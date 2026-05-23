@@ -1,4 +1,5 @@
 import io
+import logging
 
 import segno
 
@@ -515,6 +516,17 @@ class TokenListPanel(QWidget):
                 )
         self.set_prices(chain.chain_id, prices)
 
+    def contract_set_matches(self, chain, tokens: list[TokenBalance]) -> bool:
+        """True if the panel currently displays exactly the contract set
+        described by ``tokens`` (plus the native row). Lets callers decide
+        between in-place updates and rebuilds without mutating cells."""
+        if self._chain_id != chain.chain_id:
+            return False
+        expected = {(chain.chain_id, self.NATIVE_CONTRACT)} | {
+            (chain.chain_id, b.contract.lower()) for b in tokens
+        }
+        return set(self._balances.keys()) == expected
+
     def update_balances_if_set_unchanged(
         self,
         chain,
@@ -522,20 +534,18 @@ class TokenListPanel(QWidget):
         tokens: list[TokenBalance],
     ) -> bool:
         """If the displayed contract set matches the new fetch, update
-        balance cells in place (no table rebuild → no flicker). Returns
-        False to tell the caller "fall back to show_balances rebuild"
-        when contracts changed (token added/removed)."""
-        if self._chain_id != chain.chain_id:
+        balance cells in place. Only cells whose value actually differs
+        are mutated, and the sort toggle is skipped entirely when nothing
+        changed — both to prevent gratuitous repaints/reorders that the
+        user perceives as flicker. Returns False to tell the caller
+        "fall back to show_balances rebuild" when contracts changed."""
+        if not self.contract_set_matches(chain, tokens):
             return False
-        expected = {(chain.chain_id, self.NATIVE_CONTRACT)} | {
-            (chain.chain_id, b.contract.lower()) for b in tokens
-        }
-        if set(self._balances.keys()) != expected:
-            return False
-        self.table.setSortingEnabled(False)
-        native_balance = wei_to_ether(native_wei)
-        self._balances[(chain.chain_id, self.NATIVE_CONTRACT)] = native_balance
+        new_native = wei_to_ether(native_wei)
         by_addr = {b.contract.lower(): b for b in tokens}
+
+        # First pass: collect what would change without mutating anything.
+        changes: list[tuple[int, tuple[int, str], Decimal]] = []
         for row in range(self.table.rowCount()):
             sym = self.table.item(row, 0)
             if sym is None:
@@ -544,17 +554,27 @@ class TokenListPanel(QWidget):
             if not key:
                 continue
             _, addr = key
-            bal_cell = self.table.item(row, 1)
-            if bal_cell is None:
-                continue
             if addr == self.NATIVE_CONTRACT:
-                value = native_balance
+                new_value = new_native
             else:
                 b = by_addr.get(addr)
                 if b is None:
                     continue
-                value = b.balance
-                self._balances[key] = value
+                new_value = b.balance
+            if self._balances.get(key) != new_value:
+                changes.append((row, key, new_value))
+
+        if not changes:
+            # Set matches, all balances identical to what's already shown.
+            # Touch nothing, don't toggle sort.
+            return True
+
+        self.table.setSortingEnabled(False)
+        for row, key, value in changes:
+            self._balances[key] = value
+            bal_cell = self.table.item(row, 1)
+            if bal_cell is None:
+                continue
             bal_cell.setText(f"{value:.6g}")
             if isinstance(bal_cell, _NumericItem):
                 bal_cell.set_value(value)
@@ -586,14 +606,18 @@ class TokenListPanel(QWidget):
         """Recompute the Value column using the most recent prices we have.
 
         Called after balance-only refreshes so the value cells aren't stale
-        relative to the new balances."""
+        relative to the new balances. Crucially: does NOT re-apply the
+        dust filter. The dust check is only meaningful with fresh DefiLlama
+        prices (which only arrive at combined-update time); re-running it
+        here against stale cached prices would just oscillate borderline
+        tokens between visible/hidden."""
         if self._chain_id is None:
             return
         cached_prices = getattr(self, "_prices_state", {}) or {}
         if cached_prices:
-            self.set_prices(self._chain_id, cached_prices)
+            self.set_prices(self._chain_id, cached_prices, apply_dust_filter=False)
 
-    def set_prices(self, chain_id: int, prices: dict) -> None:
+    def set_prices(self, chain_id: int, prices: dict, apply_dust_filter: bool = True) -> None:
         """Populate the Value (USD) column from a {addr_lower: Price} dict
         and hide rows whose value falls below the dust threshold.
 
@@ -608,6 +632,15 @@ class TokenListPanel(QWidget):
         table re-sorts once by the current header indicator (Value desc by
         default; whatever the user clicked otherwise)."""
         if self._chain_id != chain_id:
+            return
+        # Short-circuit when the price values match the last call —
+        # nothing in the table would change, so don't even toggle sort
+        # (which causes Qt to repaint visible rows even when no order
+        # change is needed).
+        stored = getattr(self, "_prices_state", None) or {}
+        if stored and set(stored.keys()) == set(prices.keys()) and all(
+            stored[k].price_usd == prices[k].price_usd for k in prices
+        ):
             return
         self._remember_prices(prices)
         self.table.setSortingEnabled(False)
@@ -631,14 +664,15 @@ class TokenListPanel(QWidget):
                 if isinstance(cell, _NumericItem):
                     cell.set_value(value)
 
-            # Dust hiding (display-time; doesn't touch the worker data).
-            # Show only: native, user-force-shown, or priced above dust.
-            if (is_native
-                    or self._store.is_force_shown(cid, addr)
-                    or (value is not None and value >= self.DUST_USD_THRESHOLD)):
-                self.table.setRowHidden(row, False)
-            else:
-                self.table.setRowHidden(row, True)
+            if apply_dust_filter:
+                # Dust hiding (display-time; doesn't touch the worker data).
+                # Show only: native, user-force-shown, or priced above dust.
+                if (is_native
+                        or self._store.is_force_shown(cid, addr)
+                        or (value is not None and value >= self.DUST_USD_THRESHOLD)):
+                    self.table.setRowHidden(row, False)
+                else:
+                    self.table.setRowHidden(row, True)
         self.table.setSortingEnabled(True)
 
     # ---- icon refresh ---------------------------------------------------
@@ -700,10 +734,14 @@ class MainWindow(QMainWindow):
         self._icon_cache = IconCache(self)
         self._price_source = DefiLlamaPrices()
         self._wallet_cache = WalletCache()
-        # Holds the Blockscout fetch while we wait for prices, so we can
-        # compute the final filtered set in one go and update the panel
-        # exactly once (rather than: Blockscout-rebuild, then prices-filter).
-        self._pending_view: dict | None = None
+        # (chain_id, address_lower) the panel currently shows; used to
+        # skip needless show_cached rebuilds on subsequent refresh calls
+        # (e.g. from _on_lists_loaded firing after _on_tree_selection
+        # already rendered the cache).
+        self._displayed_view: tuple[int, str] | None = None
+        # Active discovery (TokenList+Prices) jobs per view, so re-clicking
+        # the same account doesn't stack duplicate Blockscout requests.
+        self._discovery_in_flight: set[tuple[int, str]] = set()
         # All in-flight workers. Held here so Python doesn't GC them while
         # they're still running — Qt's QThread destructor aborts (and kills
         # the process) if the thread is alive. Workers self-evict via their
@@ -898,95 +936,179 @@ class MainWindow(QMainWindow):
                 return
         self.details.clear()
         self.token_panel.clear()
+        self._displayed_view = None
 
     def _refresh_tokens(self, address: str) -> None:
         chain = self.store.current_chain()
+        view_key = (chain.chain_id, address.lower())
+        is_new_view = self._displayed_view != view_key
+
         cached = self._wallet_cache.load(chain.chain_id, address)
         if cached is not None:
-            # Immediate render from cache; no flicker while we refresh.
-            self.token_panel.show_cached(chain, cached)
-            # Quick on-chain balance refresh for the cached set (multicall +
-            # native). Works even when Blockscout/DefiLlama are down. The
-            # handler skips the update if nothing changed since cache.
-            bw = BalanceWorker(
-                chain, address,
-                [t.contract for t in cached.tokens],
-            )
-            bw.refreshed.connect(self._on_balance_refresh)
-            self._start_worker(bw)
+            if is_new_view:
+                # Immediate render from cache; no flicker while we refresh.
+                self.token_panel.show_cached(chain, cached)
+                self._displayed_view = view_key
+            if is_new_view:
+                # Only kick off a multicall balance refresh once per view;
+                # repeated _refresh_tokens calls for the same view (e.g.
+                # _on_lists_loaded after _on_tree_selection) don't need
+                # another round-trip.
+                bw = BalanceWorker(
+                    chain, address,
+                    [t.contract for t in cached.tokens],
+                )
+                bw.refreshed.connect(self._on_balance_refresh)
+                bw.failed.connect(
+                    lambda msg: logging.getLogger("qeth.ui").warning(
+                        "BalanceWorker failed: %s", msg
+                    )
+                )
+                self._start_worker(bw)
 
         if not self._token_lists.loaded:
-            if cached is None:
+            if cached is None and is_new_view:
                 self.token_panel.show_message(
                     "Loading token lists… selection will refresh automatically"
                 )
+                self._displayed_view = view_key
             return
 
-        self._pending_view = {"chain": chain, "address": address}
+        # Per-view "discovery in progress" guard. Avoids stacking duplicate
+        # Blockscout/multicall/prices chains when _refresh_tokens fires
+        # multiple times for the same view (e.g. _on_lists_loaded right
+        # after _on_tree_selection on startup).
+        if view_key in self._discovery_in_flight:
+            return
+        self._discovery_in_flight.add(view_key)
+
+        # Per-call state captured by closure so concurrent jobs for
+        # different views never trample each other's data.
+        pv = {"chain": chain, "address": address, "view_key": view_key}
+
+        def on_discovered(blockscout_native_wei, blockscout_tokens: list) -> None:
+            # Discard Blockscout's balances — they read a few blocks behind
+            # chain head. Keep contracts + metadata (symbol/name/decimals
+            # are stable identifiers, not on-chain reads). Multicall against
+            # the user's own RPC is the authoritative balance source.
+            metadata = {
+                b.contract.lower(): (b.symbol, b.name, b.decimals)
+                for b in blockscout_tokens
+            }
+            contracts = [b.contract for b in blockscout_tokens]
+            pv["metadata"] = metadata
+
+            def on_multicall(cid: int, mc_native, mc_balances: dict) -> None:
+                pv["native_wei"] = int(mc_native)
+                pv["balances_raw"] = {k.lower(): int(v) for k, v in mc_balances.items()}
+                pw = PricesWorker(
+                    self._price_source, chain,
+                    contracts, include_native=True,
+                )
+                pw.prices_ready.connect(
+                    lambda c, p: self._on_combined_ready(pv, c, p)
+                )
+                self._start_worker(pw)
+
+            def on_multicall_fail(msg: str) -> None:
+                # Fall back to Blockscout's balances if the chain RPC's
+                # multicall itself fails — better than nothing.
+                logging.getLogger("qeth.ui").warning(
+                    "post-discovery multicall failed: %s", msg
+                )
+                pv["native_wei"] = int(blockscout_native_wei)
+                pv["balances_raw"] = {
+                    b.contract.lower(): int(b.balance_raw) for b in blockscout_tokens
+                }
+                pw = PricesWorker(
+                    self._price_source, chain,
+                    contracts, include_native=True,
+                )
+                pw.prices_ready.connect(
+                    lambda c, p: self._on_combined_ready(pv, c, p)
+                )
+                self._start_worker(pw)
+
+            mc = BalanceWorker(chain, address, contracts)
+            mc.refreshed.connect(on_multicall)
+            mc.failed.connect(on_multicall_fail)
+            self._start_worker(mc)
+
+        def on_failed(msg: str) -> None:
+            self._discovery_in_flight.discard(view_key)
+            if self.token_panel._chain_id is None and self._displayed_view == view_key:
+                self.token_panel.show_error(msg)
 
         worker = TokenListWorker(
             chain, address, self._token_source, self._token_lists, self.store,
         )
-        worker.fetched.connect(self._on_tokens_fetched)
-        worker.failed.connect(self._on_tokens_failed)
-        if cached is None:
+        worker.fetched.connect(on_discovered)
+        worker.failed.connect(on_failed)
+        if cached is None and is_new_view:
             self.token_panel.show_loading(address)
+            self._displayed_view = view_key
         self._start_worker(worker)
 
-    def _on_tokens_fetched(self, native_wei, tokens: list) -> None:
-        pv = self._pending_view
-        if not pv:
-            return
+    def _on_combined_ready(self, pv: dict, chain_id: int, prices) -> None:
+        """TokenListWorker + PricesWorker both done. Apply visibility +
+        sort once, then update the panel. Single visible update."""
+        self._discovery_in_flight.discard(pv["view_key"])
         chain = pv["chain"]
-        pv["native_wei"] = native_wei
-        pv["tokens"] = tokens
-        pv["entries"] = {
+        if chain.chain_id != chain_id:
+            return
+        # If the user moved on to a different view in the meantime, just
+        # let the prices update whatever's showing (cheap, idempotent).
+        if self._displayed_view != pv["view_key"]:
+            self.token_panel.set_prices(chain_id, prices)
+            return
+
+        address = pv["address"]
+        native_wei = pv["native_wei"]
+        metadata = pv["metadata"]
+        balances_raw = pv["balances_raw"]
+
+        # Tokens for display are constructed only from multicall results.
+        # Anything multicall returned 0 for (Blockscout had a positive
+        # balance at its read block but the user has since transferred away)
+        # is silently dropped. Anything multicall didn't return at all
+        # (call reverted) is dropped — better to omit than to invent.
+        tokens: list[TokenBalance] = []
+        for addr, raw in balances_raw.items():
+            if raw == 0:
+                continue
+            meta = metadata.get(addr)
+            if meta is None:
+                continue
+            sym, name, decimals = meta
+            tokens.append(TokenBalance(
+                contract=addr, symbol=sym, name=name,
+                decimals=decimals, balance_raw=raw,
+            ))
+
+        entries = {
             (chain.chain_id, b.contract.lower()): e
             for b in tokens
             if (e := self._token_lists.get(chain.chain_id, b.contract)) is not None
         }
-        pw = PricesWorker(
-            self._price_source, chain,
-            [b.contract for b in tokens],
-            include_native=True,
-        )
-        pw.prices_ready.connect(self._on_combined_ready)
-        self._start_worker(pw)
-
-    def _on_tokens_failed(self, msg: str) -> None:
-        # Blockscout failed. If we have a cached view it stays on screen;
-        # otherwise nothing to display.
-        pv = self._pending_view
-        self._pending_view = None
-        if pv and self.token_panel._chain_id is None:
-            self.token_panel.show_error(msg)
-
-    def _on_combined_ready(self, chain_id: int, prices) -> None:
-        """TokenListWorker + PricesWorker both done. Apply visibility +
-        sort once, then update the panel. Single visible update."""
-        pv = self._pending_view
-        if not pv or pv["chain"].chain_id != chain_id:
-            # Selection moved on; just push prices into whatever's showing.
-            self.token_panel.set_prices(chain_id, prices)
-            return
-        self._pending_view = None
-        chain = pv["chain"]
-        address = pv["address"]
-        native_wei = pv["native_wei"]
-        tokens = pv["tokens"]
-        entries = pv["entries"]
 
         visible = self._compute_visible_tokens(chain, tokens, prices)
 
-        # Try in-place update first; only rebuild when the displayed set
-        # genuinely changed (added/removed token).
-        if not self.token_panel.update_balances_if_set_unchanged(
-            chain, native_wei, visible
-        ):
+        if self.token_panel.contract_set_matches(chain, visible):
+            # Same set as currently displayed. Don't touch balance cells —
+            # BalanceWorker's multicall data is fresher than Blockscout's
+            # readback and we don't want to flicker by overwriting with
+            # slightly-older values. set_prices self-skips when prices
+            # are unchanged too.
+            self.token_panel.set_prices(chain.chain_id, prices)
+        else:
+            # Token set genuinely changed (new airdrop / removed token):
+            # rebuild, then apply prices.
             self.token_panel.show_balances(chain, native_wei, visible, entries)
-        self.token_panel.set_prices(chain.chain_id, prices)
+            self.token_panel.set_prices(chain.chain_id, prices)
 
-        self._save_wallet_cache(chain, address, native_wei, tokens, prices, entries)
+        # Cache only the visible (post-dust, post-force-show) set in the
+        # same order the panel rendered them.
+        self._save_wallet_cache(chain, address, native_wei, visible, prices, entries)
 
     def _compute_visible_tokens(self, chain, tokens: list, prices) -> list:
         """Apply dust + force-show filter and sort by USD value desc.
@@ -1021,9 +1143,9 @@ class MainWindow(QMainWindow):
         return worker
 
     def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
-        """Apply on-chain balance refresh to the panel. Skips entirely
-        when no balance actually changed since cache, avoiding a needless
-        cell-update + re-sort cycle that the user would perceive as flicker."""
+        """Fast in-place balance refresh for the cached set, ahead of the
+        slower discovery+prices chain. Display only — cache writes happen
+        in _save_wallet_cache after the combined update with prices."""
         chain = self.store.current_chain()
         if chain.chain_id != chain_id:
             return
@@ -1033,18 +1155,26 @@ class MainWindow(QMainWindow):
         cached = self._wallet_cache.load(chain_id, addrs[0])
         if cached is None:
             return
-        if int(native_wei) == cached.native_balance_wei and all(
-            int(balances_raw.get(t.contract.lower(), t.balance_raw)) == t.balance_raw
-            for t in cached.tokens
-        ):
-            return  # cache is already accurate; no display update needed
-        tokens = []
-        for t in cached.tokens:
-            raw = balances_raw.get(t.contract.lower(), t.balance_raw)
-            tokens.append(TokenBalance(
+
+        nothing_changed = (
+            int(native_wei) == cached.native_balance_wei
+            and all(
+                int(balances_raw.get(t.contract.lower(), t.balance_raw))
+                == t.balance_raw
+                for t in cached.tokens
+            )
+        )
+        if nothing_changed:
+            return
+
+        tokens = [
+            TokenBalance(
                 contract=t.contract, symbol=t.symbol, name=t.name,
-                decimals=t.decimals, balance_raw=int(raw),
-            ))
+                decimals=t.decimals,
+                balance_raw=int(balances_raw.get(t.contract.lower(), t.balance_raw)),
+            )
+            for t in cached.tokens
+        ]
         if self.token_panel.update_balances_if_set_unchanged(chain, native_wei, tokens):
             # Re-multiply by last-known prices so the Value column tracks
             # the new balances even before DefiLlama refreshes.
@@ -1054,9 +1184,13 @@ class MainWindow(QMainWindow):
         self, chain, address: str, native_wei: int,
         tokens: list, prices: dict, entries: dict,
     ) -> None:
+        """Persist the multicall-derived view. ``tokens`` is the visible
+        set after dust/force-show filtering, sorted by USD value desc —
+        whatever the panel actually rendered. No further filtering here."""
         import time
         from .wallet_cache import CachedToken
         now = int(time.time())
+
         cached = CachedWallet(
             chain_id=chain.chain_id,
             address=address.lower(),
@@ -1068,20 +1202,11 @@ class MainWindow(QMainWindow):
             cached.native_price_usd = str(np.price_usd)
             cached.native_price_updated = np.timestamp or now
 
-        # Only cache what the panel would actually display (passes dust /
-        # force-show filter). Sort by USD value desc so the on-disk order
-        # matches the displayed order.
-        from decimal import Decimal as D
-        kept: list[tuple[D, CachedToken]] = []
         for b in tokens:
             addr = b.contract.lower()
             price = prices.get(addr)
             entry = entries.get((chain.chain_id, addr))
-            force = self.store.is_force_shown(chain.chain_id, addr)
-            value = b.balance * price.price_usd if price else D(0)
-            if not force and (price is None or value < TokenListPanel.DUST_USD_THRESHOLD):
-                continue
-            kept.append((value, CachedToken(
+            cached.tokens.append(CachedToken(
                 contract=addr, symbol=b.symbol, name=b.name,
                 decimals=b.decimals,
                 logo_uri=entry.logo_uri if entry else None,
@@ -1089,9 +1214,7 @@ class MainWindow(QMainWindow):
                 price_usd=str(price.price_usd) if price else None,
                 balance_updated=now,
                 price_updated=price.timestamp if price else 0,
-            )))
-        kept.sort(key=lambda kv: kv[0], reverse=True)
-        cached.tokens = [t for _, t in kept]
+            ))
         self._wallet_cache.save(cached)
 
     def _on_hide_token(self, chain_id: int, contract: str) -> None:
@@ -1112,6 +1235,7 @@ class MainWindow(QMainWindow):
             self._refresh_tokens(addrs[0])
         else:
             self.token_panel.clear()
+            self._displayed_view = None
 
     def _copy_selected_address(self) -> None:
         addrs = self._selected_addresses()

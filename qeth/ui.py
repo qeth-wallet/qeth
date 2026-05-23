@@ -43,7 +43,7 @@ class AddLedgerDialog(QDialog):
         ))
 
         self.results = QListWidget()
-        self.results.setSelectionMode(QListWidget.MultiSelection)
+        self.results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         font = QFont("monospace")
         self.results.setFont(font)
         layout.addWidget(self.results, 1)

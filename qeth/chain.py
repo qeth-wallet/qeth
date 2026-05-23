@@ -23,8 +23,14 @@ MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
 # Verified against the published ABIs:
 #   aggregate3((address,bool,bytes)[]) -> 0x82ad56cb
 #   balanceOf(address)                 -> 0x70a08231
+#   name()                             -> 0x06fdde03
+#   symbol()                           -> 0x95d89b41
+#   decimals()                         -> 0x313ce567
 _SEL_AGGREGATE3 = bytes.fromhex("82ad56cb")
 _SEL_BALANCE_OF = bytes.fromhex("70a08231")
+_SEL_NAME = bytes.fromhex("06fdde03")
+_SEL_SYMBOL = bytes.fromhex("95d89b41")
+_SEL_DECIMALS = bytes.fromhex("313ce567")
 
 
 def wei_to_ether(wei: int) -> Decimal:
@@ -151,3 +157,79 @@ class EthClient:
             if success and len(retdata) >= 32:
                 out[token.lower()] = int.from_bytes(retdata[:32], "big")
         return out
+
+    def multicall_erc20_metadata(
+        self, tokens: list[str], batch_size: int = 30,
+    ) -> dict[str, dict]:
+        """Fetch (name, symbol, decimals) for every contract in ``tokens``
+        via Multicall3.aggregate3 (3 inner calls per token).
+
+        Returns ``{token_lower: {"symbol": str, "name": str, "decimals": int}}``.
+        Tokens for which any inner call reverted are omitted. Legacy
+        tokens that return bytes32 instead of string for name/symbol
+        (MKR-style) are decoded by stripping NUL padding.
+
+        Batched in chunks (default 30 tokens = 90 inner calls per
+        round-trip) so the eth_call response stays manageable for large
+        discovery sets.
+        """
+        if not tokens:
+            return {}
+        from eth_abi import decode, encode
+
+        out: dict[str, dict] = {}
+        for start in range(0, len(tokens), batch_size):
+            batch = tokens[start:start + batch_size]
+            calls = []
+            for t in batch:
+                # allowFailure=True so one weird contract doesn't abort
+                # the whole aggregate3 (returns success=False, empty
+                # retdata for the offending call instead).
+                calls.append((t, True, _SEL_NAME))
+                calls.append((t, True, _SEL_SYMBOL))
+                calls.append((t, True, _SEL_DECIMALS))
+            calldata = _SEL_AGGREGATE3 + encode(
+                ["(address,bool,bytes)[]"], [calls]
+            )
+            try:
+                result_hex = self.call(
+                    {"to": MULTICALL3, "data": "0x" + calldata.hex()}
+                )
+                decoded = decode(
+                    ["(bool,bytes)[]"], bytes.fromhex(result_hex[2:])
+                )[0]
+            except Exception:
+                continue
+
+            for i, token in enumerate(batch):
+                name_ok, name_data = decoded[i * 3]
+                sym_ok, sym_data = decoded[i * 3 + 1]
+                dec_ok, dec_data = decoded[i * 3 + 2]
+                name = _decode_string_or_bytes32(name_data) if name_ok else ""
+                symbol = _decode_string_or_bytes32(sym_data) if sym_ok else ""
+                if dec_ok and len(dec_data) >= 32:
+                    decimals = int.from_bytes(dec_data[:32], "big")
+                else:
+                    decimals = 18
+                # Require at least a symbol — entries with empty symbol
+                # are unusable for display.
+                if symbol:
+                    out[token.lower()] = {
+                        "symbol": symbol, "name": name,
+                        "decimals": int(decimals),
+                    }
+        return out
+
+
+def _decode_string_or_bytes32(data: bytes) -> str:
+    """Some legacy ERC-20s (MKR, …) return bytes32 instead of string for
+    name/symbol. Try string first, fall back to bytes32-stripped."""
+    from eth_abi import decode
+    try:
+        return decode(["string"], data)[0]
+    except Exception:
+        try:
+            b = decode(["bytes32"], data)[0]
+            return b.rstrip(b"\x00").decode("utf-8", errors="replace")
+        except Exception:
+            return ""

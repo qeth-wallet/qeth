@@ -19,6 +19,7 @@ from .chain import EthClient, wei_to_ether
 from .icons import IconCache, bundled_chain_icon, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from .prices import DefiLlamaPrices, Price, PriceSource
+from .token_metadata import TokenMetadataCache
 from .tokenlists import TokenListEntry, TokenLists
 from .tokens import BlockscoutSource, TokenBalance
 from .wallet_cache import CachedWallet, WalletCache
@@ -283,6 +284,28 @@ class TokenListWorker(QThread):
                         tokens.append(b)
                 tokens.sort(key=lambda x: x.balance, reverse=True)
             self.fetched.emit(native_wei, tokens)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class MetadataWorker(QThread):
+    """Fetch (name, symbol, decimals) on-chain via multicall for any
+    contracts not already in the metadata cache. ERC-20 metadata is
+    immutable, so once we have it for a contract, we never re-fetch."""
+
+    fetched = Signal(int, object)   # chain_id, {contract_lower: {symbol,name,decimals}}
+    failed = Signal(str)
+
+    def __init__(self, chain, contracts: list[str], parent=None):
+        super().__init__(parent)
+        self.chain = chain
+        self.contracts = list(contracts)
+
+    def run(self) -> None:
+        try:
+            client = EthClient(self.chain)
+            meta = client.multicall_erc20_metadata(self.contracts)
+            self.fetched.emit(self.chain.chain_id, meta)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -790,6 +813,7 @@ class MainWindow(QMainWindow):
         self._icon_cache = IconCache(self)
         self._price_source = DefiLlamaPrices()
         self._wallet_cache = WalletCache()
+        self._token_metadata = TokenMetadataCache()
         # (chain_id, address_lower) the panel currently shows; used to
         # skip needless show_cached rebuilds on subsequent refresh calls
         # (e.g. from _on_lists_loaded firing after _on_tree_selection
@@ -1092,19 +1116,35 @@ class MainWindow(QMainWindow):
 
         def on_discovered(blockscout_native_wei, blockscout_tokens: list) -> None:
             # Discard Blockscout's balances — they read a few blocks behind
-            # chain head. Keep contracts + metadata (symbol/name/decimals
-            # are stable identifiers, not on-chain reads). Multicall against
-            # the user's own RPC is the authoritative balance source.
-            metadata = {
+            # chain head. The contract list is the only thing we keep;
+            # metadata (name/symbol/decimals) is fetched on-chain via
+            # multicall and cached permanently (it's immutable), with
+            # Blockscout's values used only as a one-shot fallback for
+            # contracts whose on-chain metadata call reverts.
+            contracts = [b.contract for b in blockscout_tokens]
+            blockscout_meta = {
                 b.contract.lower(): (b.symbol, b.name, b.decimals)
                 for b in blockscout_tokens
             }
-            contracts = [b.contract for b in blockscout_tokens]
-            pv["metadata"] = metadata
 
-            def on_multicall(cid: int, mc_native, mc_balances: dict) -> None:
+            def build_metadata() -> dict:
+                """Cached metadata first; fall back to Blockscout values
+                for anything still missing (e.g. multicall just failed for
+                that token). Always returns ``{addr_lower: (sym,name,dec)}``."""
+                out: dict = {}
+                for c in contracts:
+                    al = c.lower()
+                    m = self._token_metadata.get(chain.chain_id, al)
+                    if m:
+                        out[al] = (m["symbol"], m["name"], m["decimals"])
+                    elif al in blockscout_meta:
+                        out[al] = blockscout_meta[al]
+                return out
+
+            def on_balances(cid: int, mc_native, mc_balances: dict) -> None:
                 pv["native_wei"] = int(mc_native)
                 pv["balances_raw"] = {k.lower(): int(v) for k, v in mc_balances.items()}
+                pv["metadata"] = build_metadata()
                 pw = PricesWorker(
                     self._price_source, chain,
                     contracts, include_native=True,
@@ -1114,9 +1154,7 @@ class MainWindow(QMainWindow):
                 )
                 self._start_worker(pw)
 
-            def on_multicall_fail(msg: str) -> None:
-                # Fall back to Blockscout's balances if the chain RPC's
-                # multicall itself fails — better than nothing.
+            def on_balances_fail(msg: str) -> None:
                 logging.getLogger("qeth.ui").warning(
                     "post-discovery multicall failed: %s", msg
                 )
@@ -1124,6 +1162,7 @@ class MainWindow(QMainWindow):
                 pv["balances_raw"] = {
                     b.contract.lower(): int(b.balance_raw) for b in blockscout_tokens
                 }
+                pv["metadata"] = build_metadata()
                 pw = PricesWorker(
                     self._price_source, chain,
                     contracts, include_native=True,
@@ -1133,10 +1172,36 @@ class MainWindow(QMainWindow):
                 )
                 self._start_worker(pw)
 
-            mc = BalanceWorker(chain, address, contracts)
-            mc.refreshed.connect(on_multicall)
-            mc.failed.connect(on_multicall_fail)
-            self._start_worker(mc)
+            def kick_balance_multicall() -> None:
+                bw = BalanceWorker(chain, address, contracts)
+                bw.refreshed.connect(on_balances)
+                bw.failed.connect(on_balances_fail)
+                self._start_worker(bw)
+
+            # Step 1: bring metadata cache up to date for any uncached
+            # contracts. ERC-20 (name,symbol,decimals) are immutable, so
+            # the cache hit rate climbs to ~100% after one visit per
+            # token-set. Step 2: balance multicall + prices.
+            missing_meta = self._token_metadata.missing(chain.chain_id, contracts)
+            if not missing_meta:
+                kick_balance_multicall()
+                return
+
+            def on_meta(cid: int, meta: dict) -> None:
+                if meta:
+                    self._token_metadata.put_many(chain.chain_id, meta)
+                kick_balance_multicall()
+
+            def on_meta_fail(msg: str) -> None:
+                logging.getLogger("qeth.ui").warning(
+                    "metadata multicall failed: %s", msg
+                )
+                kick_balance_multicall()
+
+            mw = MetadataWorker(chain, missing_meta)
+            mw.fetched.connect(on_meta)
+            mw.failed.connect(on_meta_fail)
+            self._start_worker(mw)
 
         def on_failed(msg: str) -> None:
             self._discovery_in_flight.discard(view_key)

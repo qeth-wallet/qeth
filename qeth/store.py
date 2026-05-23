@@ -1,9 +1,27 @@
 import json
 import threading
+from dataclasses import fields
 from pathlib import Path
 from typing import Optional
 
 from .chains import Chain, DEFAULT_CHAINS
+
+
+_CHAIN_FIELDS = {f.name for f in fields(Chain)}
+
+
+def _merge_chain(persisted: dict) -> Chain:
+    """Build a Chain from a persisted dict, filling in any missing fields
+    from DEFAULT_CHAINS when chain_id matches (so old configs pick up
+    newly-added fields like coingecko_id). Persisted values win when
+    both sides have a value."""
+    cid = persisted.get("chain_id")
+    default = next((d for d in DEFAULT_CHAINS if d.chain_id == cid), None)
+    base = default.to_dict() if default else {}
+    merged = {**base, **persisted}
+    # Drop any keys that aren't on the current Chain dataclass (forwards-
+    # compatible with old configs that might carry unknown fields).
+    return Chain(**{k: v for k, v in merged.items() if k in _CHAIN_FIELDS})
 
 CONFIG_DIR = Path.home() / ".qeth"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -36,7 +54,7 @@ class Store:
             s.default_account = data.get("default_account")
             chains_data = data.get("chains")
             if chains_data:
-                s.chains = [Chain(**c) for c in chains_data]
+                s.chains = [_merge_chain(c) for c in chains_data]
             s.hidden_tokens = {
                 (int(t["chain_id"]), str(t["address"]).lower())
                 for t in data.get("hidden_tokens", [])

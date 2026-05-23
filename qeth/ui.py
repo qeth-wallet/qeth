@@ -12,9 +12,12 @@ from PySide6.QtWidgets import (
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from decimal import Decimal
+
 from .chain import EthClient, wei_to_ether
 from .icons import IconCache, bundled_chain_icon, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from .prices import DefiLlamaPrices, Price, PriceSource
 from .tokenlists import TokenLists
 from .tokens import BlockscoutSource, TokenBalance
 
@@ -264,6 +267,42 @@ class TokenListWorker(QThread):
             self.failed.emit(str(e))
 
 
+class PricesWorker(QThread):
+    """Fetch USD prices for the currently-displayed assets.
+
+    Emits ``prices_ready(chain_id: int, prices: dict[str, Price])`` where
+    the dict is keyed by lower-case ERC-20 address or ``""`` for native.
+    Failures are silent — the value column simply stays empty.
+    """
+
+    prices_ready = Signal(int, dict)
+
+    def __init__(self, source: PriceSource, chain, contracts: list[str],
+                 include_native: bool, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.chain = chain
+        self.contracts = contracts
+        self.include_native = include_native
+
+    def run(self) -> None:
+        try:
+            prices = self.source.fetch(
+                self.chain, self.contracts, include_native=self.include_native,
+            )
+        except Exception:
+            prices = {}
+        self.prices_ready.emit(self.chain.chain_id, prices)
+
+
+def _format_usd(value: Decimal) -> str:
+    if value <= 0:
+        return ""
+    if value < Decimal("0.01"):
+        return "<$0.01"
+    return f"${value:,.2f}"
+
+
 class TokenListPanel(QWidget):
     """Right pane: native + held ERC-20s for the currently-selected account.
 
@@ -286,8 +325,8 @@ class TokenListPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 8, 8, 8)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Name"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Value (USD)", "Name"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -298,7 +337,8 @@ class TokenListPanel(QWidget):
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
         # current chain (set by show_balances) — needed to scope icon lookups
@@ -323,8 +363,13 @@ class TokenListPanel(QWidget):
         row_count = 1 + len(tokens)
         self.table.setRowCount(row_count)
 
+        # Remember per-row Decimal balances so set_prices can multiply
+        # without re-parsing the displayed text.
+        self._balances: dict[tuple[int, str], Decimal] = {}
+
         # --- native row ---------------------------------------------------
         native_balance = wei_to_ether(native_wei)
+        self._balances[(chain.chain_id, self.NATIVE_CONTRACT)] = native_balance
         sym = QTableWidgetItem(chain.symbol)
         sym.setData(Qt.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
         sym.setToolTip(f"Native {chain.symbol} on {chain.name}")
@@ -335,17 +380,23 @@ class TokenListPanel(QWidget):
         bal = QTableWidgetItem(f"{native_balance:.6g}")
         bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         bal.setFont(bf)
+        val = QTableWidgetItem("")
+        val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        val.setFont(bf)
         name = QTableWidgetItem(chain.name)
         name.setFont(bf)
         self.table.setItem(0, 0, sym)
         self.table.setItem(0, 1, bal)
-        self.table.setItem(0, 2, name)
+        self.table.setItem(0, 2, val)
+        self.table.setItem(0, 3, name)
 
         # --- ERC-20 rows --------------------------------------------------
         for row, b in enumerate(tokens, start=1):
-            entry = list_entries.get((chain.chain_id, b.contract.lower()))
+            key = (chain.chain_id, b.contract.lower())
+            self._balances[key] = b.balance
+            entry = list_entries.get(key)
             sym = QTableWidgetItem(b.symbol)
-            sym.setData(Qt.UserRole, (chain.chain_id, b.contract.lower()))
+            sym.setData(Qt.UserRole, key)
             sym.setToolTip(b.contract)
             pix = self._icons.get(chain.chain_id, b.contract)
             if pix is not None:
@@ -354,22 +405,46 @@ class TokenListPanel(QWidget):
                 self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
             bal = QTableWidgetItem(f"{b.balance:.6g}")
             bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val = QTableWidgetItem("")
+            val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             name = QTableWidgetItem(b.name)
             self.table.setItem(row, 0, sym)
             self.table.setItem(row, 1, bal)
-            self.table.setItem(row, 2, name)
+            self.table.setItem(row, 2, val)
+            self.table.setItem(row, 3, name)
 
     def show_error(self, msg: str) -> None:
         self.table.setRowCount(0)
         self._chain_id = None
+        self._balances = {}
 
     def show_message(self, msg: str) -> None:
         self.table.setRowCount(0)
         self._chain_id = None
+        self._balances = {}
 
     def clear(self) -> None:
         self.table.setRowCount(0)
         self._chain_id = None
+        self._balances = {}
+
+    def set_prices(self, chain_id: int, prices: dict) -> None:
+        """Populate the Value (USD) column from a {addr_lower: Price} dict."""
+        if self._chain_id != chain_id:
+            return
+        for row in range(self.table.rowCount()):
+            sym = self.table.item(row, 0)
+            if sym is None:
+                continue
+            key = sym.data(Qt.UserRole)
+            if not key:
+                continue
+            balance = self._balances.get(key)
+            price = prices.get(key[1])  # contract or "" for native
+            cell = self.table.item(row, 2)
+            if cell is None or balance is None or price is None:
+                continue
+            cell.setText(_format_usd(balance * price.price_usd))
 
     # ---- icon refresh ---------------------------------------------------
 
@@ -428,6 +503,8 @@ class MainWindow(QMainWindow):
         self._token_lists = TokenLists()
         self._token_worker: TokenListWorker | None = None
         self._icon_cache = IconCache(self)
+        self._price_source = DefiLlamaPrices()
+        self._prices_worker: PricesWorker | None = None
 
         self._build_toolbar()
         self._build_central()
@@ -638,6 +715,14 @@ class MainWindow(QMainWindow):
                 if e is not None:
                     entries[(chain.chain_id, b.contract.lower())] = e
             self.token_panel.show_balances(chain, native_wei, tokens, entries)
+            # Now fetch USD prices for the visible set; updates the column in place.
+            self._prices_worker = PricesWorker(
+                self._price_source, chain,
+                [b.contract for b in tokens],
+                include_native=True,
+            )
+            self._prices_worker.prices_ready.connect(self.token_panel.set_prices)
+            self._prices_worker.start()
 
         self._token_worker.fetched.connect(on_fetched)
         self._token_worker.failed.connect(self.token_panel.show_error)

@@ -268,6 +268,33 @@ class TokenListWorker(QThread):
             self.failed.emit(str(e))
 
 
+class BalanceWorker(QThread):
+    """Refresh balances on-chain via Multicall3 + eth_getBalance.
+
+    Depends only on the user's configured chain RPC, so it produces
+    fresh numbers even when Blockscout and DefiLlama are both down.
+    Emits ``refreshed(chain_id, native_wei, {addr_lower: balance_raw})``.
+    """
+
+    refreshed = Signal(int, object, dict)
+    failed = Signal(str)
+
+    def __init__(self, chain, address: str, token_contracts: list[str], parent=None):
+        super().__init__(parent)
+        self.chain = chain
+        self.address = address
+        self.contracts = list(token_contracts)
+
+    def run(self) -> None:
+        try:
+            client = EthClient(self.chain)
+            native = client.get_balance(self.address)
+            balances = client.multicall_erc20_balances(self.contracts, self.address) if self.contracts else {}
+            self.refreshed.emit(self.chain.chain_id, native, balances)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class PricesWorker(QThread):
     """Fetch USD prices for the currently-displayed assets.
 
@@ -540,6 +567,23 @@ class TokenListPanel(QWidget):
         self._chain_id = None
         self._balances = {}
 
+    def _remember_prices(self, prices: dict) -> None:
+        if not hasattr(self, "_prices_state"):
+            self._prices_state: dict = {}
+        for k, v in prices.items():
+            self._prices_state[k] = v
+
+    def reapply_prices(self) -> None:
+        """Recompute the Value column using the most recent prices we have.
+
+        Called after balance-only refreshes so the value cells aren't stale
+        relative to the new balances."""
+        if self._chain_id is None:
+            return
+        cached_prices = getattr(self, "_prices_state", {}) or {}
+        if cached_prices:
+            self.set_prices(self._chain_id, cached_prices)
+
     def set_prices(self, chain_id: int, prices: dict) -> None:
         """Populate the Value (USD) column from a {addr_lower: Price} dict
         and hide rows whose value falls below the dust threshold.
@@ -556,6 +600,7 @@ class TokenListPanel(QWidget):
         default; whatever the user clicked otherwise)."""
         if self._chain_id != chain_id:
             return
+        self._remember_prices(prices)
         self.table.setSortingEnabled(False)
         for row in range(self.table.rowCount()):
             sym = self.table.item(row, 0)
@@ -846,6 +891,17 @@ class MainWindow(QMainWindow):
         if cached is not None:
             # Immediate render from cache; no flicker while we refresh.
             self.token_panel.show_cached(chain, cached)
+            # Independently refresh balances on-chain (multicall + native).
+            # This works even when Blockscout/DefiLlama are down, so cached
+            # balances stay current as long as the chain RPC works.
+            bw = BalanceWorker(
+                chain, address,
+                [t.contract for t in cached.tokens],
+            )
+            bw.refreshed.connect(self._on_balance_refresh)
+            bw.start()
+            # Hold a ref so it isn't GC'd before finishing.
+            self._balance_worker = bw
 
         if not self._token_lists.loaded:
             if cached is None:
@@ -895,6 +951,31 @@ class MainWindow(QMainWindow):
         if cached is None:
             self.token_panel.show_loading(address)
         self._token_worker.start()
+
+    def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
+        """Apply on-chain balance refresh to the panel. Needs the cached
+        token metadata (decimals, symbol, name) to construct TokenBalance
+        objects for the in-place update."""
+        chain = self.store.current_chain()
+        if chain.chain_id != chain_id:
+            return
+        addrs = self._selected_addresses()
+        if len(addrs) != 1:
+            return
+        cached = self._wallet_cache.load(chain_id, addrs[0])
+        if cached is None:
+            return
+        tokens = []
+        for t in cached.tokens:
+            raw = balances_raw.get(t.contract.lower(), t.balance_raw)
+            tokens.append(TokenBalance(
+                contract=t.contract, symbol=t.symbol, name=t.name,
+                decimals=t.decimals, balance_raw=int(raw),
+            ))
+        if self.token_panel.update_balances_if_set_unchanged(chain, native_wei, tokens):
+            # Re-multiply by last-known prices so the Value column tracks
+            # the new balances even before DefiLlama refreshes.
+            self.token_panel.reapply_prices()
 
     def _on_prices_ready(self, chain_id: int, prices: dict) -> None:
         self.token_panel.set_prices(chain_id, prices)

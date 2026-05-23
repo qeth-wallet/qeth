@@ -15,6 +15,7 @@ dependencies = [
     "ledgereth>=0.10",
     "aiohttp>=3.9",
     "segno>=1.6",
+    "eth-abi>=5.0",
 ]
 
 [project.optional-dependencies]

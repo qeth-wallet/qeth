@@ -16,6 +16,16 @@ USER_AGENT = "qeth/0.1"
 # Native asset has 18 decimals on every EVM chain we currently support.
 _WEI_PER_ETHER = Decimal(10) ** 18
 
+# Multicall3 is deployed at the same address on every EVM chain we support.
+MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+# 4-byte function selectors. Pre-computed (Keccak isn't in stdlib hashlib).
+# Verified against the published ABIs:
+#   aggregate3((address,bool,bytes)[]) -> 0x82ad56cb
+#   balanceOf(address)                 -> 0x70a08231
+_SEL_AGGREGATE3 = bytes.fromhex("82ad56cb")
+_SEL_BALANCE_OF = bytes.fromhex("70a08231")
+
 
 def wei_to_ether(wei: int) -> Decimal:
     """Convert a wei int to a Decimal ether amount.
@@ -107,3 +117,37 @@ class EthClient:
         if isinstance(raw_tx, (bytes, bytearray)):
             raw_tx = "0x" + raw_tx.hex()
         return self.rpc("eth_sendRawTransaction", [raw_tx])
+
+    # --- batch helpers -----------------------------------------------------
+
+    def multicall_erc20_balances(
+        self, tokens: list[str], holder: str,
+    ) -> dict[str, int]:
+        """Fetch ERC-20 ``balanceOf(holder)`` for every address in ``tokens``
+        in a single Multicall3.aggregate3 call.
+
+        Returns ``{token_lower: balance_raw}``. Tokens whose inner call
+        reverted or returned malformed data are silently omitted, so the
+        caller should treat absence as "unknown" rather than zero.
+        """
+        if not tokens:
+            return {}
+        from eth_abi import decode, encode
+
+        addr_hex = holder[2:].lower() if holder.startswith("0x") else holder.lower()
+        balof_calldata = _SEL_BALANCE_OF + b"\x00" * 12 + bytes.fromhex(addr_hex)
+        calls = [(t, False, balof_calldata) for t in tokens]
+        calldata = _SEL_AGGREGATE3 + encode(
+            ["(address,bool,bytes)[]"], [calls]
+        )
+        result_hex = self.call({"to": MULTICALL3, "data": "0x" + calldata.hex()})
+        if not result_hex.startswith("0x"):
+            return {}
+        decoded = decode(
+            ["(bool,bytes)[]"], bytes.fromhex(result_hex[2:])
+        )[0]
+        out: dict[str, int] = {}
+        for (token, _, _), (success, retdata) in zip(calls, decoded):
+            if success and len(retdata) >= 32:
+                out[token.lower()] = int.from_bytes(retdata[:32], "big")
+        return out

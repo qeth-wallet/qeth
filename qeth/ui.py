@@ -428,27 +428,11 @@ def _is_scam_via_lists(lists, chain_id: int, b: TokenBalance,
     return lists.is_likely_scam(chain_id, b.contract, b.symbol, b.name, risk=risk)
 
 
-def _format_usd(value: Decimal) -> str:
-    if value <= 0:
-        return ""
-    if value < Decimal("0.01"):
-        return "<$0.01"
-    return f"${value:,.2f}"
-
-
-# Map "e[+-]?N" suffixes to typographic ×10ⁿ notation, since balances on
-# scam-airdrop tokens routinely land in the 10¹⁵+ range and "9.12e+10" reads
-# noticeably worse than "9.12 × 10¹⁰".
-_SUPERSCRIPT = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
-
-
-def _format_balance(value: Decimal) -> str:
-    s = f"{value:.6g}"
-    if "e" not in s and "E" not in s:
-        return s
-    mantissa, _, exp = s.lower().partition("e")
-    exp = exp.lstrip("+")              # drop leading "+", keep "-"
-    return f"{mantissa} × 10{exp.translate(_SUPERSCRIPT)}"
+# Pure formatting helpers live in qeth.formatting so they can be unit-
+# tested without dragging in PySide6. Aliased here under their old
+# private names to keep the rest of this module unchanged.
+from .formatting import format_balance as _format_balance
+from .formatting import format_usd as _format_usd
 
 
 class _NumericItem(QTableWidgetItem):

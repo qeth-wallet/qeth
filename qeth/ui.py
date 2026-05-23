@@ -84,7 +84,7 @@ class AddLedgerDialog(QDialog):
         self.progress.setVisible(True)
         self.scan_btn.setEnabled(False)
         self._worker = LedgerWorker(
-            self.scheme_combo.currentText(), n, rpc_url=self._chain.rpc_url
+            self.scheme_combo.currentText(), n, chain=self._chain
         )
         self._worker.discovered.connect(self._on_found)
         self._worker.finished_ok.connect(self._on_done)

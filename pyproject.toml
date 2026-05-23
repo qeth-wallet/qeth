@@ -16,6 +16,7 @@ dependencies = [
     "aiohttp>=3.9",
     "segno>=1.6",
     "eth-abi>=5.0",
+    "web3>=7",
 ]
 
 [project.optional-dependencies]

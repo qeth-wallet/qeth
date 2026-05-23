@@ -1,0 +1,30 @@
+[project]
+name = "qeth"
+version = "0.1.0"
+description = "Qt-based Ethereum wallet with Ledger support, Frame-compatible JSON-RPC"
+requires-python = ">=3.10"
+# PySide6 is intentionally NOT listed here. On Linux desktops with a configured
+# Qt theme (qt5ct/qt6ct, KDE Breeze, etc.), the PyPI PySide6 wheel ships its
+# own Qt build that lacks the matching platform-theme plugins, so themes are
+# silently ignored. Use system PySide6 instead:
+#   uv venv --system-site-packages
+#   uv pip install -e .
+# If you don't have system PySide6, install the [bundled] extra:
+#   uv pip install -e .[bundled]
+dependencies = [
+    "ledgereth>=0.10",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+bundled = ["PySide6>=6.6"]
+
+[project.scripts]
+qeth = "qeth.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["qeth*"]

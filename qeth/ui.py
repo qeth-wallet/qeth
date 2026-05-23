@@ -335,10 +335,13 @@ class TokenListPanel(QWidget):
 
     NATIVE_CONTRACT = ""  # sentinel for the native row
 
-    def __init__(self, icon_cache: IconCache, parent=None):
+    DUST_USD_THRESHOLD = Decimal("0.01")
+
+    def __init__(self, icon_cache: IconCache, store, parent=None):
         super().__init__(parent)
         self._icons = icon_cache
         self._icons.icon_ready.connect(self._on_icon_ready)
+        self._store = store
 
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 8, 8, 8)
@@ -457,7 +460,15 @@ class TokenListPanel(QWidget):
         self._balances = {}
 
     def set_prices(self, chain_id: int, prices: dict) -> None:
-        """Populate the Value (USD) column from a {addr_lower: Price} dict.
+        """Populate the Value (USD) column from a {addr_lower: Price} dict
+        and hide rows whose value falls below the dust threshold.
+
+        Visibility rules:
+        - Native row: always shown.
+        - Force-shown ERC-20 (user override): always shown.
+        - Priced ERC-20 with value < DUST_USD_THRESHOLD: hidden.
+        - ERC-20 with no price quote: hidden (treated as zero — if it
+          mattered, the user can force-show it).
 
         Sorting is suspended while we mutate cells, then re-enabled so the
         table re-sorts once by the current header indicator (Value desc by
@@ -472,15 +483,27 @@ class TokenListPanel(QWidget):
             key = sym.data(Qt.UserRole)
             if not key:
                 continue
+            cid, addr = key
+            is_native = (addr == self.NATIVE_CONTRACT)
+
             balance = self._balances.get(key)
-            price = prices.get(key[1])  # contract or "" for native
+            price = prices.get(addr)  # native lives under ""
             cell = self.table.item(row, 2)
-            if cell is None or balance is None or price is None:
-                continue
-            value = balance * price.price_usd
-            cell.setText(_format_usd(value))
-            if isinstance(cell, _NumericItem):
-                cell.set_value(value)
+            value: Decimal | None = None
+            if cell is not None and balance is not None and price is not None:
+                value = balance * price.price_usd
+                cell.setText(_format_usd(value))
+                if isinstance(cell, _NumericItem):
+                    cell.set_value(value)
+
+            # Dust hiding (display-time; doesn't touch the worker data).
+            # Show only: native, user-force-shown, or priced above dust.
+            if (is_native
+                    or self._store.is_force_shown(cid, addr)
+                    or (value is not None and value >= self.DUST_USD_THRESHOLD)):
+                self.table.setRowHidden(row, False)
+            else:
+                self.table.setRowHidden(row, True)
         self.table.setSortingEnabled(True)
 
     # ---- icon refresh ---------------------------------------------------
@@ -640,7 +663,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(left)
 
         # Right half: token list for the currently-selected account.
-        self.token_panel = TokenListPanel(self._icon_cache)
+        self.token_panel = TokenListPanel(self._icon_cache, self.store)
         self.token_panel.hide_requested.connect(self._on_hide_token)
         outer.addWidget(self.token_panel)
 

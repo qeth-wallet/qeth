@@ -2,17 +2,19 @@ import io
 
 import segno
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter,
-    QStatusBar, QStyle, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+    QSplitter, QStatusBar, QStyle, QTableWidget, QTableWidgetItem, QToolBar,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from .tokenlists import TokenLists
+from .tokens import BlockscoutSource, TokenBalance
 
 
 # --- Add Ledger dialog -------------------------------------------------------
@@ -191,6 +193,119 @@ class DetailsPanel(QWidget):
         self.set_default_btn.setText("Set as default (exposed to dapps)")
 
 
+# --- Token list panel + background workers -----------------------------------
+
+class TokenListsLoader(QThread):
+    """Background loader for the curated TokenLists (network + cache)."""
+
+    loaded = Signal()
+    failed = Signal(str)
+
+    def __init__(self, lists: TokenLists, parent=None):
+        super().__init__(parent)
+        self.lists = lists
+
+    def run(self) -> None:
+        try:
+            self.lists.load()
+            self.loaded.emit()
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class TokenListWorker(QThread):
+    """Fetch ERC-20 balances for one (chain, address) and filter via lists."""
+
+    fetched = Signal(list)        # list[TokenBalance]
+    failed = Signal(str)
+
+    def __init__(self, chain, address: str, source: BlockscoutSource,
+                 lists: TokenLists, parent=None):
+        super().__init__(parent)
+        self.chain = chain
+        self.address = address
+        self.source = source
+        self.lists = lists
+
+    def run(self) -> None:
+        try:
+            if not self.source.supports(self.chain):
+                self.fetched.emit([])
+                return
+            balances = self.source.list_balances(self.chain, self.address)
+            filtered: list[TokenBalance] = [
+                b for b in balances
+                if b.balance_raw > 0
+                and self.lists.is_known(self.chain.chain_id, b.contract)
+            ]
+            filtered.sort(key=lambda b: b.balance, reverse=True)
+            self.fetched.emit(filtered)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class TokenListPanel(QWidget):
+    """Right pane: held ERC-20s for the currently-selected account."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        self.title = QLabel("Tokens")
+        f = self.title.font(); f.setPointSize(f.pointSize() + 1); f.setBold(True)
+        self.title.setFont(f)
+        v.addWidget(self.title)
+
+        self.status = QLabel("Select an account on the left")
+        v.addWidget(self.status)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Name"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        v.addWidget(self.table, 1)
+
+    def show_loading(self, address: str) -> None:
+        self.status.setText(f"Loading tokens for {address[:6]}…{address[-4:]} …")
+        self.table.setRowCount(0)
+
+    def show_balances(self, balances: list[TokenBalance]) -> None:
+        self.table.setRowCount(0)
+        if not balances:
+            self.status.setText("No known ERC-20 tokens on this chain")
+            return
+        self.status.setText(f"{len(balances)} known ERC-20 token(s)")
+        self.table.setRowCount(len(balances))
+        for row, b in enumerate(balances):
+            sym = QTableWidgetItem(b.symbol)
+            sym.setToolTip(b.contract)
+            bal = QTableWidgetItem(f"{b.balance:.6g}")
+            bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            name = QTableWidgetItem(b.name)
+            self.table.setItem(row, 0, sym)
+            self.table.setItem(row, 1, bal)
+            self.table.setItem(row, 2, name)
+
+    def show_error(self, msg: str) -> None:
+        self.status.setText(f"Error: {msg}")
+        self.table.setRowCount(0)
+
+    def show_message(self, msg: str) -> None:
+        self.status.setText(msg)
+        self.table.setRowCount(0)
+
+    def clear(self) -> None:
+        self.status.setText("Select an account on the left")
+        self.table.setRowCount(0)
+
+
 # --- Main window -------------------------------------------------------------
 
 class MainWindow(QMainWindow):
@@ -199,12 +314,25 @@ class MainWindow(QMainWindow):
         self.store = store
         self.rpc = rpc
         self.setWindowTitle("qeth — Ethereum wallet")
-        self.resize(1024, 600)
+        self.resize(1200, 720)
+
+        # Token discovery + curated whitelist (lists load in background).
+        self._token_source = BlockscoutSource()
+        self._token_lists = TokenLists()
+        self._token_worker: TokenListWorker | None = None
 
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
         self._rebuild_tree()
+
+        self._lists_loader = TokenListsLoader(self._token_lists)
+        self._lists_loader.loaded.connect(self._on_lists_loaded)
+        self._lists_loader.failed.connect(
+            lambda e: self.token_panel.show_message(f"Token lists failed: {e}")
+        )
+        self.token_panel.show_message("Loading token lists…")
+        self._lists_loader.start()
         self._refresh_status()
 
     def _build_toolbar(self) -> None:
@@ -256,27 +384,42 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.chain_combo)
 
     def _build_central(self) -> None:
-        splitter = QSplitter(Qt.Horizontal)
+        outer = QSplitter(Qt.Horizontal)
+
+        # Left half: tree on top, account details on bottom.
+        left = QSplitter(Qt.Vertical)
+
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Accounts"])
         self.tree.setRootIsDecorated(True)
         self.tree.setTextElideMode(Qt.ElideMiddle)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
-        splitter.addWidget(self.tree)
+        left.addWidget(self.tree)
 
         self.details = DetailsPanel()
         self.details.set_default_requested.connect(self._set_default)
-        wrap = QFrame()
-        wrap.setFrameShape(QFrame.StyledPanel)
-        lay = QVBoxLayout(wrap)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.addWidget(self.details)
-        splitter.addWidget(wrap)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([460, 560])
-        self.setCentralWidget(splitter)
+        details_wrap = QFrame()
+        details_wrap.setFrameShape(QFrame.StyledPanel)
+        dlay = QVBoxLayout(details_wrap)
+        dlay.setContentsMargins(12, 12, 12, 12)
+        dlay.addWidget(self.details)
+        left.addWidget(details_wrap)
+        left.setStretchFactor(0, 1)
+        left.setStretchFactor(1, 1)
+        left.setSizes([320, 400])
+
+        outer.addWidget(left)
+
+        # Right half: token list for the currently-selected account.
+        self.token_panel = TokenListPanel()
+        outer.addWidget(self.token_panel)
+
+        outer.setStretchFactor(0, 1)
+        outer.setStretchFactor(1, 1)
+        outer.setSizes([520, 680])
+
+        self.setCentralWidget(outer)
 
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
@@ -355,8 +498,38 @@ class MainWindow(QMainWindow):
                 self.details.show_account(
                     acct, is_default=(addrs[0] == self.store.default_account)
                 )
+                self._refresh_tokens(addrs[0])
                 return
         self.details.clear()
+        self.token_panel.clear()
+
+    def _refresh_tokens(self, address: str) -> None:
+        if not self._token_lists.loaded:
+            self.token_panel.show_message(
+                "Loading token lists… selection will refresh automatically"
+            )
+            return
+        # Cancel any in-flight worker (best-effort; QThread won't truly stop).
+        self._token_worker = TokenListWorker(
+            self.store.current_chain(), address,
+            self._token_source, self._token_lists,
+        )
+        self._token_worker.fetched.connect(self.token_panel.show_balances)
+        self._token_worker.failed.connect(self.token_panel.show_error)
+        self.token_panel.show_loading(address)
+        self._token_worker.start()
+
+    def _on_lists_loaded(self) -> None:
+        n = self._token_lists.count()
+        self.statusBar().showMessage(
+            f"Token lists loaded ({n} known tokens)", 3000
+        )
+        # If a single account is already selected, fetch its tokens now.
+        addrs = self._selected_addresses()
+        if len(addrs) == 1:
+            self._refresh_tokens(addrs[0])
+        else:
+            self.token_panel.clear()
 
     def _copy_selected_address(self) -> None:
         addrs = self._selected_addresses()
@@ -417,6 +590,9 @@ class MainWindow(QMainWindow):
         if cid is not None:
             self.store.set_current_chain(int(cid))
             self._refresh_status()
+            addrs = self._selected_addresses()
+            if len(addrs) == 1:
+                self._refresh_tokens(addrs[0])
 
     def _set_default(self, address: str) -> None:
         self.store.set_default_account(address)

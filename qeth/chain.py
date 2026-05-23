@@ -127,14 +127,21 @@ class EthClient:
     # --- batch helpers -----------------------------------------------------
 
     def multicall_erc20_balances(
-        self, tokens: list[str], holder: str,
+        self, tokens: list[str], holder: str, batch_size: int = 100,
     ) -> dict[str, int]:
         """Fetch ERC-20 ``balanceOf(holder)`` for every address in ``tokens``
-        in a single Multicall3.aggregate3 call.
+        via Multicall3.aggregate3.
 
         Returns ``{token_lower: balance_raw}``. Tokens whose inner call
         reverted or returned malformed data are silently omitted, so the
         caller should treat absence as "unknown" rather than zero.
+
+        Two robustness measures matter for "show all" mode where the
+        token set can grow into the hundreds:
+        - ``allowFailure=True`` per inner call so a single malicious
+          contract whose balanceOf reverts can't sink the whole batch.
+        - Batched in chunks (default 100 inner calls per round-trip) so
+          we stay under the eth_call gas/size limit.
         """
         if not tokens:
             return {}
@@ -142,20 +149,26 @@ class EthClient:
 
         addr_hex = holder[2:].lower() if holder.startswith("0x") else holder.lower()
         balof_calldata = _SEL_BALANCE_OF + b"\x00" * 12 + bytes.fromhex(addr_hex)
-        calls = [(t, False, balof_calldata) for t in tokens]
-        calldata = _SEL_AGGREGATE3 + encode(
-            ["(address,bool,bytes)[]"], [calls]
-        )
-        result_hex = self.call({"to": MULTICALL3, "data": "0x" + calldata.hex()})
-        if not result_hex.startswith("0x"):
-            return {}
-        decoded = decode(
-            ["(bool,bytes)[]"], bytes.fromhex(result_hex[2:])
-        )[0]
+
         out: dict[str, int] = {}
-        for (token, _, _), (success, retdata) in zip(calls, decoded):
-            if success and len(retdata) >= 32:
-                out[token.lower()] = int.from_bytes(retdata[:32], "big")
+        for start in range(0, len(tokens), batch_size):
+            batch = tokens[start:start + batch_size]
+            calls = [(t, True, balof_calldata) for t in batch]
+            calldata = _SEL_AGGREGATE3 + encode(
+                ["(address,bool,bytes)[]"], [calls]
+            )
+            try:
+                result_hex = self.call(
+                    {"to": MULTICALL3, "data": "0x" + calldata.hex()}
+                )
+                decoded = decode(
+                    ["(bool,bytes)[]"], bytes.fromhex(result_hex[2:])
+                )[0]
+            except Exception:
+                continue
+            for (token, _, _), (success, retdata) in zip(calls, decoded):
+                if success and len(retdata) >= 32:
+                    out[token.lower()] = int.from_bytes(retdata[:32], "big")
         return out
 
     def multicall_erc20_metadata(

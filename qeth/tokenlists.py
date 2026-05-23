@@ -30,6 +30,23 @@ DEFAULT_TIMEOUT = 8.0
 DEFAULT_TTL_SECONDS = 24 * 3600
 USER_AGENT = "qeth/0.1"
 
+# Heuristic spam-filter inputs. Kept here rather than in the UI module
+# because deciding "is this token suspicious" is a data concern that
+# leans on the curated whitelist (TokenLists.is_known) for its
+# strongest signal.
+_SCAM_URL_NEEDLES = (
+    "http://", "https://", "www.", ".com", ".io", ".gg", ".xyz",
+    ".org", ".net", ".finance", ".app", "t.me/", "t.ly/", "bit.ly/",
+)
+_SCAM_KEYWORDS = (
+    "claim", "visit", "airdrop", "reward", "free $",
+    "redeem", "voucher", "winner",
+)
+_CANONICAL_SYMBOLS = {
+    "eth", "usdc", "usdt", "dai", "wbtc", "weth", "wmatic", "matic",
+    "bnb", "avax", "frax", "crv", "uni", "aave",
+}
+
 
 @dataclass(frozen=True)
 class TokenListEntry:
@@ -300,6 +317,31 @@ class TokenLists:
 
     def is_known(self, chain_id: int, address: str) -> bool:
         return (chain_id, address.lower()) in self._index
+
+    def is_likely_scam(self, chain_id: int, contract: str,
+                       symbol: str, name: str) -> bool:
+        """Loose heuristic for "shitcoin pretending to be something".
+
+        Presence on any curated whitelist short-circuits to False — if
+        a token's contract is in Uniswap/CoinGecko/Curve/1inch we trust
+        it regardless of how scammy the on-chain name reads (some real
+        tokens have weird names). Otherwise:
+
+        - URL fragments (``http``, ``.com``, ``t.me/`` …) or claim/visit
+          keywords in the name or symbol -> scam.
+        - Symbol matches a canonical major token (ETH/USDC/USDT/…) but
+          the contract isn't on any whitelist -> impersonation scam.
+        """
+        if self.is_known(chain_id, contract):
+            return False
+        blob = f" {(name or '').lower()} {(symbol or '').lower()} "
+        if any(n in blob for n in _SCAM_URL_NEEDLES):
+            return True
+        if any(k in blob for k in _SCAM_KEYWORDS):
+            return True
+        if (symbol or "").strip().lower() in _CANONICAL_SYMBOLS:
+            return True
+        return False
 
     def get(self, chain_id: int, address: str) -> TokenListEntry | None:
         return self._index.get((chain_id, address.lower()))

@@ -256,13 +256,14 @@ class TokenListWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, chain, address: str, source: BlockscoutSource,
-                 lists: TokenLists, store, parent=None):
+                 lists: TokenLists, store, show_all: bool = False, parent=None):
         super().__init__(parent)
         self.chain = chain
         self.address = address
         self.source = source
         self.lists = lists
         self.store = store
+        self.show_all = show_all
 
     def run(self) -> None:
         try:
@@ -277,6 +278,12 @@ class TokenListWorker(QThread):
                 cid = self.chain.chain_id
                 for b in self.source.list_balances(self.chain, self.address):
                     if b.balance_raw <= 0:
+                        continue
+                    if self.show_all:
+                        # Spotlight: pass everything through; scam filter
+                        # gets applied at the display layer via
+                        # _compute_visible_tokens.
+                        tokens.append(b)
                         continue
                     if self.store.is_hidden(cid, b.contract):
                         continue
@@ -370,6 +377,10 @@ class PricesWorker(QThread):
         self.prices_ready.emit(self.chain.chain_id, prices)
 
 
+def _is_scam_via_lists(lists, chain_id: int, b: TokenBalance) -> bool:
+    return lists.is_likely_scam(chain_id, b.contract, b.symbol, b.name)
+
+
 def _format_usd(value: Decimal) -> str:
     if value <= 0:
         return ""
@@ -422,6 +433,13 @@ class TokenListPanel(QWidget):
     # User asked to hide a specific (chain_id, contract). Empty contract means
     # the native asset row was clicked (no-op for now — can't hide native).
     hide_requested = Signal(int, str)
+    # User wants to add a custom token by contract address.
+    add_custom_requested = Signal()
+    # User wants to pin (force-show) the currently-selected token.
+    pin_requested = Signal(int, str)
+    # User toggled the "show all" view (no dust, no hide-list — only scams
+    # still hidden).
+    show_all_toggled = Signal(bool)
 
     NATIVE_CONTRACT = ""  # sentinel for the native row
 
@@ -482,9 +500,75 @@ class TokenListPanel(QWidget):
         h.setSectionResizeMode(3, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
+        # Bottom-right action row: + add custom, − remove (hide), pin
+        # (force show), spotlight (show all). Theme icons with text
+        # fallback for systems without the freedesktop icon names.
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(4, 2, 4, 4)
+        action_row.addStretch(1)
+
+        style = self.style()
+        self.btn_add = QPushButton()
+        self.btn_add.setIcon(QIcon.fromTheme("list-add",
+                                             style.standardIcon(QStyle.SP_FileDialogNewFolder)))
+        self.btn_add.setToolTip("Add a custom token by contract address")
+
+        self.btn_hide = QPushButton()
+        self.btn_hide.setIcon(QIcon.fromTheme("list-remove",
+                                              style.standardIcon(QStyle.SP_TrashIcon)))
+        self.btn_hide.setToolTip("Hide selected token from this wallet")
+        self.btn_hide.setEnabled(False)
+
+        self.btn_pin = QPushButton()
+        _pin_icon = QIcon.fromTheme("emblem-favorite",
+                                    QIcon.fromTheme("starred"))
+        if _pin_icon.isNull() or not _pin_icon.availableSizes():
+            self.btn_pin.setText("★")    # Unicode star, reliable on any system
+        else:
+            self.btn_pin.setIcon(_pin_icon)
+        self.btn_pin.setToolTip(
+            "Pin selected token: always show it, even at zero balance "
+            "or below the dust threshold"
+        )
+        self.btn_pin.setEnabled(False)
+
+        self.btn_show_all = QPushButton()
+        _eye_icon = QIcon.fromTheme("view-visible",
+                                    QIcon.fromTheme("eye-symbolic"))
+        if _eye_icon.isNull() or not _eye_icon.availableSizes():
+            self.btn_show_all.setText("👁")  # Unicode eye fallback
+        else:
+            self.btn_show_all.setIcon(_eye_icon)
+        self.btn_show_all.setToolTip(
+            "Show all tokens (including dust and hidden); suspected "
+            "scams stay hidden"
+        )
+        self.btn_show_all.setCheckable(True)
+
+        for b in (self.btn_add, self.btn_hide, self.btn_pin, self.btn_show_all):
+            b.setFlat(True)
+            b.setMaximumSize(28, 28)
+            b.setIconSize(QSize(16, 16))
+            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            action_row.addWidget(b)
+        v.addLayout(action_row)
+
+        self.btn_add.clicked.connect(self.add_custom_requested.emit)
+        self.btn_hide.clicked.connect(
+            lambda: self._emit_for_selected(self.hide_requested)
+        )
+        self.btn_pin.clicked.connect(
+            lambda: self._emit_for_selected(self.pin_requested)
+        )
+        self.btn_show_all.toggled.connect(self.show_all_toggled.emit)
+        self.table.itemSelectionChanged.connect(self._update_action_buttons)
+
         # current chain (set by show_balances) — needed to scope icon lookups
         # and context-menu actions.
         self._chain_id: int | None = None
+        # Set externally by MainWindow so we can mark scams with an alarm
+        # icon and short-circuit `_is_likely_scam` against the curated lists.
+        self._token_lists: "TokenLists | None" = None
 
     # ---- displaying data -------------------------------------------------
 
@@ -547,6 +631,7 @@ class TokenListPanel(QWidget):
         self.table.setItem(0, 3, name)
 
         # --- ERC-20 rows --------------------------------------------------
+        alarm_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
         for row, b in enumerate(tokens, start=1):
             key = (chain.chain_id, b.contract.lower())
             self._balances[key] = b.balance
@@ -554,11 +639,23 @@ class TokenListPanel(QWidget):
             sym = QTableWidgetItem(b.symbol)
             sym.setData(Qt.UserRole, key)
             sym.setToolTip(b.contract)
-            pix = self._icons.get(chain.chain_id, b.contract)
-            if pix is not None:
-                sym.setIcon(QIcon(pix))
-            elif entry and entry.logo_uri:
-                self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
+            # Mark suspected scams with an alarm. Most of the time these
+            # don't reach the panel at all (filtered upstream); the case
+            # that survives is "user force-shows a contract that fails
+            # the heuristic" — exactly when a warning is most useful.
+            scam = (
+                self._token_lists is not None
+                and _is_scam_via_lists(self._token_lists, chain.chain_id, b)
+            )
+            if scam:
+                sym.setIcon(alarm_icon)
+                sym.setToolTip(b.contract + "\n⚠ Looks like a scam token")
+            else:
+                pix = self._icons.get(chain.chain_id, b.contract)
+                if pix is not None:
+                    sym.setIcon(QIcon(pix))
+                elif entry and entry.logo_uri:
+                    self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
             bal = _NumericItem(_format_balance(b.balance), b.balance)
             bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             val = _NumericItem("", Decimal(0))
@@ -572,14 +669,20 @@ class TokenListPanel(QWidget):
         self.table.setSortingEnabled(True)
 
     def render_full(self, chain, native_wei: int, tokens: list[TokenBalance],
-                    entries: dict, prices: dict) -> None:
+                    entries: dict, prices: dict,
+                    apply_dust_filter: bool = True) -> None:
         """Atomic full re-render: rows + balances + prices in one go,
         with paint events suspended so the user never sees an
-        intermediate blank or pre-price-filter state."""
+        intermediate blank or pre-price-filter state.
+
+        ``apply_dust_filter`` is forwarded to set_prices — spotlight
+        mode passes False so zero-value / unpriced rows stay visible.
+        """
         self.setUpdatesEnabled(False)
         try:
             self.show_balances(chain, native_wei, tokens, entries)
-            self.set_prices(chain.chain_id, prices)
+            self.set_prices(chain.chain_id, prices,
+                            apply_dust_filter=apply_dust_filter)
         finally:
             self.setUpdatesEnabled(True)
 
@@ -791,6 +894,32 @@ class TokenListPanel(QWidget):
                 item.setIcon(QIcon(pix))
                 break
 
+    # ---- action buttons --------------------------------------------------
+
+    def _selected_token(self) -> tuple[int, str] | None:
+        """``(chain_id, contract_lower)`` of the currently-selected ERC-20
+        row, or None when nothing is selected / the native row is."""
+        items = self.table.selectedItems()
+        if not items:
+            return None
+        sym = self.table.item(items[0].row(), 0)
+        if sym is None:
+            return None
+        key = sym.data(Qt.UserRole)
+        if not key or key[1] == self.NATIVE_CONTRACT:
+            return None
+        return key
+
+    def _emit_for_selected(self, sig) -> None:
+        sel = self._selected_token()
+        if sel:
+            sig.emit(sel[0], sel[1])
+
+    def _update_action_buttons(self) -> None:
+        enabled = self._selected_token() is not None
+        self.btn_hide.setEnabled(enabled)
+        self.btn_pin.setEnabled(enabled)
+
     # ---- context menu ---------------------------------------------------
 
     def _on_context_menu(self, pos) -> None:
@@ -838,6 +967,7 @@ class MainWindow(QMainWindow):
         self._price_source = DefiLlamaPrices()
         self._wallet_cache = WalletCache()
         self._token_metadata = TokenMetadataCache()
+        self._show_all = False
         # (chain_id, address_lower) the panel currently shows; used to
         # skip needless show_cached rebuilds on subsequent refresh calls
         # (e.g. from _on_lists_loaded firing after _on_tree_selection
@@ -1003,6 +1133,9 @@ class MainWindow(QMainWindow):
         # Right half: token list for the currently-selected account.
         self.token_panel = TokenListPanel(self._icon_cache, self.store)
         self.token_panel.hide_requested.connect(self._on_hide_token)
+        self.token_panel.pin_requested.connect(self._on_pin_token)
+        self.token_panel.add_custom_requested.connect(self._on_add_custom_token)
+        self.token_panel.show_all_toggled.connect(self._on_show_all_toggled)
         outer.addWidget(self.token_panel)
 
         outer.setStretchFactor(0, 1)
@@ -1149,7 +1282,19 @@ class MainWindow(QMainWindow):
             # multicall and cached permanently (it's immutable), with
             # Blockscout's values used only as a one-shot fallback for
             # contracts whose on-chain metadata call reverts.
-            contracts = [b.contract for b in blockscout_tokens]
+            # Always include force-shown contracts in the multicall set,
+            # even if Blockscout didn't return them (user might have just
+            # added a brand-new contract with zero balance).
+            forced = {addr for (cid, addr) in self.store.shown_tokens
+                      if cid == chain.chain_id}
+            seen = set()
+            contracts: list[str] = []
+            for c in [b.contract for b in blockscout_tokens] + sorted(forced):
+                cl = c.lower()
+                if cl in seen:
+                    continue
+                seen.add(cl)
+                contracts.append(c)
             blockscout_meta = {
                 b.contract.lower(): (b.symbol, b.name, b.decimals)
                 for b in blockscout_tokens
@@ -1238,6 +1383,7 @@ class MainWindow(QMainWindow):
 
         worker = TokenListWorker(
             chain, address, self._token_source, self._token_lists, self.store,
+            show_all=self._show_all,
         )
         worker.fetched.connect(on_discovered)
         worker.failed.connect(on_failed)
@@ -1274,8 +1420,14 @@ class MainWindow(QMainWindow):
         # (call reverted) is dropped — better to omit than to invent.
         tokens: list[TokenBalance] = []
         for addr, raw in balances_raw.items():
+            # Normally drop zero balances. Keep them when (a) the user
+            # has pinned this token (then it should always be visible at
+            # 0 too) or (b) spotlight mode is on (user explicitly wants
+            # to see everything, including zero/undetermined-value rows).
             if raw == 0:
-                continue
+                if not (self._show_all
+                        or self.store.is_force_shown(chain.chain_id, addr)):
+                    continue
             meta = metadata.get(addr)
             if meta is None:
                 continue
@@ -1293,33 +1445,55 @@ class MainWindow(QMainWindow):
 
         visible = self._compute_visible_tokens(chain, tokens, prices)
 
+        # Spotlight mode disables the dust filter at display time too —
+        # otherwise rows kept by _compute_visible_tokens would still get
+        # setRowHidden=True the moment set_prices applied dust check.
+        apply_dust = not self._show_all
         if self.token_panel.contract_set_matches(chain, visible):
-            # Same contract set — refresh balance cells (smart-diff: only
-            # cells whose value actually changed get touched) then refresh
-            # the Value column. set_prices is the one that re-applies the
-            # dust filter; update_balances skips it.
             self.token_panel.update_balances_if_set_unchanged(
                 chain, native_wei, visible,
             )
-            self.token_panel.set_prices(chain.chain_id, prices)
+            self.token_panel.set_prices(
+                chain.chain_id, prices, apply_dust_filter=apply_dust,
+            )
         else:
-            # Token set genuinely changed (new airdrop / removed token):
-            # atomic rebuild + price application so the table never shows
-            # an intermediate row-resize blank.
-            self.token_panel.render_full(chain, native_wei, visible, entries, prices)
+            self.token_panel.render_full(
+                chain, native_wei, visible, entries, prices,
+                apply_dust_filter=apply_dust,
+            )
 
-        # Cache only the visible (post-dust, post-force-show) set in the
-        # same order the panel rendered them.
-        self._save_wallet_cache(chain, address, native_wei, visible, prices, entries)
+        # Cache only the normal-mode visible set (post-dust + force-show);
+        # never persist the spotlight superset, otherwise next visit's
+        # cached preview would briefly include dust tokens.
+        cache_visible = (
+            self._compute_visible_tokens(chain, tokens, prices, show_all=False)
+            if self._show_all else visible
+        )
+        self._save_wallet_cache(chain, address, native_wei, cache_visible, prices, entries)
 
-    def _compute_visible_tokens(self, chain, tokens: list, prices) -> list:
+    def _compute_visible_tokens(self, chain, tokens: list, prices,
+                                show_all: bool | None = None) -> list:
         """Apply dust + force-show filter and sort by USD value desc.
-        Mirrors the same logic TokenListPanel.set_prices uses for hiding,
-        so the displayed set is computed once up front."""
+
+        When ``show_all`` is True (spotlight mode) the only filter is
+        the scam heuristic — dust and the user's hide list are ignored.
+        Defaults to ``self._show_all`` so callers can leave it out;
+        ``_save_wallet_cache`` passes False explicitly so it never
+        persists the spotlight superset.
+        """
+        if show_all is None:
+            show_all = self._show_all
         dust = TokenListPanel.DUST_USD_THRESHOLD
         out = []
         for b in tokens:
             addr = b.contract.lower()
+            if show_all:
+                if self._token_lists.is_likely_scam(
+                    chain.chain_id, addr, b.symbol, b.name
+                ):
+                    continue
+                out.append(b)
+                continue
             if self.store.is_force_shown(chain.chain_id, addr):
                 out.append(b)
                 continue
@@ -1434,7 +1608,74 @@ class MainWindow(QMainWindow):
 
     def _on_hide_token(self, chain_id: int, contract: str) -> None:
         self.store.hide_token(chain_id, contract)
-        # Re-fetch for the currently-selected account so the row disappears.
+        self._invalidate_view_and_refresh()
+
+    def _on_pin_token(self, chain_id: int, contract: str) -> None:
+        self.store.force_show_token(chain_id, contract)
+        self._invalidate_view_and_refresh()
+
+    def _on_show_all_toggled(self, on: bool) -> None:
+        self._show_all = on
+        self._invalidate_view_and_refresh()
+
+    def _on_add_custom_token(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        chain = self.store.current_chain()
+        addr, ok = QInputDialog.getText(
+            self, "Add custom token",
+            f"Contract address on {chain.name} (0x… 40 hex chars):",
+        )
+        if not ok:
+            return
+        addr = (addr or "").strip()
+        if not (addr.startswith("0x") and len(addr) == 42):
+            QMessageBox.warning(self, "Invalid address",
+                                "Expected a 0x-prefixed 40-character hex address.")
+            return
+        try:
+            int(addr[2:], 16)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid address",
+                                "Address must be hexadecimal.")
+            return
+
+        try:
+            meta = EthClient(chain).multicall_erc20_metadata([addr])
+        except Exception as e:
+            QMessageBox.warning(self, "Read failed",
+                                f"Couldn't read ERC-20 metadata: {e}")
+            return
+        if not meta:
+            QMessageBox.warning(
+                self, "Not a token",
+                "Contract didn't respond to ERC-20 metadata calls "
+                "(name/symbol/decimals). It might not be an ERC-20.",
+            )
+            return
+        self._token_metadata.put_many(chain.chain_id, meta)
+        self.store.force_show_token(chain.chain_id, addr)
+
+        m = next(iter(meta.values()))
+        scam = self._token_lists.is_likely_scam(
+            chain.chain_id, addr, m.get("symbol", ""), m.get("name", "")
+        )
+        if scam:
+            QMessageBox.warning(
+                self, "Heuristic warning",
+                f"Added {m['symbol']!r} ({m['name']}). Heads up: it "
+                "matches our scam heuristic (URL or impersonating a "
+                "major symbol) and will be marked with an alarm icon. "
+                "Pinned anyway since you added it explicitly.",
+            )
+        self._invalidate_view_and_refresh()
+
+    def _invalidate_view_and_refresh(self) -> None:
+        """Force the next _refresh_tokens to do a full discovery round
+        rather than short-circuiting on the _discovery_in_flight or
+        _displayed_view guards — used when the user changes filter state
+        and we need the panel to re-render."""
+        self._displayed_view = None
+        self._discovery_in_flight.clear()
         addrs = self._selected_addresses()
         if len(addrs) == 1:
             self._refresh_tokens(addrs[0])
@@ -1444,6 +1685,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Token lists loaded ({n} known tokens)", 3000
         )
+        # Hand the lists to the panel so it can run the scam heuristic
+        # for the alarm-icon decision.
+        self.token_panel._token_lists = self._token_lists
         # If a single account is already selected, fetch its tokens now.
         addrs = self._selected_addresses()
         if len(addrs) == 1:

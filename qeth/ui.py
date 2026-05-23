@@ -224,7 +224,10 @@ class TokenListWorker(QThread):
     Emits ``fetched(native_wei: int, tokens: list[TokenBalance])``.
     """
 
-    fetched = Signal(int, list)
+    # native_wei must travel as ``object``; declaring ``int`` makes PySide6
+    # marshal through qint32 and overflows for any balance above ~2.1e9 wei
+    # (well below a millionth of an ETH).
+    fetched = Signal(object, list)
     failed = Signal(str)
 
     def __init__(self, chain, address: str, source: BlockscoutSource,

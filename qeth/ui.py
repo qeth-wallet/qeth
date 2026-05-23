@@ -78,7 +78,9 @@ class AddLedgerDialog(QDialog):
             lambda: self.add_btn.setEnabled(bool(self.results.selectedItems()))
         )
 
-        self._worker: LedgerWorker | None = None
+        # Workers tracked here so they aren't garbage-collected while still
+        # running (Qt's QThread destructor aborts the process if it is).
+        self._workers: set[QThread] = set()
 
     def _scan(self) -> None:
         self.results.clear()
@@ -91,13 +93,16 @@ class AddLedgerDialog(QDialog):
             self.progress.setValue(0)
         self.progress.setVisible(True)
         self.scan_btn.setEnabled(False)
-        self._worker = LedgerWorker(
+        worker = LedgerWorker(
             self.scheme_combo.currentText(), n, chain=self._chain
         )
-        self._worker.discovered.connect(self._on_found)
-        self._worker.finished_ok.connect(self._on_done)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.start()
+        worker.discovered.connect(self._on_found)
+        worker.finished_ok.connect(self._on_done)
+        worker.failed.connect(self._on_failed)
+        self._workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _on_found(self, acct: DiscoveredAccount) -> None:
         balance = wei_to_ether(acct.balance_wei)
@@ -276,7 +281,10 @@ class BalanceWorker(QThread):
     Emits ``refreshed(chain_id, native_wei, {addr_lower: balance_raw})``.
     """
 
-    refreshed = Signal(int, object, dict)
+    # `dict` would make PySide6 marshal its values through qint64; some
+    # ERC-20 raw balances (e.g. ~3.2e19 for ASF with 18 decimals) overflow.
+    # Pass as plain object so the Python dict travels untouched.
+    refreshed = Signal(int, object, object)
     failed = Signal(str)
 
     def __init__(self, chain, address: str, token_contracts: list[str], parent=None):
@@ -303,7 +311,8 @@ class PricesWorker(QThread):
     Failures are silent — the value column simply stays empty.
     """
 
-    prices_ready = Signal(int, dict)
+    # See BalanceWorker.refreshed: pass as object to skip Qt marshalling.
+    prices_ready = Signal(int, object)
 
     def __init__(self, source: PriceSource, chain, contracts: list[str],
                  include_native: bool, parent=None):
@@ -690,11 +699,15 @@ class MainWindow(QMainWindow):
         self._token_worker: TokenListWorker | None = None
         self._icon_cache = IconCache(self)
         self._price_source = DefiLlamaPrices()
-        self._prices_worker: PricesWorker | None = None
         self._wallet_cache = WalletCache()
         # Stashed after a successful balance fetch so the post-price callback
         # has the data it needs to write the wallet cache.
         self._pending_save: dict | None = None
+        # All in-flight workers. Held here so Python doesn't GC them while
+        # they're still running — Qt's QThread destructor aborts (and kills
+        # the process) if the thread is alive. Workers self-evict via their
+        # `finished` signal so the set doesn't grow forever.
+        self._active_workers: set[QThread] = set()
 
         self._build_toolbar()
         self._build_central()
@@ -899,9 +912,7 @@ class MainWindow(QMainWindow):
                 [t.contract for t in cached.tokens],
             )
             bw.refreshed.connect(self._on_balance_refresh)
-            bw.start()
-            # Hold a ref so it isn't GC'd before finishing.
-            self._balance_worker = bw
+            self._start_worker(bw)
 
         if not self._token_lists.loaded:
             if cached is None:
@@ -910,8 +921,7 @@ class MainWindow(QMainWindow):
                 )
             return
 
-        # Cancel any in-flight worker (best-effort; QThread won't truly stop).
-        self._token_worker = TokenListWorker(
+        worker = TokenListWorker(
             chain, address, self._token_source, self._token_lists, self.store,
         )
 
@@ -933,24 +943,32 @@ class MainWindow(QMainWindow):
                 "chain": chain, "address": address, "native_wei": native_wei,
                 "tokens": tokens, "entries": entries,
             }
-            self._prices_worker = PricesWorker(
+            pw = PricesWorker(
                 self._price_source, chain,
                 [b.contract for b in tokens],
                 include_native=True,
             )
-            self._prices_worker.prices_ready.connect(self._on_prices_ready)
-            self._prices_worker.start()
+            pw.prices_ready.connect(self._on_prices_ready)
+            self._start_worker(pw)
 
         def on_failed(msg: str) -> None:
             # Blockscout failed; keep the cache view rather than wiping it.
             if cached is None:
                 self.token_panel.show_error(msg)
 
-        self._token_worker.fetched.connect(on_fetched)
-        self._token_worker.failed.connect(on_failed)
+        worker.fetched.connect(on_fetched)
+        worker.failed.connect(on_failed)
         if cached is None:
             self.token_panel.show_loading(address)
-        self._token_worker.start()
+        self._start_worker(worker)
+
+    def _start_worker(self, worker: QThread) -> QThread:
+        """Track a worker so it isn't garbage-collected while running."""
+        self._active_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        return worker
 
     def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
         """Apply on-chain balance refresh to the panel. Needs the cached

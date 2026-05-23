@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .chain import EthClient
-from .icons import IconCache, bundled_native_icon
+from .icons import IconCache, bundled_chain_icon, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from .tokenlists import TokenLists
 from .tokens import BlockscoutSource, TokenBalance
@@ -480,8 +480,14 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(QLabel("Chain: "))
         self.chain_combo = QComboBox()
+        self.chain_combo.setIconSize(QSize(18, 18))
         for c in self.store.chains:
-            self.chain_combo.addItem(f"{c.name} ({c.chain_id})", c.chain_id)
+            label = f"{c.name} ({c.chain_id})"
+            pix = bundled_chain_icon(c.chain_id)
+            if pix is not None:
+                self.chain_combo.addItem(QIcon(pix), label, c.chain_id)
+            else:
+                self.chain_combo.addItem(label, c.chain_id)
         idx = self.chain_combo.findData(self.store.current_chain_id)
         if idx >= 0:
             self.chain_combo.setCurrentIndex(idx)

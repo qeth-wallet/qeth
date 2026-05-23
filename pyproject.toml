@@ -31,4 +31,4 @@ build-backend = "setuptools.build_meta"
 include = ["qeth*"]
 
 [tool.setuptools.package-data]
-qeth = ["assets/native/*.png"]
+qeth = ["assets/native/*.png", "assets/chains/*.png"]

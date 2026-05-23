@@ -20,6 +20,7 @@ log = logging.getLogger("qeth.icons")
 
 ICONS_DIR = Path.home() / ".qeth" / "icons"
 BUNDLED_NATIVE_DIR = Path(__file__).parent / "assets" / "native"
+BUNDLED_CHAIN_DIR = Path(__file__).parent / "assets" / "chains"
 USER_AGENT = "qeth/0.1"
 FETCH_TIMEOUT = 10.0
 
@@ -28,6 +29,17 @@ def bundled_native_icon(symbol: str) -> QPixmap | None:
     """Return the bundled native-asset icon for a chain symbol (ETH, MATIC,
     …), or None if no file ships for that symbol."""
     p = BUNDLED_NATIVE_DIR / f"{symbol.upper()}.png"
+    if not p.exists():
+        return None
+    pix = QPixmap(str(p))
+    return pix if not pix.isNull() else None
+
+
+def bundled_chain_icon(chain_id: int) -> QPixmap | None:
+    """Return the bundled chain logo by chain id, or None if no file ships
+    for that chain. Distinct from the native-asset icon: e.g. Optimism's
+    chain logo is the red O, not the ETH diamond."""
+    p = BUNDLED_CHAIN_DIR / f"{int(chain_id)}.png"
     if not p.exists():
         return None
     pix = QPixmap(str(p))

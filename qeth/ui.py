@@ -140,6 +140,9 @@ class DetailsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         v = QVBoxLayout(self)
+        # No bottom margin so the Set-as-default button can sit flush with
+        # the bottom of the splitter (matches the right panel's bottom edge).
+        v.setContentsMargins(9, 9, 9, 0)
         self.title = QLabel("Select an account on the left")
         f = self.title.font(); f.setPointSize(f.pointSize() + 2); f.setBold(True)
         self.title.setFont(f)
@@ -179,8 +182,9 @@ class DetailsPanel(QWidget):
         self.set_default_btn.clicked.connect(
             lambda: self._current and self.set_default_requested.emit(self._current)
         )
-        v.addWidget(self.set_default_btn)
+        # Stretch pushes the button to the very bottom of the panel.
         v.addStretch(1)
+        v.addWidget(self.set_default_btn)
         self._current: str | None = None
 
     def show_account(self, account: dict, is_default: bool) -> None:
@@ -391,7 +395,9 @@ class TokenListPanel(QWidget):
         self._store = store
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(8, 8, 8, 8)
+        # No top margin so the table header aligns with the tree header on
+        # the left side (which sits directly in the splitter, no wrapping).
+        v.setContentsMargins(0, 0, 0, 0)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Value (USD)", "Name"])
@@ -916,7 +922,9 @@ class MainWindow(QMainWindow):
         details_wrap = QFrame()
         details_wrap.setFrameShape(QFrame.StyledPanel)
         dlay = QVBoxLayout(details_wrap)
-        dlay.setContentsMargins(12, 12, 12, 12)
+        # No bottom padding so DetailsPanel's button (now anchored at the
+        # bottom of its own layout) lines up with the right panel's bottom.
+        dlay.setContentsMargins(12, 12, 12, 0)
         dlay.addWidget(self.details)
         left.addWidget(details_wrap)
         left.setStretchFactor(0, 1)

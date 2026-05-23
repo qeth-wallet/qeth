@@ -303,6 +303,24 @@ def _format_usd(value: Decimal) -> str:
     return f"${value:,.2f}"
 
 
+class _NumericItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts numerically by an associated Decimal,
+    regardless of the formatted display text. Falls back to string compare
+    against non-numeric peers so heterogeneous columns still sort sanely."""
+
+    def __init__(self, text: str, value: Decimal):
+        super().__init__(text)
+        self._value = value
+
+    def set_value(self, value: Decimal) -> None:
+        self._value = value
+
+    def __lt__(self, other):
+        if isinstance(other, _NumericItem):
+            return self._value < other._value
+        return super().__lt__(other)
+
+
 class TokenListPanel(QWidget):
     """Right pane: native + held ERC-20s for the currently-selected account.
 
@@ -334,7 +352,12 @@ class TokenListPanel(QWidget):
         self.table.setIconSize(QSize(20, 20))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.setSortingEnabled(True)
+        # Default: by Value (USD) descending. setSortIndicator only sets the
+        # arrow; the actual sort kicks in each time we toggle sortingEnabled
+        # off-then-on around a populate/update cycle.
         h = self.table.horizontalHeader()
+        h.setSortIndicator(2, Qt.DescendingOrder)
         h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -359,6 +382,9 @@ class TokenListPanel(QWidget):
     ) -> None:
         """Populate the table with the native asset on top, then ERC-20s."""
         self._chain_id = chain.chain_id
+        # Disable sorting while populating; re-enabling at the end triggers
+        # a single sort by the current header indicator.
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         row_count = 1 + len(tokens)
         self.table.setRowCount(row_count)
@@ -377,10 +403,10 @@ class TokenListPanel(QWidget):
         native_pix = bundled_native_icon(chain.symbol)
         if native_pix is not None:
             sym.setIcon(QIcon(native_pix))
-        bal = QTableWidgetItem(f"{native_balance:.6g}")
+        bal = _NumericItem(f"{native_balance:.6g}", native_balance)
         bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         bal.setFont(bf)
-        val = QTableWidgetItem("")
+        val = _NumericItem("", Decimal(0))
         val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         val.setFont(bf)
         name = QTableWidgetItem(chain.name)
@@ -403,15 +429,17 @@ class TokenListPanel(QWidget):
                 sym.setIcon(QIcon(pix))
             elif entry and entry.logo_uri:
                 self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
-            bal = QTableWidgetItem(f"{b.balance:.6g}")
+            bal = _NumericItem(f"{b.balance:.6g}", b.balance)
             bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            val = QTableWidgetItem("")
+            val = _NumericItem("", Decimal(0))
             val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             name = QTableWidgetItem(b.name)
             self.table.setItem(row, 0, sym)
             self.table.setItem(row, 1, bal)
             self.table.setItem(row, 2, val)
             self.table.setItem(row, 3, name)
+
+        self.table.setSortingEnabled(True)
 
     def show_error(self, msg: str) -> None:
         self.table.setRowCount(0)
@@ -429,9 +457,14 @@ class TokenListPanel(QWidget):
         self._balances = {}
 
     def set_prices(self, chain_id: int, prices: dict) -> None:
-        """Populate the Value (USD) column from a {addr_lower: Price} dict."""
+        """Populate the Value (USD) column from a {addr_lower: Price} dict.
+
+        Sorting is suspended while we mutate cells, then re-enabled so the
+        table re-sorts once by the current header indicator (Value desc by
+        default; whatever the user clicked otherwise)."""
         if self._chain_id != chain_id:
             return
+        self.table.setSortingEnabled(False)
         for row in range(self.table.rowCount()):
             sym = self.table.item(row, 0)
             if sym is None:
@@ -444,7 +477,11 @@ class TokenListPanel(QWidget):
             cell = self.table.item(row, 2)
             if cell is None or balance is None or price is None:
                 continue
-            cell.setText(_format_usd(balance * price.price_usd))
+            value = balance * price.price_usd
+            cell.setText(_format_usd(value))
+            if isinstance(cell, _NumericItem):
+                cell.set_value(value)
+        self.table.setSortingEnabled(True)
 
     # ---- icon refresh ---------------------------------------------------
 

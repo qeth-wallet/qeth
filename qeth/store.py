@@ -40,6 +40,14 @@ class Store:
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
         self.shown_tokens: set[tuple[int, str]] = set()
+        # Hex-encoded QByteArray from QMainWindow.saveGeometry(), so size +
+        # position + maximized state all round-trip.
+        self.window_geometry: Optional[str] = None
+        # Same encoding for QSplitter.saveState() — preserves the user's
+        # drag positions for the outer horizontal split (tree+details vs
+        # token panel) and the inner vertical split (tree vs details).
+        self.splitter_state_main: Optional[str] = None
+        self.splitter_state_left: Optional[str] = None
 
     @classmethod
     def load(cls) -> "Store":
@@ -65,6 +73,9 @@ class Store:
                 for t in data.get("shown_tokens", [])
                 if t.get("address") and t.get("chain_id") is not None
             }
+            s.window_geometry = data.get("window_geometry")
+            s.splitter_state_main = data.get("splitter_state_main")
+            s.splitter_state_left = data.get("splitter_state_left")
         return s
 
     def save(self) -> None:
@@ -82,6 +93,9 @@ class Store:
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.shown_tokens)
                 ],
+                "window_geometry": self.window_geometry,
+                "splitter_state_main": self.splitter_state_main,
+                "splitter_state_left": self.splitter_state_left,
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(data, indent=2))
@@ -166,4 +180,15 @@ class Store:
     def unforce_show_token(self, chain_id: int, address: str) -> None:
         with self._lock:
             self.shown_tokens.discard((int(chain_id), address.lower()))
+        self.save()
+
+    def set_window_geometry(self, geometry_hex: str) -> None:
+        with self._lock:
+            self.window_geometry = geometry_hex
+        self.save()
+
+    def set_splitter_states(self, main_hex: str, left_hex: str) -> None:
+        with self._lock:
+            self.splitter_state_main = main_hex
+            self.splitter_state_left = left_hex
         self.save()

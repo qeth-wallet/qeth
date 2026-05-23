@@ -3,7 +3,7 @@ import logging
 
 import segno
 
-from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
@@ -147,9 +147,14 @@ class DetailsPanel(QWidget):
 
         form = QFormLayout()
         mono = QFont("monospace")
+        # Ignored size policy on the long monospace labels: their sizeHint
+        # (full 42-char address etc.) shouldn't pin the panel's minimum
+        # width, otherwise the whole window can't be shrunk down.
         self.address_lbl = QLabel("—"); self.address_lbl.setFont(mono)
         self.address_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.address_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.path_lbl = QLabel("—"); self.path_lbl.setFont(mono)
+        self.path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.source_lbl = QLabel("—")
         self.scheme_lbl = QLabel("—")
         form.addRow("Address:", self.address_lbl)
@@ -163,8 +168,14 @@ class DetailsPanel(QWidget):
         self.qr_lbl.setFixedSize(220, 220)
         v.addWidget(self.qr_lbl, 0, Qt.AlignCenter)
 
-        self.set_default_btn = QPushButton("Set as default (exposed to dapps)")
+        # Short label + tooltip rather than a wide button — keeps the
+        # panel narrow-shrinkable. Same policy trick on the button itself.
+        self.set_default_btn = QPushButton("Set as default")
+        self.set_default_btn.setToolTip(
+            "Make this the address dapps see (returned by eth_accounts)"
+        )
         self.set_default_btn.setEnabled(False)
+        self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.set_default_btn.clicked.connect(
             lambda: self._current and self.set_default_requested.emit(self._current)
         )
@@ -180,9 +191,7 @@ class DetailsPanel(QWidget):
         self.source_lbl.setText(account.get("source", "—"))
         self.scheme_lbl.setText(account.get("scheme", "—"))
         self.set_default_btn.setEnabled(not is_default)
-        self.set_default_btn.setText(
-            "Default ✓" if is_default else "Set as default (exposed to dapps)"
-        )
+        self.set_default_btn.setText("Default ✓" if is_default else "Set as default")
         self._render_qr(account["address"])
 
     def _render_qr(self, address: str) -> None:
@@ -202,7 +211,7 @@ class DetailsPanel(QWidget):
             w.setText("—")
         self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
-        self.set_default_btn.setText("Set as default (exposed to dapps)")
+        self.set_default_btn.setText("Set as default")
 
 
 # --- Token list panel + background workers -----------------------------------
@@ -748,6 +757,10 @@ class MainWindow(QMainWindow):
         self.rpc = rpc
         self.setWindowTitle("qeth — Ethereum wallet")
         self.resize(1200, 720)
+        # Override QMainWindow's inflated minimumSizeHint (it reports
+        # ~950x565 even when child widgets only need ~370x500). Floor at
+        # something a bit below what the QR + a usable table need.
+        self.setMinimumSize(420, 360)
 
         # Token discovery + curated whitelist (lists load in background).
         self._token_source = BlockscoutSource()
@@ -790,6 +803,44 @@ class MainWindow(QMainWindow):
         )
         self.token_panel.show_message("Loading token lists…")
         self._lists_loader.start()
+
+        # Restore prior window geometry (size + position + maximized state).
+        # Done after the UI is fully built so the layout has a chance to
+        # compute its hints; QByteArray.fromHex tolerates trailing nulls
+        # and bad input — restoreGeometry returns False on garbage, which
+        # we just ignore.
+        if self.store.window_geometry:
+            try:
+                self.restoreGeometry(
+                    QByteArray.fromHex(self.store.window_geometry.encode())
+                )
+            except Exception:
+                pass
+        # Splitter states — drag positions for outer (left↔right) and inner
+        # (tree↕details) splits. Restored after geometry so the splitters
+        # know the right total width to distribute.
+        if self.store.splitter_state_main:
+            try:
+                self._splitter_outer.restoreState(
+                    QByteArray.fromHex(self.store.splitter_state_main.encode())
+                )
+            except Exception:
+                pass
+        if self.store.splitter_state_left:
+            try:
+                self._splitter_left.restoreState(
+                    QByteArray.fromHex(self.store.splitter_state_left.encode())
+                )
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        self.store.set_window_geometry(bytes(self.saveGeometry().toHex()).decode())
+        self.store.set_splitter_states(
+            bytes(self._splitter_outer.saveState().toHex()).decode(),
+            bytes(self._splitter_left.saveState().toHex()).decode(),
+        )
+        super().closeEvent(event)
         self._refresh_status()
 
     def _build_toolbar(self) -> None:
@@ -847,10 +898,10 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.chain_combo)
 
     def _build_central(self) -> None:
-        outer = QSplitter(Qt.Horizontal)
+        self._splitter_outer = outer = QSplitter(Qt.Horizontal)
 
         # Left half: tree on top, account details on bottom.
-        left = QSplitter(Qt.Vertical)
+        self._splitter_left = left = QSplitter(Qt.Vertical)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Accounts"])

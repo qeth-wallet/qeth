@@ -1,10 +1,10 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSpinBox, QSplitter, QStatusBar, QToolBar, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QStyle,
+    QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
@@ -174,12 +174,31 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QToolBar()
         tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
-        act_add = QAction("Add Ledger account", self)
+        act_add = QAction(
+            QIcon.fromTheme("document-new", self.style().standardIcon(QStyle.SP_FileIcon)),
+            "Add account",
+            self,
+        )
         act_add.triggered.connect(self._add_ledger)
         tb.addAction(act_add)
         tb.addSeparator()
-        tb.addWidget(QLabel("  Chain: "))
+
+        self.act_copy = QAction(
+            QIcon.fromTheme("edit-copy", self.style().standardIcon(QStyle.SP_DialogSaveButton)),
+            "Copy address",
+            self,
+        )
+        self.act_copy.setEnabled(False)
+        self.act_copy.triggered.connect(self._copy_selected_address)
+        tb.addAction(self.act_copy)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        tb.addWidget(QLabel("Chain: "))
         self.chain_combo = QComboBox()
         for c in self.store.chains:
             self.chain_combo.addItem(f"{c.name} ({c.chain_id})", c.chain_id)
@@ -271,10 +290,8 @@ class MainWindow(QMainWindow):
 
     def _on_tree_selection(self) -> None:
         items = self.tree.selectedItems()
-        if not items:
-            self.details.clear()
-            return
-        addr = items[0].data(0, Qt.UserRole)
+        addr = items[0].data(0, Qt.UserRole) if items else None
+        self.act_copy.setEnabled(bool(addr))
         if not addr:
             self.details.clear()
             return
@@ -283,6 +300,14 @@ class MainWindow(QMainWindow):
             self.details.show_account(acct, is_default=(addr == self.store.default_account))
         else:
             self.details.clear()
+
+    def _copy_selected_address(self) -> None:
+        items = self.tree.selectedItems()
+        addr = items[0].data(0, Qt.UserRole) if items else None
+        if not addr:
+            return
+        QApplication.clipboard().setText(addr)
+        self.statusBar().showMessage(f"Copied {addr} to clipboard", 3000)
 
     def _add_ledger(self) -> None:
         dlg = AddLedgerDialog(self)

@@ -26,6 +26,16 @@ dev = [
     "pytest>=8",
 ]
 
+[tool.pytest.ini_options]
+# Network tests exercise real Blockscout / DefiLlama / GoPlus / Curve /
+# chain RPC endpoints; they're skipped by default to keep `pytest` fast
+# and hermetic. To run only them:    uv run pytest -m network
+# To run everything (offline + online): uv run pytest -m ''
+markers = [
+    "network: requires live network and external services",
+]
+addopts = "-m 'not network'"
+
 [project.scripts]
 qeth = "qeth.__main__:main"
 

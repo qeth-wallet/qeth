@@ -1,11 +1,13 @@
 """Tests for qeth.chain — pure (no network)."""
 
+import json
 from decimal import Decimal
 
 import pytest
 from eth_abi import encode
 
 from qeth.chain import (
+    ChainError,
     EthClient,
     _SEL_AGGREGATE3,
     _SEL_BALANCE_OF,
@@ -168,6 +170,185 @@ class TestMulticallMetadata:
         ])
         monkeypatch.setattr(EthClient, "call", lambda self, tx, block="latest": response)
         assert eth_client.multicall_erc20_metadata(tokens) == {}
+
+
+# --- EthClient.rpc + the simple wrappers ---------------------------------
+
+def _patch_rpc_response(monkeypatch, response: dict) -> dict:
+    """Patch urllib.request.urlopen so EthClient sees ``response`` as the
+    parsed JSON-RPC reply. Returns a dict that captures what the call
+    actually sent (URL, headers, decoded body) so tests can assert on it.
+    """
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.headers)
+        captured["method"] = req.get_method()
+        captured["body"] = json.loads(req.data.decode())
+        body = json.dumps(response).encode()
+
+        class _R:
+            def read(self): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        return _R()
+
+    monkeypatch.setattr("qeth.chain.urllib.request.urlopen", fake_urlopen)
+    return captured
+
+
+class TestRpcDispatcher:
+    def test_posts_jsonrpc_envelope(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0xdead",
+        })
+        out = eth_client.rpc("eth_someMethod", ["param1", 42])
+        assert out == "0xdead"
+        assert captured["method"] == "POST"
+        assert captured["url"] == eth_client.chain.rpc_url
+        assert captured["body"] == {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_someMethod", "params": ["param1", 42],
+        }
+
+    def test_sends_qeth_user_agent(self, eth_client, monkeypatch):
+        """DRPC's Cloudflare front 403s the default Python-urllib UA;
+        this is exactly what the User-Agent override exists to prevent."""
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x1",
+        })
+        eth_client.rpc("eth_chainId")
+        # urllib stores header names title-cased.
+        assert any("qeth" in v.lower() for v in captured["headers"].values())
+
+    def test_no_params_defaults_to_empty_list(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x0",
+        })
+        eth_client.rpc("eth_blockNumber")
+        assert captured["body"]["params"] == []
+
+    def test_error_response_raises_ChainError(self, eth_client, monkeypatch):
+        _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32000, "message": "broken"},
+        })
+        with pytest.raises(ChainError) as exc:
+            eth_client.rpc("eth_blockNumber")
+        assert exc.value.code == -32000
+        assert "broken" in exc.value.message
+
+    def test_error_response_with_missing_message(self, eth_client, monkeypatch):
+        """Provider sends a code but no message — should still raise
+        without crashing, with a default message."""
+        _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "error": {"code": -32000},
+        })
+        with pytest.raises(ChainError) as exc:
+            eth_client.rpc("eth_blockNumber")
+        assert exc.value.code == -32000
+        assert exc.value.message  # non-empty default
+
+
+class TestEthMethodWrappers:
+    """Each of these uses rpc() under the hood and parses the hex result."""
+
+    def test_get_balance(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1,
+            "result": "0x4b3b4ca85a86c47a098a224000000000",
+        })
+        bal = eth_client.get_balance("0xdead")
+        assert bal == int("0x4b3b4ca85a86c47a098a224000000000", 16)
+        assert captured["body"]["method"] == "eth_getBalance"
+        assert captured["body"]["params"] == ["0xdead", "latest"]
+
+    def test_get_balance_with_explicit_block(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x0",
+        })
+        eth_client.get_balance("0xdead", block="0x100")
+        assert captured["body"]["params"] == ["0xdead", "0x100"]
+
+    def test_get_block_number(self, eth_client, monkeypatch):
+        _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x1234567",
+        })
+        assert eth_client.get_block_number() == 0x1234567
+
+    def test_chain_id(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0xa",
+        })
+        assert eth_client.chain_id() == 10
+        assert captured["body"]["method"] == "eth_chainId"
+
+    def test_get_transaction_count_defaults_to_pending(self, eth_client, monkeypatch):
+        """Nonce queries should default to 'pending' so back-to-back tx
+        submissions don't collide on the same nonce."""
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x5",
+        })
+        n = eth_client.get_transaction_count("0xdead")
+        assert n == 5
+        assert captured["body"]["method"] == "eth_getTransactionCount"
+        assert captured["body"]["params"] == ["0xdead", "pending"]
+
+    def test_gas_price(self, eth_client, monkeypatch):
+        _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x3b9aca00",  # 1 gwei
+        })
+        assert eth_client.gas_price() == 1_000_000_000
+
+    def test_max_priority_fee(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x77359400",  # 2 gwei
+        })
+        assert eth_client.max_priority_fee() == 2_000_000_000
+        assert captured["body"]["method"] == "eth_maxPriorityFeePerGas"
+
+    def test_estimate_gas(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x5208",  # 21000
+        })
+        tx = {"from": "0xdead", "to": "0xbeef", "value": "0x1"}
+        assert eth_client.estimate_gas(tx) == 21000
+        assert captured["body"]["method"] == "eth_estimateGas"
+        assert captured["body"]["params"] == [tx]
+
+    def test_call(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0xc0ffee",
+        })
+        out = eth_client.call({"to": "0xdead", "data": "0x1234"})
+        assert out == "0xc0ffee"
+        assert captured["body"]["method"] == "eth_call"
+        assert captured["body"]["params"] == [
+            {"to": "0xdead", "data": "0x1234"}, "latest",
+        ]
+
+    def test_send_raw_transaction_bytes(self, eth_client, monkeypatch):
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1,
+            "result": "0xaabbccddee00000000000000000000000000000000000000000000000000000000",
+        })
+        raw = bytes.fromhex("aabb")
+        txh = eth_client.send_raw_transaction(raw)
+        assert txh.startswith("0x")
+        assert captured["body"]["method"] == "eth_sendRawTransaction"
+        # Bytes should be hex-encoded with 0x prefix in the request.
+        assert captured["body"]["params"] == ["0xaabb"]
+
+    def test_send_raw_transaction_str_passthrough(self, eth_client, monkeypatch):
+        """If the caller already hex-encoded the signed transaction, it
+        should pass through unchanged."""
+        captured = _patch_rpc_response(monkeypatch, {
+            "jsonrpc": "2.0", "id": 1, "result": "0xdeadbeef",
+        })
+        eth_client.send_raw_transaction("0xf86b...")
+        assert captured["body"]["params"] == ["0xf86b..."]
 
 
 class TestDecodeStringOrBytes32:

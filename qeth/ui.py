@@ -169,10 +169,15 @@ class DetailsPanel(QWidget):
         form.addRow("Scheme:", self.scheme_lbl)
         v.addLayout(form)
 
+        # Vertical breathing room above + below the QR — without these,
+        # the form rows / button crowd right up against it and the panel
+        # looks squeezed.
+        v.addSpacing(12)
         self.qr_lbl = QLabel()
         self.qr_lbl.setAlignment(Qt.AlignCenter)
         self.qr_lbl.setFixedSize(220, 220)
         v.addWidget(self.qr_lbl, 0, Qt.AlignCenter)
+        v.addSpacing(12)
 
         # Short label + tooltip rather than a wide button — keeps the
         # panel narrow-shrinkable. Same policy trick on the button itself.
@@ -181,7 +186,13 @@ class DetailsPanel(QWidget):
             "Make this the address dapps see (returned by eth_accounts)"
         )
         self.set_default_btn.setEnabled(False)
-        self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        # Pin the height. With QSizePolicy.Fixed Qt re-queries sizeHint()
+        # every time the text changes — and "Default ✓" can come out a
+        # touch shorter than "Set as default" depending on the theme. The
+        # snapshot here is taken while the (longer) text is set, so the
+        # disabled state never shrinks.
+        self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.set_default_btn.setMinimumHeight(self.set_default_btn.sizeHint().height())
         self.set_default_btn.clicked.connect(
             lambda: self._current and self.set_default_requested.emit(self._current)
         )

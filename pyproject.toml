@@ -14,6 +14,7 @@ requires-python = ">=3.10"
 dependencies = [
     "ledgereth>=0.10",
     "aiohttp>=3.9",
+    "segno>=1.6",
 ]
 
 [project.optional-dependencies]

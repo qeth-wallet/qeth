@@ -1,5 +1,9 @@
+import io
+
+import segno
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
@@ -125,6 +129,11 @@ class DetailsPanel(QWidget):
         form.addRow("Scheme:", self.scheme_lbl)
         v.addLayout(form)
 
+        self.qr_lbl = QLabel()
+        self.qr_lbl.setAlignment(Qt.AlignCenter)
+        self.qr_lbl.setFixedSize(220, 220)
+        v.addWidget(self.qr_lbl, 0, Qt.AlignCenter)
+
         self.set_default_btn = QPushButton("Set as default (exposed to dapps)")
         self.set_default_btn.setEnabled(False)
         self.set_default_btn.clicked.connect(
@@ -145,12 +154,24 @@ class DetailsPanel(QWidget):
         self.set_default_btn.setText(
             "Default ✓" if is_default else "Set as default (exposed to dapps)"
         )
+        self._render_qr(account["address"])
+
+    def _render_qr(self, address: str) -> None:
+        buf = io.BytesIO()
+        # ethereum: URI per EIP-681 so wallets recognize it as a send intent
+        segno.make(f"ethereum:{address}", error="m").save(buf, kind="png", scale=6, border=2)
+        pix = QPixmap()
+        pix.loadFromData(buf.getvalue(), "PNG")
+        self.qr_lbl.setPixmap(pix.scaled(
+            self.qr_lbl.size(), Qt.KeepAspectRatio, Qt.FastTransformation
+        ))
 
     def clear(self) -> None:
         self._current = None
         self.title.setText("Select an account on the left")
         for w in (self.address_lbl, self.path_lbl, self.source_lbl, self.scheme_lbl):
             w.setText("—")
+        self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
         self.set_default_btn.setText("Set as default (exposed to dapps)")
 

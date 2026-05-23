@@ -39,6 +39,7 @@ class TokenListEntry:
     name: str
     decimals: int
     source: str         # name of the source that first contributed this entry
+    logo_uri: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,7 @@ def _from_tokenlists_schema(data: dict, source_name: str) -> Iterable[TokenListE
                 name=str(t.get("name") or ""),
                 decimals=int(t.get("decimals") or 18),
                 source=source_name,
+                logo_uri=t.get("logoURI") or None,
             )
         except (TypeError, ValueError):
             continue
@@ -178,6 +180,14 @@ class Curve(TokenListSource):
                     addr = str(t.get("address", "")).lower()
                     if not addr.startswith("0x") or len(addr) != 42:
                         continue
+                    # Curve doesn't return logoURI; their curve-assets repo
+                    # serves icons by lower-case address (verified for
+                    # mainnet; per-chain folders don't follow a slug pattern,
+                    # so this 404s gracefully on non-mainnet entries).
+                    logo = (
+                        "https://raw.githubusercontent.com/curvefi/curve-assets"
+                        f"/main/images/assets/{addr}.png"
+                    )
                     yield TokenListEntry(
                         chain_id=cid,
                         address=addr,
@@ -185,6 +195,7 @@ class Curve(TokenListSource):
                         name=str(t.get("name") or ""),
                         decimals=int(t.get("decimals") or 18),
                         source=self.name,
+                        logo_uri=logo,
                     )
                 except (TypeError, ValueError):
                     continue
@@ -218,6 +229,7 @@ class OneInch(TokenListSource):
                         name=str(info.get("name") or ""),
                         decimals=int(info.get("decimals") or 18),
                         source=self.name,
+                        logo_uri=info.get("logoURI") or None,
                     )
                 except (TypeError, ValueError):
                     continue

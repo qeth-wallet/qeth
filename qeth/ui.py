@@ -2,16 +2,18 @@ import io
 
 import segno
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QThread, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-    QSplitter, QStatusBar, QStyle, QTableWidget, QTableWidgetItem, QToolBar,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
+    QSpinBox, QSplitter, QStatusBar, QStyle, QTableWidget, QTableWidgetItem,
+    QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .chain import EthClient
+from .icons import IconCache, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from .tokenlists import TokenLists
 from .tokens import BlockscoutSource, TokenBalance
@@ -214,41 +216,70 @@ class TokenListsLoader(QThread):
 
 
 class TokenListWorker(QThread):
-    """Fetch ERC-20 balances for one (chain, address) and filter via lists."""
+    """Fetch native + ERC-20 balances for (chain, address) and apply the
+    visibility rules: hidden tokens are dropped; only known-or-force-shown
+    ERC-20s are kept; the native asset is always returned as the first
+    element so the UI can render it on top.
 
-    fetched = Signal(list)        # list[TokenBalance]
+    Emits ``fetched(native_wei: int, tokens: list[TokenBalance])``.
+    """
+
+    fetched = Signal(int, list)
     failed = Signal(str)
 
     def __init__(self, chain, address: str, source: BlockscoutSource,
-                 lists: TokenLists, parent=None):
+                 lists: TokenLists, store, parent=None):
         super().__init__(parent)
         self.chain = chain
         self.address = address
         self.source = source
         self.lists = lists
+        self.store = store
 
     def run(self) -> None:
         try:
-            if not self.source.supports(self.chain):
-                self.fetched.emit([])
-                return
-            balances = self.source.list_balances(self.chain, self.address)
-            filtered: list[TokenBalance] = [
-                b for b in balances
-                if b.balance_raw > 0
-                and self.lists.is_known(self.chain.chain_id, b.contract)
-            ]
-            filtered.sort(key=lambda b: b.balance, reverse=True)
-            self.fetched.emit(filtered)
+            # Native balance — best-effort; chain RPC may be flaky.
+            try:
+                native_wei = EthClient(self.chain).get_balance(self.address)
+            except Exception:
+                native_wei = 0
+
+            tokens: list[TokenBalance] = []
+            if self.source.supports(self.chain):
+                cid = self.chain.chain_id
+                for b in self.source.list_balances(self.chain, self.address):
+                    if b.balance_raw <= 0:
+                        continue
+                    if self.store.is_hidden(cid, b.contract):
+                        continue
+                    if (self.lists.is_known(cid, b.contract)
+                            or self.store.is_force_shown(cid, b.contract)):
+                        tokens.append(b)
+                tokens.sort(key=lambda x: x.balance, reverse=True)
+            self.fetched.emit(native_wei, tokens)
         except Exception as e:
             self.failed.emit(str(e))
 
 
 class TokenListPanel(QWidget):
-    """Right pane: held ERC-20s for the currently-selected account."""
+    """Right pane: native + held ERC-20s for the currently-selected account.
 
-    def __init__(self, parent=None):
+    Native row pinned at index 0; ERC-20s below, sorted by balance. Each row
+    carries (chain_id, contract_or_empty) in the Symbol cell's UserRole so
+    the icon cache + context menu can find the right row to act on.
+    """
+
+    # User asked to hide a specific (chain_id, contract). Empty contract means
+    # the native asset row was clicked (no-op for now — can't hide native).
+    hide_requested = Signal(int, str)
+
+    NATIVE_CONTRACT = ""  # sentinel for the native row
+
+    def __init__(self, icon_cache: IconCache, parent=None):
         super().__init__(parent)
+        self._icons = icon_cache
+        self._icons.icon_ready.connect(self._on_icon_ready)
+
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 8, 8, 8)
 
@@ -266,26 +297,67 @@ class TokenListPanel(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.setIconSize(QSize(20, 20))
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(2, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
+        # current chain (set by show_balances) — needed to scope icon lookups
+        # and context-menu actions.
+        self._chain_id: int | None = None
+
+    # ---- displaying data -------------------------------------------------
+
     def show_loading(self, address: str) -> None:
         self.status.setText(f"Loading tokens for {address[:6]}…{address[-4:]} …")
         self.table.setRowCount(0)
 
-    def show_balances(self, balances: list[TokenBalance]) -> None:
+    def show_balances(
+        self,
+        chain,
+        native_wei: int,
+        tokens: list[TokenBalance],
+        list_entries: dict,    # (chain_id, addr_lower) -> TokenListEntry
+    ) -> None:
+        """Populate the table with the native asset on top, then ERC-20s."""
+        self._chain_id = chain.chain_id
         self.table.setRowCount(0)
-        if not balances:
-            self.status.setText("No known ERC-20 tokens on this chain")
-            return
-        self.status.setText(f"{len(balances)} known ERC-20 token(s)")
-        self.table.setRowCount(len(balances))
-        for row, b in enumerate(balances):
+        row_count = 1 + len(tokens)
+        self.table.setRowCount(row_count)
+
+        # --- native row ---------------------------------------------------
+        native_balance = native_wei / 1e18
+        sym = QTableWidgetItem(chain.symbol)
+        sym.setData(Qt.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
+        sym.setToolTip(f"Native {chain.symbol} on {chain.name}")
+        bf = sym.font(); bf.setBold(True); sym.setFont(bf)
+        native_pix = bundled_native_icon(chain.symbol)
+        if native_pix is not None:
+            sym.setIcon(QIcon(native_pix))
+        bal = QTableWidgetItem(f"{native_balance:.6g}")
+        bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bal.setFont(bf)
+        name = QTableWidgetItem(chain.name)
+        name.setFont(bf)
+        self.table.setItem(0, 0, sym)
+        self.table.setItem(0, 1, bal)
+        self.table.setItem(0, 2, name)
+
+        # --- ERC-20 rows --------------------------------------------------
+        for row, b in enumerate(tokens, start=1):
+            entry = list_entries.get((chain.chain_id, b.contract.lower()))
             sym = QTableWidgetItem(b.symbol)
+            sym.setData(Qt.UserRole, (chain.chain_id, b.contract.lower()))
             sym.setToolTip(b.contract)
+            pix = self._icons.get(chain.chain_id, b.contract)
+            if pix is not None:
+                sym.setIcon(QIcon(pix))
+            elif entry and entry.logo_uri:
+                self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
             bal = QTableWidgetItem(f"{b.balance:.6g}")
             bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             name = QTableWidgetItem(b.name)
@@ -293,17 +365,66 @@ class TokenListPanel(QWidget):
             self.table.setItem(row, 1, bal)
             self.table.setItem(row, 2, name)
 
+        if tokens:
+            self.status.setText(f"1 native + {len(tokens)} token(s)")
+        else:
+            self.status.setText(f"{chain.symbol} only on this chain")
+
     def show_error(self, msg: str) -> None:
         self.status.setText(f"Error: {msg}")
         self.table.setRowCount(0)
+        self._chain_id = None
 
     def show_message(self, msg: str) -> None:
         self.status.setText(msg)
         self.table.setRowCount(0)
+        self._chain_id = None
 
     def clear(self) -> None:
         self.status.setText("Select an account on the left")
         self.table.setRowCount(0)
+        self._chain_id = None
+
+    # ---- icon refresh ---------------------------------------------------
+
+    def _on_icon_ready(self, chain_id: int, contract: str) -> None:
+        if self._chain_id != chain_id:
+            return
+        pix = self._icons.get(chain_id, contract)
+        if pix is None:
+            return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+            cid, addr = item.data(Qt.UserRole) or (None, None)
+            if cid == chain_id and addr == contract.lower():
+                item.setIcon(QIcon(pix))
+                break
+
+    # ---- context menu ---------------------------------------------------
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        sym_item = self.table.item(item.row(), 0)
+        if sym_item is None:
+            return
+        meta = sym_item.data(Qt.UserRole)
+        if not meta:
+            return
+        cid, addr = meta
+        if addr == self.NATIVE_CONTRACT:
+            return  # native asset can't be hidden
+        menu = QMenu(self)
+        act_hide = menu.addAction(f"Hide {sym_item.text()}")
+        act_copy = menu.addAction("Copy contract address")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is act_hide:
+            self.hide_requested.emit(cid, addr)
+        elif chosen is act_copy:
+            QApplication.clipboard().setText(addr)
 
 
 # --- Main window -------------------------------------------------------------
@@ -320,6 +441,7 @@ class MainWindow(QMainWindow):
         self._token_source = BlockscoutSource()
         self._token_lists = TokenLists()
         self._token_worker: TokenListWorker | None = None
+        self._icon_cache = IconCache(self)
 
         self._build_toolbar()
         self._build_central()
@@ -412,7 +534,8 @@ class MainWindow(QMainWindow):
         outer.addWidget(left)
 
         # Right half: token list for the currently-selected account.
-        self.token_panel = TokenListPanel()
+        self.token_panel = TokenListPanel(self._icon_cache)
+        self.token_panel.hide_requested.connect(self._on_hide_token)
         outer.addWidget(self.token_panel)
 
         outer.setStretchFactor(0, 1)
@@ -509,15 +632,32 @@ class MainWindow(QMainWindow):
                 "Loading token lists… selection will refresh automatically"
             )
             return
+        chain = self.store.current_chain()
         # Cancel any in-flight worker (best-effort; QThread won't truly stop).
         self._token_worker = TokenListWorker(
-            self.store.current_chain(), address,
-            self._token_source, self._token_lists,
+            chain, address, self._token_source, self._token_lists, self.store,
         )
-        self._token_worker.fetched.connect(self.token_panel.show_balances)
+
+        def on_fetched(native_wei: int, tokens: list) -> None:
+            # Build the metadata dict the panel needs for icon URLs.
+            entries = {}
+            for b in tokens:
+                e = self._token_lists.get(chain.chain_id, b.contract)
+                if e is not None:
+                    entries[(chain.chain_id, b.contract.lower())] = e
+            self.token_panel.show_balances(chain, native_wei, tokens, entries)
+
+        self._token_worker.fetched.connect(on_fetched)
         self._token_worker.failed.connect(self.token_panel.show_error)
         self.token_panel.show_loading(address)
         self._token_worker.start()
+
+    def _on_hide_token(self, chain_id: int, contract: str) -> None:
+        self.store.hide_token(chain_id, contract)
+        # Re-fetch for the currently-selected account so the row disappears.
+        addrs = self._selected_addresses()
+        if len(addrs) == 1:
+            self._refresh_tokens(addrs[0])
 
     def _on_lists_loaded(self) -> None:
         n = self._token_lists.count()

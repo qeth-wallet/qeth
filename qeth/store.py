@@ -18,6 +18,10 @@ class Store:
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
         self.default_account: Optional[str] = None
+        # User overrides for the token panel: (chain_id, addr_lower) tuples.
+        # `hidden` always wins over `shown` when both contain the same key.
+        self.hidden_tokens: set[tuple[int, str]] = set()
+        self.shown_tokens: set[tuple[int, str]] = set()
 
     @classmethod
     def load(cls) -> "Store":
@@ -33,6 +37,16 @@ class Store:
             chains_data = data.get("chains")
             if chains_data:
                 s.chains = [Chain(**c) for c in chains_data]
+            s.hidden_tokens = {
+                (int(t["chain_id"]), str(t["address"]).lower())
+                for t in data.get("hidden_tokens", [])
+                if t.get("address") and t.get("chain_id") is not None
+            }
+            s.shown_tokens = {
+                (int(t["chain_id"]), str(t["address"]).lower())
+                for t in data.get("shown_tokens", [])
+                if t.get("address") and t.get("chain_id") is not None
+            }
         return s
 
     def save(self) -> None:
@@ -42,6 +56,14 @@ class Store:
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
                 "default_account": self.default_account,
+                "hidden_tokens": [
+                    {"chain_id": cid, "address": addr}
+                    for (cid, addr) in sorted(self.hidden_tokens)
+                ],
+                "shown_tokens": [
+                    {"chain_id": cid, "address": addr}
+                    for (cid, addr) in sorted(self.shown_tokens)
+                ],
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(data, indent=2))
@@ -94,4 +116,36 @@ class Store:
             if any(c.chain_id == chain.chain_id for c in self.chains):
                 return
             self.chains.append(chain)
+        self.save()
+
+    # --- token-level user overrides -----------------------------------------
+
+    def is_hidden(self, chain_id: int, address: str) -> bool:
+        return (int(chain_id), address.lower()) in self.hidden_tokens
+
+    def is_force_shown(self, chain_id: int, address: str) -> bool:
+        return (int(chain_id), address.lower()) in self.shown_tokens
+
+    def hide_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            key = (int(chain_id), address.lower())
+            self.hidden_tokens.add(key)
+            self.shown_tokens.discard(key)
+        self.save()
+
+    def unhide_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            self.hidden_tokens.discard((int(chain_id), address.lower()))
+        self.save()
+
+    def force_show_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            key = (int(chain_id), address.lower())
+            self.shown_tokens.add(key)
+            self.hidden_tokens.discard(key)
+        self.save()
+
+    def unforce_show_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            self.shown_tokens.discard((int(chain_id), address.lower()))
         self.save()

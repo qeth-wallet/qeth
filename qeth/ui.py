@@ -283,14 +283,6 @@ class TokenListPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 8, 8, 8)
 
-        self.title = QLabel("Tokens")
-        f = self.title.font(); f.setPointSize(f.pointSize() + 1); f.setBold(True)
-        self.title.setFont(f)
-        v.addWidget(self.title)
-
-        self.status = QLabel("Select an account on the left")
-        v.addWidget(self.status)
-
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Name"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -313,7 +305,6 @@ class TokenListPanel(QWidget):
     # ---- displaying data -------------------------------------------------
 
     def show_loading(self, address: str) -> None:
-        self.status.setText(f"Loading tokens for {address[:6]}…{address[-4:]} …")
         self.table.setRowCount(0)
 
     def show_balances(
@@ -365,23 +356,15 @@ class TokenListPanel(QWidget):
             self.table.setItem(row, 1, bal)
             self.table.setItem(row, 2, name)
 
-        if tokens:
-            self.status.setText(f"1 native + {len(tokens)} token(s)")
-        else:
-            self.status.setText(f"{chain.symbol} only on this chain")
-
     def show_error(self, msg: str) -> None:
-        self.status.setText(f"Error: {msg}")
         self.table.setRowCount(0)
         self._chain_id = None
 
     def show_message(self, msg: str) -> None:
-        self.status.setText(msg)
         self.table.setRowCount(0)
         self._chain_id = None
 
     def clear(self) -> None:
-        self.status.setText("Select an account on the left")
         self.table.setRowCount(0)
         self._chain_id = None
 

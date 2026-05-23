@@ -5,10 +5,11 @@ import segno
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QStyle,
-    QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter,
+    QStatusBar, QStyle, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
@@ -260,6 +261,7 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels(["Accounts"])
         self.tree.setRootIsDecorated(True)
         self.tree.setTextElideMode(Qt.ElideMiddle)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         splitter.addWidget(self.tree)
 
@@ -334,48 +336,61 @@ class MainWindow(QMainWindow):
             f"Default: {addr}   •   {self.store.current_chain().name}"
         )
 
+    def _selected_addresses(self) -> list[str]:
+        out = []
+        for it in self.tree.selectedItems():
+            addr = it.data(0, Qt.UserRole)
+            if addr:
+                out.append(addr)
+        return out
+
     def _on_tree_selection(self) -> None:
-        items = self.tree.selectedItems()
-        addr = items[0].data(0, Qt.UserRole) if items else None
-        self.act_copy.setEnabled(bool(addr))
-        self.act_remove.setEnabled(bool(addr))
-        if not addr:
-            self.details.clear()
-            return
-        acct = next((a for a in self.store.accounts if a["address"] == addr), None)
-        if acct:
-            self.details.show_account(acct, is_default=(addr == self.store.default_account))
-        else:
-            self.details.clear()
+        addrs = self._selected_addresses()
+        # Copy only makes sense for a single address; Remove handles many.
+        self.act_copy.setEnabled(len(addrs) == 1)
+        self.act_remove.setEnabled(len(addrs) >= 1)
+        if len(addrs) == 1:
+            acct = next((a for a in self.store.accounts if a["address"] == addrs[0]), None)
+            if acct:
+                self.details.show_account(
+                    acct, is_default=(addrs[0] == self.store.default_account)
+                )
+                return
+        self.details.clear()
 
     def _copy_selected_address(self) -> None:
-        items = self.tree.selectedItems()
-        addr = items[0].data(0, Qt.UserRole) if items else None
-        if not addr:
+        addrs = self._selected_addresses()
+        if len(addrs) != 1:
             return
-        QApplication.clipboard().setText(addr)
-        self.statusBar().showMessage(f"Copied {addr} to clipboard", 3000)
+        QApplication.clipboard().setText(addrs[0])
+        self.statusBar().showMessage(f"Copied {addrs[0]} to clipboard", 3000)
 
     def _remove_selected_account(self) -> None:
-        items = self.tree.selectedItems()
-        addr = items[0].data(0, Qt.UserRole) if items else None
-        if not addr:
+        addrs = self._selected_addresses()
+        if not addrs:
             return
+        if len(addrs) == 1:
+            prompt = f"Remove {addrs[0]} from this wallet?"
+        else:
+            preview = "\n".join(f"  • {a}" for a in addrs[:5])
+            extra = f"\n  … and {len(addrs) - 5} more" if len(addrs) > 5 else ""
+            prompt = f"Remove {len(addrs)} accounts from this wallet?\n\n{preview}{extra}"
         reply = QMessageBox.question(
             self,
-            "Remove account",
-            f"Remove {addr} from this wallet?\n\n"
-            "The key on your Ledger is untouched; this only forgets the "
-            "address locally. You can re-add it via Scan at any time.",
+            "Remove account" if len(addrs) == 1 else "Remove accounts",
+            f"{prompt}\n\n"
+            "Keys on your Ledger are untouched; this only forgets the "
+            "addresses locally. You can re-add them via Scan at any time.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        if self.store.remove_account(addr):
+        removed = sum(1 for a in addrs if self.store.remove_account(a))
+        if removed:
             self._rebuild_tree()
             self._refresh_status()
-            self.statusBar().showMessage(f"Removed {addr}", 3000)
+            self.statusBar().showMessage(f"Removed {removed} account(s)", 3000)
 
     def _add_ledger(self) -> None:
         dlg = AddLedgerDialog(self.store.current_chain(), self)

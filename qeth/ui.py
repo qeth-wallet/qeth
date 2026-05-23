@@ -3,7 +3,7 @@ import logging
 
 import segno
 
-from PySide6.QtCore import Qt, QSize, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
@@ -764,6 +764,14 @@ class MainWindow(QMainWindow):
         # Active discovery (TokenList+Prices) jobs per view, so re-clicking
         # the same account doesn't stack duplicate Blockscout requests.
         self._discovery_in_flight: set[tuple[int, str]] = set()
+        # Periodic refresh for prices / new tokens / balance changes from
+        # external transactions. Fires every minute against the currently
+        # displayed view; _refresh_tokens self-deduplicates via
+        # _discovery_in_flight, so an unfinished run blocks the next tick.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(60_000)
+        self._refresh_timer.timeout.connect(self._on_refresh_tick)
+        self._refresh_timer.start()
         # All in-flight workers. Held here so Python doesn't GC them while
         # they're still running — Qt's QThread destructor aborts (and kills
         # the process) if the thread is alive. Workers self-evict via their
@@ -1119,11 +1127,13 @@ class MainWindow(QMainWindow):
         visible = self._compute_visible_tokens(chain, tokens, prices)
 
         if self.token_panel.contract_set_matches(chain, visible):
-            # Same set as currently displayed. Don't touch balance cells —
-            # BalanceWorker's multicall data is fresher than Blockscout's
-            # readback and we don't want to flicker by overwriting with
-            # slightly-older values. set_prices self-skips when prices
-            # are unchanged too.
+            # Same contract set — refresh balance cells (smart-diff: only
+            # cells whose value actually changed get touched) then refresh
+            # the Value column. set_prices is the one that re-applies the
+            # dust filter; update_balances skips it.
+            self.token_panel.update_balances_if_set_unchanged(
+                chain, native_wei, visible,
+            )
             self.token_panel.set_prices(chain.chain_id, prices)
         else:
             # Token set genuinely changed (new airdrop / removed token):
@@ -1166,6 +1176,19 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
+
+    def _on_refresh_tick(self) -> None:
+        """Periodic re-fetch for the currently-displayed account.
+
+        Re-runs _refresh_tokens, which short-circuits on already-displayed
+        views (no needless show_cached) and on already-running discovery
+        chains (no stacked Blockscout requests). The net effect for the
+        common steady state is: one Blockscout + one multicall + one
+        DefiLlama request per minute, balance + price cells updated in
+        place via update_balances_if_set_unchanged + set_prices."""
+        addrs = self._selected_addresses()
+        if len(addrs) == 1:
+            self._refresh_tokens(addrs[0])
 
     def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
         """Fast in-place balance refresh for the cached set, ahead of the

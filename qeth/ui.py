@@ -846,7 +846,11 @@ class MainWindow(QMainWindow):
         self._lists_loader.failed.connect(
             lambda e: self.token_panel.show_message(f"Token lists failed: {e}")
         )
-        self.token_panel.show_message("Loading token lists…")
+        # Don't blank the panel with "Loading token lists…" here:
+        # _rebuild_tree above has already invoked _refresh_tokens for the
+        # default account, which renders the cached view immediately. The
+        # "loading" message is only useful when there's no cache, and the
+        # no-cache branch inside _refresh_tokens handles that case itself.
         self._lists_loader.start()
 
         # Restore prior window geometry (size + position + maximized state).

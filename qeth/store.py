@@ -66,10 +66,11 @@ class Store:
                     return c
             return self.chains[0]
 
-    def set_current_chain(self, chain_id: int) -> None:
+    def set_current_chain(self, chain_id: int, *, persist: bool = True) -> None:
         with self._lock:
             self.current_chain_id = chain_id
-        self.save()
+        if persist:
+            self.save()
 
     def set_default_account(self, address: str) -> None:
         with self._lock:

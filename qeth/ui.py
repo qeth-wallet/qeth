@@ -206,8 +206,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.details)
         splitter.addWidget(wrap)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([340, 680])
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([460, 560])
         self.setCentralWidget(splitter)
 
     def _build_statusbar(self) -> None:
@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):
         ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
         self.tree.addTopLevelItem(ledger_root)
         groups: dict[str, QTreeWidgetItem] = {}
+        default_item: QTreeWidgetItem | None = None
         for a in ledger_accts:
             scheme = a.get("scheme", "Custom")
             grp = groups.get(scheme)
@@ -232,10 +233,12 @@ class MainWindow(QMainWindow):
                 ledger_root.addChild(grp)
                 groups[scheme] = grp
             addr = a["address"]
-            label = f"{addr[:6]}…{addr[-4:]}   {a.get('path', '')}"
-            it = QTreeWidgetItem([label])
+            it = QTreeWidgetItem([addr])
             it.setData(0, Qt.UserRole, addr)
+            it.setFont(0, QFont("monospace"))
             grp.addChild(it)
+            if addr == self.store.default_account:
+                default_item = it
         ledger_root.setExpanded(True)
         for g in groups.values():
             g.setExpanded(True)
@@ -243,6 +246,9 @@ class MainWindow(QMainWindow):
         # Stubs for the future
         self.tree.addTopLevelItem(QTreeWidgetItem(["Hot wallet (0)"]))
         self.tree.addTopLevelItem(QTreeWidgetItem(["Watch only (0)"]))
+
+        if default_item is not None:
+            self.tree.setCurrentItem(default_item)
 
     def _refresh_status(self) -> None:
         err = self.rpc.error

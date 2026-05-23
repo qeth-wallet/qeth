@@ -164,7 +164,9 @@ class RpcServer:
             cid = int(params[0]["chainId"], 16)
             if not any(c.chain_id == cid for c in self.store.chains):
                 raise RpcError(4902, "Unrecognized chain")
-            self.store.set_current_chain(cid)
+            # Don't persist: dapp-driven switches are session-only.
+            # The user's chosen default (set via the UI) survives restarts.
+            self.store.set_current_chain(cid, persist=False)
             return None
 
         if method == "wallet_addEthereumChain":

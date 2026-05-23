@@ -7,10 +7,24 @@ method names, argument types, and return types mirror web3.py's
 
 import json
 import urllib.request
+from decimal import Decimal
 
 from .chains import Chain
 
 USER_AGENT = "qeth/0.1"
+
+# Native asset has 18 decimals on every EVM chain we currently support.
+_WEI_PER_ETHER = Decimal(10) ** 18
+
+
+def wei_to_ether(wei: int) -> Decimal:
+    """Convert a wei int to a Decimal ether amount.
+
+    Always prefer this over ``wei / 1e18`` — float arithmetic on on-chain
+    amounts silently loses precision (double has ~15-17 sig digits; wei
+    has 18 decimal places) and round-trips badly through display formats.
+    """
+    return Decimal(int(wei)) / _WEI_PER_ETHER
 
 
 class ChainError(Exception):

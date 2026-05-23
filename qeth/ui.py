@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .chain import EthClient
+from .chain import EthClient, wei_to_ether
 from .icons import IconCache, bundled_chain_icon, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from .tokenlists import TokenLists
@@ -96,7 +96,7 @@ class AddLedgerDialog(QDialog):
         self._worker.start()
 
     def _on_found(self, acct: DiscoveredAccount) -> None:
-        balance = acct.balance_wei / 1e18
+        balance = wei_to_ether(acct.balance_wei)
         label = (
             f"#{acct.index:<3} {acct.address}   "
             f"{balance:.6f} {self._chain.symbol}"
@@ -324,7 +324,7 @@ class TokenListPanel(QWidget):
         self.table.setRowCount(row_count)
 
         # --- native row ---------------------------------------------------
-        native_balance = native_wei / 1e18
+        native_balance = wei_to_ether(native_wei)
         sym = QTableWidgetItem(chain.symbol)
         sym.setData(Qt.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
         sym.setToolTip(f"Native {chain.symbol} on {chain.name}")

@@ -161,6 +161,51 @@ def test_hide_pin_disabled_by_default(mainwindow):
     assert not mainwindow.token_panel.btn_pin.isEnabled()
 
 
+def test_initial_selection_reaches_right_slot_plugins(qtbot, tmp_qeth,
+                                                      fake_rpc,
+                                                      hermetic_mainwindow,
+                                                      monkeypatch):
+    """Regression: on startup MainWindow used to wire its
+    selected_address_changed listener *after* the wallet tree's
+    auto-select fired, so the right-slot plugins never received the
+    initial on_account_changed and their panels stayed empty until
+    TokenListsLoader nudged them. Fix is a manual replay; this test
+    locks it in."""
+    from qeth.store import Store
+    from qeth.ui import MainWindow
+
+    addr = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+    store = Store.load()
+    store.add_account({
+        "address": addr, "path": "44'/60'/0'/0/0",
+        "source": "ledger", "scheme": "BIP-44", "label": "",
+    })
+
+    # Capture on_account_changed calls on the right-slot plugins for
+    # the duration of MainWindow construction.
+    calls: list[tuple[str, object]] = []
+
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.plugins.transactions import TransactionsPlugin
+    monkeypatch.setattr(
+        TokensPlugin, "on_account_changed",
+        lambda self, a: calls.append(("tokens", a)),
+    )
+    monkeypatch.setattr(
+        TransactionsPlugin, "on_account_changed",
+        lambda self, a: calls.append(("transactions", a)),
+    )
+
+    win = MainWindow(store, fake_rpc)
+    qtbot.addWidget(win)
+
+    # Both plugins must have seen the default address before __init__
+    # returned. (TokenListsLoader's no-op finish may later trigger a
+    # second pass; "at least once" is what we care about.)
+    assert ("tokens", addr) in calls
+    assert ("transactions", addr) in calls
+
+
 def test_hide_pin_enabled_only_for_erc20_rows(mainwindow):
     chain = _fake_chain()
     tokens = [

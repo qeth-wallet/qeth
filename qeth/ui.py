@@ -58,6 +58,16 @@ class MainWindow(QMainWindow):
         )
         self.wallets_plugin.default_account_changed.connect(self._refresh_status)
         self._refresh_status()
+        # Replay the current selection. _build_central() above mounted
+        # the plugins, which built their widgets, which rebuilt the
+        # wallet tree and auto-selected the default account — emitting
+        # selected_address_changed before we connected to it just now.
+        # Without this nudge the right-slot plugins would sit empty
+        # until TokenListsLoader finishes and re-triggers a refresh,
+        # producing a visible "gone for a sec" gap on startup.
+        initial_addr = self.wallets_plugin.selected_address
+        if initial_addr is not None:
+            self.right_slot.broadcast_account_changed(initial_addr)
 
         # Restore prior window geometry + splitter states.
         if self.store.window_geometry:

@@ -4,7 +4,7 @@ import logging
 
 import segno
 
-from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
@@ -17,19 +17,18 @@ from PySide6.QtWidgets import (
 
 from decimal import Decimal
 
-from .chain import EthClient, wei_to_ether
+from .chain import wei_to_ether
 from .icons import IconCache, bundled_chain_icon, bundled_native_icon
 from .ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
-from .prices import DefiLlamaPrices, Price, PriceSource
-from .risk import GoPlusRisk, RiskCache
-from .token_metadata import TokenMetadataCache
-from .tokenlists import TokenListEntry, TokenLists
 from .plugin import Slot
-from .tokens import BlockscoutSource, TokenBalance
+from .prices import Price
+from .risk import RiskCache
+from .tokenlists import TokenListEntry, TokenLists
+from .tokens import TokenBalance
 from .tokens_plugin import TokensPlugin
 from .transactions import Transaction, TxDirection
 from .transactions_plugin import TransactionsPlugin
-from .wallet_cache import CachedWallet, WalletCache
+from .wallet_cache import CachedWallet
 
 
 # --- Add Ledger dialog -------------------------------------------------------
@@ -237,192 +236,12 @@ class DetailsPanel(QWidget):
         self.set_default_btn.setText("Set as default")
 
 
-# --- Token list panel + background workers -----------------------------------
-
-class TokenListsLoader(QThread):
-    """Background loader for the curated TokenLists (network + cache)."""
-
-    loaded = Signal()
-    failed = Signal(str)
-
-    def __init__(self, lists: TokenLists, parent=None):
-        super().__init__(parent)
-        self.lists = lists
-
-    def run(self) -> None:
-        try:
-            self.lists.load()
-            self.loaded.emit()
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class TokenListWorker(QThread):
-    """Fetch native + ERC-20 balances for (chain, address) and apply the
-    visibility rules: hidden tokens are dropped; only known-or-force-shown
-    ERC-20s are kept; the native asset is always returned as the first
-    element so the UI can render it on top.
-
-    Emits ``fetched(native_wei: int, tokens: list[TokenBalance])``.
-    """
-
-    # native_wei must travel as ``object``; declaring ``int`` makes PySide6
-    # marshal through qint32 and overflows for any balance above ~2.1e9 wei
-    # (well below a millionth of an ETH).
-    fetched = Signal(object, list)
-    failed = Signal(str)
-
-    def __init__(self, chain, address: str, source: BlockscoutSource,
-                 lists: TokenLists, store, show_all: bool = False, parent=None):
-        super().__init__(parent)
-        self.chain = chain
-        self.address = address
-        self.source = source
-        self.lists = lists
-        self.store = store
-        self.show_all = show_all
-
-    def run(self) -> None:
-        try:
-            # Native balance — best-effort; chain RPC may be flaky.
-            try:
-                native_wei = EthClient(self.chain).get_balance(self.address)
-            except Exception:
-                native_wei = 0
-
-            tokens: list[TokenBalance] = []
-            if self.source.supports(self.chain):
-                cid = self.chain.chain_id
-                for b in self.source.list_balances(self.chain, self.address):
-                    if b.balance_raw <= 0:
-                        continue
-                    known_or_pinned = (
-                        self.lists.is_known(cid, b.contract)
-                        or self.store.is_force_shown(cid, b.contract)
-                    )
-                    if not known_or_pinned:
-                        # Random Blockscout discoveries don't surface in
-                        # any mode. Spotlight is "show my trusted tokens
-                        # regardless of value or hide-state", not "show
-                        # every unknown contract Blockscout knows about".
-                        # User can pin a contract explicitly via the +
-                        # button to bring it in.
-                        continue
-                    if not self.show_all and self.store.is_hidden(cid, b.contract):
-                        # Hide list applies in normal mode; spotlight
-                        # ignores it (that's the whole point).
-                        continue
-                    tokens.append(b)
-                tokens.sort(key=lambda x: x.balance, reverse=True)
-            self.fetched.emit(native_wei, tokens)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class RiskWorker(QThread):
-    """Fetch GoPlus per-contract risk reports for any uncached contracts.
-
-    Runs after the balance multicall and before the price fetch so the
-    combined update can already factor risk into the visibility filter.
-    Emits ``fetched(chain_id, {addr_lower: RiskReport})``."""
-
-    fetched = Signal(int, object)
-    failed = Signal(str)
-
-    def __init__(self, source: GoPlusRisk, chain_id: int,
-                 contracts: list[str], parent=None):
-        super().__init__(parent)
-        self.source = source
-        self.chain_id = chain_id
-        self.contracts = list(contracts)
-
-    def run(self) -> None:
-        try:
-            reports = self.source.fetch(self.chain_id, self.contracts)
-            self.fetched.emit(self.chain_id, reports)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class MetadataWorker(QThread):
-    """Fetch (name, symbol, decimals) on-chain via multicall for any
-    contracts not already in the metadata cache. ERC-20 metadata is
-    immutable, so once we have it for a contract, we never re-fetch."""
-
-    fetched = Signal(int, object)   # chain_id, {contract_lower: {symbol,name,decimals}}
-    failed = Signal(str)
-
-    def __init__(self, chain, contracts: list[str], parent=None):
-        super().__init__(parent)
-        self.chain = chain
-        self.contracts = list(contracts)
-
-    def run(self) -> None:
-        try:
-            client = EthClient(self.chain)
-            meta = client.multicall_erc20_metadata(self.contracts)
-            self.fetched.emit(self.chain.chain_id, meta)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class BalanceWorker(QThread):
-    """Refresh balances on-chain via Multicall3 + eth_getBalance.
-
-    Depends only on the user's configured chain RPC, so it produces
-    fresh numbers even when Blockscout and DefiLlama are both down.
-    Emits ``refreshed(chain_id, native_wei, {addr_lower: balance_raw})``.
-    """
-
-    # `dict` would make PySide6 marshal its values through qint64; some
-    # ERC-20 raw balances (e.g. ~3.2e19 for ASF with 18 decimals) overflow.
-    # Pass as plain object so the Python dict travels untouched.
-    refreshed = Signal(int, object, object)
-    failed = Signal(str)
-
-    def __init__(self, chain, address: str, token_contracts: list[str], parent=None):
-        super().__init__(parent)
-        self.chain = chain
-        self.address = address
-        self.contracts = list(token_contracts)
-
-    def run(self) -> None:
-        try:
-            client = EthClient(self.chain)
-            native = client.get_balance(self.address)
-            balances = client.multicall_erc20_balances(self.contracts, self.address) if self.contracts else {}
-            self.refreshed.emit(self.chain.chain_id, native, balances)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class PricesWorker(QThread):
-    """Fetch USD prices for the currently-displayed assets.
-
-    Emits ``prices_ready(chain_id: int, prices: dict[str, Price])`` where
-    the dict is keyed by lower-case ERC-20 address or ``""`` for native.
-    Failures are silent — the value column simply stays empty.
-    """
-
-    # See BalanceWorker.refreshed: pass as object to skip Qt marshalling.
-    prices_ready = Signal(int, object)
-
-    def __init__(self, source: PriceSource, chain, contracts: list[str],
-                 include_native: bool, parent=None):
-        super().__init__(parent)
-        self.source = source
-        self.chain = chain
-        self.contracts = contracts
-        self.include_native = include_native
-
-    def run(self) -> None:
-        try:
-            prices = self.source.fetch(
-                self.chain, self.contracts, include_native=self.include_native,
-            )
-        except Exception:
-            prices = {}
-        self.prices_ready.emit(self.chain.chain_id, prices)
+# --- Token list panel -------------------------------------------------------
+#
+# The six token-related QThread workers (TokenListsLoader, TokenListWorker,
+# RiskWorker, MetadataWorker, BalanceWorker, PricesWorker) used to live
+# here. They moved into qeth.tokens_plugin as part of the plugin refactor
+# (step 3) — they're token-domain code, owned by TokensPlugin now.
 
 
 def _is_scam_via_lists(lists, chain_id: int, b: TokenBalance,
@@ -1196,59 +1015,24 @@ class MainWindow(QMainWindow):
         # something a bit below what the QR + a usable table need.
         self.setMinimumSize(420, 360)
 
-        # Token discovery + curated whitelist (lists load in background).
-        self._token_source = BlockscoutSource()
-        self._token_lists = TokenLists()
-        self._token_worker: TokenListWorker | None = None
-        self._icon_cache = IconCache(self)
-        self._price_source = DefiLlamaPrices()
-        self._wallet_cache = WalletCache()
-        self._token_metadata = TokenMetadataCache()
-        self._risk_source = GoPlusRisk()
-        self._risk_cache = RiskCache()
-        # Topic plugins for the right pane. The data sources / caches
-        # for transactions live inside the plugin now (step 2 of the
-        # refactor); tokens still leans on MainWindow methods (step 3).
-        self.tokens_plugin = TokensPlugin(self.store, self._icon_cache)
+        # Topic plugins. Each plugin owns its sources, caches, workers,
+        # widgets, and lifecycle. MainWindow's job is to wire the
+        # plugins into slots and broadcast user actions (selection /
+        # chain change) to them.
+        self.tokens_plugin = TokensPlugin(self.store)
         self.transactions_plugin = TransactionsPlugin()
-        self._show_all = False
-        # (chain_id, address_lower) the panel currently shows; used to
-        # skip needless show_cached rebuilds on subsequent refresh calls
-        # (e.g. from _on_lists_loaded firing after _on_tree_selection
-        # already rendered the cache).
-        self._displayed_view: tuple[int, str] | None = None
-        # Active discovery (TokenList+Prices) jobs per view, so re-clicking
-        # the same account doesn't stack duplicate Blockscout requests.
-        self._discovery_in_flight: set[tuple[int, str]] = set()
-        # Periodic refresh for prices / new tokens / balance changes from
-        # external transactions. Fires every minute against the currently
-        # displayed view; _refresh_tokens self-deduplicates via
-        # _discovery_in_flight, so an unfinished run blocks the next tick.
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(60_000)
-        self._refresh_timer.timeout.connect(self._on_refresh_tick)
-        self._refresh_timer.start()
-        # All in-flight workers. Held here so Python doesn't GC them while
-        # they're still running — Qt's QThread destructor aborts (and kills
-        # the process) if the thread is alive. Workers self-evict via their
-        # `finished` signal so the set doesn't grow forever.
+        # Workers tracked here so Python doesn't GC them while running
+        # (Qt's QThread destructor aborts the process if the thread is
+        # alive). Plugins register workers via host.start_worker(...);
+        # they self-evict via the ``finished`` signal.
         self._active_workers: set[QThread] = set()
 
         self._build_central()
         self._build_statusbar()
         self._rebuild_tree()
-
-        self._lists_loader = TokenListsLoader(self._token_lists)
-        self._lists_loader.loaded.connect(self._on_lists_loaded)
-        self._lists_loader.failed.connect(
-            lambda e: self.token_panel.show_message(f"Token lists failed: {e}")
-        )
-        # Don't blank the panel with "Loading token lists…" here:
-        # _rebuild_tree above has already invoked _refresh_tokens for the
-        # default account, which renders the cached view immediately. The
-        # "loading" message is only useful when there's no cache, and the
-        # no-cache branch inside _refresh_tokens handles that case itself.
-        self._lists_loader.start()
+        # The TokensPlugin's attach() (called from Slot.add_plugin in
+        # _build_central) starts its own TokenListsLoader and refresh
+        # timer — MainWindow no longer owns that lifecycle.
 
         # Restore prior window geometry (size + position + maximized state).
         # Done after the UI is fully built so the layout has a chance to
@@ -1402,12 +1186,6 @@ class MainWindow(QMainWindow):
         self.right_slot = Slot()
         self.right_slot.add_plugin(self.tokens_plugin, self)
         self.right_slot.add_plugin(self.transactions_plugin, self)
-        # Wire token-panel signals that still terminate in MainWindow.
-        # Step 3 will move these into TokensPlugin proper.
-        self.token_panel.hide_requested.connect(self._on_hide_token)
-        self.token_panel.pin_requested.connect(self._on_pin_token)
-        self.token_panel.add_custom_requested.connect(self._on_add_custom_token)
-        self.token_panel.show_all_toggled.connect(self._on_show_all_toggled)
 
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
@@ -1500,312 +1278,6 @@ class MainWindow(QMainWindow):
                 return
         self.details.clear()
         self.right_slot.broadcast_account_changed(None)
-        self._displayed_view = None
-
-    def _refresh_tokens(self, address: str) -> None:
-        chain = self.store.current_chain()
-        view_key = (chain.chain_id, address.lower())
-        is_new_view = self._displayed_view != view_key
-
-        cached = self._wallet_cache.load(chain.chain_id, address)
-        if cached is not None:
-            if is_new_view:
-                # Immediate render from cache; no flicker while we refresh.
-                self.token_panel.show_cached(chain, cached)
-                self._displayed_view = view_key
-            if is_new_view:
-                # Only kick off a multicall balance refresh once per view;
-                # repeated _refresh_tokens calls for the same view (e.g.
-                # _on_lists_loaded after _on_tree_selection) don't need
-                # another round-trip.
-                bw = BalanceWorker(
-                    chain, address,
-                    [t.contract for t in cached.tokens],
-                )
-                bw.refreshed.connect(self._on_balance_refresh)
-                bw.failed.connect(
-                    lambda msg: logging.getLogger("qeth.ui").warning(
-                        "BalanceWorker failed: %s", msg
-                    )
-                )
-                self._start_worker(bw)
-
-        if not self._token_lists.loaded:
-            if cached is None and is_new_view:
-                self.token_panel.show_message(
-                    "Loading token lists… selection will refresh automatically"
-                )
-                self._displayed_view = view_key
-            return
-
-        # Per-view "discovery in progress" guard. Avoids stacking duplicate
-        # Blockscout/multicall/prices chains when _refresh_tokens fires
-        # multiple times for the same view (e.g. _on_lists_loaded right
-        # after _on_tree_selection on startup).
-        if view_key in self._discovery_in_flight:
-            return
-        self._discovery_in_flight.add(view_key)
-
-        # Per-call state captured by closure so concurrent jobs for
-        # different views never trample each other's data.
-        pv = {"chain": chain, "address": address, "view_key": view_key}
-
-        def on_discovered(blockscout_native_wei, blockscout_tokens: list) -> None:
-            # Discard Blockscout's balances — they read a few blocks behind
-            # chain head. The contract list is the only thing we keep;
-            # metadata (name/symbol/decimals) is fetched on-chain via
-            # multicall and cached permanently (it's immutable), with
-            # Blockscout's values used only as a one-shot fallback for
-            # contracts whose on-chain metadata call reverts.
-            # Always include force-shown contracts in the multicall set,
-            # even if Blockscout didn't return them (user might have just
-            # added a brand-new contract with zero balance).
-            forced = {addr for (cid, addr) in self.store.shown_tokens
-                      if cid == chain.chain_id}
-            seen = set()
-            contracts: list[str] = []
-            for c in [b.contract for b in blockscout_tokens] + sorted(forced):
-                cl = c.lower()
-                if cl in seen:
-                    continue
-                seen.add(cl)
-                contracts.append(c)
-            blockscout_meta = {
-                b.contract.lower(): (b.symbol, b.name, b.decimals)
-                for b in blockscout_tokens
-            }
-
-            def build_metadata() -> dict:
-                """Cached metadata first; fall back to Blockscout values
-                for anything still missing (e.g. multicall just failed for
-                that token). Always returns ``{addr_lower: (sym,name,dec)}``."""
-                out: dict = {}
-                for c in contracts:
-                    al = c.lower()
-                    m = self._token_metadata.get(chain.chain_id, al)
-                    if m:
-                        out[al] = (m["symbol"], m["name"], m["decimals"])
-                    elif al in blockscout_meta:
-                        out[al] = blockscout_meta[al]
-                return out
-
-            def kick_prices() -> None:
-                pw = PricesWorker(
-                    self._price_source, chain,
-                    contracts, include_native=True,
-                )
-                pw.prices_ready.connect(
-                    lambda c, p: self._on_combined_ready(pv, c, p)
-                )
-                self._start_worker(pw)
-
-            def kick_risk_then_prices() -> None:
-                """GoPlus first for any uncached non-whitelisted contracts
-                (whitelisted ones can never be scams, no need to ask),
-                then prices. Risk fetch is fast (~300 ms batched) and
-                only happens once per token thanks to the disk cache."""
-                needed_risk = self._risk_cache.missing(
-                    chain.chain_id,
-                    [c for c in contracts
-                     if not self._token_lists.is_known(chain.chain_id, c)],
-                )
-                if not needed_risk:
-                    kick_prices()
-                    return
-
-                def on_risk(cid: int, reports: dict) -> None:
-                    if reports:
-                        self._risk_cache.put_many(cid, reports)
-                    kick_prices()
-
-                def on_risk_fail(msg: str) -> None:
-                    logging.getLogger("qeth.ui").warning(
-                        "risk fetch failed: %s", msg
-                    )
-                    kick_prices()
-
-                rw = RiskWorker(self._risk_source, chain.chain_id, needed_risk)
-                rw.fetched.connect(on_risk)
-                rw.failed.connect(on_risk_fail)
-                self._start_worker(rw)
-
-            def on_balances(cid: int, mc_native, mc_balances: dict) -> None:
-                pv["native_wei"] = int(mc_native)
-                pv["balances_raw"] = {k.lower(): int(v) for k, v in mc_balances.items()}
-                pv["metadata"] = build_metadata()
-                kick_risk_then_prices()
-
-            def on_balances_fail(msg: str) -> None:
-                logging.getLogger("qeth.ui").warning(
-                    "post-discovery multicall failed: %s", msg
-                )
-                pv["native_wei"] = int(blockscout_native_wei)
-                pv["balances_raw"] = {
-                    b.contract.lower(): int(b.balance_raw) for b in blockscout_tokens
-                }
-                pv["metadata"] = build_metadata()
-                kick_risk_then_prices()
-
-            def kick_balance_multicall() -> None:
-                bw = BalanceWorker(chain, address, contracts)
-                bw.refreshed.connect(on_balances)
-                bw.failed.connect(on_balances_fail)
-                self._start_worker(bw)
-
-            # Step 1: bring metadata cache up to date for any uncached
-            # contracts. ERC-20 (name,symbol,decimals) are immutable, so
-            # the cache hit rate climbs to ~100% after one visit per
-            # token-set. Step 2: balance multicall + prices.
-            missing_meta = self._token_metadata.missing(chain.chain_id, contracts)
-            if not missing_meta:
-                kick_balance_multicall()
-                return
-
-            def on_meta(cid: int, meta: dict) -> None:
-                if meta:
-                    self._token_metadata.put_many(chain.chain_id, meta)
-                kick_balance_multicall()
-
-            def on_meta_fail(msg: str) -> None:
-                logging.getLogger("qeth.ui").warning(
-                    "metadata multicall failed: %s", msg
-                )
-                kick_balance_multicall()
-
-            mw = MetadataWorker(chain, missing_meta)
-            mw.fetched.connect(on_meta)
-            mw.failed.connect(on_meta_fail)
-            self._start_worker(mw)
-
-        def on_failed(msg: str) -> None:
-            self._discovery_in_flight.discard(view_key)
-            if self.token_panel._chain_id is None and self._displayed_view == view_key:
-                self.token_panel.show_error(msg)
-
-        worker = TokenListWorker(
-            chain, address, self._token_source, self._token_lists, self.store,
-            show_all=self._show_all,
-        )
-        worker.fetched.connect(on_discovered)
-        worker.failed.connect(on_failed)
-        if cached is None and is_new_view:
-            self.token_panel.show_loading(address)
-            self._displayed_view = view_key
-        self._start_worker(worker)
-
-    def _on_combined_ready(self, pv: dict, chain_id: int, prices) -> None:
-        """TokenListWorker + PricesWorker both done. Apply visibility +
-        sort once, then update the panel. Single visible update."""
-        self._discovery_in_flight.discard(pv["view_key"])
-        chain = pv["chain"]
-        if chain.chain_id != chain_id:
-            return
-        # Drop stale results. If the user switched wallets while this
-        # pipeline was running, pushing prices/balances from the previous
-        # wallet would hide every row whose address doesn't happen to
-        # appear in both wallets (the "tokens disappear and reappear"
-        # flicker), then the current view's own pipeline would restore
-        # them moments later.
-        if self._displayed_view != pv["view_key"]:
-            return
-
-        address = pv["address"]
-        native_wei = pv["native_wei"]
-        metadata = pv["metadata"]
-        balances_raw = pv["balances_raw"]
-
-        # Tokens for display are constructed only from multicall results.
-        # Anything multicall returned 0 for (Blockscout had a positive
-        # balance at its read block but the user has since transferred away)
-        # is silently dropped. Anything multicall didn't return at all
-        # (call reverted) is dropped — better to omit than to invent.
-        tokens: list[TokenBalance] = []
-        for addr, raw in balances_raw.items():
-            # Normally drop zero balances. Keep them when (a) the user
-            # has pinned this token (then it should always be visible at
-            # 0 too) or (b) spotlight mode is on (user explicitly wants
-            # to see everything, including zero/undetermined-value rows).
-            if raw == 0:
-                if not (self._show_all
-                        or self.store.is_force_shown(chain.chain_id, addr)):
-                    continue
-            meta = metadata.get(addr)
-            if meta is None:
-                continue
-            sym, name, decimals = meta
-            tokens.append(TokenBalance(
-                contract=addr, symbol=sym, name=name,
-                decimals=decimals, balance_raw=raw,
-            ))
-
-        entries = {
-            (chain.chain_id, b.contract.lower()): e
-            for b in tokens
-            if (e := self._token_lists.get(chain.chain_id, b.contract)) is not None
-        }
-
-        visible = self._compute_visible_tokens(chain, tokens, prices)
-
-        # Spotlight mode disables the dust filter at display time too —
-        # otherwise rows kept by _compute_visible_tokens would still get
-        # setRowHidden=True the moment set_prices applied dust check.
-        apply_dust = not self._show_all
-        if self.token_panel.contract_set_matches(chain, visible):
-            self.token_panel.update_balances_if_set_unchanged(
-                chain, native_wei, visible,
-            )
-            self.token_panel.set_prices(
-                chain.chain_id, prices, apply_dust_filter=apply_dust,
-            )
-        else:
-            self.token_panel.render_full(
-                chain, native_wei, visible, entries, prices,
-                apply_dust_filter=apply_dust,
-            )
-
-        # Cache only the normal-mode visible set (post-dust + force-show);
-        # never persist the spotlight superset, otherwise next visit's
-        # cached preview would briefly include dust tokens.
-        cache_visible = (
-            self._compute_visible_tokens(chain, tokens, prices, show_all=False)
-            if self._show_all else visible
-        )
-        self._save_wallet_cache(chain, address, native_wei, cache_visible, prices, entries)
-
-    def _compute_visible_tokens(self, chain, tokens: list, prices,
-                                show_all: bool | None = None) -> list:
-        """Apply dust + force-show filter and sort by USD value desc.
-
-        Spotlight mode (``show_all``): worker already restricted the
-        input to known-or-pinned, so the only thing the display layer
-        needs to do is skip the dust check. The scam heuristic still
-        runs at render time so pinned-but-scammy contracts get the
-        alarm icon, but it doesn't *filter* anything here.
-        """
-        if show_all is None:
-            show_all = self._show_all
-        dust = TokenListPanel.DUST_USD_THRESHOLD
-        out = []
-        for b in tokens:
-            addr = b.contract.lower()
-            if show_all:
-                out.append(b)
-                continue
-            if self.store.is_force_shown(chain.chain_id, addr):
-                out.append(b)
-                continue
-            price = prices.get(addr)
-            if price is None:
-                continue
-            if b.balance * price.price_usd < dust:
-                continue
-            out.append(b)
-
-        def _value(b):
-            p = prices.get(b.contract.lower())
-            return b.balance * p.price_usd if p else Decimal(0)
-        out.sort(key=_value, reverse=True)
-        return out
 
     # --- Host protocol (consumed by plugins via plugin.attach) -----------
 
@@ -1832,9 +1304,6 @@ class MainWindow(QMainWindow):
 
     # Transitional: TokensPlugin's lifecycle hooks defer back here.
     # Step 3 will move the implementation into the plugin and drop this.
-    def refresh_tokens(self, address: str) -> None:
-        self._refresh_tokens(address)
-
     # --- transitional aliases (used by tests and legacy MainWindow code).
     # Once both plugins are fully self-contained, MainWindow stops
     # poking at the panels directly and these can be removed.
@@ -1854,185 +1323,6 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
-
-    def _on_refresh_tick(self) -> None:
-        """Periodic re-fetch for the currently-displayed account.
-
-        Re-runs _refresh_tokens, which short-circuits on already-displayed
-        views (no needless show_cached) and on already-running discovery
-        chains (no stacked Blockscout requests). The net effect for the
-        common steady state is: one Blockscout + one multicall + one
-        DefiLlama request per minute, balance + price cells updated in
-        place via update_balances_if_set_unchanged + set_prices."""
-        addrs = self._selected_addresses()
-        if len(addrs) == 1:
-            self._refresh_tokens(addrs[0])
-
-    def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
-        """Fast in-place balance refresh for the cached set, ahead of the
-        slower discovery+prices chain. Display only — cache writes happen
-        in _save_wallet_cache after the combined update with prices."""
-        chain = self.store.current_chain()
-        if chain.chain_id != chain_id:
-            return
-        addrs = self._selected_addresses()
-        if len(addrs) != 1:
-            return
-        cached = self._wallet_cache.load(chain_id, addrs[0])
-        if cached is None:
-            return
-
-        nothing_changed = (
-            int(native_wei) == cached.native_balance_wei
-            and all(
-                int(balances_raw.get(t.contract.lower(), t.balance_raw))
-                == t.balance_raw
-                for t in cached.tokens
-            )
-        )
-        if nothing_changed:
-            return
-
-        tokens = [
-            TokenBalance(
-                contract=t.contract, symbol=t.symbol, name=t.name,
-                decimals=t.decimals,
-                balance_raw=int(balances_raw.get(t.contract.lower(), t.balance_raw)),
-            )
-            for t in cached.tokens
-        ]
-        if self.token_panel.update_balances_if_set_unchanged(chain, native_wei, tokens):
-            # Re-multiply by last-known prices so the Value column tracks
-            # the new balances even before DefiLlama refreshes.
-            self.token_panel.reapply_prices()
-
-    def _save_wallet_cache(
-        self, chain, address: str, native_wei: int,
-        tokens: list, prices: dict, entries: dict,
-    ) -> None:
-        """Persist the multicall-derived view. ``tokens`` is the visible
-        set after dust/force-show filtering, sorted by USD value desc —
-        whatever the panel actually rendered. No further filtering here."""
-        import time
-        from .wallet_cache import CachedToken
-        now = int(time.time())
-
-        cached = CachedWallet(
-            chain_id=chain.chain_id,
-            address=address.lower(),
-            native_balance_wei=int(native_wei),
-            native_balance_updated=now,
-        )
-        np = prices.get("")
-        if np is not None:
-            cached.native_price_usd = str(np.price_usd)
-            cached.native_price_updated = np.timestamp or now
-
-        for b in tokens:
-            addr = b.contract.lower()
-            price = prices.get(addr)
-            entry = entries.get((chain.chain_id, addr))
-            cached.tokens.append(CachedToken(
-                contract=addr, symbol=b.symbol, name=b.name,
-                decimals=b.decimals,
-                logo_uri=entry.logo_uri if entry else None,
-                balance_raw=int(b.balance_raw),
-                price_usd=str(price.price_usd) if price else None,
-                balance_updated=now,
-                price_updated=price.timestamp if price else 0,
-            ))
-        self._wallet_cache.save(cached)
-
-    def _on_hide_token(self, chain_id: int, contract: str) -> None:
-        self.store.hide_token(chain_id, contract)
-        self._invalidate_view_and_refresh()
-
-    def _on_pin_token(self, chain_id: int, contract: str) -> None:
-        self.store.force_show_token(chain_id, contract)
-        self._invalidate_view_and_refresh()
-
-    def _on_show_all_toggled(self, on: bool) -> None:
-        self._show_all = on
-        self._invalidate_view_and_refresh()
-
-    def _on_add_custom_token(self) -> None:
-        from PySide6.QtWidgets import QInputDialog
-        chain = self.store.current_chain()
-        addr, ok = QInputDialog.getText(
-            self, "Add custom token",
-            f"Contract address on {chain.name} (0x… 40 hex chars):",
-        )
-        if not ok:
-            return
-        addr = (addr or "").strip()
-        if not (addr.startswith("0x") and len(addr) == 42):
-            QMessageBox.warning(self, "Invalid address",
-                                "Expected a 0x-prefixed 40-character hex address.")
-            return
-        try:
-            int(addr[2:], 16)
-        except ValueError:
-            QMessageBox.warning(self, "Invalid address",
-                                "Address must be hexadecimal.")
-            return
-
-        try:
-            meta = EthClient(chain).multicall_erc20_metadata([addr])
-        except Exception as e:
-            QMessageBox.warning(self, "Read failed",
-                                f"Couldn't read ERC-20 metadata: {e}")
-            return
-        if not meta:
-            QMessageBox.warning(
-                self, "Not a token",
-                "Contract didn't respond to ERC-20 metadata calls "
-                "(name/symbol/decimals). It might not be an ERC-20.",
-            )
-            return
-        self._token_metadata.put_many(chain.chain_id, meta)
-        self.store.force_show_token(chain.chain_id, addr)
-
-        m = next(iter(meta.values()))
-        scam = self._token_lists.is_likely_scam(
-            chain.chain_id, addr, m.get("symbol", ""), m.get("name", "")
-        )
-        if scam:
-            QMessageBox.warning(
-                self, "Heuristic warning",
-                f"Added {m['symbol']!r} ({m['name']}). Heads up: it "
-                "matches our scam heuristic (URL or impersonating a "
-                "major symbol) and will be marked with an alarm icon. "
-                "Pinned anyway since you added it explicitly.",
-            )
-        self._invalidate_view_and_refresh()
-
-    def _invalidate_view_and_refresh(self) -> None:
-        """Force the next _refresh_tokens to do a full discovery round
-        rather than short-circuiting on the _discovery_in_flight or
-        _displayed_view guards — used when the user changes filter state
-        and we need the panel to re-render."""
-        self._displayed_view = None
-        self._discovery_in_flight.clear()
-        addrs = self._selected_addresses()
-        if len(addrs) == 1:
-            self._refresh_tokens(addrs[0])
-
-    def _on_lists_loaded(self) -> None:
-        n = self._token_lists.count()
-        self.statusBar().showMessage(
-            f"Token lists loaded ({n} known tokens)", 3000
-        )
-        # Hand the lists + risk cache to the panel so it can run the
-        # combined scam check for the alarm-icon decision.
-        self.token_panel._token_lists = self._token_lists
-        self.token_panel._risk_cache = self._risk_cache
-        # If a single account is already selected, fetch its tokens now.
-        addrs = self._selected_addresses()
-        if len(addrs) == 1:
-            self._refresh_tokens(addrs[0])
-        else:
-            self.token_panel.clear()
-            self._displayed_view = None
 
     def _copy_selected_address(self) -> None:
         addrs = self._selected_addresses()

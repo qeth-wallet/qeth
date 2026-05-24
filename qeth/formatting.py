@@ -55,22 +55,19 @@ def short_addr(addr: str | None) -> str:
     return f"{addr[:6]}…{addr[-4:]}"
 
 
-def format_relative_time(ts: int, now: int | None = None) -> str:
-    """Compact human time: "5 min ago", "3 hr ago", "2 d ago", or an
-    absolute YYYY-MM-DD for anything older than a week. Returns "—"
-    for non-positive timestamps (Blockscout occasionally drops the
-    field on very old chain reorgs)."""
+def format_datetime(ts: int) -> str:
+    """Format a unix timestamp as the locale-preferred date + time.
+
+    Uses ``strftime("%x %X")`` — Python's C-library hooks for "locale's
+    appropriate date representation" and "locale's appropriate time
+    representation". The actual format (DD/MM/YYYY vs MM/DD/YYYY vs
+    YYYY-MM-DD, 12-hour vs 24-hour, etc.) follows whatever LC_TIME is
+    set to. qeth's entry point calls ``locale.setlocale(LC_TIME, "")``
+    so the user's environment-configured locale takes effect; tests
+    that need deterministic output should set the locale themselves.
+
+    Returns ``"—"`` for non-positive timestamps (Blockscout sometimes
+    drops the field on very old chain reorgs)."""
     if ts <= 0:
         return "—"
-    if now is None:
-        now = int(datetime.datetime.now().timestamp())
-    delta = max(0, now - ts)
-    if delta < 60:
-        return f"{delta}s ago"
-    if delta < 3600:
-        return f"{delta // 60} min ago"
-    if delta < 86400:
-        return f"{delta // 3600} hr ago"
-    if delta < 7 * 86400:
-        return f"{delta // 86400} d ago"
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    return datetime.datetime.fromtimestamp(ts).strftime("%x %X")

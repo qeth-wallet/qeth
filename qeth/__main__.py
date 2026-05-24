@@ -1,3 +1,4 @@
+import locale
 import logging
 import sys
 
@@ -13,6 +14,15 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Honor the user's LC_TIME for strftime("%x %X") in tx timestamps.
+    # Python starts in the POSIX C locale until something flips it;
+    # without this call all timestamps would render as MM/DD/YY.
+    try:
+        locale.setlocale(locale.LC_TIME, "")
+    except locale.Error:
+        # Misconfigured environment (e.g. LC_ALL set to a locale that
+        # isn't installed). Fall back silently; strftime works in C.
+        pass
 
     app = QApplication(sys.argv)
     app.setApplicationName("qeth")

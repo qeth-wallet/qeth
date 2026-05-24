@@ -20,8 +20,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import datetime
-
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
@@ -30,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..chain import wei_to_ether
-from ..formatting import format_relative_time as _format_relative_time
+from ..formatting import format_datetime as _format_datetime
 from ..formatting import short_addr as _short_addr
 from ..plugin import Plugin
 from ..transactions import (
@@ -377,7 +375,6 @@ class TransactionListPanel(QWidget):
         self.table.setRowCount(len(txs))
         viewer = (self._viewer or "").lower()
         symbol = self._chain.symbol if self._chain else "ETH"
-        now = int(datetime.datetime.now().timestamp())
         for row, tx in enumerate(txs):
             direction = tx.direction(viewer) if viewer else TxDirection.UNRELATED
 
@@ -393,9 +390,10 @@ class TransactionListPanel(QWidget):
                 # isn't misread.
                 nonce.setToolTip("sender's nonce")
 
-            when = QTableWidgetItem(_format_relative_time(tx.timestamp, now))
-            when.setToolTip(datetime.datetime.fromtimestamp(tx.timestamp)
-                            .strftime("%Y-%m-%d %H:%M:%S"))
+            # Locale-formatted full date+time; the tooltip used to show
+            # the absolute time alongside a fuzzy "5 min ago" label, but
+            # now the cell itself is absolute so no extra tooltip needed.
+            when = QTableWidgetItem(_format_datetime(tx.timestamp))
 
             if direction == TxDirection.SENT:
                 arrow, counterparty = "→", tx.to_addr

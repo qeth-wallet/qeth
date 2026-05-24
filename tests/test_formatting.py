@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from qeth.formatting import (
-    format_balance, format_relative_time, format_usd, short_addr,
+    format_balance, format_datetime, format_usd, short_addr,
 )
 
 
@@ -98,35 +98,32 @@ class TestShortAddr:
         assert short_addr("0xabcd") == "0xabcd"
 
 
-# --- format_relative_time --------------------------------------------------
+# --- format_datetime -------------------------------------------------------
 
-class TestFormatRelativeTime:
-    def test_seconds(self):
-        assert format_relative_time(1000, now=1030) == "30s ago"
-
-    def test_minutes(self):
-        # 5 min 30 s → "5 min ago" (floor; we don't round up).
-        assert format_relative_time(1000, now=1000 + 330) == "5 min ago"
-
-    def test_hours(self):
-        assert format_relative_time(1000, now=1000 + 3 * 3600 + 500) == "3 hr ago"
-
-    def test_days(self):
-        assert format_relative_time(1000, now=1000 + 2 * 86400) == "2 d ago"
-
-    def test_older_than_week_uses_absolute_date(self):
-        # Past the week boundary, switch to a YYYY-MM-DD label.
-        # 2026-05-24 minus 30 days is 2026-04-24.
-        import datetime
-        ts = int(datetime.datetime(2026, 4, 24).timestamp())
-        now = int(datetime.datetime(2026, 5, 24).timestamp())
-        assert format_relative_time(ts, now=now) == "2026-04-24"
+class TestFormatDatetime:
+    """The exact rendered string depends on LC_TIME. We pin a locale
+    for each test so the assertions don't drift with the developer's
+    environment."""
 
     def test_non_positive_returns_dash(self):
-        assert format_relative_time(0, now=1_000_000) == "—"
-        assert format_relative_time(-5, now=1_000_000) == "—"
+        assert format_datetime(0) == "—"
+        assert format_datetime(-5) == "—"
 
-    def test_future_timestamps_clamp_to_zero(self):
-        # Clock skew between the user and the chain shouldn't crash —
-        # treat "future" as "just now".
-        assert format_relative_time(1000, now=500) == "0s ago"
+    def test_c_locale_format(self, monkeypatch):
+        import datetime
+        import locale
+        # The POSIX "C" locale is guaranteed available on every system.
+        # %x %X under it renders as "MM/DD/YY HH:MM:SS".
+        previous = locale.setlocale(locale.LC_TIME)
+        try:
+            locale.setlocale(locale.LC_TIME, "C")
+            ts = int(datetime.datetime(2026, 4, 24, 13, 5, 7).timestamp())
+            assert format_datetime(ts) == "04/24/26 13:05:07"
+        finally:
+            locale.setlocale(locale.LC_TIME, previous)
+
+    def test_returns_string_for_recent_timestamp(self):
+        import datetime
+        ts = int(datetime.datetime.now().timestamp())
+        s = format_datetime(ts)
+        assert isinstance(s, str) and s != "—"

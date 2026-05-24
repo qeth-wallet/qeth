@@ -319,6 +319,56 @@ class TestTransactionsPlugin:
         assert plugin.widget().table.rowCount() == 1000
         assert plugin._displayed_count[key] == 1000
 
+    def test_double_click_opens_details_dialog(self, qtbot, tmp_qeth):
+        """Double-clicking a row should open TransactionDetailsDialog
+        with the right tx and chain wired through. Plugin no-ops the
+        ABI fetch worker so the test doesn't hit Blockscout."""
+        from qeth.plugins.transactions import (
+            TransactionDetailsDialog, TransactionListPanel,
+        )
+        from qeth.transactions_cache import TransactionCache
+
+        sample_tx = Transaction(
+            chain_id=1, hash="0x" + "aa" * 32, block_number=100,
+            timestamp=1779618611, nonce=42, from_addr=ADDR,
+            to_addr="0xdac17f958d2ee523a2206206994597c13d831ec7",
+            value_wei=0, gas_used=63197, gas_price_wei=10**9,
+            method_id="0xa9059cbb",
+            input_data=(
+                "0xa9059cbb"
+                "0000000000000000000000005d6a4ba137d77df7c3cdd7131c430da5497c7ace"
+                "000000000000000000000000000000000000000000000000000000001dcd6500"
+            ),
+            success=True,
+        )
+        TransactionCache().save(ETH.chain_id, ADDR, [sample_tx])
+
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.on_activated()
+
+        # Capture the dialog the plugin opens.
+        opened: list[TransactionDetailsDialog] = []
+        orig_show = TransactionDetailsDialog.show
+
+        def _capture(self):
+            opened.append(self)
+            # Don't actually call show() — keeps the test offscreen.
+
+        try:
+            TransactionDetailsDialog.show = _capture
+            # Emulate double-click → plugin._show_tx_details.
+            plugin._panel.tx_details_requested.emit(sample_tx)
+        finally:
+            TransactionDetailsDialog.show = orig_show
+
+        assert len(opened) == 1
+        dialog = opened[0]
+        assert dialog.tx is sample_tx
+        assert dialog.chain is ETH
+
     def test_tab_reactivation_preserves_table(self, qtbot, tmp_qeth):
         """Switching away to the Tokens tab and back must NOT throw
         away anything on screen. The plugin sees on_activated for the

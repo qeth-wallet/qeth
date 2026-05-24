@@ -17,16 +17,21 @@ a cached page yet.
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
+    QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QSizePolicy,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from ..abi import BlockscoutAbiSource, decode_call
+from ..abi_cache import AbiCache
+from ..chain import wei_to_ether
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
 from ..transactions import (
@@ -118,11 +123,17 @@ class TransactionsPlugin(Plugin):
         self,
         source: Optional[TransactionSource] = None,
         disk_cache: Optional[TransactionCache] = None,
+        abi_source: Optional[BlockscoutAbiSource] = None,
+        abi_cache: Optional[AbiCache] = None,
     ):
         super().__init__()
         # Source / cache injection both let tests pass fakes.
         self._source: TransactionSource = source or BlockscoutTransactionSource()
         self._disk_cache = disk_cache if disk_cache is not None else TransactionCache()
+        # ABI machinery for the details dialog. Lazy fetch + disk-
+        # cache so each contract address is looked up at most once.
+        self._abi_source = abi_source if abi_source is not None else BlockscoutAbiSource()
+        self._abi_cache = abi_cache if abi_cache is not None else AbiCache()
         # In-memory cache, keyed by (chain_id, address_lower). Hydrated
         # lazily from the disk cache on first ``on_account_changed`` for
         # a (chain, addr) — that's what prevents the empty → populated
@@ -161,7 +172,21 @@ class TransactionsPlugin(Plugin):
         if self._panel is None:
             self._panel = TransactionListPanel()
             self._panel.scrolled_to_bottom.connect(self._on_scroll_bottom)
+            self._panel.tx_details_requested.connect(self._show_tx_details)
         return self._panel
+
+    def _show_tx_details(self, tx: Transaction) -> None:
+        if self.host is None or self._panel is None:
+            return
+        chain = self.host.current_chain()
+        dialog = TransactionDetailsDialog(
+            tx, chain,
+            abi_source=self._abi_source,
+            abi_cache=self._abi_cache,
+            start_worker=self.host.start_worker,
+            parent=self._panel,
+        )
+        dialog.show()
 
     # No bottom-row actions yet. Future: a Refresh button, a "load
     # more" cursor, etc. would go here.
@@ -424,14 +449,18 @@ class TransactionsPlugin(Plugin):
 
 class TransactionListPanel(QWidget):
     """Right pane / Transactions tab: top-level txs for the selected
-    account, newest first. Double-click opens the tx in the block
-    explorer; right-click offers copy-hash / copy-counterparty.
+    account, newest first.
 
-    Emits ``scrolled_to_bottom`` whenever the user reaches (or stays
-    at) the end of the visible rows — the plugin uses this as a cue
-    to fetch one more older page."""
+    Signals:
+      scrolled_to_bottom      — user reached the bottom; load more.
+      tx_details_requested    — user double-clicked or hit
+                                "Show details…" in the context menu.
+                                Plugin opens TransactionDetailsDialog
+                                with ABI decoding.
+    """
 
     scrolled_to_bottom = Signal()
+    tx_details_requested = Signal(object)   # Transaction instance
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -465,7 +494,7 @@ class TransactionListPanel(QWidget):
         )
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
-        self.table.cellDoubleClicked.connect(self._open_in_explorer)
+        self.table.cellDoubleClicked.connect(self._on_double_click)
         # ElideMiddle on the view lets the Hash column adapt: the full
         # hash is stored in the cell, and Qt truncates at paint time
         # only as much as needed to fit the column width — so the
@@ -598,7 +627,9 @@ class TransactionListPanel(QWidget):
 
     def _populate_row(self, row: int, tx: Transaction) -> None:
         """Render one tx into ``row``. Shared by show / append /
-        prepend so the cell shape stays consistent across paths."""
+        prepend so the cell shape stays consistent across paths.
+        The full Transaction is stored on the Hash cell's UserRole
+        so handlers (explorer, details dialog) can recover it."""
         status = QTableWidgetItem("✓" if tx.success else "✗")
         status.setTextAlignment(Qt.AlignCenter)
         status.setToolTip("Success" if tx.success else "Reverted")
@@ -614,43 +645,210 @@ class TransactionListPanel(QWidget):
         hash_item = QTableWidgetItem(tx.hash)
         hash_item.setFont(QFont("monospace"))
         hash_item.setToolTip(tx.hash)
-        hash_item.setData(Qt.UserRole, tx.hash)
+        hash_item.setData(Qt.UserRole, tx)
 
         self.table.setItem(row, 0, status)
         self.table.setItem(row, 1, nonce)
         self.table.setItem(row, 2, time_item)
         self.table.setItem(row, 3, hash_item)
 
-    # Column 3 (Hash) carries the full tx hash on UserRole. The
-    # explorer-open and context-menu handlers read it from there.
-
-    def _selected_hash(self) -> str | None:
-        items = self.table.selectedItems()
-        if not items:
+    def _tx_at(self, row: int) -> Optional[Transaction]:
+        item = self.table.item(row, 3)
+        if item is None:
             return None
-        return self.table.item(items[0].row(), 3).data(Qt.UserRole)
+        data = item.data(Qt.UserRole)
+        return data if isinstance(data, Transaction) else None
 
-    def _open_in_explorer(self, row: int, col: int) -> None:
+    def _on_double_click(self, row: int, _col: int) -> None:
+        tx = self._tx_at(row)
+        if tx is not None:
+            self.tx_details_requested.emit(tx)
+
+    def _open_in_explorer(self, tx: Transaction) -> None:
         if self._chain is None or not self._chain.explorer:
             return
-        h = self.table.item(row, 3).data(Qt.UserRole)
-        if not h:
-            return
-        url = f"{self._chain.explorer.rstrip('/')}/tx/{h}"
+        url = f"{self._chain.explorer.rstrip('/')}/tx/{tx.hash}"
         QDesktopServices.openUrl(QUrl(url))
 
     def _on_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
         if item is None:
             return
-        row = item.row()
-        h = self.table.item(row, 3).data(Qt.UserRole)
+        tx = self._tx_at(item.row())
+        if tx is None:
+            return
         menu = QMenu(self)
+        act_details = menu.addAction("Show transaction details…")
         act_open = menu.addAction("Open in block explorer")
-        act_open.setEnabled(bool(self._chain and self._chain.explorer and h))
+        act_open.setEnabled(bool(self._chain and self._chain.explorer))
         act_copy_hash = menu.addAction("Copy tx hash")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen is act_open:
-            self._open_in_explorer(row, 0)
-        elif chosen is act_copy_hash and h:
-            QApplication.clipboard().setText(h)
+        if chosen is act_details:
+            self.tx_details_requested.emit(tx)
+        elif chosen is act_open:
+            self._open_in_explorer(tx)
+        elif chosen is act_copy_hash:
+            QApplication.clipboard().setText(tx.hash)
+
+
+# --- transaction details dialog + ABI fetch worker ------------------------
+
+
+class AbiFetchWorker(QThread):
+    """Look up the ABI for a contract address. Checks the disk cache
+    first (positive hits and the unverified-sentinel both short-
+    circuit the HTTP call) and falls back to a Blockscout fetch.
+
+    Emits ``ready(abi)`` where ``abi`` is the parsed list of fragments,
+    ``False`` for known-unverified, or ``None`` on transient errors."""
+
+    ready = Signal(object)
+
+    def __init__(self, source: BlockscoutAbiSource, cache: AbiCache,
+                 chain_id: int, address: str, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.cache = cache
+        self.chain_id = chain_id
+        self.address = address
+
+    def run(self) -> None:
+        cached = self.cache.load(self.chain_id, self.address)
+        if cached is not None:
+            self.ready.emit(cached)
+            return
+        try:
+            abi = self.source.fetch(self.chain_id, self.address)
+        except Exception as e:
+            log.warning("ABI fetch failed for %s/%s: %s",
+                        self.chain_id, self.address, e)
+            self.ready.emit(None)
+            return
+        # Persist verified ABIs AND the negative sentinel — both save
+        # the next dialog the round-trip.
+        self.cache.save(self.chain_id, self.address, abi)
+        self.ready.emit(abi)
+
+
+class TransactionDetailsDialog(QDialog):
+    """Modal-ish dialog showing the full tx record.
+
+    Calldata decoding runs asynchronously: the dialog opens with a
+    "(decoding…)" placeholder, kicks an AbiFetchWorker, and fills in
+    the function name + arguments when the worker returns. The
+    explorer link button is always available regardless of ABI state.
+    """
+
+    def __init__(self, tx: Transaction, chain, *,
+                 abi_source: BlockscoutAbiSource,
+                 abi_cache: AbiCache,
+                 start_worker,
+                 parent=None):
+        super().__init__(parent)
+        self.tx = tx
+        self.chain = chain
+        self._abi_source = abi_source
+        self._abi_cache = abi_cache
+        self._start_worker = start_worker
+
+        self.setWindowTitle(f"Transaction {tx.hash[:10]}…")
+        self.resize(720, 480)
+
+        v = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        v.addLayout(form)
+
+        mono = QFont("monospace")
+
+        def _label(text: str, *, monospace: bool = False) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if monospace:
+                lbl.setFont(mono)
+            lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            return lbl
+
+        form.addRow("Status:", _label("✓ Success" if tx.success else "✗ Reverted"))
+        form.addRow("Nonce:", _label(str(tx.nonce)))
+        dt = datetime.datetime.fromtimestamp(tx.timestamp)
+        form.addRow("Date:", _label(dt.strftime("%c")))
+        form.addRow("Timestamp:", _label(f"{tx.timestamp} (unix)"))
+        form.addRow("Block:", _label(str(tx.block_number)))
+        form.addRow("Hash:", _label(tx.hash, monospace=True))
+        form.addRow("From:", _label(tx.from_addr, monospace=True))
+        to_text = tx.to_addr or "(contract creation)"
+        form.addRow("To:", _label(to_text, monospace=True))
+        # Value rendered through wei_to_ether (Decimal) — never float.
+        if tx.value_wei:
+            ether = wei_to_ether(tx.value_wei)
+            value_text = f"{ether} {chain.symbol}  ({tx.value_wei} wei)"
+        else:
+            value_text = "0"
+        form.addRow("Value:", _label(value_text))
+        form.addRow("Method ID:", _label(tx.method_id or "(none — plain transfer)",
+                                        monospace=True))
+
+        # Decoded call goes in a read-only QPlainTextEdit so long
+        # argument lists (multi-line) read cleanly.
+        self.decoded_view = QPlainTextEdit()
+        self.decoded_view.setReadOnly(True)
+        self.decoded_view.setFont(mono)
+        self.decoded_view.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        form.addRow("Decoded call:", self.decoded_view)
+
+        # Buttons row: Explorer + Close.
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        explorer_btn = QPushButton("Open in block explorer")
+        explorer_btn.setEnabled(bool(chain.explorer))
+        explorer_btn.clicked.connect(self._open_explorer)
+        buttons.addButton(explorer_btn, QDialogButtonBox.ActionRole)
+        buttons.rejected.connect(self.reject)
+        v.addWidget(buttons)
+
+        # Start ABI fetch + decode (only when there's calldata).
+        if tx.input_data and tx.input_data not in ("0x", "0X") and tx.to_addr:
+            self.decoded_view.setPlainText("(decoding…)")
+            worker = AbiFetchWorker(
+                self._abi_source, self._abi_cache,
+                chain.chain_id, tx.to_addr,
+            )
+            worker.ready.connect(self._on_abi_ready)
+            self._start_worker(worker)
+        elif not tx.to_addr:
+            self.decoded_view.setPlainText("(contract creation — no method call)")
+        else:
+            self.decoded_view.setPlainText("(plain value transfer — no calldata)")
+
+    def _on_abi_ready(self, abi) -> None:
+        if abi is False:
+            self.decoded_view.setPlainText(
+                "(contract source is not verified on Blockscout — "
+                "no ABI available for decoding)"
+            )
+            return
+        if abi is None:
+            self.decoded_view.setPlainText(
+                "(failed to fetch ABI from Blockscout — try again later)"
+            )
+            return
+        decoded = decode_call(abi, self.tx.input_data, address=self.tx.to_addr)
+        if decoded is None:
+            self.decoded_view.setPlainText(
+                "(ABI available but this calldata didn't match any "
+                "function in it — possibly a fallback or proxy call)"
+            )
+            return
+        lines = [f"{decoded['function']}("]
+        for k, v in decoded["args"].items():
+            lines.append(f"    {k} = {v},")
+        lines.append(")")
+        self.decoded_view.setPlainText("\n".join(lines))
+
+    def _open_explorer(self) -> None:
+        if not self.chain.explorer:
+            return
+        url = f"{self.chain.explorer.rstrip('/')}/tx/{self.tx.hash}"
+        QDesktopServices.openUrl(QUrl(url))

@@ -188,7 +188,10 @@ class TestTransactionListPanel:
         hash_cell = panel.table.item(0, 3)
         assert hash_cell.text() == tx.hash
         assert hash_cell.toolTip() == tx.hash
-        assert hash_cell.data(Qt.UserRole) == tx.hash
+        # The Hash cell carries the full Transaction object on
+        # UserRole (so the details dialog can pick it up from a
+        # double-click without re-looking-up the cache).
+        assert hash_cell.data(Qt.UserRole) is tx
 
     def test_failed_tx_marked_with_cross(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()

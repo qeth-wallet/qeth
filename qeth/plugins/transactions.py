@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
 from ..transactions import (
-    BlockscoutTransactionSource, Transaction, TransactionSource, TxDirection,
+    BlockscoutTransactionSource, Transaction, TransactionSource,
 )
 from ..transactions_cache import TransactionCache, merge_txs
 
@@ -43,14 +43,21 @@ class TransactionsWorker(QThread):
     TransactionSource, emitting each page as it arrives so the UI can
     render incrementally (newest first, growing as we paginate).
 
-    Early-exits when a page contains a hash already in the caller's
-    ``known_hashes`` set — that's how repeated runs stay fast: the
-    first page typically overlaps prior history, the merge handles
-    dedup, and we stop without walking the entire chain history.
+    ``sent_only=True`` filters each page to outgoing transactions
+    (``tx.from_addr == address``). This is the default because the
+    panel sorts by nonce: received-tx nonces are the *sender's* and
+    interleave non-monotonically with the wallet's own nonces. The
+    filter is applied per page so the empty-page-after-filter case
+    (a whole page of received-only txs) just continues walking
+    without misinterpreting as end-of-history.
+
+    Early-exits when a (filtered) page contains a hash already in the
+    caller's ``known_hashes`` set — that's how repeated runs stay
+    fast: the first page typically overlaps prior history, the merge
+    handles dedup, and we stop without walking the entire history.
 
     A small inter-page sleep is polite to Blockscout's rate limit;
-    ``max_pages`` is a runaway guard for accounts with very deep
-    history (e.g. validator-payout addresses)."""
+    ``max_pages`` is a runaway guard for accounts with deep history."""
 
     # Object signal carries Python objects (avoids qint64 marshalling).
     page_fetched = Signal(int, str, object)   # chain_id, addr_lower, page
@@ -59,8 +66,8 @@ class TransactionsWorker(QThread):
 
     def __init__(self, source: TransactionSource, chain, address: str,
                  known_hashes=None, page_size: int = 50,
-                 max_pages: int = 200, page_pause_s: float = 0.2,
-                 parent=None):
+                 max_pages: int = 1000, page_pause_s: float = 0.2,
+                 sent_only: bool = True, parent=None):
         super().__init__(parent)
         self.source = source
         self.chain = chain
@@ -69,28 +76,39 @@ class TransactionsWorker(QThread):
         self.page_size = page_size
         self.max_pages = max_pages
         self.page_pause_s = page_pause_s
+        self.sent_only = sent_only
 
     def run(self) -> None:
+        viewer = self.address.lower()
         try:
             for page_idx in range(1, self.max_pages + 1):
-                page = self.source.list_transactions(
+                raw_page = self.source.list_transactions(
                     self.chain, self.address,
                     page=page_idx, limit=self.page_size,
                 )
-                if not page:
+                if not raw_page:
+                    # No more rows on the wire — done.
                     break
-                self.page_fetched.emit(
-                    self.chain.chain_id, self.address.lower(), page,
-                )
-                # Caught up: this page already contains entries we have
-                # cached, so anything further is also cached.
-                if any(t.hash in self.known_hashes for t in page):
-                    break
+                page = raw_page
+                if self.sent_only:
+                    page = [t for t in raw_page
+                            if t.from_addr.lower() == viewer]
+
+                if page:
+                    self.page_fetched.emit(
+                        self.chain.chain_id, viewer, page,
+                    )
+                    # Caught up: this page already contains entries we
+                    # have cached, so anything older is also cached.
+                    if any(t.hash in self.known_hashes for t in page):
+                        break
+                # Note: an empty page *after filter* doesn't mean the
+                # end of history — it just means this raw page was all
+                # received txs. Keep walking.
+
                 if page_idx < self.max_pages and self.page_pause_s > 0:
                     self.msleep(int(self.page_pause_s * 1000))
-            self.completed.emit(
-                self.chain.chain_id, self.address.lower(),
-            )
+            self.completed.emit(self.chain.chain_id, viewer)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -197,9 +215,14 @@ class TransactionsPlugin(Plugin):
         if cached is None:
             # First time this (chain, addr) is seen this session — try
             # the disk cache. Confirmed txs don't change, so cached
-            # bytes from a prior run are always safe to render.
+            # bytes from a prior run are always safe to render. Also
+            # drop any received txs that an earlier (pre-filter) build
+            # may have written to disk — keeping them would break the
+            # nonce-monotonic sort.
             disk = self._disk_cache.load(chain.chain_id, address)
             if disk:
+                addr_l = address.lower()
+                disk = [t for t in disk if t.from_addr.lower() == addr_l]
                 self._cache[key] = disk
                 cached = disk
         if cached is not None:
@@ -397,21 +420,13 @@ class TransactionListPanel(QWidget):
             return
         self.status_lbl.setVisible(False)
         self.table.setRowCount(len(txs))
-        viewer = (self._viewer or "").lower()
         for row, tx in enumerate(txs):
-            direction = tx.direction(viewer) if viewer else TxDirection.UNRELATED
-
             status = QTableWidgetItem("✓" if tx.success else "✗")
             status.setTextAlignment(Qt.AlignCenter)
             status.setToolTip("Success" if tx.success else "Reverted")
 
             nonce = QTableWidgetItem(str(tx.nonce))
             nonce.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if direction != TxDirection.SENT:
-                # The nonce of a received tx is the *sender's* nonce,
-                # not ours — surface that in the tooltip so the column
-                # isn't misread.
-                nonce.setToolTip("sender's nonce")
 
             time_item = QTableWidgetItem(_format_datetime(tx.timestamp))
 

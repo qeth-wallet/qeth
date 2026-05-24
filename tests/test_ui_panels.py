@@ -201,19 +201,6 @@ class TestTransactionListPanel:
         assert panel.table.item(0, 0).text() == "✓"
         assert panel.table.item(1, 0).text() == "✗"
 
-    def test_received_tx_marks_sender_nonce_in_tooltip(self, qtbot, tmp_qeth):
-        """The Nonce column is straightforward when it's the wallet's
-        own nonce. For received txs the column shows the sender's
-        nonce, which would be misleading without context — the tooltip
-        clarifies."""
-        panel = TransactionListPanel()
-        qtbot.addWidget(panel)
-        panel.set_context(ETH, ADDR)
-        panel.show_transactions([_tx(
-            from_addr="0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace",
-            to_addr=ADDR,
-        )])
-        assert "sender" in (panel.table.item(0, 1).toolTip() or "").lower()
 
     def test_clear_resets_panel(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()

@@ -183,6 +183,87 @@ class TestTransactionsPlugin:
         assert len(reloaded) == 1
         assert reloaded[0].hash == fetched[0].hash
 
+    def test_worker_filters_to_sent_only_by_default(self, qtbot, tmp_qeth):
+        """Sent-only is the right default — received txs carry the
+        sender's nonce, which would interleave non-monotonically with
+        the wallet's own nonces and break the sort-by-nonce order."""
+        from qeth.plugins.transactions import TransactionsWorker
+
+        def _mk(hash_suffix: str, sender: str, nonce: int) -> Transaction:
+            return Transaction(
+                chain_id=1, hash="0x" + hash_suffix * 32,
+                block_number=nonce, timestamp=nonce, nonce=nonce,
+                from_addr=sender.lower(),
+                to_addr="0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+
+        # Mixed page: one sent + two received with their senders'
+        # (unrelated) nonces.
+        page1 = [
+            _mk("aa", ADDR, 100),               # sent by us
+            _mk("bb", "0xstrangeaddress1", 7),  # received
+            _mk("cc", "0xstrangeaddress2", 3),  # received
+        ]
+
+        class _Source:
+            def __init__(self):
+                self.calls = 0
+
+            def supports(self, _c):
+                return True
+
+            def list_transactions(self, chain, address, page=1, limit=50):
+                self.calls += 1
+                return page1 if page == 1 else []
+
+        emitted: list[list[Transaction]] = []
+        worker = TransactionsWorker(
+            _Source(), ETH, ADDR, page_pause_s=0,
+        )
+        worker.page_fetched.connect(
+            lambda _c, _a, p: emitted.append(list(p))
+        )
+        worker.run()
+
+        # Only the sent row survives the filter.
+        assert len(emitted) == 1
+        assert [t.hash for t in emitted[0]] == ["0x" + "aa" * 32]
+
+    def test_worker_filter_can_be_disabled(self, qtbot, tmp_qeth):
+        from qeth.plugins.transactions import TransactionsWorker
+
+        def _mk(suffix, sender):
+            return Transaction(
+                chain_id=1, hash="0x" + suffix * 32, block_number=1,
+                timestamp=1, nonce=1, from_addr=sender.lower(),
+                to_addr="0xfeed", value_wei=0, gas_used=0,
+                gas_price_wei=0, method_id="", input_data="0x",
+                success=True,
+            )
+
+        rows = [_mk("aa", ADDR), _mk("bb", "0xother")]
+
+        class _Source:
+            def supports(self, _c):
+                return True
+
+            def list_transactions(self, _c, _a, page=1, limit=50):
+                return rows if page == 1 else []
+
+        emitted = []
+        worker = TransactionsWorker(
+            _Source(), ETH, ADDR, page_pause_s=0, sent_only=False,
+        )
+        worker.page_fetched.connect(
+            lambda _c, _a, p: emitted.append(list(p))
+        )
+        worker.run()
+
+        # Filter off → both rows pass through unchanged.
+        assert len(emitted[0]) == 2
+
     def test_paginating_worker_early_exits_on_known_hash(self, qtbot, tmp_qeth):
         """TransactionsWorker walks pages newest-first and stops the
         moment one of them contains a hash from ``known_hashes``. This

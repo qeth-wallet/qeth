@@ -183,6 +183,30 @@ class TestTransactionsPlugin:
         assert len(reloaded) == 1
         assert reloaded[0].hash == fetched[0].hash
 
+    def test_is_full_history(self):
+        """Cache completeness is derived from the data itself: sent
+        nonces are strictly monotonic per sender, so nonce 0 present
+        + contiguous range = the entire outgoing history."""
+        from qeth.plugins.transactions import _is_full_history
+
+        def _t(n):
+            return Transaction(
+                chain_id=1, hash="0x" + format(n, "064x"),
+                block_number=n, timestamp=n, nonce=n,
+                from_addr=ADDR, to_addr="0xfeed",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+
+        assert _is_full_history([]) is False
+        # Has nonce 0 and contiguous → complete.
+        assert _is_full_history([_t(0), _t(1), _t(2)]) is True
+        assert _is_full_history([_t(0)]) is True
+        # Missing nonce 0 (older history missing) → incomplete.
+        assert _is_full_history([_t(5), _t(6), _t(7)]) is False
+        # Gap in the middle → incomplete.
+        assert _is_full_history([_t(0), _t(1), _t(3)]) is False
+
     def test_worker_filters_to_sent_only_by_default(self, qtbot, tmp_qeth):
         """Sent-only is the right default — received txs carry the
         sender's nonce, which would interleave non-monotonically with
@@ -265,11 +289,11 @@ class TestTransactionsPlugin:
         assert len(emitted[0]) == 2
 
     def test_paginating_worker_early_exits_on_known_hash(self, qtbot, tmp_qeth):
-        """TransactionsWorker walks pages newest-first and stops the
-        moment one of them contains a hash from ``known_hashes``. This
-        is what keeps subsequent runs cheap: the cache has prior
-        history, the worker fetches page 1, sees the overlap, and
-        doesn't walk the full chain."""
+        """When ``walk_to_end=False`` the worker stops the moment a
+        page contains a hash from ``known_hashes``. This is the
+        incremental-refresh path used after the cache has been fully
+        backfilled at least once: page 1 typically overlaps prior
+        history and we're done in one HTTP call."""
         from qeth.plugins.transactions import TransactionsWorker
 
         def _mk(hash_suffix: str, nonce: int) -> Transaction:
@@ -304,6 +328,7 @@ class TestTransactionsPlugin:
         worker = TransactionsWorker(
             source, ETH, ADDR,
             known_hashes={"0x" + "known" * 32}, page_pause_s=0,
+            walk_to_end=False,
         )
         emitted: list[list[Transaction]] = []
         worker.page_fetched.connect(

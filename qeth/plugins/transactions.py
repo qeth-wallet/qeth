@@ -38,6 +38,22 @@ from ..transactions_cache import TransactionCache, merge_txs
 log = logging.getLogger("qeth.plugin.transactions")
 
 
+def _is_full_history(txs: list[Transaction]) -> bool:
+    """True iff ``txs`` already represents the entire sent history of
+    a wallet — used to decide whether the next refresh can early-exit
+    on hash overlap, or whether it has to walk every page.
+
+    Sent nonces are 0-based and strictly monotonic per sender, so the
+    cache is complete iff nonce 0 is present AND every value between
+    0 and max(nonce) appears. Returns False for empty input — an
+    empty cache could be a brand-new wallet OR a never-fetched one,
+    and a re-walk costs at most one Blockscout call to confirm."""
+    if not txs:
+        return False
+    nonces = {t.nonce for t in txs}
+    return 0 in nonces and len(nonces) == max(nonces) + 1
+
+
 class TransactionsWorker(QThread):
     """Walk every page of a wallet's tx history via the configured
     TransactionSource, emitting each page as it arrives so the UI can
@@ -67,7 +83,8 @@ class TransactionsWorker(QThread):
     def __init__(self, source: TransactionSource, chain, address: str,
                  known_hashes=None, page_size: int = 50,
                  max_pages: int = 1000, page_pause_s: float = 0.2,
-                 sent_only: bool = True, parent=None):
+                 sent_only: bool = True, walk_to_end: bool = True,
+                 parent=None):
         super().__init__(parent)
         self.source = source
         self.chain = chain
@@ -77,6 +94,12 @@ class TransactionsWorker(QThread):
         self.max_pages = max_pages
         self.page_pause_s = page_pause_s
         self.sent_only = sent_only
+        # walk_to_end=True ignores the known-hashes overlap check and
+        # walks until Blockscout returns an empty page. Used the first
+        # time we visit a wallet (or whenever the cache is missing
+        # older history). After a full backfill the plugin flips this
+        # off so subsequent refreshes early-exit on overlap.
+        self.walk_to_end = walk_to_end
 
     def run(self) -> None:
         viewer = self.address.lower()
@@ -100,7 +123,12 @@ class TransactionsWorker(QThread):
                     )
                     # Caught up: this page already contains entries we
                     # have cached, so anything older is also cached.
-                    if any(t.hash in self.known_hashes for t in page):
+                    # Skipped when walk_to_end is True — that's used
+                    # the first time we visit (cache may be missing
+                    # older history we haven't yet discovered).
+                    if (not self.walk_to_end
+                            and any(t.hash in self.known_hashes
+                                    for t in page)):
                         break
                 # Note: an empty page *after filter* doesn't mean the
                 # end of history — it just means this raw page was all
@@ -241,14 +269,16 @@ class TransactionsPlugin(Plugin):
             return
         self._in_flight.add(key)
 
-        # Pass the currently-known hashes so the worker can early-exit
-        # once it walks back into territory we've already cached. On
-        # the very first run this set is empty and the worker paginates
-        # to the wallet's full history (or max_pages, whichever is
-        # smaller).
+        # Decide whether we already hold the wallet's full sent
+        # history — sent nonces are strictly monotonic per sender, so
+        # contiguous + includes nonce 0 ⇒ complete. When complete, the
+        # worker can early-exit on hash overlap (incremental refresh);
+        # otherwise it walks until Blockscout returns an empty page.
+        complete = _is_full_history(cached or [])
         known = {t.hash for t in (cached or [])}
         worker = TransactionsWorker(
-            self._source, chain, address, known_hashes=known,
+            self._source, chain, address,
+            known_hashes=known, walk_to_end=not complete,
         )
         worker.page_fetched.connect(self._on_page_fetched)
         worker.completed.connect(

@@ -9,7 +9,7 @@ survives, the refactor is fine.
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QStackedWidget, QTabBar, QToolButton,
+    QApplication, QTabBar, QToolButton,
 )
 
 from qeth.chains import DEFAULT_CHAINS
@@ -52,44 +52,41 @@ def test_tab_bar_has_tokens_and_transactions(mainwindow):
 
 
 def test_tab_bar_starts_on_tokens(mainwindow):
-    assert mainwindow.right_stack.currentWidget() is mainwindow.token_panel
+    # After the plugin refactor the active widget lives behind the
+    # slot's active plugin — but the observable behaviour is the same.
+    assert mainwindow.right_slot.active() is mainwindow.tokens_plugin
 
 
 def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
     tab_bar = mainwindow.findChild(QTabBar)
     tab_bar.setCurrentIndex(1)
-    assert mainwindow.right_stack.currentWidget() is mainwindow.tx_panel
+    assert mainwindow.right_slot.active() is mainwindow.transactions_plugin
     tab_bar.setCurrentIndex(0)
-    assert mainwindow.right_stack.currentWidget() is mainwindow.token_panel
+    assert mainwindow.right_slot.active() is mainwindow.tokens_plugin
 
 
 # --- Bottom-of-right: single shared row -------------------------------------
 
 def test_chain_combo_and_token_actions_share_one_row(mainwindow):
-    """The +/-/★/👁 token-action buttons and the chain selector are in
-    the same QHBoxLayout — regression guard for the "two stacked rows"
-    bug that prompted the merge."""
-    combo = mainwindow.chain_combo
-    parent_layout = combo.parentWidget().layout()
-    # The shared bottom row should contain (in order): four token-action
-    # buttons, a stretch, then the combo. Verify the combo and at least
-    # one of the action buttons share a row.
-    siblings = []
-    for i in range(parent_layout.count()):
-        row = parent_layout.itemAt(i).layout()
-        if row is None:
-            continue
-        widgets = [
-            row.itemAt(j).widget()
-            for j in range(row.count())
-            if row.itemAt(j).widget() is not None
-        ]
-        if combo in widgets:
-            siblings = widgets
-            break
-    assert combo in siblings
-    assert mainwindow.token_panel.btn_add in siblings
-    assert mainwindow.token_panel.btn_show_all in siblings
+    """The +/-/★/👁 token-action buttons and the chain selector live
+    in the same bottom row of the right slot — regression guard for
+    the "two stacked rows" bug that prompted the merge."""
+    bottom = mainwindow.right_slot._bottom
+
+    def widgets_in(layout):
+        out = []
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is not None:
+                out.append(item.widget())
+            elif item.layout() is not None:
+                out.extend(widgets_in(item.layout()))
+        return out
+
+    widgets = widgets_in(bottom)
+    assert mainwindow.chain_combo in widgets
+    assert mainwindow.token_panel.btn_add in widgets
+    assert mainwindow.token_panel.btn_show_all in widgets
 
 
 def test_chain_combo_lists_all_default_chains(mainwindow):

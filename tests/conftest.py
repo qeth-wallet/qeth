@@ -72,23 +72,22 @@ def hermetic_mainwindow(monkeypatch):
     they still get ``start()``'d and emit ``finished``, so the
     self-eviction wiring stays exercised.
     """
-    from qeth import ui
+    from qeth import transactions_plugin, ui
 
     def _noop_run(self):  # pragma: no cover - simple no-op
         return
 
-    for cls_name in (
-        "TokenListsLoader",
-        "TokenListWorker",
-        "BalanceWorker",
-        "PricesWorker",
-        "RiskWorker",
-        "MetadataWorker",
-        "TransactionsWorker",
+    for mod, cls_names in (
+        (ui, [
+            "TokenListsLoader", "TokenListWorker", "BalanceWorker",
+            "PricesWorker", "RiskWorker", "MetadataWorker",
+        ]),
+        (transactions_plugin, ["TransactionsWorker"]),
     ):
-        cls = getattr(ui, cls_name, None)
-        if cls is not None:
-            monkeypatch.setattr(cls, "run", _noop_run)
+        for cls_name in cls_names:
+            cls = getattr(mod, cls_name, None)
+            if cls is not None:
+                monkeypatch.setattr(cls, "run", _noop_run)
 
 
 @pytest.fixture

@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QSpinBox, QSplitter, QStatusBar, QStyle, QStyledItemDelegate,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QTabBar, QToolButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from decimal import Decimal
@@ -24,10 +24,11 @@ from .prices import DefiLlamaPrices, Price, PriceSource
 from .risk import GoPlusRisk, RiskCache
 from .token_metadata import TokenMetadataCache
 from .tokenlists import TokenListEntry, TokenLists
+from .plugin import Slot
 from .tokens import BlockscoutSource, TokenBalance
-from .transactions import (
-    BlockscoutTransactionSource, Transaction, TransactionSource, TxDirection,
-)
+from .tokens_plugin import TokensPlugin
+from .transactions import Transaction, TxDirection
+from .transactions_plugin import TransactionsPlugin
 from .wallet_cache import CachedWallet, WalletCache
 
 
@@ -1007,36 +1008,6 @@ KNOWN_SELECTORS: dict[str, str] = {
 }
 
 
-class TransactionsWorker(QThread):
-    """Fetch the recent transactions for (chain, address) via the
-    configured TransactionSource. Emits ``fetched(chain_id, address_lower,
-    list[Transaction])`` on success, ``failed(msg)`` on error."""
-
-    # See BalanceWorker.refreshed: the list contains ints (wei) that
-    # would overflow PySide6's qint64 marshaler if declared `list`.
-    fetched = Signal(int, str, object)
-    failed = Signal(str)
-
-    def __init__(self, source: TransactionSource, chain, address: str,
-                 limit: int = 50, parent=None):
-        super().__init__(parent)
-        self.source = source
-        self.chain = chain
-        self.address = address
-        self.limit = limit
-
-    def run(self) -> None:
-        try:
-            txs = self.source.list_transactions(
-                self.chain, self.address, limit=self.limit,
-            )
-            self.fetched.emit(
-                self.chain.chain_id, self.address.lower(), txs,
-            )
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
 class TransactionListPanel(QWidget):
     """Right pane / Transactions tab: top-level txs for the selected
     account, newest first. Double-click opens the tx in the block
@@ -1235,12 +1206,11 @@ class MainWindow(QMainWindow):
         self._token_metadata = TokenMetadataCache()
         self._risk_source = GoPlusRisk()
         self._risk_cache = RiskCache()
-        # Transaction history is fetched lazily (only when the Transactions
-        # tab is the active one). In-memory cache for now; disk-backed
-        # cache is the natural follow-up.
-        self._tx_source: TransactionSource = BlockscoutTransactionSource()
-        self._tx_cache: dict[tuple[int, str], list[Transaction]] = {}
-        self._tx_in_flight: set[tuple[int, str]] = set()
+        # Topic plugins for the right pane. The data sources / caches
+        # for transactions live inside the plugin now (step 2 of the
+        # refactor); tokens still leans on MainWindow methods (step 3).
+        self.tokens_plugin = TokensPlugin(self.store, self._icon_cache)
+        self.transactions_plugin = TransactionsPlugin()
         self._show_all = False
         # (chain_id, address_lower) the panel currently shows; used to
         # skip needless show_cached rebuilds on subsequent refresh calls
@@ -1425,54 +1395,23 @@ class MainWindow(QMainWindow):
         lv.addWidget(left, 1)
         outer.addWidget(left_container)
 
-        # Right half: tabs for Tokens / Transactions, with the chain
-        # selector pinned to the bottom-right of the pane (outside the
-        # tabs so it stays visible regardless of which one is active).
-        self.token_panel = TokenListPanel(self._icon_cache, self.store)
+        # Right half: a Slot that hosts the Tokens and Transactions
+        # plugins. The slot draws the tab bar at Y=0, swaps the active
+        # plugin's action widgets on the bottom-left, and keeps the
+        # chain selector pinned on the bottom-right as a shared widget.
+        self.right_slot = Slot()
+        self.right_slot.add_plugin(self.tokens_plugin, self)
+        self.right_slot.add_plugin(self.transactions_plugin, self)
+        # Wire token-panel signals that still terminate in MainWindow.
+        # Step 3 will move these into TokensPlugin proper.
         self.token_panel.hide_requested.connect(self._on_hide_token)
         self.token_panel.pin_requested.connect(self._on_pin_token)
         self.token_panel.add_custom_requested.connect(self._on_add_custom_token)
         self.token_panel.show_all_toggled.connect(self._on_show_all_toggled)
 
-        self.tx_panel = TransactionListPanel()
-
-        # QTabBar + QStackedWidget instead of QTabWidget: a QTabWidget
-        # adds style-dependent vertical padding above its tab bar that
-        # stylesheets can't reliably zero out (visible as a gap above
-        # the bar vs. the left pane's tree header). Doing it manually
-        # lets us pin the bar to Y=0 of the right pane.
-        self.right_tab_bar = QTabBar()
-        self.right_tab_bar.setDocumentMode(True)
-        self.right_tab_bar.setExpanding(False)
-        self.right_tab_bar.addTab("Tokens")
-        self.right_tab_bar.addTab("Transactions")
-
-        self.right_stack = QStackedWidget()
-        self.right_stack.addWidget(self.token_panel)
-        self.right_stack.addWidget(self.tx_panel)
-        self.right_tab_bar.currentChanged.connect(self.right_stack.setCurrentIndex)
-        self.right_tab_bar.currentChanged.connect(self._on_right_tab_changed)
-
         self.chain_combo = self._build_chain_combo()
-
-        right_container = QWidget()
-        rv = QVBoxLayout(right_container)
-        rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(0)
-        rv.addWidget(self.right_tab_bar)
-        rv.addWidget(self.right_stack, 1)
-        # Shared bottom row: token-action buttons on the left, chain
-        # selector on the right. The token actions stay enabled across
-        # both tabs — harmless when the user is on Transactions, and it
-        # avoids burning a second row for what fits in one.
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(4, 2, 4, 4)
-        for b in self.token_panel.action_widgets():
-            bottom.addWidget(b)
-        bottom.addStretch(1)
-        bottom.addWidget(self.chain_combo)
-        rv.addLayout(bottom)
-        outer.addWidget(right_container)
+        self.right_slot.add_shared_widget(self.chain_combo)
+        outer.addWidget(self.right_slot)
 
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 1)
@@ -1557,12 +1496,10 @@ class MainWindow(QMainWindow):
                 self.details.show_account(
                     acct, is_default=(addrs[0] == self.store.default_account)
                 )
-                self._refresh_tokens(addrs[0])
-                self._maybe_refresh_transactions(addrs[0])
+                self.right_slot.broadcast_account_changed(addrs[0])
                 return
         self.details.clear()
-        self.token_panel.clear()
-        self.tx_panel.clear()
+        self.right_slot.broadcast_account_changed(None)
         self._displayed_view = None
 
     def _refresh_tokens(self, address: str) -> None:
@@ -1870,6 +1807,46 @@ class MainWindow(QMainWindow):
         out.sort(key=_value, reverse=True)
         return out
 
+    # --- Host protocol (consumed by plugins via plugin.attach) -----------
+
+    @property
+    def selected_address(self) -> "str | None":
+        """The single currently-selected wallet address, or None when
+        zero or multiple are selected. Plugins read this to drive
+        per-account refresh logic."""
+        addrs = self._selected_addresses()
+        return addrs[0] if len(addrs) == 1 else None
+
+    def current_chain(self):
+        """The Chain currently picked by the user."""
+        return self.store.current_chain()
+
+    def start_worker(self, worker: QThread) -> QThread:
+        """Public entry point for plugins to start a QThread; the
+        worker is tracked so Python doesn't GC it while it runs."""
+        return self._start_worker(worker)
+
+    def status_message(self, text: str, timeout_ms: int = 3000) -> None:
+        """Show a transient message in the status bar."""
+        self.statusBar().showMessage(text, timeout_ms)
+
+    # Transitional: TokensPlugin's lifecycle hooks defer back here.
+    # Step 3 will move the implementation into the plugin and drop this.
+    def refresh_tokens(self, address: str) -> None:
+        self._refresh_tokens(address)
+
+    # --- transitional aliases (used by tests and legacy MainWindow code).
+    # Once both plugins are fully self-contained, MainWindow stops
+    # poking at the panels directly and these can be removed.
+
+    @property
+    def token_panel(self):
+        return self.tokens_plugin.widget()
+
+    @property
+    def tx_panel(self):
+        return self.transactions_plugin.widget()
+
     def _start_worker(self, worker: QThread) -> QThread:
         """Track a worker so it isn't garbage-collected while running."""
         self._active_workers.add(worker)
@@ -2116,81 +2093,7 @@ class MainWindow(QMainWindow):
         if cid is not None:
             self.store.set_current_chain(int(cid))
             self._refresh_status()
-            addrs = self._selected_addresses()
-            if len(addrs) == 1:
-                self._refresh_tokens(addrs[0])
-                self._maybe_refresh_transactions(addrs[0])
-
-    def _on_right_tab_changed(self, index: int) -> None:
-        """Lazy-load: only fetch transactions when the user actually
-        switches to the Transactions tab (avoids one HTTP call per
-        account-click while the user is browsing balances)."""
-        if self.right_stack.widget(index) is self.tx_panel:
-            addrs = self._selected_addresses()
-            if len(addrs) == 1:
-                self._maybe_refresh_transactions(addrs[0])
-
-    def _maybe_refresh_transactions(self, address: str) -> None:
-        """Render cached transactions immediately (if any) and kick a
-        background fetch when the Transactions tab is currently visible
-        and we're not already refreshing this (chain, address) view."""
-        chain = self.store.current_chain()
-        key = (chain.chain_id, address.lower())
-        is_active = self.right_stack.currentWidget() is self.tx_panel
-
-        self.tx_panel.set_context(chain, address)
-        cached = self._tx_cache.get(key)
-        if cached is not None:
-            self.tx_panel.show_transactions(cached)
-        elif is_active:
-            self.tx_panel.show_loading()
-
-        # Background fetch only when the tab is visible — otherwise we'd
-        # be making Blockscout calls the user never asked for. The cache
-        # warms only after the user explicitly views the tab.
-        if not is_active:
-            return
-        if not self._tx_source.supports(chain):
-            self.tx_panel.show_error(
-                f"Transactions aren't available for {chain.name}."
-            )
-            return
-        if key in self._tx_in_flight:
-            return
-        self._tx_in_flight.add(key)
-
-        worker = TransactionsWorker(self._tx_source, chain, address)
-        worker.fetched.connect(self._on_transactions_fetched)
-        worker.failed.connect(
-            lambda msg, k=key: self._on_transactions_failed(k, msg)
-        )
-        self._start_worker(worker)
-
-    def _on_transactions_fetched(self, chain_id: int, address_lower: str,
-                                 txs: list) -> None:
-        key = (chain_id, address_lower)
-        self._tx_in_flight.discard(key)
-        self._tx_cache[key] = txs
-        # Only repaint if the user still has this view selected — they
-        # may have clicked another account or chain while we were
-        # waiting on Blockscout.
-        addrs = self._selected_addresses()
-        if len(addrs) != 1 or addrs[0].lower() != address_lower:
-            return
-        if self.store.current_chain_id != chain_id:
-            return
-        self.tx_panel.show_transactions(txs)
-
-    def _on_transactions_failed(self, key: tuple[int, str], msg: str) -> None:
-        self._tx_in_flight.discard(key)
-        addrs = self._selected_addresses()
-        if (
-            len(addrs) == 1
-            and addrs[0].lower() == key[1]
-            and self.store.current_chain_id == key[0]
-            and self.right_stack.currentWidget() is self.tx_panel
-        ):
-            self.tx_panel.show_error(msg)
+            self.right_slot.broadcast_chain_changed()
 
     def _set_default(self, address: str) -> None:
         self.store.set_default_account(address)

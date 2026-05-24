@@ -39,28 +39,57 @@ log = logging.getLogger("qeth.plugin.transactions")
 
 
 class TransactionsWorker(QThread):
-    """Fetch the recent transactions for (chain, address) via the
-    configured TransactionSource."""
+    """Walk every page of a wallet's tx history via the configured
+    TransactionSource, emitting each page as it arrives so the UI can
+    render incrementally (newest first, growing as we paginate).
+
+    Early-exits when a page contains a hash already in the caller's
+    ``known_hashes`` set — that's how repeated runs stay fast: the
+    first page typically overlaps prior history, the merge handles
+    dedup, and we stop without walking the entire chain history.
+
+    A small inter-page sleep is polite to Blockscout's rate limit;
+    ``max_pages`` is a runaway guard for accounts with very deep
+    history (e.g. validator-payout addresses)."""
 
     # Object signal carries Python objects (avoids qint64 marshalling).
-    fetched = Signal(int, str, object)
+    page_fetched = Signal(int, str, object)   # chain_id, addr_lower, page
+    completed = Signal(int, str)              # chain_id, addr_lower
     failed = Signal(str)
 
     def __init__(self, source: TransactionSource, chain, address: str,
-                 limit: int = 50, parent=None):
+                 known_hashes=None, page_size: int = 50,
+                 max_pages: int = 200, page_pause_s: float = 0.2,
+                 parent=None):
         super().__init__(parent)
         self.source = source
         self.chain = chain
         self.address = address
-        self.limit = limit
+        self.known_hashes = set(known_hashes or ())
+        self.page_size = page_size
+        self.max_pages = max_pages
+        self.page_pause_s = page_pause_s
 
     def run(self) -> None:
         try:
-            txs = self.source.list_transactions(
-                self.chain, self.address, limit=self.limit,
-            )
-            self.fetched.emit(
-                self.chain.chain_id, self.address.lower(), txs,
+            for page_idx in range(1, self.max_pages + 1):
+                page = self.source.list_transactions(
+                    self.chain, self.address,
+                    page=page_idx, limit=self.page_size,
+                )
+                if not page:
+                    break
+                self.page_fetched.emit(
+                    self.chain.chain_id, self.address.lower(), page,
+                )
+                # Caught up: this page already contains entries we have
+                # cached, so anything further is also cached.
+                if any(t.hash in self.known_hashes for t in page):
+                    break
+                if page_idx < self.max_pages and self.page_pause_s > 0:
+                    self.msleep(int(self.page_pause_s * 1000))
+            self.completed.emit(
+                self.chain.chain_id, self.address.lower(),
             )
         except Exception as e:
             self.failed.emit(str(e))
@@ -189,27 +218,37 @@ class TransactionsPlugin(Plugin):
             return
         self._in_flight.add(key)
 
-        worker = TransactionsWorker(self._source, chain, address)
-        worker.fetched.connect(self._on_fetched)
+        # Pass the currently-known hashes so the worker can early-exit
+        # once it walks back into territory we've already cached. On
+        # the very first run this set is empty and the worker paginates
+        # to the wallet's full history (or max_pages, whichever is
+        # smaller).
+        known = {t.hash for t in (cached or [])}
+        worker = TransactionsWorker(
+            self._source, chain, address, known_hashes=known,
+        )
+        worker.page_fetched.connect(self._on_page_fetched)
+        worker.completed.connect(
+            lambda _cid, _addr, k=key: self._in_flight.discard(k)
+        )
         worker.failed.connect(
             lambda msg, k=key: self._on_failed(k, msg)
         )
         self.host.start_worker(worker)
 
-    def _on_fetched(self, chain_id: int, address_lower: str,
-                    txs: list) -> None:
+    def _on_page_fetched(self, chain_id: int, address_lower: str,
+                         page: list) -> None:
+        """One page of newest-first transactions arrived. Merge it into
+        the cache, save, and re-render — so the list grows as pages
+        come in instead of waiting for the whole backfill to finish."""
         key = (chain_id, address_lower)
-        self._in_flight.discard(key)
-        # Merge with whatever the cache already holds — the fetch only
-        # returns the most-recent window (limit=50), but the cache from
-        # prior runs may contain older transactions that aren't in this
-        # page. merge_txs dedupes by hash and re-sorts newest-first.
         existing = self._cache.get(key) or []
-        merged = merge_txs(txs, existing)
+        merged = merge_txs(page, existing)
         self._cache[key] = merged
+        # Persist after every page so an interrupted backfill leaves
+        # the disk cache holding everything we did fetch.
         self._disk_cache.save(chain_id, address_lower, merged)
-        # Only repaint if the user still has this view selected — they
-        # may have clicked another account/chain while we waited.
+        # Only repaint if the user still has this view selected.
         if self.host is None:
             return
         addr = self.host.selected_address

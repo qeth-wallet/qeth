@@ -81,16 +81,17 @@ class UnsupportedChain(TransactionSourceError):
 class TransactionSource(ABC):
     """A backend that lists transactions for an address on a chain.
 
-    Returns newest-first. ``before_block`` is exclusive — pass the
-    oldest block already seen to paginate further into the past.
-    """
+    Returns newest-first within each page. Pagination is by 1-based
+    page index plus a per-page ``limit`` — avoids the block-boundary
+    edge case that a block-cursor strategy has when several txs from
+    a single wallet land in the same block."""
 
     @abstractmethod
     def list_transactions(
         self,
         chain: Chain,
         address: str,
-        before_block: Optional[int] = None,
+        page: int = 1,
         limit: int = 50,
     ) -> list[Transaction]:
         ...
@@ -184,7 +185,7 @@ class BlockscoutTransactionSource(TransactionSource):
         self,
         chain: Chain,
         address: str,
-        before_block: Optional[int] = None,
+        page: int = 1,
         limit: int = 50,
     ) -> list[Transaction]:
         base = self.instances.get(chain.chain_id)
@@ -197,12 +198,9 @@ class BlockscoutTransactionSource(TransactionSource):
             ("action", "txlist"),
             ("address", address),
             ("sort", "desc"),
-            ("page", "1"),
+            ("page", str(max(1, int(page)))),
             ("offset", str(max(1, int(limit)))),
         ]
-        if before_block is not None:
-            # endblock is inclusive; subtract one for an exclusive cursor.
-            params.append(("endblock", str(int(before_block) - 1)))
         url = f"{base.rstrip('/')}/api?" + urllib.parse.urlencode(params)
         raw = self._transport(url, self.timeout)
         data = json.loads(raw)

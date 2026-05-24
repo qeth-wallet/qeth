@@ -150,7 +150,7 @@ class TestTransactionsPlugin:
                 method_id="", input_data="0x", success=True,
             )
         ]
-        plugin._on_fetched(ETH.chain_id, ADDR.lower(), new_only)
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), new_only)
 
         merged = plugin._cache[(ETH.chain_id, ADDR.lower())]
         # Both entries present, newer first.
@@ -175,13 +175,72 @@ class TestTransactionsPlugin:
                 success=True,
             )
         ]
-        plugin._on_fetched(ETH.chain_id, ADDR.lower(), fetched)
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), fetched)
 
         # On disk now — a fresh TransactionCache instance can read it.
         reloaded = TransactionCache().load(ETH.chain_id, ADDR)
         assert reloaded is not None
         assert len(reloaded) == 1
         assert reloaded[0].hash == fetched[0].hash
+
+    def test_paginating_worker_early_exits_on_known_hash(self, qtbot, tmp_qeth):
+        """TransactionsWorker walks pages newest-first and stops the
+        moment one of them contains a hash from ``known_hashes``. This
+        is what keeps subsequent runs cheap: the cache has prior
+        history, the worker fetches page 1, sees the overlap, and
+        doesn't walk the full chain."""
+        from qeth.plugins.transactions import TransactionsWorker
+
+        def _mk(hash_suffix: str, nonce: int) -> Transaction:
+            return Transaction(
+                chain_id=1, hash="0x" + hash_suffix * 32,
+                block_number=nonce, timestamp=nonce,
+                nonce=nonce, from_addr=ADDR, to_addr="0xbeef",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+
+        page1 = [_mk("aa", 5), _mk("bb", 4), _mk("cc", 3)]   # all new
+        page2 = [_mk("dd", 2), _mk("known", 1)]              # overlap
+        page3 = [_mk("ee", 0)]                               # not reached
+
+        class _FakeSource:
+            def __init__(self):
+                self.calls: list[int] = []
+
+            def supports(self, _chain):
+                return True
+
+            def list_transactions(self, chain, address, page=1, limit=50):
+                self.calls.append(page)
+                if page == 1:
+                    return page1
+                if page == 2:
+                    return page2
+                return page3
+
+        source = _FakeSource()
+        worker = TransactionsWorker(
+            source, ETH, ADDR,
+            known_hashes={"0x" + "known" * 32}, page_pause_s=0,
+        )
+        emitted: list[list[Transaction]] = []
+        worker.page_fetched.connect(
+            lambda _cid, _addr, p: emitted.append(list(p))
+        )
+        completed: list[tuple] = []
+        worker.completed.connect(
+            lambda cid, addr: completed.append((cid, addr))
+        )
+
+        # Run synchronously so the test doesn't race the QThread.
+        worker.run()
+
+        assert source.calls == [1, 2]   # page 3 never fetched
+        assert len(emitted) == 2
+        assert emitted[0] == page1
+        assert emitted[1] == page2
+        assert completed == [(1, ADDR.lower())]
 
     def test_unsupported_chain_shows_error_when_activated(self, qtbot, tmp_qeth):
         from qeth.chains import Chain

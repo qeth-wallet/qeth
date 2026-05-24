@@ -29,11 +29,12 @@ def test_blockscout_returns_recent_txs():
 
 def test_pagination_returns_older_page():
     src = BlockscoutTransactionSource()
-    first = src.list_transactions(ETH, ACTIVE, limit=3)
+    first = src.list_transactions(ETH, ACTIVE, page=1, limit=3)
     assert len(first) == 3
-    older = src.list_transactions(
-        ETH, ACTIVE, before_block=first[-1].block_number, limit=3,
-    )
-    # Every entry in the older page must be strictly before the cursor.
-    for tx in older:
-        assert tx.block_number < first[-1].block_number
+    older = src.list_transactions(ETH, ACTIVE, page=2, limit=3)
+    # Pages 1 and 2 must not overlap by hash; page 2 must be strictly
+    # older or equal in block number to page 1's last entry.
+    page1_hashes = {tx.hash for tx in first}
+    assert all(tx.hash not in page1_hashes for tx in older)
+    if older:
+        assert older[0].block_number <= first[-1].block_number

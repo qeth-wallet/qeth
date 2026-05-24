@@ -184,14 +184,16 @@ class TestBlockscoutSource:
         assert "offset=1" in urls[0]
         assert "endblock=" not in urls[0]   # no pagination cursor
 
-    def test_before_block_paginates(self):
+    def test_page_index_passes_through(self):
         urls = []
         src = BlockscoutTransactionSource(
             transport=_fake_transport({"status": "1", "result": []}, urls),
         )
-        src.list_transactions(ETH, ADDR, before_block=100, limit=10)
-        # endblock is exclusive: before_block=100 → endblock=99
-        assert "endblock=99" in urls[0]
+        src.list_transactions(ETH, ADDR, page=3, limit=10)
+        # Walks page-by-page; the URL must carry the page index that
+        # the worker asked for.
+        assert "page=3" in urls[0]
+        assert "offset=10" in urls[0]
 
     def test_no_transactions_is_empty_not_error(self):
         urls = []

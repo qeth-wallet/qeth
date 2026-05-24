@@ -435,12 +435,16 @@ class TestTransactionsPlugin:
         })
         text = edit.toPlainText()
         lines = text.splitlines()
-        # Layout: register(\n  data: tuple = {\n    label: …\n    secret: …\n  },\n)
+        # Layout: function(\n   …last child without trailing comma\n   …\n)
         assert lines[0] == "register("
         assert lines[1] == "    data: tuple = {"
-        assert lines[2].startswith('        label: string = "qeth"')
+        # First child has a comma; last child does not. The closing
+        # brace also has no trailing comma because data is the last
+        # (and only) top-level arg.
+        assert lines[2] == '        label: string = "qeth",'
         assert lines[3].startswith("        secret: bytes32 = 0x99")
-        assert lines[4] == "    },"
+        assert not lines[3].endswith(",")
+        assert lines[4] == "    }"
         assert lines[5] == ")"
 
     def test_double_click_opens_details_dialog(self, qtbot, tmp_qeth):

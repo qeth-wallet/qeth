@@ -136,16 +136,25 @@ def _render_decoded(text_edit, decoded: dict) -> None:
 
     cursor.insertText(decoded.get("function") or "?", bold)
     cursor.insertText("(\n", base)
-    for arg in decoded.get("args") or []:
-        _insert_arg(cursor, arg, indent=1, formats=formats)
+    args = decoded.get("args") or []
+    for i, arg in enumerate(args):
+        _insert_arg(
+            cursor, arg, indent=1, formats=formats,
+            last=(i == len(args) - 1),
+        )
     cursor.insertText(")", base)
 
 
-def _insert_arg(cursor, arg: dict, *, indent: int, formats) -> None:
-    """Write one ``arg`` node (leaf or struct branch) into the
-    document at the current cursor, indented to ``indent`` levels."""
+def _insert_arg(cursor, arg: dict, *, indent: int, formats,
+                last: bool) -> None:
+    """Write one ``arg`` node (leaf or struct branch) at the current
+    cursor, indented to ``indent`` levels. ``last`` controls the
+    trailing punctuation: non-final entries get a comma, the last
+    in any group just gets a newline (Python-style without trailing
+    commas)."""
     base, type_fmt, value_fmt = formats
     pad = "    " * indent
+    tail = "\n" if last else ",\n"
     cursor.insertText(pad + (arg.get("name") or "") + ": ", base)
     cursor.insertText(arg.get("type") or "", type_fmt)
     cursor.insertText(" = ", base)
@@ -153,15 +162,18 @@ def _insert_arg(cursor, arg: dict, *, indent: int, formats) -> None:
     if children is not None:
         if children:
             cursor.insertText("{\n", base)
-            for child in children:
-                _insert_arg(cursor, child, indent=indent + 1, formats=formats)
-            cursor.insertText(pad + "},\n", base)
+            for j, child in enumerate(children):
+                _insert_arg(
+                    cursor, child, indent=indent + 1, formats=formats,
+                    last=(j == len(children) - 1),
+                )
+            cursor.insertText(pad + "}" + tail, base)
         else:
-            cursor.insertText("{},\n", base)
+            cursor.insertText("{}" + tail, base)
     else:
         value = arg.get("value")
         cursor.insertText("" if value is None else str(value), value_fmt)
-        cursor.insertText(",\n", base)
+        cursor.insertText(tail, base)
 
 
 def _is_full_history(txs: list[Transaction]) -> bool:

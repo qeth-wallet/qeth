@@ -278,17 +278,16 @@ class TransactionListPanel(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._open_in_explorer)
         h = self.table.horizontalHeader()
-        # Status / Nonce / Time are kept narrow (just-enough to fit
-        # content); Hash stretches to fill the rest, but its rendered
-        # text is the short 0x1234…abcd form so the cell looks padded
-        # rather than full-bleed.
-        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Status
-        h.setSectionResizeMode(1, QHeaderView.Interactive)  # Nonce
-        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Time
-        h.setSectionResizeMode(3, QHeaderView.Stretch)      # Hash
-        for col, width in enumerate((28, 60, 150, 0)):
-            if width:
-                h.resizeSection(col, width)
+        # Status / Nonce / Time auto-fit content (no user-drag — there's
+        # nothing meaningful to widen them to). Hash stretches to fill
+        # the remaining space; its rendered text is the short
+        # 0x1234…abcd form, so the wider cell looks padded rather than
+        # full-bleed. Stretch + ResizeToContents together also mean
+        # there's no empty trailing space after Hash.
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Status
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Nonce
+        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Time
+        h.setSectionResizeMode(3, QHeaderView.Stretch)           # Hash
         v.addWidget(self.table, 1)
 
         # The empty-state / loading / error label sits stacked under the

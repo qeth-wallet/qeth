@@ -97,12 +97,11 @@ class MainWindow(QMainWindow):
 
     def _header_persisters(self) -> dict:
         """Plugins whose panel layouts we persist across runs.
-        Wallets has its own tree (not a QTableWidget), so it's not
-        included here. The keys are opaque storage keys, not user-
-        facing."""
+        Wallets uses a tree (not a QTableWidget); Transactions uses
+        auto-sizing modes (no user-drag, nothing to remember). Only
+        the Tokens panel has interactive widths worth persisting."""
         return {
             "tokens": self.tokens_plugin,
-            "transactions": self.transactions_plugin,
         }
 
     def closeEvent(self, event):

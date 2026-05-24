@@ -23,11 +23,10 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..chain import wei_to_ether
 from ..formatting import format_datetime as _format_datetime
 from ..formatting import short_addr as _short_addr
 from ..plugin import Plugin
@@ -237,22 +236,7 @@ class TransactionsPlugin(Plugin):
         self._panel.show_error(msg)
 
 
-# --- panel + selector map (moved from qeth.ui) -----------------------------
-
-KNOWN_SELECTORS: dict[str, str] = {
-    "0xa9059cbb": "transfer",
-    "0x23b872dd": "transferFrom",
-    "0x095ea7b3": "approve",
-    "0xd0e30db0": "deposit",
-    "0x2e1a7d4d": "withdraw",
-    "0x7ff36ab5": "swapExactETHForTokens",
-    "0x18cbafe5": "swapExactTokensForETH",
-    "0x38ed1739": "swapExactTokensForTokens",
-    "0x5ae401dc": "multicall",
-    "0xac9650d8": "multicall",
-}
-
-
+# --- panel ----------------------------------------------------------------
 
 
 class TransactionListPanel(QWidget):
@@ -265,10 +249,11 @@ class TransactionListPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["Nonce", "When", "Counterparty", "Value", "Method", "Status"]
-        )
+        # Status / Nonce / Time / Hash. The Status column has an empty
+        # label — the ✓/✗ glyph speaks for itself, and dropping the word
+        # "Status" lets the column be tight against the left edge.
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["", "Nonce", "Time", "Hash"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -293,20 +278,15 @@ class TransactionListPanel(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._open_in_explorer)
         h = self.table.horizontalHeader()
-        # Interactive = user can drag the column edge. ResizeToContents
-        # is auto-sizing only, which silently blocks user resize, so we
-        # use it nowhere here. The Method column is left as Stretch so
-        # widening the window fills the gap rather than leaving a void
-        # to the right of the table.
-        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Nonce
-        h.setSectionResizeMode(1, QHeaderView.Interactive)  # When
-        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Counterparty
-        h.setSectionResizeMode(3, QHeaderView.Interactive)  # Value
-        h.setSectionResizeMode(4, QHeaderView.Stretch)      # Method
-        h.setSectionResizeMode(5, QHeaderView.Interactive)  # Status
-        # Sensible default widths. restoreState() (if a saved layout
-        # exists) overrides these.
-        for col, width in enumerate((60, 90, 150, 140, 0, 60)):
+        # Status / Nonce / Time are kept narrow (just-enough to fit
+        # content); Hash stretches to fill the rest, but its rendered
+        # text is the short 0x1234…abcd form so the cell looks padded
+        # rather than full-bleed.
+        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Status
+        h.setSectionResizeMode(1, QHeaderView.Interactive)  # Nonce
+        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Time
+        h.setSectionResizeMode(3, QHeaderView.Stretch)      # Hash
+        for col, width in enumerate((28, 60, 150, 0)):
             if width:
                 h.resizeSection(col, width)
         v.addWidget(self.table, 1)
@@ -374,76 +354,49 @@ class TransactionListPanel(QWidget):
         self.status_lbl.setVisible(False)
         self.table.setRowCount(len(txs))
         viewer = (self._viewer or "").lower()
-        symbol = self._chain.symbol if self._chain else "ETH"
         for row, tx in enumerate(txs):
             direction = tx.direction(viewer) if viewer else TxDirection.UNRELATED
 
-            # Nonce column holds the row's hash on UserRole so the
-            # explorer-open / context-menu code (which reads column 0)
-            # finds it without depending on the column order.
+            status = QTableWidgetItem("✓" if tx.success else "✗")
+            status.setTextAlignment(Qt.AlignCenter)
+            status.setToolTip("Success" if tx.success else "Reverted")
+
             nonce = QTableWidgetItem(str(tx.nonce))
             nonce.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            nonce.setData(Qt.UserRole, tx.hash)
             if direction != TxDirection.SENT:
                 # The nonce of a received tx is the *sender's* nonce,
                 # not ours — surface that in the tooltip so the column
                 # isn't misread.
                 nonce.setToolTip("sender's nonce")
 
-            # Locale-formatted full date+time; the tooltip used to show
-            # the absolute time alongside a fuzzy "5 min ago" label, but
-            # now the cell itself is absolute so no extra tooltip needed.
-            when = QTableWidgetItem(_format_datetime(tx.timestamp))
+            time_item = QTableWidgetItem(_format_datetime(tx.timestamp))
 
-            if direction == TxDirection.SENT:
-                arrow, counterparty = "→", tx.to_addr
-            elif direction == TxDirection.RECEIVED:
-                arrow, counterparty = "←", tx.from_addr
-            elif direction == TxDirection.SELF:
-                arrow, counterparty = "↻", tx.to_addr
-            else:
-                arrow, counterparty = " ", tx.to_addr or tx.from_addr
-            cp = QTableWidgetItem(f"{arrow} {_short_addr(counterparty)}")
-            cp.setFont(QFont("monospace"))
-            cp.setToolTip(counterparty or "")
-            cp.setData(Qt.UserRole, counterparty)
+            # Hash column carries the full hash on UserRole (used by
+            # explorer-open / context-menu) and renders the truncated
+            # 0x1234…abcd form for display.
+            hash_item = QTableWidgetItem(_short_addr(tx.hash))
+            hash_item.setFont(QFont("monospace"))
+            hash_item.setToolTip(tx.hash)
+            hash_item.setData(Qt.UserRole, tx.hash)
 
-            if tx.value_wei:
-                # Native amounts are wei → ether through Decimal (never
-                # float — see CLAUDE.md on-chain math rule).
-                ether = wei_to_ether(tx.value_wei)
-                value_text = f"{ether:.6f} {symbol}"
-            else:
-                value_text = "—"
-            val = QTableWidgetItem(value_text)
-            val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 0, status)
+            self.table.setItem(row, 1, nonce)
+            self.table.setItem(row, 2, time_item)
+            self.table.setItem(row, 3, hash_item)
 
-            method_label = KNOWN_SELECTORS.get(tx.method_id, tx.method_id or "—")
-            method = QTableWidgetItem(method_label)
-            if tx.method_id and method_label != tx.method_id:
-                method.setToolTip(tx.method_id)
-
-            status = QTableWidgetItem("✓" if tx.success else "✗")
-            status.setTextAlignment(Qt.AlignCenter)
-            status.setToolTip("Success" if tx.success else "Reverted")
-
-            self.table.setItem(row, 0, nonce)
-            self.table.setItem(row, 1, when)
-            self.table.setItem(row, 2, cp)
-            self.table.setItem(row, 3, val)
-            self.table.setItem(row, 4, method)
-            self.table.setItem(row, 5, status)
+    # Column 3 (Hash) carries the full tx hash on UserRole. The
+    # explorer-open and context-menu handlers read it from there.
 
     def _selected_hash(self) -> str | None:
         items = self.table.selectedItems()
         if not items:
             return None
-        return self.table.item(items[0].row(), 0).data(Qt.UserRole)
+        return self.table.item(items[0].row(), 3).data(Qt.UserRole)
 
     def _open_in_explorer(self, row: int, col: int) -> None:
         if self._chain is None or not self._chain.explorer:
             return
-        h = self.table.item(row, 0).data(Qt.UserRole)
+        h = self.table.item(row, 3).data(Qt.UserRole)
         if not h:
             return
         url = f"{self._chain.explorer.rstrip('/')}/tx/{h}"
@@ -454,20 +407,13 @@ class TransactionListPanel(QWidget):
         if item is None:
             return
         row = item.row()
-        # Nonce cell (col 0) carries the hash on UserRole; Counterparty
-        # cell (col 2) carries the full counterparty address.
-        h = self.table.item(row, 0).data(Qt.UserRole)
-        cp = self.table.item(row, 2).data(Qt.UserRole)
+        h = self.table.item(row, 3).data(Qt.UserRole)
         menu = QMenu(self)
         act_open = menu.addAction("Open in block explorer")
         act_open.setEnabled(bool(self._chain and self._chain.explorer and h))
         act_copy_hash = menu.addAction("Copy tx hash")
-        act_copy_cp = menu.addAction("Copy counterparty address")
-        act_copy_cp.setEnabled(bool(cp))
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_open:
             self._open_in_explorer(row, 0)
         elif chosen is act_copy_hash and h:
             QApplication.clipboard().setText(h)
-        elif chosen is act_copy_cp and cp:
-            QApplication.clipboard().setText(cp)

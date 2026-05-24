@@ -158,51 +158,35 @@ class TestTransactionListPanel:
         assert "No transactions" in panel.status_lbl.text()
         assert panel.table.rowCount() == 0
 
-    def test_nonce_column_shows_tx_nonce(self, qtbot, tmp_qeth):
-        panel = TransactionListPanel()
-        qtbot.addWidget(panel)
-        panel.set_context(ETH, ADDR)
-        panel.show_transactions([_tx(nonce=42, to_addr="0xbeef")])
-        # Column 0 is Nonce, holding the integer formatted as a string.
-        assert panel.table.item(0, 0).text() == "42"
+    # Column layout: 0=Status, 1=Nonce, 2=Time, 3=Hash.
 
-    def test_sent_tx_shows_right_arrow(self, qtbot, tmp_qeth):
+    def test_columns_match_layout(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
         qtbot.addWidget(panel)
-        panel.set_context(ETH, ADDR)
-        panel.show_transactions([_tx(
-            to_addr="0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace",
-            value_wei=10**17, method_id="",
-        )])
-        assert panel.table.rowCount() == 1
-        # Columns after the Nonce-column insertion:
-        # 0=Nonce, 1=When, 2=Counterparty, 3=Value, 4=Method, 5=Status.
-        cp = panel.table.item(0, 2).text()
-        assert cp.startswith("→ ")
-        assert "0x5d6a" in cp
-        assert panel.table.item(0, 3).text() == "0.100000 ETH"
-        assert panel.table.item(0, 4).text() == "—"
+        # Status column has an empty header; the others use words.
+        labels = [
+            panel.table.horizontalHeaderItem(i).text()
+            for i in range(panel.table.columnCount())
+        ]
+        assert labels == ["", "Nonce", "Time", "Hash"]
 
-    def test_received_tx_shows_left_arrow(self, qtbot, tmp_qeth):
+    def test_status_nonce_and_hash_render(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
         qtbot.addWidget(panel)
         panel.set_context(ETH, ADDR)
-        panel.show_transactions([_tx(
-            from_addr="0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace",
-            to_addr=ADDR, value_wei=10**18,
-        )])
-        cp = panel.table.item(0, 2).text()
-        assert cp.startswith("← ")
-
-    def test_known_method_id_is_humanized(self, qtbot, tmp_qeth):
-        panel = TransactionListPanel()
-        qtbot.addWidget(panel)
-        panel.set_context(ETH, ADDR)
-        panel.show_transactions([_tx(
-            to_addr="0xdac17f958d2ee523a2206206994597c13d831ec7",
-            method_id="0xa9059cbb",
-        )])
-        assert panel.table.item(0, 4).text() == "transfer"
+        tx = _tx(nonce=42, to_addr="0xbeef", success=True)
+        panel.show_transactions([tx])
+        assert panel.table.item(0, 0).text() == "✓"
+        assert panel.table.item(0, 1).text() == "42"
+        # Time cell is locale-formatted — just assert non-empty rather
+        # than locking in a specific format string.
+        assert panel.table.item(0, 2).text()
+        # Hash cell shows the short 0x1234…abcd form; the full hash
+        # is stored on UserRole and used by the explorer-open path.
+        hash_cell = panel.table.item(0, 3)
+        assert "…" in hash_cell.text()
+        assert hash_cell.text().startswith("0x")
+        assert hash_cell.data(Qt.UserRole) == tx.hash
 
     def test_failed_tx_marked_with_cross(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
@@ -212,8 +196,22 @@ class TestTransactionListPanel:
             _tx(to_addr="0xbeef00000000000000000000000000000000beef", success=True),
             _tx(to_addr="0xbeef00000000000000000000000000000000beef", success=False),
         ])
-        assert panel.table.item(0, 5).text() == "✓"
-        assert panel.table.item(1, 5).text() == "✗"
+        assert panel.table.item(0, 0).text() == "✓"
+        assert panel.table.item(1, 0).text() == "✗"
+
+    def test_received_tx_marks_sender_nonce_in_tooltip(self, qtbot, tmp_qeth):
+        """The Nonce column is straightforward when it's the wallet's
+        own nonce. For received txs the column shows the sender's
+        nonce, which would be misleading without context — the tooltip
+        clarifies."""
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions([_tx(
+            from_addr="0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace",
+            to_addr=ADDR,
+        )])
+        assert "sender" in (panel.table.item(0, 1).toolTip() or "").lower()
 
     def test_clear_resets_panel(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()

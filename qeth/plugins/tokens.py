@@ -258,6 +258,17 @@ class TokensPlugin(Plugin):
             return []
         return self._panel.action_widgets()
 
+    # --- persistence shim ---------------------------------------------------
+
+    def header_state(self) -> str:
+        if self._panel is None:
+            return ""
+        return self._panel.header_state()
+
+    def restore_header_state(self, state_hex: str) -> None:
+        if self._panel is not None:
+            self._panel.restore_header_state(state_hex)
+
     def attach(self, host) -> None:
         super().attach(host)
         # 60-second background refresh against whatever view is on screen.
@@ -848,10 +859,16 @@ class TokenListPanel(QWidget):
         # off-then-on around a populate/update cycle.
         h = self.table.horizontalHeader()
         h.setSortIndicator(2, Qt.DescendingOrder)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(3, QHeaderView.Stretch)
+        # Interactive = user can drag the column edge. The Name column
+        # stays Stretch so widening the window fills the gap instead
+        # of leaving a void to the right.
+        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Symbol
+        h.setSectionResizeMode(1, QHeaderView.Interactive)  # Balance
+        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Value (USD)
+        h.setSectionResizeMode(3, QHeaderView.Stretch)      # Name
+        for col, width in enumerate((90, 120, 110, 0)):
+            if width:
+                h.resizeSection(col, width)
         v.addWidget(self.table, 1)
 
         # The +/-/★/👁 buttons are owned by this panel (so they can hook
@@ -927,6 +944,24 @@ class TokenListPanel(QWidget):
         """The +/-/★/👁 buttons, in display order. MainWindow mounts them
         on the shared bottom-right row beside the chain selector."""
         return [self.btn_add, self.btn_hide, self.btn_pin, self.btn_show_all]
+
+    def header_state(self) -> str:
+        """Hex-encoded QHeaderView.saveState() — captures column widths,
+        order, and the active sort indicator. Persisted by MainWindow."""
+        return bytes(
+            self.table.horizontalHeader().saveState().toHex()
+        ).decode()
+
+    def restore_header_state(self, state_hex: str) -> None:
+        if not state_hex:
+            return
+        try:
+            from PySide6.QtCore import QByteArray
+            self.table.horizontalHeader().restoreState(
+                QByteArray.fromHex(state_hex.encode())
+            )
+        except Exception:
+            pass
 
     # ---- displaying data -------------------------------------------------
 

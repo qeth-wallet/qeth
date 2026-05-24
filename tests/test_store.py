@@ -180,3 +180,27 @@ class TestCorruptConfig:
         # Falls back to constructor defaults rather than crashing
         assert s.accounts == []
         assert s.default_account is None
+
+
+class TestHeaderStates:
+    def test_round_trip(self, tmp_qeth):
+        s1 = Store()
+        s1.set_header_state("tokens", "abcd1234")
+        s1.set_header_state("transactions", "5678ef")
+        s2 = Store.load()
+        assert s2.get_header_state("tokens") == "abcd1234"
+        assert s2.get_header_state("transactions") == "5678ef"
+
+    def test_missing_key_returns_none(self, tmp_qeth):
+        s = Store()
+        assert s.get_header_state("tokens") is None
+
+    def test_empty_state_forgets_the_entry(self, tmp_qeth):
+        s = Store()
+        s.set_header_state("tokens", "abcd")
+        assert s.get_header_state("tokens") == "abcd"
+        s.set_header_state("tokens", "")
+        assert s.get_header_state("tokens") is None
+        # And the JSON file no longer carries it either.
+        s2 = Store.load()
+        assert s2.get_header_state("tokens") is None

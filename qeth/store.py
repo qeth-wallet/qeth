@@ -48,6 +48,10 @@ class Store:
         # token panel) and the inner vertical split (tree vs details).
         self.splitter_state_main: Optional[str] = None
         self.splitter_state_left: Optional[str] = None
+        # Per-panel header state (hex of QHeaderView.saveState()), keyed
+        # by an opaque panel name. Lets users drag columns to widths
+        # they prefer and have those persist across runs.
+        self.header_states: dict[str, str] = {}
 
     @classmethod
     def load(cls) -> "Store":
@@ -76,6 +80,12 @@ class Store:
             s.window_geometry = data.get("window_geometry")
             s.splitter_state_main = data.get("splitter_state_main")
             s.splitter_state_left = data.get("splitter_state_left")
+            raw_headers = data.get("header_states") or {}
+            if isinstance(raw_headers, dict):
+                s.header_states = {
+                    str(k): str(v) for k, v in raw_headers.items()
+                    if isinstance(v, str)
+                }
         return s
 
     def save(self) -> None:
@@ -96,6 +106,7 @@ class Store:
                 "window_geometry": self.window_geometry,
                 "splitter_state_main": self.splitter_state_main,
                 "splitter_state_left": self.splitter_state_left,
+                "header_states": dict(self.header_states),
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(data, indent=2))
@@ -191,4 +202,18 @@ class Store:
         with self._lock:
             self.splitter_state_main = main_hex
             self.splitter_state_left = left_hex
+        self.save()
+
+    def get_header_state(self, name: str) -> Optional[str]:
+        return self.header_states.get(name)
+
+    def set_header_state(self, name: str, state_hex: str) -> None:
+        """Persist the hex-encoded QHeaderView.saveState() for a panel.
+        Empty/falsy state is treated as "forget" so a panel that has
+        nothing useful to save doesn't leave a stale entry behind."""
+        with self._lock:
+            if state_hex:
+                self.header_states[name] = state_hex
+            else:
+                self.header_states.pop(name, None)
         self.save()

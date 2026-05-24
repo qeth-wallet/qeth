@@ -108,6 +108,17 @@ class TransactionsPlugin(Plugin):
     def action_widgets(self):
         return []
 
+    # --- persistence shim ---------------------------------------------------
+
+    def header_state(self) -> str:
+        if self._panel is None:
+            return ""
+        return self._panel.header_state()
+
+    def restore_header_state(self, state_hex: str) -> None:
+        if self._panel is not None:
+            self._panel.restore_header_state(state_hex)
+
     # --- lifecycle hooks ----------------------------------------------------
 
     def on_account_changed(self, address: Optional[str]) -> None:
@@ -284,12 +295,22 @@ class TransactionListPanel(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._open_in_explorer)
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Nonce
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # When
-        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Counterparty
-        h.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Value
-        h.setSectionResizeMode(4, QHeaderView.Stretch)           # Method
-        h.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Status
+        # Interactive = user can drag the column edge. ResizeToContents
+        # is auto-sizing only, which silently blocks user resize, so we
+        # use it nowhere here. The Method column is left as Stretch so
+        # widening the window fills the gap rather than leaving a void
+        # to the right of the table.
+        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Nonce
+        h.setSectionResizeMode(1, QHeaderView.Interactive)  # When
+        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Counterparty
+        h.setSectionResizeMode(3, QHeaderView.Interactive)  # Value
+        h.setSectionResizeMode(4, QHeaderView.Stretch)      # Method
+        h.setSectionResizeMode(5, QHeaderView.Interactive)  # Status
+        # Sensible default widths. restoreState() (if a saved layout
+        # exists) overrides these.
+        for col, width in enumerate((60, 90, 150, 140, 0, 60)):
+            if width:
+                h.resizeSection(col, width)
         v.addWidget(self.table, 1)
 
         # The empty-state / loading / error label sits stacked under the
@@ -307,6 +328,25 @@ class TransactionListPanel(QWidget):
     def set_context(self, chain, viewer_address: str) -> None:
         self._chain = chain
         self._viewer = viewer_address
+
+    def header_state(self) -> str:
+        """Hex-encoded QHeaderView.saveState() — captures column widths,
+        order, and any sort indicator. MainWindow persists this on close
+        and restores on startup."""
+        return bytes(
+            self.table.horizontalHeader().saveState().toHex()
+        ).decode()
+
+    def restore_header_state(self, state_hex: str) -> None:
+        if not state_hex:
+            return
+        try:
+            from PySide6.QtCore import QByteArray
+            self.table.horizontalHeader().restoreState(
+                QByteArray.fromHex(state_hex.encode())
+            )
+        except Exception:
+            pass
 
     def show_loading(self) -> None:
         self.table.setRowCount(0)

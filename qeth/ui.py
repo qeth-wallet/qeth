@@ -78,6 +78,22 @@ class MainWindow(QMainWindow):
             self.wallets_plugin.restore_splitter_state(
                 self.store.splitter_state_left
             )
+        # Restore each panel's column layout (widths, order, sort
+        # indicator) from the per-plugin map in the store.
+        for name, plugin in self._header_persisters().items():
+            saved = self.store.get_header_state(name)
+            if saved:
+                plugin.restore_header_state(saved)
+
+    def _header_persisters(self) -> dict:
+        """Plugins whose panel layouts we persist across runs.
+        Wallets has its own tree (not a QTableWidget), so it's not
+        included here. The keys are opaque storage keys, not user-
+        facing."""
+        return {
+            "tokens": self.tokens_plugin,
+            "transactions": self.transactions_plugin,
+        }
 
     def closeEvent(self, event):
         self.store.set_window_geometry(bytes(self.saveGeometry().toHex()).decode())
@@ -85,6 +101,10 @@ class MainWindow(QMainWindow):
             bytes(self._splitter_outer.saveState().toHex()).decode(),
             self.wallets_plugin.splitter_state(),
         )
+        for name, plugin in self._header_persisters().items():
+            state = plugin.header_state()
+            if state:
+                self.store.set_header_state(name, state)
         super().closeEvent(event)
 
     def _build_chain_combo(self) -> QComboBox:

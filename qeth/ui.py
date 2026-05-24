@@ -1,17 +1,18 @@
+import datetime
 import io
 import logging
 
 import segno
 
-from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
+from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QSpinBox, QSplitter, QStatusBar, QStyle, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QToolBar, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QTabBar, QToolButton,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from decimal import Decimal
@@ -24,6 +25,9 @@ from .risk import GoPlusRisk, RiskCache
 from .token_metadata import TokenMetadataCache
 from .tokenlists import TokenListEntry, TokenLists
 from .tokens import BlockscoutSource, TokenBalance
+from .transactions import (
+    BlockscoutTransactionSource, Transaction, TransactionSource, TxDirection,
+)
 from .wallet_cache import CachedWallet, WalletCache
 
 
@@ -432,7 +436,9 @@ def _is_scam_via_lists(lists, chain_id: int, b: TokenBalance,
 # tested without dragging in PySide6. Aliased here under their old
 # private names to keep the rest of this module unchanged.
 from .formatting import format_balance as _format_balance
+from .formatting import format_relative_time as _format_relative_time
 from .formatting import format_usd as _format_usd
+from .formatting import short_addr as _short_addr
 
 
 class _NumericItem(QTableWidgetItem):
@@ -531,13 +537,11 @@ class TokenListPanel(QWidget):
         h.setSectionResizeMode(3, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
-        # Bottom action row: + add custom, − remove (hide), pin (force
-        # show), spotlight (show all) on the left; chain selector (added
-        # by MainWindow via mount_right_widget) on the right. Theme icons
-        # with text fallback for systems without the freedesktop names.
-        self._action_row = action_row = QHBoxLayout()
-        action_row.setContentsMargins(4, 2, 4, 4)
-
+        # The +/-/★/👁 buttons are owned by this panel (so they can hook
+        # into table selection and the panel's signals) but NOT added to
+        # its layout — MainWindow places them on the shared bottom-right
+        # action row alongside the chain selector, so we don't waste two
+        # rows on what fits in one. ``action_widgets()`` exposes them.
         style = self.style()
         self.btn_add = QPushButton()
         self.btn_add.setIcon(QIcon.fromTheme("list-add",
@@ -581,9 +585,6 @@ class TokenListPanel(QWidget):
             b.setMaximumSize(28, 28)
             b.setIconSize(QSize(16, 16))
             b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            action_row.addWidget(b)
-        action_row.addStretch(1)
-        v.addLayout(action_row)
 
         self.btn_add.clicked.connect(self.add_custom_requested.emit)
         self.btn_hide.clicked.connect(
@@ -605,10 +606,10 @@ class TokenListPanel(QWidget):
         # high-risk verdicts (honeypot / hidden owner / >50% sell tax).
         self._risk_cache: "RiskCache | None" = None
 
-    def mount_right_widget(self, widget: QWidget) -> None:
-        """Append a widget to the right end of the bottom action row.
-        Used by MainWindow to dock the chain selector there."""
-        self._action_row.addWidget(widget)
+    def action_widgets(self) -> list[QWidget]:
+        """The +/-/★/👁 buttons, in display order. MainWindow mounts them
+        on the shared bottom-right row beside the chain selector."""
+        return [self.btn_add, self.btn_hide, self.btn_pin, self.btn_show_all]
 
     # ---- displaying data -------------------------------------------------
 
@@ -988,6 +989,228 @@ class TokenListPanel(QWidget):
             QApplication.clipboard().setText(addr)
 
 
+# --- Transaction history panel + worker -------------------------------------
+
+# Light decoding for the most common selectors. Anything not here renders
+# as the raw 10-char selector — better than guessing wrong on a name.
+KNOWN_SELECTORS: dict[str, str] = {
+    "0xa9059cbb": "transfer",
+    "0x23b872dd": "transferFrom",
+    "0x095ea7b3": "approve",
+    "0xd0e30db0": "deposit",
+    "0x2e1a7d4d": "withdraw",
+    "0x7ff36ab5": "swapExactETHForTokens",
+    "0x18cbafe5": "swapExactTokensForETH",
+    "0x38ed1739": "swapExactTokensForTokens",
+    "0x5ae401dc": "multicall",
+    "0xac9650d8": "multicall",
+}
+
+
+class TransactionsWorker(QThread):
+    """Fetch the recent transactions for (chain, address) via the
+    configured TransactionSource. Emits ``fetched(chain_id, address_lower,
+    list[Transaction])`` on success, ``failed(msg)`` on error."""
+
+    # See BalanceWorker.refreshed: the list contains ints (wei) that
+    # would overflow PySide6's qint64 marshaler if declared `list`.
+    fetched = Signal(int, str, object)
+    failed = Signal(str)
+
+    def __init__(self, source: TransactionSource, chain, address: str,
+                 limit: int = 50, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.chain = chain
+        self.address = address
+        self.limit = limit
+
+    def run(self) -> None:
+        try:
+            txs = self.source.list_transactions(
+                self.chain, self.address, limit=self.limit,
+            )
+            self.fetched.emit(
+                self.chain.chain_id, self.address.lower(), txs,
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class TransactionListPanel(QWidget):
+    """Right pane / Transactions tab: top-level txs for the selected
+    account, newest first. Double-click opens the tx in the block
+    explorer; right-click offers copy-hash / copy-counterparty."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["When", "Counterparty", "Value", "Method", "Status"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setShowGrid(False)
+        # Same selection/hover normalization as TokenListPanel.
+        self.table.setStyleSheet(
+            "QTableView::item {"
+            "  padding: 3px 6px;"
+            "  border: 0;"
+            "}"
+            "QTableView::item:hover { background: transparent; }"
+            "QTableView::item:selected,"
+            "QTableView::item:selected:hover {"
+            "  background: palette(highlight);"
+            "  color: palette(highlighted-text);"
+            "}"
+        )
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.cellDoubleClicked.connect(self._open_in_explorer)
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.Stretch)
+        h.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        v.addWidget(self.table, 1)
+
+        # The empty-state / loading / error label sits stacked under the
+        # table; we toggle visibility based on state.
+        self.status_lbl = QLabel("")
+        self.status_lbl.setAlignment(Qt.AlignCenter)
+        self.status_lbl.setVisible(False)
+        v.addWidget(self.status_lbl)
+
+        # Set by MainWindow before render so we can build explorer URLs
+        # and compute SENT/RECEIVED direction labels.
+        self._chain = None
+        self._viewer: str | None = None
+
+    def set_context(self, chain, viewer_address: str) -> None:
+        self._chain = chain
+        self._viewer = viewer_address
+
+    def show_loading(self) -> None:
+        self.table.setRowCount(0)
+        self.status_lbl.setText("Loading transactions…")
+        self.status_lbl.setVisible(True)
+
+    def show_error(self, msg: str) -> None:
+        self.table.setRowCount(0)
+        self.status_lbl.setText(f"Couldn't load transactions: {msg}")
+        self.status_lbl.setVisible(True)
+
+    def show_empty(self) -> None:
+        self.table.setRowCount(0)
+        self.status_lbl.setText("No transactions yet for this account.")
+        self.status_lbl.setVisible(True)
+
+    def clear(self) -> None:
+        self.table.setRowCount(0)
+        self.status_lbl.setVisible(False)
+        self._chain = None
+        self._viewer = None
+
+    def show_transactions(self, txs: list[Transaction]) -> None:
+        if not txs:
+            self.show_empty()
+            return
+        self.status_lbl.setVisible(False)
+        self.table.setRowCount(len(txs))
+        viewer = (self._viewer or "").lower()
+        symbol = self._chain.symbol if self._chain else "ETH"
+        now = int(datetime.datetime.now().timestamp())
+        for row, tx in enumerate(txs):
+            direction = tx.direction(viewer) if viewer else TxDirection.UNRELATED
+
+            when = QTableWidgetItem(_format_relative_time(tx.timestamp, now))
+            when.setToolTip(datetime.datetime.fromtimestamp(tx.timestamp)
+                            .strftime("%Y-%m-%d %H:%M:%S"))
+            when.setData(Qt.UserRole, tx.hash)
+
+            if direction == TxDirection.SENT:
+                arrow, counterparty = "→", tx.to_addr
+            elif direction == TxDirection.RECEIVED:
+                arrow, counterparty = "←", tx.from_addr
+            elif direction == TxDirection.SELF:
+                arrow, counterparty = "↻", tx.to_addr
+            else:
+                arrow, counterparty = " ", tx.to_addr or tx.from_addr
+            cp = QTableWidgetItem(f"{arrow} {_short_addr(counterparty)}")
+            cp.setFont(QFont("monospace"))
+            cp.setToolTip(counterparty or "")
+            cp.setData(Qt.UserRole, counterparty)
+
+            if tx.value_wei:
+                # Native amounts are wei → ether through Decimal (never
+                # float — see CLAUDE.md on-chain math rule).
+                ether = wei_to_ether(tx.value_wei)
+                value_text = f"{ether:.6f} {symbol}"
+            else:
+                value_text = "—"
+            val = QTableWidgetItem(value_text)
+            val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+            method_label = KNOWN_SELECTORS.get(tx.method_id, tx.method_id or "—")
+            method = QTableWidgetItem(method_label)
+            if tx.method_id and method_label != tx.method_id:
+                method.setToolTip(tx.method_id)
+
+            status = QTableWidgetItem("✓" if tx.success else "✗")
+            status.setTextAlignment(Qt.AlignCenter)
+            status.setToolTip("Success" if tx.success else "Reverted")
+
+            self.table.setItem(row, 0, when)
+            self.table.setItem(row, 1, cp)
+            self.table.setItem(row, 2, val)
+            self.table.setItem(row, 3, method)
+            self.table.setItem(row, 4, status)
+
+    def _selected_hash(self) -> str | None:
+        items = self.table.selectedItems()
+        if not items:
+            return None
+        return self.table.item(items[0].row(), 0).data(Qt.UserRole)
+
+    def _open_in_explorer(self, row: int, col: int) -> None:
+        if self._chain is None or not self._chain.explorer:
+            return
+        h = self.table.item(row, 0).data(Qt.UserRole)
+        if not h:
+            return
+        url = f"{self._chain.explorer.rstrip('/')}/tx/{h}"
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        h = self.table.item(row, 0).data(Qt.UserRole)
+        cp = self.table.item(row, 1).data(Qt.UserRole)
+        menu = QMenu(self)
+        act_open = menu.addAction("Open in block explorer")
+        act_open.setEnabled(bool(self._chain and self._chain.explorer and h))
+        act_copy_hash = menu.addAction("Copy tx hash")
+        act_copy_cp = menu.addAction("Copy counterparty address")
+        act_copy_cp.setEnabled(bool(cp))
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is act_open:
+            self._open_in_explorer(row, 0)
+        elif chosen is act_copy_hash and h:
+            QApplication.clipboard().setText(h)
+        elif chosen is act_copy_cp and cp:
+            QApplication.clipboard().setText(cp)
+
+
 # --- Main window -------------------------------------------------------------
 
 class MainWindow(QMainWindow):
@@ -1012,6 +1235,12 @@ class MainWindow(QMainWindow):
         self._token_metadata = TokenMetadataCache()
         self._risk_source = GoPlusRisk()
         self._risk_cache = RiskCache()
+        # Transaction history is fetched lazily (only when the Transactions
+        # tab is the active one). In-memory cache for now; disk-backed
+        # cache is the natural follow-up.
+        self._tx_source: TransactionSource = BlockscoutTransactionSource()
+        self._tx_cache: dict[tuple[int, str], list[Transaction]] = {}
+        self._tx_in_flight: set[tuple[int, str]] = set()
         self._show_all = False
         # (chain_id, address_lower) the panel currently shows; used to
         # skip needless show_cached rebuilds on subsequent refresh calls
@@ -1035,7 +1264,6 @@ class MainWindow(QMainWindow):
         # `finished` signal so the set doesn't grow forever.
         self._active_workers: set[QThread] = set()
 
-        self._build_toolbar()
         self._build_central()
         self._build_statusbar()
         self._rebuild_tree()
@@ -1091,39 +1319,55 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
         self._refresh_status()
 
-    def _build_toolbar(self) -> None:
-        tb = QToolBar()
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.addToolBar(tb)
-        act_add = QAction(
-            QIcon.fromTheme("document-new", self.style().standardIcon(QStyle.SP_FileIcon)),
-            "Add account",
-            self,
+    def _build_account_actions(self) -> QHBoxLayout:
+        """Account-level actions (Add / Copy / Remove) rendered as a
+        compact icon-button row at the bottom of the left pane. Lived
+        previously in a QToolBar across the top of the window; moving
+        them here is what lets the right pane's tab bar sit flush with
+        the top of the tree (the toolbar was the source of that gap)."""
+        self.act_add = QAction(
+            QIcon.fromTheme("document-new",
+                            self.style().standardIcon(QStyle.SP_FileIcon)),
+            "Add account", self,
         )
-        act_add.triggered.connect(self._add_ledger)
-        tb.addAction(act_add)
-        tb.addSeparator()
+        self.act_add.setToolTip("Add Ledger accounts by scanning derivation paths")
+        self.act_add.triggered.connect(self._add_ledger)
 
         self.act_copy = QAction(
-            QIcon.fromTheme("edit-copy", self.style().standardIcon(QStyle.SP_DialogSaveButton)),
-            "Copy address",
-            self,
+            QIcon.fromTheme("edit-copy",
+                            self.style().standardIcon(QStyle.SP_DialogSaveButton)),
+            "Copy address", self,
         )
         self.act_copy.setEnabled(False)
         self.act_copy.triggered.connect(self._copy_selected_address)
-        tb.addAction(self.act_copy)
-        tb.addSeparator()
 
         self.act_remove = QAction(
             QIcon.fromTheme("list-remove",
                             self.style().standardIcon(QStyle.SP_TrashIcon)),
-            "Remove account",
-            self,
+            "Remove account", self,
         )
         self.act_remove.setEnabled(False)
         self.act_remove.triggered.connect(self._remove_selected_account)
-        tb.addAction(self.act_remove)
+
+        # Keep Python refs to the QToolButtons so PySide6 doesn't GC the
+        # C++ objects between function exit and the moment lv.addLayout
+        # re-parents the row under left_container. Explicitly parenting
+        # to ``self`` (MainWindow) would survive GC but also pins them
+        # as direct MainWindow children, which Qt then renders as an
+        # extra row at the window's bottom — duplicating the buttons.
+        self._account_buttons: list[QToolButton] = []
+        row = QHBoxLayout()
+        row.setContentsMargins(4, 2, 4, 4)
+        for act in (self.act_add, self.act_copy, self.act_remove):
+            btn = QToolButton()
+            btn.setDefaultAction(act)
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setAutoRaise(True)
+            btn.setIconSize(QSize(16, 16))
+            row.addWidget(btn)
+            self._account_buttons.append(btn)
+        row.addStretch(1)
+        return row
 
     def _build_chain_combo(self) -> QComboBox:
         combo = QComboBox()
@@ -1169,17 +1413,66 @@ class MainWindow(QMainWindow):
         left.setStretchFactor(1, 1)
         left.setSizes([290, 365])
 
-        outer.addWidget(left)
+        # Wrap the inner left splitter so we can dock the account-action
+        # button row at its top — this is the visual partner of the
+        # right pane's tab bar (both sit at Y=0 of the splitter, same
+        # height, so the top edges of the two columns align).
+        left_container = QWidget()
+        lv = QVBoxLayout(left_container)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(0)
+        lv.addLayout(self._build_account_actions())
+        lv.addWidget(left, 1)
+        outer.addWidget(left_container)
 
-        # Right half: token list for the currently-selected account.
+        # Right half: tabs for Tokens / Transactions, with the chain
+        # selector pinned to the bottom-right of the pane (outside the
+        # tabs so it stays visible regardless of which one is active).
         self.token_panel = TokenListPanel(self._icon_cache, self.store)
         self.token_panel.hide_requested.connect(self._on_hide_token)
         self.token_panel.pin_requested.connect(self._on_pin_token)
         self.token_panel.add_custom_requested.connect(self._on_add_custom_token)
         self.token_panel.show_all_toggled.connect(self._on_show_all_toggled)
+
+        self.tx_panel = TransactionListPanel()
+
+        # QTabBar + QStackedWidget instead of QTabWidget: a QTabWidget
+        # adds style-dependent vertical padding above its tab bar that
+        # stylesheets can't reliably zero out (visible as a gap above
+        # the bar vs. the left pane's tree header). Doing it manually
+        # lets us pin the bar to Y=0 of the right pane.
+        self.right_tab_bar = QTabBar()
+        self.right_tab_bar.setDocumentMode(True)
+        self.right_tab_bar.setExpanding(False)
+        self.right_tab_bar.addTab("Tokens")
+        self.right_tab_bar.addTab("Transactions")
+
+        self.right_stack = QStackedWidget()
+        self.right_stack.addWidget(self.token_panel)
+        self.right_stack.addWidget(self.tx_panel)
+        self.right_tab_bar.currentChanged.connect(self.right_stack.setCurrentIndex)
+        self.right_tab_bar.currentChanged.connect(self._on_right_tab_changed)
+
         self.chain_combo = self._build_chain_combo()
-        self.token_panel.mount_right_widget(self.chain_combo)
-        outer.addWidget(self.token_panel)
+
+        right_container = QWidget()
+        rv = QVBoxLayout(right_container)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(0)
+        rv.addWidget(self.right_tab_bar)
+        rv.addWidget(self.right_stack, 1)
+        # Shared bottom row: token-action buttons on the left, chain
+        # selector on the right. The token actions stay enabled across
+        # both tabs — harmless when the user is on Transactions, and it
+        # avoids burning a second row for what fits in one.
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(4, 2, 4, 4)
+        for b in self.token_panel.action_widgets():
+            bottom.addWidget(b)
+        bottom.addStretch(1)
+        bottom.addWidget(self.chain_combo)
+        rv.addLayout(bottom)
+        outer.addWidget(right_container)
 
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 1)
@@ -1265,9 +1558,11 @@ class MainWindow(QMainWindow):
                     acct, is_default=(addrs[0] == self.store.default_account)
                 )
                 self._refresh_tokens(addrs[0])
+                self._maybe_refresh_transactions(addrs[0])
                 return
         self.details.clear()
         self.token_panel.clear()
+        self.tx_panel.clear()
         self._displayed_view = None
 
     def _refresh_tokens(self, address: str) -> None:
@@ -1824,6 +2119,78 @@ class MainWindow(QMainWindow):
             addrs = self._selected_addresses()
             if len(addrs) == 1:
                 self._refresh_tokens(addrs[0])
+                self._maybe_refresh_transactions(addrs[0])
+
+    def _on_right_tab_changed(self, index: int) -> None:
+        """Lazy-load: only fetch transactions when the user actually
+        switches to the Transactions tab (avoids one HTTP call per
+        account-click while the user is browsing balances)."""
+        if self.right_stack.widget(index) is self.tx_panel:
+            addrs = self._selected_addresses()
+            if len(addrs) == 1:
+                self._maybe_refresh_transactions(addrs[0])
+
+    def _maybe_refresh_transactions(self, address: str) -> None:
+        """Render cached transactions immediately (if any) and kick a
+        background fetch when the Transactions tab is currently visible
+        and we're not already refreshing this (chain, address) view."""
+        chain = self.store.current_chain()
+        key = (chain.chain_id, address.lower())
+        is_active = self.right_stack.currentWidget() is self.tx_panel
+
+        self.tx_panel.set_context(chain, address)
+        cached = self._tx_cache.get(key)
+        if cached is not None:
+            self.tx_panel.show_transactions(cached)
+        elif is_active:
+            self.tx_panel.show_loading()
+
+        # Background fetch only when the tab is visible — otherwise we'd
+        # be making Blockscout calls the user never asked for. The cache
+        # warms only after the user explicitly views the tab.
+        if not is_active:
+            return
+        if not self._tx_source.supports(chain):
+            self.tx_panel.show_error(
+                f"Transactions aren't available for {chain.name}."
+            )
+            return
+        if key in self._tx_in_flight:
+            return
+        self._tx_in_flight.add(key)
+
+        worker = TransactionsWorker(self._tx_source, chain, address)
+        worker.fetched.connect(self._on_transactions_fetched)
+        worker.failed.connect(
+            lambda msg, k=key: self._on_transactions_failed(k, msg)
+        )
+        self._start_worker(worker)
+
+    def _on_transactions_fetched(self, chain_id: int, address_lower: str,
+                                 txs: list) -> None:
+        key = (chain_id, address_lower)
+        self._tx_in_flight.discard(key)
+        self._tx_cache[key] = txs
+        # Only repaint if the user still has this view selected — they
+        # may have clicked another account or chain while we were
+        # waiting on Blockscout.
+        addrs = self._selected_addresses()
+        if len(addrs) != 1 or addrs[0].lower() != address_lower:
+            return
+        if self.store.current_chain_id != chain_id:
+            return
+        self.tx_panel.show_transactions(txs)
+
+    def _on_transactions_failed(self, key: tuple[int, str], msg: str) -> None:
+        self._tx_in_flight.discard(key)
+        addrs = self._selected_addresses()
+        if (
+            len(addrs) == 1
+            and addrs[0].lower() == key[1]
+            and self.store.current_chain_id == key[0]
+            and self.right_stack.currentWidget() is self.tx_panel
+        ):
+            self.tx_panel.show_error(msg)
 
     def _set_default(self, address: str) -> None:
         self.store.set_default_account(address)

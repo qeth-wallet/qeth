@@ -25,6 +25,7 @@ bundled = ["PySide6>=6.6"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-qt>=4.4",
 ]
 
 [tool.pytest.ini_options]
@@ -36,6 +37,11 @@ markers = [
     "network: requires live network and external services",
 ]
 addopts = "-m 'not network'"
+# pytest-qt: tell it which Qt binding we use. The "offscreen" Qt
+# platform plugin is set in tests/conftest.py before QApplication is
+# created, so UI tests don't pop windows on the developer's screen
+# (and also work in CI / SSH sessions without a display).
+qt_api = "pyside6"
 
 [project.scripts]
 qeth = "qeth.__main__:main"

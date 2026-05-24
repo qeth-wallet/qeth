@@ -4,7 +4,9 @@ from decimal import Decimal
 
 import pytest
 
-from qeth.formatting import format_balance, format_usd
+from qeth.formatting import (
+    format_balance, format_relative_time, format_usd, short_addr,
+)
 
 
 # --- format_balance --------------------------------------------------------
@@ -75,3 +77,56 @@ class TestFormatUsd:
     def test_rounds_to_two_decimals(self):
         assert format_usd(Decimal("1.2345")) == "$1.23"
         assert format_usd(Decimal("1.2378")) == "$1.24"
+
+
+# --- short_addr ------------------------------------------------------------
+
+class TestShortAddr:
+    def test_full_eth_address(self):
+        assert short_addr("0x7a16ff8270133f063aab6c9977183d9e72835428") \
+            == "0x7a16…5428"
+
+    def test_none_is_contract_creation(self):
+        assert short_addr(None) == "(contract creation)"
+
+    def test_empty_string_is_contract_creation(self):
+        assert short_addr("") == "(contract creation)"
+
+    def test_short_strings_pass_through(self):
+        # Anything 12 chars or fewer stays as-is — nothing meaningful to
+        # truncate.
+        assert short_addr("0xabcd") == "0xabcd"
+
+
+# --- format_relative_time --------------------------------------------------
+
+class TestFormatRelativeTime:
+    def test_seconds(self):
+        assert format_relative_time(1000, now=1030) == "30s ago"
+
+    def test_minutes(self):
+        # 5 min 30 s → "5 min ago" (floor; we don't round up).
+        assert format_relative_time(1000, now=1000 + 330) == "5 min ago"
+
+    def test_hours(self):
+        assert format_relative_time(1000, now=1000 + 3 * 3600 + 500) == "3 hr ago"
+
+    def test_days(self):
+        assert format_relative_time(1000, now=1000 + 2 * 86400) == "2 d ago"
+
+    def test_older_than_week_uses_absolute_date(self):
+        # Past the week boundary, switch to a YYYY-MM-DD label.
+        # 2026-05-24 minus 30 days is 2026-04-24.
+        import datetime
+        ts = int(datetime.datetime(2026, 4, 24).timestamp())
+        now = int(datetime.datetime(2026, 5, 24).timestamp())
+        assert format_relative_time(ts, now=now) == "2026-04-24"
+
+    def test_non_positive_returns_dash(self):
+        assert format_relative_time(0, now=1_000_000) == "—"
+        assert format_relative_time(-5, now=1_000_000) == "—"
+
+    def test_future_timestamps_clamp_to_zero(self):
+        # Clock skew between the user and the chain shouldn't crash —
+        # treat "future" as "just now".
+        assert format_relative_time(1000, now=500) == "0s ago"

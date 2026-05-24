@@ -36,6 +36,7 @@ from ..plugin import Plugin
 from ..transactions import (
     BlockscoutTransactionSource, Transaction, TransactionSource, TxDirection,
 )
+from ..transactions_cache import TransactionCache
 
 
 log = logging.getLogger("qeth.plugin.transactions")
@@ -72,12 +73,19 @@ class TransactionsWorker(QThread):
 class TransactionsPlugin(Plugin):
     name = "Transactions"
 
-    def __init__(self, source: Optional[TransactionSource] = None):
+    def __init__(
+        self,
+        source: Optional[TransactionSource] = None,
+        disk_cache: Optional[TransactionCache] = None,
+    ):
         super().__init__()
-        # Source injection lets tests pass a fake; default is Blockscout.
+        # Source / cache injection both let tests pass fakes.
         self._source: TransactionSource = source or BlockscoutTransactionSource()
-        # In-memory cache, keyed by (chain_id, address_lower). Survives
-        # within a session; disk-backed cache is a future iteration.
+        self._disk_cache = disk_cache if disk_cache is not None else TransactionCache()
+        # In-memory cache, keyed by (chain_id, address_lower). Hydrated
+        # lazily from the disk cache on first ``on_account_changed`` for
+        # a (chain, addr) — that's what prevents the empty → populated
+        # flicker on startup.
         self._cache: dict[tuple[int, str], list[Transaction]] = {}
         # Active fetches — prevents duplicate Blockscout calls when
         # on_activated / on_account_changed / on_chain_changed all fire
@@ -150,6 +158,14 @@ class TransactionsPlugin(Plugin):
 
         self._panel.set_context(chain, address)
         cached = self._cache.get(key)
+        if cached is None:
+            # First time this (chain, addr) is seen this session — try
+            # the disk cache. Confirmed txs don't change, so cached
+            # bytes from a prior run are always safe to render.
+            disk = self._disk_cache.load(chain.chain_id, address)
+            if disk:
+                self._cache[key] = disk
+                cached = disk
         if cached is not None:
             self._panel.show_transactions(cached)
         elif force_fetch or self._is_active():
@@ -178,6 +194,10 @@ class TransactionsPlugin(Plugin):
         key = (chain_id, address_lower)
         self._in_flight.discard(key)
         self._cache[key] = txs
+        # Persist so the next run renders these immediately, ahead of
+        # the background refresh. Safe to overwrite — fetched results
+        # always represent the newest window of the address's history.
+        self._disk_cache.save(chain_id, address_lower, txs)
         # Only repaint if the user still has this view selected — they
         # may have clicked another account/chain while we waited.
         if self.host is None:

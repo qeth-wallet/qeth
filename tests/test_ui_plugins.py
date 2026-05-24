@@ -90,6 +90,58 @@ class TestTransactionsPlugin:
         # not active in this test, so no fetch should fire anyway).
         assert plugin.widget().table.rowCount() == 1
 
+    def test_loads_from_disk_cache_on_account_change(self, qtbot, tmp_qeth):
+        """First-time selection of an address with no in-memory entry
+        should hydrate from the disk cache and render immediately —
+        this is the anti-flicker behaviour that motivated the cache."""
+        from qeth.transactions_cache import TransactionCache
+        prewritten = [
+            Transaction(
+                chain_id=1, hash="0x" + "ab" * 32, block_number=10,
+                timestamp=1, nonce=0, from_addr=ADDR,
+                to_addr="0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+                value_wei=10**18, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+        ]
+        TransactionCache().save(ETH.chain_id, ADDR, prewritten)
+
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+
+        # No in-memory cache, no fetch yet — but the disk cache should
+        # populate the panel synchronously.
+        plugin.on_account_changed(ADDR)
+        assert plugin.widget().table.rowCount() == 1
+        # And the in-memory cache should now hold the hydrated entries.
+        assert (ETH.chain_id, ADDR.lower()) in plugin._cache
+
+    def test_fetched_results_get_persisted(self, qtbot, tmp_qeth):
+        from qeth.transactions_cache import TransactionCache
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+
+        fetched = [
+            Transaction(
+                chain_id=1, hash="0x" + "cd" * 32, block_number=11,
+                timestamp=2, nonce=1, from_addr=ADDR,
+                to_addr="0xbeef", value_wei=0, gas_used=0,
+                gas_price_wei=0, method_id="", input_data="0x",
+                success=True,
+            )
+        ]
+        plugin._on_fetched(ETH.chain_id, ADDR.lower(), fetched)
+
+        # On disk now — a fresh TransactionCache instance can read it.
+        reloaded = TransactionCache().load(ETH.chain_id, ADDR)
+        assert reloaded is not None
+        assert len(reloaded) == 1
+        assert reloaded[0].hash == fetched[0].hash
+
     def test_unsupported_chain_shows_error_when_activated(self, qtbot, tmp_qeth):
         from qeth.chains import Chain
         fake_chain = Chain(name="Fake", chain_id=999_999, rpc_url="https://x")

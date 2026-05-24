@@ -32,6 +32,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     import qeth.store
     import qeth.token_metadata
     import qeth.tokenlists
+    import qeth.transactions_cache
     import qeth.wallet_cache
     import qeth.risk
 
@@ -41,6 +42,8 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.token_metadata, "CACHE_DIR", tmp_path / "token_metadata")
     monkeypatch.setattr(qeth.tokenlists, "CACHE_DIR", tmp_path / "tokenlists")
     monkeypatch.setattr(qeth.risk, "CACHE_DIR", tmp_path / "risk")
+    monkeypatch.setattr(qeth.transactions_cache, "CACHE_DIR",
+                        tmp_path / "transactions")
     return tmp_path
 
 

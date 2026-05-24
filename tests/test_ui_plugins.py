@@ -9,6 +9,7 @@ plugins do in response to lifecycle calls.
 from typing import Optional
 
 import pytest
+from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
 from qeth.tokens_plugin import TokensPlugin
@@ -185,3 +186,81 @@ class TestTokensPlugin:
         good = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         tokens_plugin._on_pin_token(1, good)
         assert tokens_plugin._store.is_force_shown(1, good)
+
+
+# --- WalletsPlugin ----------------------------------------------------------
+
+@pytest.fixture
+def wallets_plugin(qtbot, tmp_qeth):
+    from qeth.store import Store
+    from qeth.wallets_plugin import WalletsPlugin
+    store = Store.load()
+    plugin = WalletsPlugin(store)
+    qtbot.addWidget(plugin.widget())
+    return plugin
+
+
+class TestWalletsPlugin:
+    def test_widget_holds_tree_and_details(self, wallets_plugin):
+        from qeth.ui import DetailsPanel
+        from PySide6.QtWidgets import QTreeWidget
+        assert isinstance(wallets_plugin._tree, QTreeWidget)
+        assert isinstance(wallets_plugin._details, DetailsPanel)
+
+    def test_action_widgets_returns_empty(self, wallets_plugin):
+        # Wallets' action row sits at the TOP of its own widget, not
+        # on the slot's bottom row — so action_widgets() is intentionally
+        # empty.
+        assert wallets_plugin.action_widgets() == []
+
+    def test_actions_are_wired(self, wallets_plugin):
+        assert wallets_plugin.act_add is not None
+        assert wallets_plugin.act_copy is not None
+        assert wallets_plugin.act_remove is not None
+        # Copy/Remove start disabled (no selection yet).
+        assert not wallets_plugin.act_copy.isEnabled()
+        assert not wallets_plugin.act_remove.isEnabled()
+
+    def test_selection_emits_address_signal(self, qtbot, wallets_plugin):
+        addr = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        wallets_plugin._store.add_account({
+            "address": addr, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        matches = wallets_plugin._tree.findItems(
+            addr, Qt.MatchContains | Qt.MatchRecursive, 0
+        )
+        # rebuild_tree auto-selects the default account (the one we
+        # just added). Clear so the test can re-select it and observe
+        # the signal firing.
+        wallets_plugin._tree.clearSelection()
+        with qtbot.waitSignal(
+            wallets_plugin.selected_address_changed, timeout=500
+        ) as blocker:
+            wallets_plugin._tree.setCurrentItem(matches[0])
+        assert blocker.args == [addr]
+
+    def test_clearing_selection_emits_none(self, qtbot, wallets_plugin):
+        addr = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        wallets_plugin._store.add_account({
+            "address": addr, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        matches = wallets_plugin._tree.findItems(
+            addr, Qt.MatchContains | Qt.MatchRecursive, 0
+        )
+        wallets_plugin._tree.setCurrentItem(matches[0])
+        with qtbot.waitSignal(
+            wallets_plugin.selected_address_changed, timeout=500
+        ) as blocker:
+            wallets_plugin._tree.clearSelection()
+        assert blocker.args == [None]
+
+    def test_splitter_state_round_trip(self, wallets_plugin):
+        hex_state = wallets_plugin.splitter_state()
+        assert hex_state  # non-empty
+        # Restore is best-effort and doesn't raise on garbage.
+        wallets_plugin.restore_splitter_state("not-valid-hex")
+        wallets_plugin.restore_splitter_state(hex_state)

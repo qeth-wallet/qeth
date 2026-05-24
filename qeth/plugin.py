@@ -15,10 +15,10 @@ logic and is tested directly in ``tests/test_plugin.py``.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Optional, Protocol
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QStackedWidget, QTabBar, QVBoxLayout, QWidget,
 )
@@ -46,14 +46,18 @@ class Host(Protocol):
         """Show a transient message in the status bar."""
 
 
-class Plugin(ABC):
+class Plugin(QObject):
     """One topic in the UI. Subclasses define a ``name`` class attribute
     (the tab label) and implement ``widget()``. Everything else is
-    optional and defaults to a no-op."""
+    optional and defaults to a no-op.
+
+    Inherits from QObject so subclasses can declare ``Signal(...)`` for
+    cross-plugin events (e.g. WalletsPlugin.selected_address_changed)."""
 
     name: str = ""
 
     def __init__(self) -> None:
+        super().__init__()
         # ``host`` is wired in attach(); plugins reach back through it
         # rather than receiving five constructor args.
         self.host: Optional[Host] = None

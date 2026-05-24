@@ -5,14 +5,13 @@ import logging
 import segno
 
 from PySide6.QtCore import Qt, QByteArray, QSize, QThread, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
     QSpinBox, QSplitter, QStatusBar, QStyle, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from decimal import Decimal
@@ -29,6 +28,7 @@ from .tokens_plugin import TokensPlugin
 from .transactions import Transaction, TxDirection
 from .transactions_plugin import TransactionsPlugin
 from .wallet_cache import CachedWallet
+from .wallets_plugin import WalletsPlugin
 
 
 # --- Add Ledger dialog -------------------------------------------------------
@@ -1004,6 +1004,11 @@ class TransactionListPanel(QWidget):
 # --- Main window -------------------------------------------------------------
 
 class MainWindow(QMainWindow):
+    """Top-level shell. Owns the store + RPC server, instantiates the
+    three plugins (Wallets / Tokens / Transactions) into two slots,
+    and wires cross-plugin signals. Almost no domain logic lives here
+    anymore — each topic owns its own state and workers."""
+
     def __init__(self, store, rpc):
         super().__init__()
         self.store = store
@@ -1011,16 +1016,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("qeth — Ethereum wallet")
         self.resize(1060, 720)
         # Override QMainWindow's inflated minimumSizeHint (it reports
-        # ~950x565 even when child widgets only need ~370x500). Floor at
-        # something a bit below what the QR + a usable table need.
+        # ~950x565 even when child widgets only need ~370x500).
         self.setMinimumSize(420, 360)
 
-        # Topic plugins. Each plugin owns its sources, caches, workers,
-        # widgets, and lifecycle. MainWindow's job is to wire the
-        # plugins into slots and broadcast user actions (selection /
-        # chain change) to them.
+        # Topic plugins. Each owns its sources/caches/workers/widgets.
+        self.wallets_plugin = WalletsPlugin(self.store)
         self.tokens_plugin = TokensPlugin(self.store)
         self.transactions_plugin = TransactionsPlugin()
+
         # Workers tracked here so Python doesn't GC them while running
         # (Qt's QThread destructor aborts the process if the thread is
         # alive). Plugins register workers via host.start_worker(...);
@@ -1029,16 +1032,18 @@ class MainWindow(QMainWindow):
 
         self._build_central()
         self._build_statusbar()
-        self._rebuild_tree()
-        # The TokensPlugin's attach() (called from Slot.add_plugin in
-        # _build_central) starts its own TokenListsLoader and refresh
-        # timer — MainWindow no longer owns that lifecycle.
 
-        # Restore prior window geometry (size + position + maximized state).
-        # Done after the UI is fully built so the layout has a chance to
-        # compute its hints; QByteArray.fromHex tolerates trailing nulls
-        # and bad input — restoreGeometry returns False on garbage, which
-        # we just ignore.
+        # Wallets is the source of the selection broadcast: when the
+        # user picks an account, the plugin emits this signal and we
+        # forward it to the right slot's mounted plugins (Tokens,
+        # Transactions). Default-account changes refresh the status bar.
+        self.wallets_plugin.selected_address_changed.connect(
+            self.right_slot.broadcast_account_changed
+        )
+        self.wallets_plugin.default_account_changed.connect(self._refresh_status)
+        self._refresh_status()
+
+        # Restore prior window geometry + splitter states.
         if self.store.window_geometry:
             try:
                 self.restoreGeometry(
@@ -1046,9 +1051,6 @@ class MainWindow(QMainWindow):
                 )
             except Exception:
                 pass
-        # Splitter states — drag positions for outer (left↔right) and inner
-        # (tree↕details) splits. Restored after geometry so the splitters
-        # know the right total width to distribute.
         if self.store.splitter_state_main:
             try:
                 self._splitter_outer.restoreState(
@@ -1057,71 +1059,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         if self.store.splitter_state_left:
-            try:
-                self._splitter_left.restoreState(
-                    QByteArray.fromHex(self.store.splitter_state_left.encode())
-                )
-            except Exception:
-                pass
+            self.wallets_plugin.restore_splitter_state(
+                self.store.splitter_state_left
+            )
 
     def closeEvent(self, event):
         self.store.set_window_geometry(bytes(self.saveGeometry().toHex()).decode())
         self.store.set_splitter_states(
             bytes(self._splitter_outer.saveState().toHex()).decode(),
-            bytes(self._splitter_left.saveState().toHex()).decode(),
+            self.wallets_plugin.splitter_state(),
         )
         super().closeEvent(event)
-        self._refresh_status()
-
-    def _build_account_actions(self) -> QHBoxLayout:
-        """Account-level actions (Add / Copy / Remove) rendered as a
-        compact icon-button row at the bottom of the left pane. Lived
-        previously in a QToolBar across the top of the window; moving
-        them here is what lets the right pane's tab bar sit flush with
-        the top of the tree (the toolbar was the source of that gap)."""
-        self.act_add = QAction(
-            QIcon.fromTheme("document-new",
-                            self.style().standardIcon(QStyle.SP_FileIcon)),
-            "Add account", self,
-        )
-        self.act_add.setToolTip("Add Ledger accounts by scanning derivation paths")
-        self.act_add.triggered.connect(self._add_ledger)
-
-        self.act_copy = QAction(
-            QIcon.fromTheme("edit-copy",
-                            self.style().standardIcon(QStyle.SP_DialogSaveButton)),
-            "Copy address", self,
-        )
-        self.act_copy.setEnabled(False)
-        self.act_copy.triggered.connect(self._copy_selected_address)
-
-        self.act_remove = QAction(
-            QIcon.fromTheme("list-remove",
-                            self.style().standardIcon(QStyle.SP_TrashIcon)),
-            "Remove account", self,
-        )
-        self.act_remove.setEnabled(False)
-        self.act_remove.triggered.connect(self._remove_selected_account)
-
-        # Keep Python refs to the QToolButtons so PySide6 doesn't GC the
-        # C++ objects between function exit and the moment lv.addLayout
-        # re-parents the row under left_container. Explicitly parenting
-        # to ``self`` (MainWindow) would survive GC but also pins them
-        # as direct MainWindow children, which Qt then renders as an
-        # extra row at the window's bottom — duplicating the buttons.
-        self._account_buttons: list[QToolButton] = []
-        row = QHBoxLayout()
-        row.setContentsMargins(4, 2, 4, 4)
-        for act in (self.act_add, self.act_copy, self.act_remove):
-            btn = QToolButton()
-            btn.setDefaultAction(act)
-            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            btn.setAutoRaise(True)
-            btn.setIconSize(QSize(16, 16))
-            row.addWidget(btn)
-            self._account_buttons.append(btn)
-        row.addStretch(1)
-        return row
 
     def _build_chain_combo(self) -> QComboBox:
         combo = QComboBox()
@@ -1142,51 +1090,15 @@ class MainWindow(QMainWindow):
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Horizontal)
 
-        # Left half: tree on top, account details on bottom.
-        self._splitter_left = left = QSplitter(Qt.Vertical)
+        # Left slot: Wallets only. Single-plugin → no tab bar visible.
+        self.left_slot = Slot()
+        self.left_slot.add_plugin(self.wallets_plugin, self)
+        outer.addWidget(self.left_slot)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Accounts"])
-        self.tree.setRootIsDecorated(True)
-        self.tree.setTextElideMode(Qt.ElideMiddle)
-        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.tree.itemSelectionChanged.connect(self._on_tree_selection)
-        left.addWidget(self.tree)
-
-        self.details = DetailsPanel()
-        self.details.set_default_requested.connect(self._set_default)
-        details_wrap = QFrame()
-        details_wrap.setFrameShape(QFrame.StyledPanel)
-        dlay = QVBoxLayout(details_wrap)
-        # No bottom padding so DetailsPanel's button (now anchored at the
-        # bottom of its own layout) lines up with the right panel's bottom.
-        dlay.setContentsMargins(12, 12, 12, 0)
-        dlay.addWidget(self.details)
-        left.addWidget(details_wrap)
-        left.setStretchFactor(0, 1)
-        left.setStretchFactor(1, 1)
-        left.setSizes([290, 365])
-
-        # Wrap the inner left splitter so we can dock the account-action
-        # button row at its top — this is the visual partner of the
-        # right pane's tab bar (both sit at Y=0 of the splitter, same
-        # height, so the top edges of the two columns align).
-        left_container = QWidget()
-        lv = QVBoxLayout(left_container)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(0)
-        lv.addLayout(self._build_account_actions())
-        lv.addWidget(left, 1)
-        outer.addWidget(left_container)
-
-        # Right half: a Slot that hosts the Tokens and Transactions
-        # plugins. The slot draws the tab bar at Y=0, swaps the active
-        # plugin's action widgets on the bottom-left, and keeps the
-        # chain selector pinned on the bottom-right as a shared widget.
+        # Right slot: Tokens + Transactions. Tab bar visible.
         self.right_slot = Slot()
         self.right_slot.add_plugin(self.tokens_plugin, self)
         self.right_slot.add_plugin(self.transactions_plugin, self)
-
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
         outer.addWidget(self.right_slot)
@@ -1205,43 +1117,6 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.rpc_label, 1)
         sb.addPermanentWidget(self.default_label)
 
-    def _rebuild_tree(self) -> None:
-        self.tree.clear()
-        ledger_accts = [a for a in self.store.accounts if a.get("source") == "ledger"]
-        ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
-        self.tree.addTopLevelItem(ledger_root)
-        groups: dict[str, QTreeWidgetItem] = {}
-        default_item: QTreeWidgetItem | None = None
-        for a in ledger_accts:
-            scheme = a.get("scheme", "Custom")
-            grp = groups.get(scheme)
-            if grp is None:
-                grp = QTreeWidgetItem([scheme])
-                ledger_root.addChild(grp)
-                groups[scheme] = grp
-            addr = a["address"]
-            is_default = (
-                self.store.default_account is not None
-                and addr.lower() == self.store.default_account.lower()
-            )
-            label = f"[{addr}]" if is_default else f" {addr} "
-            it = QTreeWidgetItem([label])
-            it.setData(0, Qt.UserRole, addr)
-            it.setFont(0, QFont("monospace"))
-            grp.addChild(it)
-            if is_default:
-                default_item = it
-        ledger_root.setExpanded(True)
-        for g in groups.values():
-            g.setExpanded(True)
-
-        # Stubs for the future
-        self.tree.addTopLevelItem(QTreeWidgetItem(["Hot wallet (0)"]))
-        self.tree.addTopLevelItem(QTreeWidgetItem(["Watch only (0)"]))
-
-        if default_item is not None:
-            self.tree.setCurrentItem(default_item)
-
     def _refresh_status(self) -> None:
         err = self.rpc.error
         if err:
@@ -1255,58 +1130,28 @@ class MainWindow(QMainWindow):
             f"Default: {addr}   •   {self.store.current_chain().name}"
         )
 
-    def _selected_addresses(self) -> list[str]:
-        out = []
-        for it in self.tree.selectedItems():
-            addr = it.data(0, Qt.UserRole)
-            if addr:
-                out.append(addr)
-        return out
-
-    def _on_tree_selection(self) -> None:
-        addrs = self._selected_addresses()
-        # Copy only makes sense for a single address; Remove handles many.
-        self.act_copy.setEnabled(len(addrs) == 1)
-        self.act_remove.setEnabled(len(addrs) >= 1)
-        if len(addrs) == 1:
-            acct = next((a for a in self.store.accounts if a["address"] == addrs[0]), None)
-            if acct:
-                self.details.show_account(
-                    acct, is_default=(addrs[0] == self.store.default_account)
-                )
-                self.right_slot.broadcast_account_changed(addrs[0])
-                return
-        self.details.clear()
-        self.right_slot.broadcast_account_changed(None)
-
     # --- Host protocol (consumed by plugins via plugin.attach) -----------
 
     @property
     def selected_address(self) -> "str | None":
-        """The single currently-selected wallet address, or None when
-        zero or multiple are selected. Plugins read this to drive
-        per-account refresh logic."""
-        addrs = self._selected_addresses()
-        return addrs[0] if len(addrs) == 1 else None
+        return self.wallets_plugin.selected_address
 
     def current_chain(self):
-        """The Chain currently picked by the user."""
         return self.store.current_chain()
 
     def start_worker(self, worker: QThread) -> QThread:
-        """Public entry point for plugins to start a QThread; the
-        worker is tracked so Python doesn't GC it while it runs."""
-        return self._start_worker(worker)
+        """Track a worker so Python doesn't GC it while running."""
+        self._active_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        return worker
 
     def status_message(self, text: str, timeout_ms: int = 3000) -> None:
-        """Show a transient message in the status bar."""
         self.statusBar().showMessage(text, timeout_ms)
 
-    # Transitional: TokensPlugin's lifecycle hooks defer back here.
-    # Step 3 will move the implementation into the plugin and drop this.
-    # --- transitional aliases (used by tests and legacy MainWindow code).
-    # Once both plugins are fully self-contained, MainWindow stops
-    # poking at the panels directly and these can be removed.
+    # --- transitional aliases (kept so existing tests / external code
+    # that pokes at the panels directly keeps working).
 
     @property
     def token_panel(self):
@@ -1316,67 +1161,25 @@ class MainWindow(QMainWindow):
     def tx_panel(self):
         return self.transactions_plugin.widget()
 
-    def _start_worker(self, worker: QThread) -> QThread:
-        """Track a worker so it isn't garbage-collected while running."""
-        self._active_workers.add(worker)
-        worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-        return worker
+    @property
+    def tree(self):
+        return self.wallets_plugin._tree
 
-    def _copy_selected_address(self) -> None:
-        addrs = self._selected_addresses()
-        if len(addrs) != 1:
-            return
-        QApplication.clipboard().setText(addrs[0])
-        self.statusBar().showMessage(f"Copied {addrs[0]} to clipboard", 3000)
+    @property
+    def details(self):
+        return self.wallets_plugin._details
 
-    def _remove_selected_account(self) -> None:
-        addrs = self._selected_addresses()
-        if not addrs:
-            return
-        if len(addrs) == 1:
-            prompt = f"Remove {addrs[0]} from this wallet?"
-        else:
-            preview = "\n".join(f"  • {a}" for a in addrs[:5])
-            extra = f"\n  … and {len(addrs) - 5} more" if len(addrs) > 5 else ""
-            prompt = f"Remove {len(addrs)} accounts from this wallet?\n\n{preview}{extra}"
-        reply = QMessageBox.question(
-            self,
-            "Remove account" if len(addrs) == 1 else "Remove accounts",
-            f"{prompt}\n\n"
-            "Keys on your Ledger are untouched; this only forgets the "
-            "addresses locally. You can re-add them via Scan at any time.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        removed = sum(1 for a in addrs if self.store.remove_account(a))
-        if removed:
-            self._rebuild_tree()
-            self._refresh_status()
-            self.statusBar().showMessage(f"Removed {removed} account(s)", 3000)
+    @property
+    def act_add(self):
+        return self.wallets_plugin.act_add
 
-    def _add_ledger(self) -> None:
-        dlg = AddLedgerDialog(self.store.current_chain(), self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        scheme = dlg.scheme_combo.currentText()
-        added = 0
-        for d in dlg.selected_accounts():
-            if self.store.add_account({
-                "address": d.address,
-                "path": d.path,
-                "source": "ledger",
-                "scheme": scheme,
-                "label": "",
-            }):
-                added += 1
-        self._rebuild_tree()
-        self._refresh_status()
-        if added:
-            self.statusBar().showMessage(f"Added {added} account(s)", 3000)
+    @property
+    def act_copy(self):
+        return self.wallets_plugin.act_copy
+
+    @property
+    def act_remove(self):
+        return self.wallets_plugin.act_remove
 
     def _on_chain_changed(self, idx: int) -> None:
         cid = self.chain_combo.itemData(idx)
@@ -1384,9 +1187,3 @@ class MainWindow(QMainWindow):
             self.store.set_current_chain(int(cid))
             self._refresh_status()
             self.right_slot.broadcast_chain_changed()
-
-    def _set_default(self, address: str) -> None:
-        self.store.set_default_account(address)
-        self._rebuild_tree()
-        self._refresh_status()
-        self._on_tree_selection()

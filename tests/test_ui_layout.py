@@ -118,7 +118,8 @@ def _add_account_and_rebuild(mainwindow, address: str):
         "scheme": "BIP-44",
         "label": "",
     })
-    mainwindow._rebuild_tree()
+    # Tree lives inside WalletsPlugin now.
+    mainwindow.wallets_plugin.rebuild_tree()
 
 
 def test_selecting_account_enables_copy_and_remove(mainwindow):

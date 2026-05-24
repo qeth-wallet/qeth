@@ -288,14 +288,13 @@ class TestTransactionsPlugin:
         # Filter off → both rows pass through unchanged.
         assert len(emitted[0]) == 2
 
-    def test_large_cache_renders_only_initial_batch(self, qtbot, tmp_qeth):
-        """Regression: with thousands of cached entries from a prior
-        auto-walk, opening the tab used to rebuild the whole table at
-        once and freeze the UI for tens of seconds. Initial render
-        must be bounded by INITIAL_BATCH."""
+    def test_initial_open_renders_whole_cache(self, qtbot, tmp_qeth):
+        """The whole on-disk cache lands on the table in one shot when
+        the view is first activated. Load-on-scroll handles only the
+        network side (fetching older pages from Blockscout) — the
+        cache itself is small enough to populate up-front and lets
+        the user see everything they've already paged in."""
         from qeth.transactions_cache import TransactionCache
-
-        # Pre-write 1000 sent txs to disk.
         big = [
             Transaction(
                 chain_id=1, hash="0x" + format(i, "064x"),
@@ -314,52 +313,18 @@ class TestTransactionsPlugin:
         qtbot.addWidget(plugin.widget())
         plugin.on_account_changed(ADDR)
 
-        # Cache is fully hydrated …
-        assert len(plugin._cache[(ETH.chain_id, ADDR.lower())]) == 1000
-        # …but the table only materialized INITIAL_BATCH rows.
-        assert plugin.widget().table.rowCount() == plugin.INITIAL_BATCH
-        assert plugin._displayed_count[(ETH.chain_id, ADDR.lower())] \
-            == plugin.INITIAL_BATCH
+        # Cache hydrated and entire row count on the table.
+        key = (ETH.chain_id, ADDR.lower())
+        assert len(plugin._cache[key]) == 1000
+        assert plugin.widget().table.rowCount() == 1000
+        assert plugin._displayed_count[key] == 1000
 
-    def test_scroll_bottom_reveals_more_cached_rows_without_network(
-        self, qtbot, tmp_qeth,
-    ):
-        """When there are still cached rows below the visible window,
-        scroll-to-bottom expands the view from the cache rather than
-        hitting Blockscout."""
-        from qeth.transactions_cache import TransactionCache
-        # Cache holds 200 sent txs; initial display shows 50.
-        cache = [
-            Transaction(
-                chain_id=1, hash="0x" + format(i, "064x"),
-                block_number=i, timestamp=i, nonce=i,
-                from_addr=ADDR, to_addr="0xfeed",
-                value_wei=0, gas_used=0, gas_price_wei=0,
-                method_id="", input_data="0x", success=True,
-            )
-            for i in range(200)
-        ]
-        TransactionCache().save(ETH.chain_id, ADDR, cache)
-
-        plugin = TransactionsPlugin()
-        host = _StubHost(address=ADDR)
-        plugin.attach(host)
-        qtbot.addWidget(plugin.widget())
-        plugin.on_account_changed(ADDR)
-        host.started_workers.clear()
-
-        # First scroll-to-bottom: 50 → 100 rendered, no worker.
-        plugin._on_scroll_bottom()
-        assert plugin.widget().table.rowCount() == 2 * plugin.INITIAL_BATCH
-        assert host.started_workers == []
-
-    def test_tab_reactivation_preserves_scrolled_in_rows(self, qtbot, tmp_qeth):
+    def test_tab_reactivation_preserves_table(self, qtbot, tmp_qeth):
         """Switching away to the Tokens tab and back must NOT throw
-        away the rows the user scrolled into view. The plugin sees
-        on_activated for the same (chain, addr) it already painted
-        and should leave the panel untouched — Qt then preserves the
-        scrollbar and the displayed list survives the tab switch
-        exactly like in a browser."""
+        away anything on screen. The plugin sees on_activated for the
+        same (chain, addr) it already painted and leaves the panel
+        untouched — Qt then preserves both contents and the scrollbar
+        position, just like tabs in a browser."""
         from qeth.transactions_cache import TransactionCache
         cache = [
             Transaction(
@@ -378,21 +343,15 @@ class TestTransactionsPlugin:
         plugin.attach(host)
         qtbot.addWidget(plugin.widget())
 
-        # Initial activation paints INITIAL_BATCH rows…
+        # First activation paints the entire cache (300 rows).
         plugin.on_activated()
-        assert plugin.widget().table.rowCount() == plugin.INITIAL_BATCH
-
-        # …user scrolls a few times to reveal more.
-        plugin._on_scroll_bottom()
-        plugin._on_scroll_bottom()
-        plugin._on_scroll_bottom()
-        big = plugin.widget().table.rowCount()
-        assert big == 4 * plugin.INITIAL_BATCH   # 200
+        first_count = plugin.widget().table.rowCount()
+        assert first_count == 300
 
         # Tab switch away then back — second on_activated for the
-        # same view should NOT shrink the table.
+        # same view must NOT touch the table.
         plugin.on_activated()
-        assert plugin.widget().table.rowCount() == big
+        assert plugin.widget().table.rowCount() == first_count
 
     def test_overlapping_fetch_auto_advances_to_new_data(self, qtbot, tmp_qeth):
         """When a fetched page contains only entries we already have

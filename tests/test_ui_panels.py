@@ -16,8 +16,10 @@ from qeth.chains import DEFAULT_CHAINS
 from qeth.icons import IconCache
 from qeth.store import Store
 from qeth.tokens import TokenBalance
+from qeth.plugins.tokens import TokenListPanel
 from qeth.transactions import Transaction
-from qeth.ui import DetailsPanel, TokenListPanel, TransactionListPanel
+from qeth.plugins.transactions import TransactionListPanel
+from qeth.plugins.wallets import DetailsPanel
 
 
 ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)

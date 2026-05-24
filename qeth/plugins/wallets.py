@@ -24,16 +24,23 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QByteArray, Qt, Signal
-from PySide6.QtGui import QAction, QFont, QIcon
-from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QFrame, QHBoxLayout, QMessageBox,
-    QSizePolicy, QSplitter, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
-)
-from PySide6.QtCore import QSize
+import io
 
-from .plugin import Plugin
+import segno
+
+from PySide6.QtCore import QByteArray, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+from PySide6.QtCore import QThread
+
+from ..chain import wei_to_ether
+from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from ..plugin import Plugin
 
 
 class WalletsPlugin(Plugin):
@@ -116,9 +123,6 @@ class WalletsPlugin(Plugin):
     # --- widget building ----------------------------------------------------
 
     def _build(self) -> None:
-        # Local import to avoid a Qt UI import at module load.
-        from .ui import DetailsPanel
-
         self._container = QWidget()
         v = QVBoxLayout(self._container)
         v.setContentsMargins(0, 0, 0, 0)
@@ -297,10 +301,6 @@ class WalletsPlugin(Plugin):
                 self.host.status_message(f"Removed {removed} account(s)", 3000)
 
     def _add_ledger(self) -> None:
-        # Local import: AddLedgerDialog drags in DetailsPanel / Ledger
-        # bits that we shouldn't load until the user actually clicks.
-        from .ui import AddLedgerDialog
-
         if self.host is None:
             return
         dlg = AddLedgerDialog(self.host.current_chain(), self._container)
@@ -328,3 +328,220 @@ class WalletsPlugin(Plugin):
         self.default_account_changed.emit()
         # Re-run selection to refresh the details-panel button state.
         self._on_tree_selection()
+
+
+# --- DetailsPanel + AddLedgerDialog (moved from qeth.ui) -------------------
+
+class DetailsPanel(QWidget):
+    set_default_requested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        # No bottom margin so the Set-as-default button can sit flush with
+        # the bottom of the splitter (matches the right panel's bottom edge).
+        v.setContentsMargins(9, 9, 9, 0)
+        self.title = QLabel("Select an account on the left")
+        f = self.title.font(); f.setPointSize(f.pointSize() + 2); f.setBold(True)
+        self.title.setFont(f)
+        v.addWidget(self.title)
+
+        form = QFormLayout()
+        mono = QFont("monospace")
+        # Ignored size policy on the long monospace labels: their sizeHint
+        # (full 42-char address etc.) shouldn't pin the panel's minimum
+        # width, otherwise the whole window can't be shrunk down.
+        self.address_lbl = QLabel("—"); self.address_lbl.setFont(mono)
+        self.address_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.address_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.path_lbl = QLabel("—"); self.path_lbl.setFont(mono)
+        self.path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.source_lbl = QLabel("—")
+        self.scheme_lbl = QLabel("—")
+        form.addRow("Address:", self.address_lbl)
+        form.addRow("Path:", self.path_lbl)
+        form.addRow("Source:", self.source_lbl)
+        form.addRow("Scheme:", self.scheme_lbl)
+        v.addLayout(form)
+
+        # Vertical breathing room above + below the QR — without these,
+        # the form rows / button crowd right up against it and the panel
+        # looks squeezed.
+        v.addSpacing(12)
+        self.qr_lbl = QLabel()
+        self.qr_lbl.setAlignment(Qt.AlignCenter)
+        self.qr_lbl.setFixedSize(220, 220)
+        v.addWidget(self.qr_lbl, 0, Qt.AlignCenter)
+        v.addSpacing(12)
+
+        # Short label + tooltip rather than a wide button — keeps the
+        # panel narrow-shrinkable. Same policy trick on the button itself.
+        self.set_default_btn = QPushButton("Set as default")
+        self.set_default_btn.setToolTip(
+            "Make this the address dapps see (returned by eth_accounts)"
+        )
+        self.set_default_btn.setEnabled(False)
+        # Pin the height. With QSizePolicy.Fixed Qt re-queries sizeHint()
+        # every time the text changes — and "Default ✓" can come out a
+        # touch shorter than "Set as default" depending on the theme. The
+        # snapshot here is taken while the (longer) text is set, so the
+        # disabled state never shrinks.
+        self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.set_default_btn.setMinimumHeight(self.set_default_btn.sizeHint().height())
+        self.set_default_btn.clicked.connect(
+            lambda: self._current and self.set_default_requested.emit(self._current)
+        )
+        # Stretch pushes the button to the very bottom of the panel.
+        v.addStretch(1)
+        v.addWidget(self.set_default_btn)
+        self._current: str | None = None
+
+    def show_account(self, account: dict, is_default: bool) -> None:
+        self._current = account["address"]
+        self.title.setText(account.get("label") or "Account")
+        self.address_lbl.setText(account["address"])
+        self.path_lbl.setText(account.get("path", "—"))
+        self.source_lbl.setText(account.get("source", "—"))
+        self.scheme_lbl.setText(account.get("scheme", "—"))
+        self.set_default_btn.setEnabled(not is_default)
+        self.set_default_btn.setText("Default ✓" if is_default else "Set as default")
+        self._render_qr(account["address"])
+
+    def _render_qr(self, address: str) -> None:
+        buf = io.BytesIO()
+        # ethereum: URI per EIP-681 so wallets recognize it as a send intent
+        segno.make(f"ethereum:{address}", error="m").save(buf, kind="png", scale=6, border=2)
+        pix = QPixmap()
+        pix.loadFromData(buf.getvalue(), "PNG")
+        self.qr_lbl.setPixmap(pix.scaled(
+            self.qr_lbl.size(), Qt.KeepAspectRatio, Qt.FastTransformation
+        ))
+
+    def clear(self) -> None:
+        self._current = None
+        self.title.setText("Select an account on the left")
+        for w in (self.address_lbl, self.path_lbl, self.source_lbl, self.scheme_lbl):
+            w.setText("—")
+        self.qr_lbl.clear()
+        self.set_default_btn.setEnabled(False)
+        self.set_default_btn.setText("Set as default")
+
+
+# --- Token list panel -------------------------------------------------------
+#
+# The six token-related QThread workers (TokenListsLoader, TokenListWorker,
+# RiskWorker, MetadataWorker, BalanceWorker, PricesWorker) used to live
+# here. They moved into qeth.plugins.tokens as part of the plugin refactor
+# (step 3) — they're token-domain code, owned by TokensPlugin now.
+
+
+
+
+class AddLedgerDialog(QDialog):
+    def __init__(self, chain, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self.setWindowTitle("Add Ledger accounts")
+        self.setMinimumSize(640, 460)
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.scheme_combo = QComboBox()
+        self.scheme_combo.addItems(list(PATH_SCHEMES.keys()))
+        form.addRow("Derivation scheme:", self.scheme_combo)
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(0, 100)
+        self.count_spin.setValue(0)
+        self.count_spin.setSpecialValueText("Auto-detect (stop after 3 empty)")
+        form.addRow("Accounts to scan:", self.count_spin)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel(
+            "Connect your Ledger, unlock it, and open the Ethereum app, then click Scan.\n"
+            f"Balances are queried on {chain.name}; non-empty accounts are pre-selected."
+        ))
+
+        self.results = QListWidget()
+        self.results.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        font = QFont("monospace")
+        self.results.setFont(font)
+        layout.addWidget(self.results, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        btns = QHBoxLayout()
+        self.scan_btn = QPushButton("Scan")
+        self.add_btn = QPushButton("Add selected")
+        self.add_btn.setEnabled(False)
+        self.close_btn = QPushButton("Close")
+        btns.addWidget(self.scan_btn)
+        btns.addStretch(1)
+        btns.addWidget(self.add_btn)
+        btns.addWidget(self.close_btn)
+        layout.addLayout(btns)
+
+        self.scan_btn.clicked.connect(self._scan)
+        self.add_btn.clicked.connect(self.accept)
+        self.close_btn.clicked.connect(self.reject)
+        self.results.itemSelectionChanged.connect(
+            lambda: self.add_btn.setEnabled(bool(self.results.selectedItems()))
+        )
+
+        # Workers tracked here so they aren't garbage-collected while still
+        # running (Qt's QThread destructor aborts the process if it is).
+        self._workers: set[QThread] = set()
+
+    def _scan(self) -> None:
+        self.results.clear()
+        self.add_btn.setEnabled(False)
+        n = self.count_spin.value()
+        if n == 0:
+            self.progress.setRange(0, 0)  # indeterminate spinner
+        else:
+            self.progress.setRange(0, n)
+            self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.scan_btn.setEnabled(False)
+        worker = LedgerWorker(
+            self.scheme_combo.currentText(), n, chain=self._chain
+        )
+        worker.discovered.connect(self._on_found)
+        worker.finished_ok.connect(self._on_done)
+        worker.failed.connect(self._on_failed)
+        self._workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_found(self, acct: DiscoveredAccount) -> None:
+        balance = wei_to_ether(acct.balance_wei)
+        label = (
+            f"#{acct.index:<3} {acct.address}   "
+            f"{balance:.6f} {self._chain.symbol}"
+        )
+        item = QListWidgetItem(label)
+        item.setData(Qt.UserRole, acct)
+        item.setSelected(acct.balance_wei > 0)
+        self.results.addItem(item)
+        if self.progress.maximum() > 0:
+            self.progress.setValue(self.progress.value() + 1)
+
+    def _on_done(self) -> None:
+        self.progress.setVisible(False)
+        self.scan_btn.setEnabled(True)
+        self.add_btn.setEnabled(bool(self.results.selectedItems()))
+
+    def _on_failed(self, msg: str) -> None:
+        self.progress.setVisible(False)
+        self.scan_btn.setEnabled(True)
+        QMessageBox.critical(self, "Ledger error", msg)
+
+    def selected_accounts(self) -> list[DiscoveredAccount]:
+        return [it.data(Qt.UserRole) for it in self.results.selectedItems()]
+
+
+# --- Right-hand details panel ------------------------------------------------
+

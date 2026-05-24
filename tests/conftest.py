@@ -72,7 +72,8 @@ def hermetic_mainwindow(monkeypatch):
     they still get ``start()``'d and emit ``finished``, so the
     self-eviction wiring stays exercised.
     """
-    from qeth import tokens_plugin, transactions_plugin
+    from qeth.plugins import tokens as tokens_plugin
+    from qeth.plugins import transactions as transactions_plugin
 
     def _noop_run(self):  # pragma: no cover - simple no-op
         return

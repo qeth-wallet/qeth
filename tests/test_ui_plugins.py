@@ -12,9 +12,9 @@ import pytest
 from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
-from qeth.tokens_plugin import TokensPlugin
+from qeth.plugins.tokens import TokensPlugin
 from qeth.transactions import Transaction
-from qeth.transactions_plugin import TransactionsPlugin
+from qeth.plugins.transactions import TransactionsPlugin
 
 
 ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
@@ -46,7 +46,7 @@ class _StubHost:
 
 class TestTransactionsPlugin:
     def test_widget_returns_transaction_panel(self, qtbot, tmp_qeth):
-        from qeth.ui import TransactionListPanel
+        from qeth.plugins.transactions import TransactionListPanel
         plugin = TransactionsPlugin()
         w = plugin.widget()
         qtbot.addWidget(w)
@@ -112,7 +112,7 @@ class TestTransactionsPlugin:
 @pytest.fixture
 def tokens_plugin(qtbot, tmp_qeth, monkeypatch):
     """A TokensPlugin with all background workers neutralized."""
-    from qeth import tokens_plugin as tp
+    from qeth.plugins import tokens as tp
 
     def _noop_run(self):
         return
@@ -133,7 +133,7 @@ def tokens_plugin(qtbot, tmp_qeth, monkeypatch):
 
 class TestTokensPlugin:
     def test_widget_returns_token_panel(self, tokens_plugin):
-        from qeth.ui import TokenListPanel
+        from qeth.plugins.tokens import TokenListPanel
         assert isinstance(tokens_plugin.widget(), TokenListPanel)
 
     def test_action_widgets_are_panel_buttons(self, tokens_plugin):
@@ -193,7 +193,7 @@ class TestTokensPlugin:
 @pytest.fixture
 def wallets_plugin(qtbot, tmp_qeth):
     from qeth.store import Store
-    from qeth.wallets_plugin import WalletsPlugin
+    from qeth.plugins.wallets import WalletsPlugin
     store = Store.load()
     plugin = WalletsPlugin(store)
     qtbot.addWidget(plugin.widget())
@@ -202,7 +202,7 @@ def wallets_plugin(qtbot, tmp_qeth):
 
 class TestWalletsPlugin:
     def test_widget_holds_tree_and_details(self, wallets_plugin):
-        from qeth.ui import DetailsPanel
+        from qeth.plugins.wallets import DetailsPanel
         from PySide6.QtWidgets import QTreeWidget
         assert isinstance(wallets_plugin._tree, QTreeWidget)
         assert isinstance(wallets_plugin._details, DetailsPanel)

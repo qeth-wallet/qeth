@@ -531,12 +531,12 @@ class TokenListPanel(QWidget):
         h.setSectionResizeMode(3, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
-        # Bottom-right action row: + add custom, − remove (hide), pin
-        # (force show), spotlight (show all). Theme icons with text
-        # fallback for systems without the freedesktop icon names.
-        action_row = QHBoxLayout()
+        # Bottom action row: + add custom, − remove (hide), pin (force
+        # show), spotlight (show all) on the left; chain selector (added
+        # by MainWindow via mount_right_widget) on the right. Theme icons
+        # with text fallback for systems without the freedesktop names.
+        self._action_row = action_row = QHBoxLayout()
         action_row.setContentsMargins(4, 2, 4, 4)
-        action_row.addStretch(1)
 
         style = self.style()
         self.btn_add = QPushButton()
@@ -582,6 +582,7 @@ class TokenListPanel(QWidget):
             b.setIconSize(QSize(16, 16))
             b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             action_row.addWidget(b)
+        action_row.addStretch(1)
         v.addLayout(action_row)
 
         self.btn_add.clicked.connect(self.add_custom_requested.emit)
@@ -603,6 +604,11 @@ class TokenListPanel(QWidget):
         # Same — MainWindow injects so the alarm icon also reflects GoPlus
         # high-risk verdicts (honeypot / hidden owner / >50% sell tax).
         self._risk_cache: "RiskCache | None" = None
+
+    def mount_right_widget(self, widget: QWidget) -> None:
+        """Append a widget to the right end of the bottom action row.
+        Used by MainWindow to dock the chain selector there."""
+        self._action_row.addWidget(widget)
 
     # ---- displaying data -------------------------------------------------
 
@@ -1119,25 +1125,21 @@ class MainWindow(QMainWindow):
         self.act_remove.triggered.connect(self._remove_selected_account)
         tb.addAction(self.act_remove)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer)
-
-        tb.addWidget(QLabel("Chain: "))
-        self.chain_combo = QComboBox()
-        self.chain_combo.setIconSize(QSize(18, 18))
+    def _build_chain_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.setIconSize(QSize(18, 18))
         for c in self.store.chains:
             label = f"{c.name} ({c.chain_id})"
             pix = bundled_chain_icon(c.chain_id)
             if pix is not None:
-                self.chain_combo.addItem(QIcon(pix), label, c.chain_id)
+                combo.addItem(QIcon(pix), label, c.chain_id)
             else:
-                self.chain_combo.addItem(label, c.chain_id)
-        idx = self.chain_combo.findData(self.store.current_chain_id)
+                combo.addItem(label, c.chain_id)
+        idx = combo.findData(self.store.current_chain_id)
         if idx >= 0:
-            self.chain_combo.setCurrentIndex(idx)
-        self.chain_combo.currentIndexChanged.connect(self._on_chain_changed)
-        tb.addWidget(self.chain_combo)
+            combo.setCurrentIndex(idx)
+        combo.currentIndexChanged.connect(self._on_chain_changed)
+        return combo
 
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Horizontal)
@@ -1175,6 +1177,8 @@ class MainWindow(QMainWindow):
         self.token_panel.pin_requested.connect(self._on_pin_token)
         self.token_panel.add_custom_requested.connect(self._on_add_custom_token)
         self.token_panel.show_all_toggled.connect(self._on_show_all_toggled)
+        self.chain_combo = self._build_chain_combo()
+        self.token_panel.mount_right_widget(self.chain_combo)
         outer.addWidget(self.token_panel)
 
         outer.setStretchFactor(0, 1)

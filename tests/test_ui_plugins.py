@@ -363,6 +363,26 @@ class TestTransactionsPlugin:
         assert weights_by_text.get("transfer", QFont.Normal) >= QFont.Bold
         assert weights_by_text.get("(", QFont.Bold) < QFont.Bold
 
+    def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
+        """The function name in the decoded-call view stays bold only
+        if the chosen monospace family ships a Bold style. The CSS
+        ``monospace`` alias on some Linux systems resolves to a
+        Regular-only family — must pick a richer one."""
+        from PySide6.QtGui import QFontDatabase
+        from qeth.plugins.transactions import _pick_mono_font
+
+        font = _pick_mono_font()
+        family = font.family()
+        styles = QFontDatabase.styles(family)
+        # If this fails the test machine literally has no monospace
+        # family with bold installed — accept the fallback. But on
+        # any normal dev box at least one of DejaVu / Liberation /
+        # Noto / etc. should be present.
+        if family != "monospace":
+            assert any("bold" in s.lower() for s in styles), (
+                f"picked font {family!r} has no Bold style: {styles}"
+            )
+
     def test_render_decoded_uses_fixed_pitch_font(self, qtbot, tmp_qeth):
         """Regression: QFontDatabase.systemFont(FixedFont) returned
         ``Ubuntu`` (not actually fixed-pitch) on the developer's

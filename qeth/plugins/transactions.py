@@ -23,7 +23,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QTextCharFormat,
+    QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
@@ -54,6 +54,42 @@ log = logging.getLogger("qeth.plugin.transactions")
 _TYPE_COLOR = "#0066cc"     # cool blue
 _VALUE_COLOR = "#22863a"    # green
 
+# Monospace families we prefer for the decoded-call view, in order.
+# All ship a Bold style — that's what made the function name fail to
+# stand out when Qt resolved generic ``monospace`` to a Regular-only
+# family on Linux. The list also covers macOS (Menlo / SF Mono /
+# Monaco) and Windows (Consolas / Courier New) so the picker lands
+# on a platform-native choice without us having to special-case OS.
+_MONO_FAMILY_PREFERENCES = (
+    # Linux desktop defaults
+    "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono",
+    # Cross-platform popular dev fonts (Adobe / GitHub / Mozilla)
+    "Source Code Pro", "Hack", "Fira Code", "Cascadia Code",
+    # macOS built-ins (Menlo is the default since 10.6; SF Mono and
+    # Monaco are also shipped)
+    "Menlo", "SF Mono", "Monaco",
+    # Windows built-ins
+    "Consolas", "Courier New",
+)
+
+
+def _pick_mono_font() -> QFont:
+    installed = set(QFontDatabase.families())
+    for family in _MONO_FAMILY_PREFERENCES:
+        if family not in installed:
+            continue
+        if any("bold" in s.lower() for s in QFontDatabase.styles(family)):
+            f = QFont(family)
+            f.setFixedPitch(True)
+            return f
+    # Last resort — generic alias. Bold may render as faux-bold (or
+    # not at all) depending on what the resolver picks, but the
+    # rest of the dialog still looks fine.
+    f = QFont("monospace")
+    f.setStyleHint(QFont.Monospace)
+    f.setFixedPitch(True)
+    return f
+
 
 def _render_decoded(text_edit, decoded: dict) -> None:
     """Render a decoded call into ``text_edit`` as Python-style
@@ -73,22 +109,17 @@ def _render_decoded(text_edit, decoded: dict) -> None:
 
     Uses QTextCursor + QTextCharFormat directly rather than HTML —
     Qt's HTML renderer silently drops ``<b>`` / ``font-weight`` when
-    the widget font is a generic alias the font resolver can't map
-    to a bold variant. The cursor path lets us pin both family and
-    weight explicitly.
-
-    For the family we use ``QFont("monospace")`` with the Monospace
-    style hint — Qt resolves this through fontconfig to the system's
-    chosen monospace family (DejaVu Sans Mono / Droid Sans Mono / …).
-    ``QFontDatabase.systemFont(FixedFont)`` was tried first but on
-    Ubuntu it returns the ``Ubuntu`` family, which isn't actually
-    fixed-pitch — columns wouldn't align."""
+    the resolved font has no Bold variant. We explicitly walk a
+    preference list of monospace families and pick the first one
+    that is (a) installed and (b) ships a Bold style. The CSS
+    ``monospace`` alias on some systems resolves to families with
+    only a Regular style (e.g. Droid Sans Mono Slashed), which
+    would render the function name visually identical to the rest
+    of the line."""
     text_edit.clear()
     cursor = text_edit.textCursor()
 
-    mono = QFont("monospace")
-    mono.setStyleHint(QFont.Monospace)
-    mono.setFixedPitch(True)
+    mono = _pick_mono_font()
     base = QTextCharFormat()
     base.setFont(mono)
 

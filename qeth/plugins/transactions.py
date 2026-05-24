@@ -22,11 +22,13 @@ import logging
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
-    QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QMenu, QPushButton, QSizePolicy,
+    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..abi import BlockscoutAbiSource, decode_call
@@ -41,6 +43,61 @@ from ..transactions_cache import TransactionCache, merge_txs
 
 
 log = logging.getLogger("qeth.plugin.transactions")
+
+
+# --- decoded-call renderer ------------------------------------------------
+#
+# Colour choices balance light and dark themes — moderate saturation
+# so both modes stay readable. Function name is bold + default text
+# colour (always contrasts against the background); types and values
+# get distinct colours so the eye can scan them quickly.
+_TYPE_COLOR = "#0066cc"     # cool blue
+_VALUE_COLOR = "#22863a"    # green
+
+
+def _render_decoded(text_edit, decoded: dict) -> None:
+    """Render a decoded call into ``text_edit`` as Python-style
+    annotated text, e.g.
+
+        transfer(
+            _to: address = 0x…,
+            _value: uint256 = 500000000,
+        )
+
+    with the function name bold and types/values in distinct colours.
+
+    Uses QTextCursor + QTextCharFormat directly rather than HTML —
+    Qt's HTML renderer silently drops ``<b>`` / ``font-weight`` when
+    the widget font is a generic alias like ``QFont("monospace")``,
+    because the font resolver can't find a bold-mapped variant. The
+    cursor path goes through QFontDatabase, which always returns a
+    family that has the weight variants we ask for."""
+    text_edit.clear()
+    cursor = text_edit.textCursor()
+
+    mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+    base = QTextCharFormat()
+    base.setFont(mono)
+
+    bold = QTextCharFormat(base)
+    bold.setFontWeight(QFont.Bold)
+
+    type_fmt = QTextCharFormat(base)
+    type_fmt.setForeground(QColor(_TYPE_COLOR))
+
+    value_fmt = QTextCharFormat(base)
+    value_fmt.setForeground(QColor(_VALUE_COLOR))
+
+    cursor.insertText(decoded.get("function") or "?", bold)
+    cursor.insertText("(\n", base)
+    for arg in decoded.get("args") or []:
+        cursor.insertText(f"    {arg.get('name') or ''}: ", base)
+        cursor.insertText(arg.get("type") or "", type_fmt)
+        cursor.insertText(" = ", base)
+        value = arg.get("value")
+        cursor.insertText("" if value is None else str(value), value_fmt)
+        cursor.insertText(",\n", base)
+    cursor.insertText(")", base)
 
 
 def _is_full_history(txs: list[Transaction]) -> bool:
@@ -789,9 +846,10 @@ class TransactionDetailsDialog(QDialog):
         form.addRow("Method ID:", _label(tx.method_id or "(none — plain transfer)",
                                         monospace=True))
 
-        # Decoded call goes in a read-only QPlainTextEdit so long
-        # argument lists (multi-line) read cleanly.
-        self.decoded_view = QPlainTextEdit()
+        # Decoded call goes in a read-only QTextEdit so we can render
+        # syntax-highlighted HTML (function bold, types and values
+        # coloured). QPlainTextEdit would only do flat text.
+        self.decoded_view = QTextEdit()
         self.decoded_view.setReadOnly(True)
         self.decoded_view.setFont(mono)
         self.decoded_view.setSizePolicy(
@@ -841,11 +899,7 @@ class TransactionDetailsDialog(QDialog):
                 "function in it — possibly a fallback or proxy call)"
             )
             return
-        lines = [f"{decoded['function']}("]
-        for k, v in decoded["args"].items():
-            lines.append(f"    {k} = {v},")
-        lines.append(")")
-        self.decoded_view.setPlainText("\n".join(lines))
+        _render_decoded(self.decoded_view, decoded)
 
     def _open_explorer(self) -> None:
         if not self.chain.explorer:

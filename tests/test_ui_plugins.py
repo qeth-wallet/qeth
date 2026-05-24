@@ -319,6 +319,50 @@ class TestTransactionsPlugin:
         assert plugin.widget().table.rowCount() == 1000
         assert plugin._displayed_count[key] == 1000
 
+    def test_render_decoded_lays_out_python_signature(self, qtbot, tmp_qeth):
+        """Decoded calls render with type annotations and the function
+        name bold — the Python-flavoured ``name: type = value`` form."""
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {
+            "function": "transfer",
+            "args": [
+                {"name": "_to", "type": "address",
+                 "value": "0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace"},
+                {"name": "_value", "type": "uint256", "value": "500000000"},
+            ],
+        })
+        text = edit.toPlainText()
+        # The whole signature is present, in declaration order, with
+        # type annotations between name and value.
+        assert "transfer(" in text
+        assert "_to: address = 0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace" in text
+        assert "_value: uint256 = 500000000" in text
+        assert text.index("_to") < text.index("_value")
+
+        # Walk the document and confirm the function name's run is
+        # bold while the surrounding text isn't. Qt picks an
+        # actually-bold-capable family via QFontDatabase, so this
+        # checks the live rendered font weight rather than just an
+        # HTML attribute the engine might silently drop.
+        doc = edit.document()
+        block = doc.firstBlock()
+        weights_by_text: dict[str, int] = {}
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid():
+                weights_by_text[frag.text()] = frag.charFormat().fontWeight()
+            it += 1
+        # The "transfer" fragment is bold; the "(" fragment around
+        # it is rendered at normal weight.
+        assert weights_by_text.get("transfer", QFont.Normal) >= QFont.Bold
+        assert weights_by_text.get("(", QFont.Bold) < QFont.Bold
+
     def test_double_click_opens_details_dialog(self, qtbot, tmp_qeth):
         """Double-clicking a row should open TransactionDetailsDialog
         with the right tx and chain wired through. Plugin no-ops the

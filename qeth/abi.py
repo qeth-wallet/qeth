@@ -211,12 +211,15 @@ def decode_call(abi: Optional[Abi], input_data: str,
     """Decode ``input_data`` against ``abi``. Returns a dict like
 
         {"function": "transfer",
-         "args": {"_to": "0x…", "_value": "500000000"}}
+         "args": [
+            {"name": "_to",    "type": "address", "value": "0x…"},
+            {"name": "_value", "type": "uint256", "value": "500000000"},
+         ]}
 
     or ``None`` when there's no ABI, the calldata is empty, or
-    decoding fails (e.g. the selector isn't in the ABI). All decoded
-    values are stringified so the result is JSON-friendly and safe
-    to splice into a QLabel."""
+    decoding fails. The args list preserves declaration order and
+    carries Solidity type names so the UI can render annotations
+    (``_to: address = 0x…``) without a second ABI lookup."""
     if not abi or not input_data or input_data in ("0x", "0X"):
         return None
     try:
@@ -227,21 +230,39 @@ def decode_call(abi: Optional[Abi], input_data: str,
         func, args = contract.decode_function_input(input_data)
     except Exception:
         return None
-    plain_args: dict[str, object] = {}
-    for k, v in args.items():
-        plain_args[k] = _stringify(v)
+    inputs = (getattr(func, "abi", None) or {}).get("inputs", []) or []
+    args_list: list[dict] = []
+    for inp in inputs:
+        name = inp.get("name", "")
+        type_ = inp.get("type", "")
+        # web3.py keys args by parameter name. Anonymous inputs are
+        # rare but possible — fall back to positional index.
+        if name in args:
+            value = args[name]
+        else:
+            try:
+                value = list(args.values())[len(args_list)]
+            except IndexError:
+                value = None
+        args_list.append({
+            "name": name,
+            "type": type_,
+            "value": _stringify(value),
+        })
     return {
         "function": getattr(func, "fn_name", None) or str(func),
-        "args": plain_args,
+        "args": args_list,
     }
 
 
-def _stringify(value):
-    """Coerce a decoded value to a string-friendly form. web3.py
-    hands back bytes for bytesN/bytes, Python ints for uintN/intN,
-    checksummed strings for addresses."""
+def _stringify(value) -> str:
+    """Coerce a decoded value to a string. web3.py hands back bytes
+    for bytesN/bytes, Python ints for uintN/intN, checksummed
+    strings for addresses, and tuples/lists for arrays."""
+    if value is None:
+        return ""
     if isinstance(value, (bytes, bytearray)):
         return "0x" + bytes(value).hex()
     if isinstance(value, (list, tuple)):
-        return [_stringify(v) for v in value]
+        return "[" + ", ".join(_stringify(v) for v in value) + "]"
     return str(value)

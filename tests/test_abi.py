@@ -215,9 +215,14 @@ class TestDecodeCall:
         )
         assert out is not None
         assert out["function"] == "transfer"
-        assert out["args"]["_to"].lower() \
+        # args is a list preserving declaration order; each entry has
+        # name/type/value so the UI can render annotated signatures.
+        assert [a["name"] for a in out["args"]] == ["_to", "_value"]
+        assert [a["type"] for a in out["args"]] == ["address", "uint256"]
+        to_arg, value_arg = out["args"]
+        assert to_arg["value"].lower() \
             == "0x5d6a4ba137d77df7c3cdd7131c430da5497c7ace"
-        assert out["args"]["_value"] == "500000000"
+        assert value_arg["value"] == "500000000"
 
     def test_no_abi_returns_none(self):
         assert decode_call(None, "0xa9059cbb...") is None

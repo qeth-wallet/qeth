@@ -23,6 +23,30 @@ from .transactions import Transaction
 CACHE_DIR = Path.home() / ".qeth" / "transactions"
 
 
+def merge_txs(
+    new: list[Transaction], old: list[Transaction],
+) -> list[Transaction]:
+    """Combine a fresh fetch with older cached entries.
+
+    Dedupes by ``hash``: a transaction the new fetch returned wins over
+    its cached counterpart (block, timestamp, status etc. should be
+    identical for confirmed txs, but if the cache has stale values
+    from before a reorg fix the new fetch's row is preferred).
+
+    The result is sorted by ``block_number`` descending. Python's
+    stable sort preserves intra-block insertion order, which means
+    transactions from the new fetch land in front of cached txs sharing
+    the same block — matching Blockscout's canonical order for that
+    block."""
+    new_hashes = {t.hash for t in new}
+    merged: list[Transaction] = list(new)
+    for t in old:
+        if t.hash not in new_hashes:
+            merged.append(t)
+    merged.sort(key=lambda t: t.block_number, reverse=True)
+    return merged
+
+
 class TransactionCache:
     """Tiny key-value store over the filesystem. Replace-on-write
     (no merging) is fine for now — each fetch returns the top N

@@ -1,7 +1,7 @@
 """Tests for qeth.transactions_cache — disk persistence for past txs."""
 
 from qeth.transactions import Transaction
-from qeth.transactions_cache import TransactionCache
+from qeth.transactions_cache import TransactionCache, merge_txs
 
 
 def _tx(hash_suffix: str = "ab", **kw) -> Transaction:
@@ -98,3 +98,60 @@ def test_chains_are_isolated(tmp_qeth):
     cache.save(10, ADDR, [_tx("bb"), _tx("cc")])
     assert len(cache.load(1, ADDR)) == 1
     assert len(cache.load(10, ADDR)) == 2
+
+
+# --- merge_txs -------------------------------------------------------------
+
+class TestMergeTxs:
+    def test_empty_inputs(self):
+        assert merge_txs([], []) == []
+
+    def test_only_new(self):
+        a, b = _tx("aa", block_number=10), _tx("bb", block_number=9)
+        assert merge_txs([a, b], []) == [a, b]
+
+    def test_only_old(self):
+        a, b = _tx("aa", block_number=10), _tx("bb", block_number=9)
+        assert merge_txs([], [a, b]) == [a, b]
+
+    def test_dedupes_by_hash(self):
+        """A tx returned by both lists appears once. The version from
+        ``new`` wins (so post-reorg corrections propagate cleanly)."""
+        old_tx = _tx("aa", block_number=10, success=False)
+        new_tx = _tx("aa", block_number=10, success=True)
+        merged = merge_txs([new_tx], [old_tx])
+        assert len(merged) == 1
+        assert merged[0].success is True
+
+    def test_extends_history_with_older_cached(self):
+        """The whole point of merging: new fetch + older cached →
+        union, so historical entries survive even after they fall out
+        of the recent-N fetch window."""
+        new = [_tx("a1", block_number=20),
+               _tx("a2", block_number=19)]
+        old = [_tx("o1", block_number=10),
+               _tx("o2", block_number=5)]
+        merged = merge_txs(new, old)
+        hashes = [t.hash for t in merged]
+        assert hashes == ["0x" + "a1" * 32, "0x" + "a2" * 32,
+                          "0x" + "o1" * 32, "0x" + "o2" * 32]
+
+    def test_interleaves_by_block(self):
+        """If the new fetch's window starts above the cached one but
+        they overlap on intermediate blocks, the result must still be
+        sorted by block desc."""
+        new = [_tx("n1", block_number=20),
+               _tx("n2", block_number=15)]
+        old = [_tx("o1", block_number=18),
+               _tx("o2", block_number=12)]
+        merged = merge_txs(new, old)
+        assert [t.block_number for t in merged] == [20, 18, 15, 12]
+
+    def test_intra_block_new_wins_via_stable_sort(self):
+        """Within the same block, new fetch entries sort ahead of old
+        cached entries (Python's stable sort preserves insertion order
+        for equal keys; merge_txs concatenates new then old)."""
+        n = _tx("nn", block_number=10)
+        o = _tx("oo", block_number=10)
+        merged = merge_txs([n], [o])
+        assert merged == [n, o]

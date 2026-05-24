@@ -118,6 +118,47 @@ class TestTransactionsPlugin:
         # And the in-memory cache should now hold the hydrated entries.
         assert (ETH.chain_id, ADDR.lower()) in plugin._cache
 
+    def test_fetched_results_merge_with_cached_history(self, qtbot, tmp_qeth):
+        """A new fetch only returns the most-recent window. The plugin
+        should merge it with anything older the cache holds, so the
+        displayed list grows over time rather than being truncated to
+        the latest 50."""
+        from qeth.transactions_cache import TransactionCache
+        old_history = [
+            Transaction(
+                chain_id=1, hash="0x" + "11" * 32, block_number=5,
+                timestamp=1, nonce=0, from_addr=ADDR, to_addr="0xbeef",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+        ]
+        TransactionCache().save(ETH.chain_id, ADDR, old_history)
+
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        # Hydrate in-memory cache from disk.
+        plugin.on_account_changed(ADDR)
+
+        # Simulate a fresh fetch returning a newer transaction only.
+        new_only = [
+            Transaction(
+                chain_id=1, hash="0x" + "22" * 32, block_number=10,
+                timestamp=2, nonce=1, from_addr=ADDR, to_addr="0xbeef",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+        ]
+        plugin._on_fetched(ETH.chain_id, ADDR.lower(), new_only)
+
+        merged = plugin._cache[(ETH.chain_id, ADDR.lower())]
+        # Both entries present, newer first.
+        assert [t.hash for t in merged] == [new_only[0].hash, old_history[0].hash]
+        # And the disk reflects the merged state.
+        reloaded = TransactionCache().load(ETH.chain_id, ADDR)
+        assert [t.hash for t in reloaded] == [new_only[0].hash, old_history[0].hash]
+
     def test_fetched_results_get_persisted(self, qtbot, tmp_qeth):
         from qeth.transactions_cache import TransactionCache
         plugin = TransactionsPlugin()

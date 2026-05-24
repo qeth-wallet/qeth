@@ -36,7 +36,7 @@ from ..plugin import Plugin
 from ..transactions import (
     BlockscoutTransactionSource, Transaction, TransactionSource, TxDirection,
 )
-from ..transactions_cache import TransactionCache
+from ..transactions_cache import TransactionCache, merge_txs
 
 
 log = logging.getLogger("qeth.plugin.transactions")
@@ -193,11 +193,14 @@ class TransactionsPlugin(Plugin):
                     txs: list) -> None:
         key = (chain_id, address_lower)
         self._in_flight.discard(key)
-        self._cache[key] = txs
-        # Persist so the next run renders these immediately, ahead of
-        # the background refresh. Safe to overwrite — fetched results
-        # always represent the newest window of the address's history.
-        self._disk_cache.save(chain_id, address_lower, txs)
+        # Merge with whatever the cache already holds — the fetch only
+        # returns the most-recent window (limit=50), but the cache from
+        # prior runs may contain older transactions that aren't in this
+        # page. merge_txs dedupes by hash and re-sorts newest-first.
+        existing = self._cache.get(key) or []
+        merged = merge_txs(txs, existing)
+        self._cache[key] = merged
+        self._disk_cache.save(chain_id, address_lower, merged)
         # Only repaint if the user still has this view selected — they
         # may have clicked another account/chain while we waited.
         if self.host is None:
@@ -207,7 +210,7 @@ class TransactionsPlugin(Plugin):
             return
         if self.host.current_chain().chain_id != chain_id:
             return
-        self._panel.show_transactions(txs)
+        self._panel.show_transactions(merged)
 
     def _on_failed(self, key: tuple[int, str], msg: str) -> None:
         self._in_flight.discard(key)

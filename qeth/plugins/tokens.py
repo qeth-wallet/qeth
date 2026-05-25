@@ -24,8 +24,8 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog,
     QMenu, QMessageBox, QPushButton, QSizePolicy, QStyle, QTableWidget,
@@ -262,7 +262,24 @@ class TokensPlugin(Plugin):
             self._panel.pin_requested.connect(self._on_pin_token)
             self._panel.add_custom_requested.connect(self._on_add_custom_token)
             self._panel.show_all_toggled.connect(self._on_show_all_toggled)
+            self._panel.transfers_requested.connect(self._on_transfers_requested)
         return self._panel
+
+    def _on_transfers_requested(self, chain_id: int, contract: str) -> None:
+        """Double-click on a token row opens the explorer's
+        token-transfers-for-this-holder page —
+        ``/token/<contract>?a=<user>`` — so the user lands on their
+        own movement history of that token rather than the bare
+        contract page."""
+        if self.host is None:
+            return
+        chain = self.host.current_chain()
+        addr = self.host.selected_address
+        if not chain.explorer or not addr:
+            return
+        base = chain.explorer.rstrip("/")
+        url = f"{base}/token/{contract}?a={addr}"
+        QDesktopServices.openUrl(QUrl(url))
 
     def action_widgets(self):
         if self._panel is None:
@@ -816,6 +833,9 @@ class TokenListPanel(QWidget):
     # User toggled the "show all" view (no dust, no hide-list — only scams
     # still hidden).
     show_all_toggled = Signal(bool)
+    # User double-clicked a token row; carries (chain_id, contract).
+    # Native rows don't emit (no token-transfers page for native).
+    transfers_requested = Signal(int, str)
 
     NATIVE_CONTRACT = ""  # sentinel for the native row
 
@@ -864,6 +884,7 @@ class TokenListPanel(QWidget):
         self.table.setIconSize(QSize(20, 20))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.setSortingEnabled(True)
         # Default: by Value (USD) descending. setSortIndicator only sets the
         # arrow; the actual sort kicks in each time we toggle sortingEnabled
@@ -1328,6 +1349,20 @@ class TokenListPanel(QWidget):
         self.btn_pin.setEnabled(enabled)
 
     # ---- context menu ---------------------------------------------------
+
+    def _on_cell_double_clicked(self, row: int, _col: int) -> None:
+        """Emit ``transfers_requested`` for non-native rows. The
+        plugin builds the explorer URL and opens it."""
+        sym_item = self.table.item(row, 0)
+        if sym_item is None:
+            return
+        meta = sym_item.data(Qt.UserRole)
+        if not meta:
+            return
+        cid, addr = meta
+        if addr == self.NATIVE_CONTRACT:
+            return
+        self.transfers_requested.emit(cid, addr)
 
     def _on_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)

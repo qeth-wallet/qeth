@@ -15,8 +15,11 @@ from PySide6.QtWidgets import (
 from .icons import bundled_chain_icon
 from .plugin import Slot
 from .plugins.tokens import TokensPlugin
-from .plugins.transactions import TransactionsPlugin
+from .plugins.transactions import (
+    SignTransactionDialog, TransactionsPlugin,
+)
 from .plugins.wallets import WalletsPlugin
+from .signing import SignerBridge, SignerError
 
 
 class MainWindow(QMainWindow):
@@ -39,6 +42,20 @@ class MainWindow(QMainWindow):
         self.wallets_plugin = WalletsPlugin(self.store)
         self.tokens_plugin = TokensPlugin(self.store)
         self.transactions_plugin = TransactionsPlugin()
+
+        # Signing bridge: the RPC server hands incoming signing
+        # requests through this object, the slot below opens the
+        # confirmation dialog on the main thread, and the bridge's
+        # future is resolved with the broadcast tx hash (or rejected
+        # with a SignerError). Parent it to MainWindow so the QObject
+        # lives on the main thread and cross-thread emit auto-queues.
+        self.signer_bridge = SignerBridge(parent=self)
+        self.signer_bridge.request_received.connect(
+            self._on_signing_request,
+            type=Qt.QueuedConnection,
+        )
+        if self.rpc is not None:
+            self.rpc.signer_bridge = self.signer_bridge
 
         # Workers tracked here so Python doesn't GC them while running
         # (Qt's QThread destructor aborts the process if the thread is
@@ -200,6 +217,61 @@ class MainWindow(QMainWindow):
 
     def icon_cache(self):
         return self.tokens_plugin.icon_cache
+
+    # --- signing -------------------------------------------------------
+
+    def _on_signing_request(self, req, fut) -> None:
+        """Slot for ``SignerBridge.request_received`` — runs on the
+        Qt main thread (queued connection). Looks up the right
+        Chain from the RPC's session view, opens the dialog, and
+        resolves / rejects the future. Phase 1: actual signing isn't
+        wired in yet, so confirmed requests still reject with a
+        placeholder error — the goal of this phase is to validate
+        the round-trip plumbing."""
+        chain = next(
+            (c for c in self.store.chains if c.chain_id == req.chain_id),
+            None,
+        )
+        if chain is None:
+            self.signer_bridge.reject(
+                fut, SignerError(f"Unknown chain {req.chain_id}"),
+            )
+            return
+        # Native USD price (used by the dialog to annotate the
+        # expected-fee line with a "(… USD)" suffix). Loaded from
+        # the wallet cache the Tokens plugin already maintains; if
+        # there's no cached price for this (chain, addr) yet, the
+        # dialog quietly omits the dollar parenthetical.
+        native_price_usd = None
+        try:
+            cached = self.tokens_plugin._wallet_cache.load(
+                chain.chain_id, req.from_addr,
+            )
+            if cached is not None and cached.native_price_usd:
+                from decimal import Decimal
+                native_price_usd = Decimal(cached.native_price_usd)
+        except Exception:
+            # Cache miss / file gone / parse error — fee just shows
+            # without the USD annotation.
+            native_price_usd = None
+
+        dialog = SignTransactionDialog(
+            req, chain,
+            abi_source=self.transactions_plugin._abi_source,
+            abi_cache=self.transactions_plugin._abi_cache,
+            start_worker=self.start_worker,
+            token_info=self.token_info,
+            native_price_usd=native_price_usd,
+            parent=self,
+        )
+        if dialog.exec() != SignTransactionDialog.Accepted:
+            self.signer_bridge.reject(fut, SignerError("User cancelled"))
+            return
+        # Phase 1 placeholder — Phase 2 will plug in LedgerSigner
+        # here, call sign + broadcast, and resolve with the tx hash.
+        self.signer_bridge.reject(
+            fut, SignerError("Signing path WIP (Phase 2)"),
+        )
 
     # --- transitional aliases (kept so existing tests / external code
     # that pokes at the panels directly keeps working).

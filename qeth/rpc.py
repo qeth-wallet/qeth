@@ -7,6 +7,9 @@ from typing import Any, Optional
 from aiohttp import ClientSession, WSMsgType, web
 
 from .chains import Chain
+from .signing import (
+    SignerBridge, SignerError, parse_send_transaction_params,
+)
 
 log = logging.getLogger("qeth.rpc")
 
@@ -40,10 +43,14 @@ class RpcServer:
 
     Runs on its own asyncio loop in a background thread."""
 
-    def __init__(self, store, host: str = "127.0.0.1", port: int = 1248):
+    def __init__(self, store, host: str = "127.0.0.1", port: int = 1248,
+                 signer_bridge: Optional[SignerBridge] = None):
         self.store = store
         self.host = host
         self.port = port
+        # Optional: when None, signing methods still return -32601
+        # (keeps tests that don't need a UI bridge working).
+        self.signer_bridge = signer_bridge
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._runner: Optional[web.AppRunner] = None
@@ -180,8 +187,25 @@ class RpcServer:
             ))
             return None
 
+        if method == "eth_sendTransaction":
+            if self.signer_bridge is None:
+                raise RpcError(-32601, "No signer wired up")
+            try:
+                req = parse_send_transaction_params(
+                    params, self.store.current_chain().chain_id,
+                )
+            except SignerError as e:
+                raise RpcError(-32602, str(e))
+            try:
+                tx_hash = await self.signer_bridge.submit_async(req)
+            except SignerError as e:
+                # User cancelled or signer failed — surface as a
+                # JSON-RPC error so the dapp can react.
+                raise RpcError(-32000, str(e))
+            return tx_hash
+
         if method in (
-            "eth_sendTransaction", "eth_signTransaction",
+            "eth_signTransaction",
             "personal_sign", "eth_sign",
             "eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4",
         ):

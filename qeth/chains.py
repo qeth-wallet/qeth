@@ -12,6 +12,11 @@ class Chain:
     # natives by coin id (e.g. DefiLlama). Defaults to "ethereum" since
     # ETH is the native asset on most chains we support.
     coingecko_id: str = "ethereum"
+    # Whether the chain accepts EIP-1559 (type 2) transactions. All
+    # five DEFAULT_CHAINS do; the flag is here so future legacy-only
+    # additions (BSC, Fantom, niche L2s) can opt out and the gas
+    # suggestion logic picks the right path automatically.
+    eip1559: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -33,14 +33,16 @@ from PySide6.QtGui import (
     QDesktopServices, QFont, QFontDatabase, QIcon, QPalette, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
-    QHBoxLayout, QHeaderView, QLabel, QMenu, QPushButton, QSizePolicy,
-    QStyle, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QMenu,
+    QPushButton, QSizePolicy, QSpinBox, QStyle, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..abi import BlockscoutAbiSource, decode_call
 from ..abi_cache import AbiCache
-from ..chain import wei_to_ether
+from ..chain import EthClient, wei_to_ether
+from ..signing import SignerError, SigningRequest
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
 from ..transactions import (
@@ -1377,3 +1379,463 @@ class TransactionDetailsDialog(QDialog):
         pix = self._icon_cache.get(chain_id, contract)
         if pix is not None and not pix.isNull():
             self._to_icon_label.setPixmap(pix)
+
+
+# --- Sign-transaction dialog + gas-suggestion worker ----------------------
+
+
+_WEI_PER_GWEI = 10 ** 9
+# Spinbox upper bounds. 30 M gas is the current Ethereum block limit;
+# 100k gwei is ~$300/gas at $3000 ETH — well beyond any realistic fee.
+_GAS_LIMIT_MAX = 30_000_000
+_GWEI_MAX = 100_000.0
+
+
+def _wei_to_gwei(wei: int, places: int = 4) -> float:
+    """Convert wei → gwei for spinbox display. Using float for the
+    spinbox's native value; we always recompute back to wei via
+    Decimal at submission time so display rounding doesn't corrupt
+    the on-chain value."""
+    from decimal import Decimal
+    return float(Decimal(wei) / Decimal(_WEI_PER_GWEI))
+
+
+def _gwei_to_wei(gwei: float) -> int:
+    """gwei → wei via Decimal so 1.23 gwei doesn't drift to
+    1229999999.9999 in float."""
+    from decimal import Decimal
+    return int(Decimal(str(gwei)) * Decimal(_WEI_PER_GWEI))
+
+
+def _format_usd(usd) -> str:
+    """Adaptive USD precision so layer-2 fees in the sub-cent range
+    don't all read as ``0.00 USD``. ≥ $1 → 2 decimals; $0.01..$1 →
+    4 decimals; below that → 6 decimals."""
+    from decimal import Decimal
+    usd = Decimal(usd)
+    if usd >= 1:
+        return f"{usd:.2f} USD"
+    if usd >= Decimal("0.01"):
+        return f"{usd:.4f} USD"
+    return f"{usd:.6f} USD"
+
+
+def apply_gas_policy(
+    *,
+    estimated_gas: int,
+    eip1559: bool,
+    base_fee_wei: int,
+    gas_price_wei: int,
+    req: SigningRequest,
+) -> dict:
+    """Pure function: turn raw chain readings (gas estimate, current
+    base fee or gas price) into the suggested gas/fee values per
+    project policy.
+
+    Policy:
+
+      gas limit                = max(estimate × 1.5, dapp gas)
+      EIP-1559 chain:
+        maxFeePerGas           = baseFee × 2  (≥ dapp's)
+        maxPriorityFeePerGas   = baseFee × 0.05  (≥ dapp's)
+      Legacy chain:
+        gasPrice               = current × 1.35  (≥ dapp's)
+
+    Dapp-supplied numbers act as a floor — we never silently lower
+    what the dapp asked for, so a time-sensitive tx that explicitly
+    overpays still goes out at the right price."""
+    target_gas = (estimated_gas * 3) // 2
+    if req.gas is not None and req.gas > target_gas:
+        target_gas = req.gas
+    out: dict = {"gas": target_gas, "estimated_gas": estimated_gas,
+                  "eip1559": eip1559}
+    if eip1559:
+        # Fall back to gas_price reading when baseFeePerGas is absent
+        # (theoretical for an "eip1559" chain but tolerated — keeps
+        # us from emitting nonsense suggestions).
+        ref = base_fee_wei if base_fee_wei > 0 else gas_price_wei
+        max_fee = ref * 2
+        priority = (ref * 5) // 100
+        if (req.max_fee_per_gas is not None
+                and req.max_fee_per_gas > max_fee):
+            max_fee = req.max_fee_per_gas
+        if (req.max_priority_fee_per_gas is not None
+                and req.max_priority_fee_per_gas > priority):
+            priority = req.max_priority_fee_per_gas
+        out["max_fee_per_gas"] = max_fee
+        out["max_priority_fee_per_gas"] = priority
+        out["base_fee"] = ref
+    else:
+        suggested = (gas_price_wei * 135) // 100
+        if req.gas_price is not None and req.gas_price > suggested:
+            suggested = req.gas_price
+        out["gas_price"] = suggested
+        out["base_fee"] = gas_price_wei
+    return out
+
+
+class GasSuggestionWorker(QThread):
+    """Pulls gas estimate + current fee state + pending nonce, then
+    runs the readings through ``apply_gas_policy`` and emits the
+    suggested dict. IO surface only — the math is in the pure
+    function above so it can be tested without a chain."""
+
+    suggested = Signal(object)  # dict
+    failed = Signal(str)
+
+    def __init__(self, chain, req: SigningRequest, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._req = req
+
+    def run(self) -> None:
+        try:
+            client = EthClient(self._chain)
+            tx_for_estimate = {
+                "from": self._req.from_addr,
+                "value": hex(self._req.value_wei),
+                "data": self._req.data,
+            }
+            if self._req.to_addr:
+                tx_for_estimate["to"] = self._req.to_addr
+            try:
+                estimated = client.estimate_gas(tx_for_estimate)
+            except Exception as e:
+                # Estimation can fail (reverting tx, missing
+                # allowance, etc.); fall back to a generous default
+                # so the user can still confirm — they can edit the
+                # gas limit before submission.
+                log.warning("estimate_gas failed: %s", e)
+                estimated = 21_000 if self._req.data in ("", "0x") else 250_000
+
+            if self._chain.eip1559:
+                latest = client.rpc("eth_getBlockByNumber", ["latest", False])
+                base_fee_hex = (latest or {}).get("baseFeePerGas")
+                base_fee = int(base_fee_hex, 16) if base_fee_hex else 0
+                gas_price = client.gas_price() if base_fee == 0 else 0
+            else:
+                base_fee = 0
+                gas_price = client.gas_price()
+
+            out = apply_gas_policy(
+                estimated_gas=estimated,
+                eip1559=bool(self._chain.eip1559),
+                base_fee_wei=base_fee,
+                gas_price_wei=gas_price,
+                req=self._req,
+            )
+            out["nonce"] = client.get_transaction_count(
+                self._req.from_addr, "pending",
+            )
+            self.suggested.emit(out)
+        except Exception as e:
+            log.exception("gas suggestion failed")
+            self.failed.emit(str(e))
+
+
+class SignTransactionDialog(QDialog):
+    """Confirmation dialog for an incoming ``eth_sendTransaction``
+    from the Frame RPC. Reuses the decoded-call renderer used by the
+    history details dialog, and exposes editable gas / fee fields
+    pre-filled by ``GasSuggestionWorker``.
+
+    Phase 1 of the signing feature: the dialog flow is complete but
+    the Confirm path returns a placeholder rejection so the
+    plumbing can be smoke-tested end-to-end before LedgerSigner
+    lands in Phase 2."""
+
+    def __init__(self, req: SigningRequest, chain, *,
+                 abi_source: BlockscoutAbiSource,
+                 abi_cache: AbiCache,
+                 start_worker,
+                 token_info=None,
+                 native_price_usd=None,
+                 parent=None):
+        super().__init__(parent)
+        self.req = req
+        self.chain = chain
+        self._abi_source = abi_source
+        self._abi_cache = abi_cache
+        self._start_worker = start_worker
+        self._token_info = token_info
+        # Decimal USD-per-native price (e.g. ETH price); when set,
+        # the Expected-fee line shows a "(0.015 USD)" annotation.
+        # None when no cached price is available — the line just
+        # omits the USD parenthetical, no other behaviour changes.
+        self._native_price_usd = native_price_usd
+        # Filled in by _on_gas_suggested; the Confirm button stays
+        # disabled until then so the user can't submit with
+        # uninitialised fee fields.
+        self._gas_ready = False
+        # Captured from the suggestion so _update_expected_fee can
+        # combine baseFee + the (user-editable) priority tip to
+        # produce the "expected" rate.
+        self._base_fee_wei = 0
+
+        self.setWindowTitle("Sign transaction")
+        self.resize(720, 640)
+        self._link_color = self.palette().color(QPalette.WindowText).name()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 20, 20, 16)
+        outer.setSpacing(8)
+
+        # --- header block (Network / From / To / Value) -----------------
+        header = QFormLayout()
+        header.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        header.setHorizontalSpacing(16)
+        header.setVerticalSpacing(6)
+        outer.addLayout(header)
+
+        mono = QFont("monospace")
+        self._mono_font = mono
+
+        def _lbl(text: str, *, monospace: bool = False) -> QLabel:
+            q = QLabel(text)
+            q.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if monospace:
+                q.setFont(mono)
+            q.setWordWrap(True)
+            return q
+
+        from_cs = to_checksum_address(req.from_addr)
+        to_text: QWidget
+        if req.to_addr:
+            to_cs = to_checksum_address(req.to_addr)
+            entry = (token_info(chain.chain_id, to_cs)
+                     if token_info is not None else None)
+            if entry is not None:
+                to_text = _lbl(
+                    f"{entry.symbol} ({to_cs})", monospace=False,
+                )
+                to_text.setFont(mono)
+            else:
+                to_text = _lbl(to_cs, monospace=True)
+        else:
+            to_text = _lbl("(contract creation)")
+
+        header.addRow("Network:", _lbl(f"{chain.name} ({chain.chain_id})"))
+        header.addRow("From:", _lbl(from_cs, monospace=True))
+        header.addRow("To:", to_text)
+        if req.value_wei > 0:
+            ether = wei_to_ether(req.value_wei)
+            header.addRow(
+                "Value:",
+                _lbl(f"{ether} {chain.symbol}  ({req.value_wei} wei)"),
+            )
+        else:
+            header.addRow("Value:", _lbl("0"))
+
+        # --- decoded calldata (read-only, syntax-highlighted) ---------
+        outer.addSpacing(4)
+        outer.addWidget(QLabel("Decoded call:"))
+        self.decoded_view = QTextEdit()
+        self.decoded_view.setReadOnly(True)
+        self.decoded_view.setFont(mono)
+        self.decoded_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.decoded_view.setWordWrapMode(
+            QTextOption.WrapAtWordBoundaryOrAnywhere
+        )
+        self.decoded_view.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        outer.addWidget(self.decoded_view, 1)
+
+        # --- gas / fee editors ---------------------------------------
+        outer.addSpacing(4)
+        outer.addWidget(QLabel("Gas settings:"))
+        gas_form = QFormLayout()
+        gas_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        gas_form.setHorizontalSpacing(16)
+        outer.addLayout(gas_form)
+
+        self.spin_gas = QSpinBox()
+        self.spin_gas.setRange(21_000, _GAS_LIMIT_MAX)
+        self.spin_gas.setSingleStep(1_000)
+        self.spin_gas.setSuffix(" gas")
+        self.spin_gas.setEnabled(False)
+        gas_form.addRow("Gas limit:", self.spin_gas)
+
+        if chain.eip1559:
+            self.spin_max_fee = QDoubleSpinBox()
+            self.spin_max_fee.setRange(0.0, _GWEI_MAX)
+            self.spin_max_fee.setDecimals(4)
+            self.spin_max_fee.setSingleStep(0.5)
+            self.spin_max_fee.setSuffix(" gwei")
+            self.spin_max_fee.setEnabled(False)
+            gas_form.addRow("Max fee / gas:", self.spin_max_fee)
+
+            self.spin_priority = QDoubleSpinBox()
+            self.spin_priority.setRange(0.0, _GWEI_MAX)
+            self.spin_priority.setDecimals(4)
+            self.spin_priority.setSingleStep(0.1)
+            self.spin_priority.setSuffix(" gwei")
+            self.spin_priority.setEnabled(False)
+            gas_form.addRow("Max priority / gas:", self.spin_priority)
+            self.spin_gas_price = None
+        else:
+            self.spin_max_fee = None
+            self.spin_priority = None
+            self.spin_gas_price = QDoubleSpinBox()
+            self.spin_gas_price.setRange(0.0, _GWEI_MAX)
+            self.spin_gas_price.setDecimals(4)
+            self.spin_gas_price.setSingleStep(0.5)
+            self.spin_gas_price.setSuffix(" gwei")
+            self.spin_gas_price.setEnabled(False)
+            gas_form.addRow("Gas price:", self.spin_gas_price)
+
+        self.base_fee_lbl = _lbl("(fetching…)")
+        gas_form.addRow("Network base fee:", self.base_fee_lbl)
+
+        self.max_total_lbl = _lbl("—")
+        gas_form.addRow("Expected fee:", self.max_total_lbl)
+
+        # --- buttons -------------------------------------------------
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.Cancel,
+        )
+        self.confirm_btn = self.buttons.addButton(
+            "Confirm and sign", QDialogButtonBox.AcceptRole,
+        )
+        self.confirm_btn.setEnabled(False)
+        self.buttons.rejected.connect(self.reject)
+        self.confirm_btn.clicked.connect(self.accept)
+        outer.addWidget(self.buttons)
+
+        # --- decode calldata in the background ----------------------
+        if req.data and req.data not in ("0x", "0X") and req.to_addr:
+            self.decoded_view.setPlainText("(decoding…)")
+            worker = AbiFetchWorker(
+                self._abi_source, self._abi_cache,
+                chain.chain_id, req.to_addr,
+            )
+            worker.ready.connect(self._on_abi_ready)
+            self._start_worker(worker)
+        elif not req.to_addr:
+            self.decoded_view.setPlainText("(contract creation — no method call)")
+        else:
+            self.decoded_view.setPlainText("(plain value transfer — no calldata)")
+
+        # --- kick the gas suggestion --------------------------------
+        gas_worker = GasSuggestionWorker(chain, req)
+        gas_worker.suggested.connect(self._on_gas_suggested)
+        gas_worker.failed.connect(self._on_gas_failed)
+        self._start_worker(gas_worker)
+
+        # Recompute the "Expected fee" line whenever the user
+        # touches an input that affects it: gas limit and either
+        # (1559) priority tip or (legacy) gas price. spin_max_fee is
+        # excluded — it caps the upper bound but doesn't change the
+        # expected effective rate (base + tip).
+        for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
+            if sp is not None:
+                sp.valueChanged.connect(self._update_max_total)
+
+    # --- callbacks ---------------------------------------------------
+
+    def _on_abi_ready(self, abi) -> None:
+        if abi is False:
+            self.decoded_view.setPlainText(
+                "(contract source is not verified on Blockscout — "
+                "no ABI available for decoding)"
+            )
+            return
+        if abi is None:
+            self.decoded_view.setPlainText(
+                "(failed to fetch ABI from Blockscout — try again later)"
+            )
+            return
+        decoded = decode_call(abi, self.req.data, address=self.req.to_addr)
+        if decoded is None:
+            self.decoded_view.setPlainText(
+                "(ABI available but this calldata didn't match any "
+                "function in it — possibly a fallback or proxy call)"
+            )
+            return
+        token_context = None
+        if self._token_info is not None and self.req.to_addr:
+            entry = self._token_info(self.chain.chain_id, self.req.to_addr)
+            if entry is not None:
+                token_context = {
+                    "symbol": entry.symbol,
+                    "decimals": entry.decimals,
+                }
+        _render_decoded(self.decoded_view, decoded, token_context)
+
+    def _on_gas_suggested(self, info: dict) -> None:
+        self._base_fee_wei = int(info.get("base_fee") or 0)
+        self.spin_gas.setValue(info["gas"])
+        self.spin_gas.setEnabled(True)
+        if self.chain.eip1559:
+            self.spin_max_fee.setValue(_wei_to_gwei(info["max_fee_per_gas"]))
+            self.spin_max_fee.setEnabled(True)
+            self.spin_priority.setValue(
+                _wei_to_gwei(info["max_priority_fee_per_gas"])
+            )
+            self.spin_priority.setEnabled(True)
+        else:
+            self.spin_gas_price.setValue(_wei_to_gwei(info["gas_price"]))
+            self.spin_gas_price.setEnabled(True)
+        self.base_fee_lbl.setText(
+            f"{_wei_to_gwei(self._base_fee_wei):.4f} gwei"
+        )
+        self._suggested_nonce = info.get("nonce")
+        self._gas_ready = True
+        self.confirm_btn.setEnabled(True)
+        self._update_max_total()
+
+    def _on_gas_failed(self, msg: str) -> None:
+        self.base_fee_lbl.setText(f"(failed: {msg})")
+        # Confirm stays disabled — without fee info we can't submit.
+
+    def _update_max_total(self) -> None:
+        """Expected gas fee at the current settings — what the user
+        is actually likely to pay, not the worst-case ceiling. For
+        EIP-1559 that's ``gas × (baseFee + priorityTip)``; in legacy
+        mode it's just ``gas × gasPrice``. Doesn't include the tx's
+        ``value`` — that's shown separately in the Value row above.
+
+        When the dialog has a native price cached (loaded from the
+        wallet cache by the host), the line also shows the dollar
+        value in parentheses."""
+        if not self._gas_ready:
+            return
+        gas = self.spin_gas.value()
+        if self.chain.eip1559:
+            effective_per_gas_wei = (
+                self._base_fee_wei + _gwei_to_wei(self.spin_priority.value())
+            )
+        else:
+            effective_per_gas_wei = _gwei_to_wei(self.spin_gas_price.value())
+        fee_wei = gas * effective_per_gas_wei
+        text = f"≈ {wei_to_ether(fee_wei)} {self.chain.symbol}"
+        if self._native_price_usd is not None:
+            usd = wei_to_ether(fee_wei) * self._native_price_usd
+            text += f"  ({_format_usd(usd)})"
+        self.max_total_lbl.setText(text)
+
+    # --- finalised request -------------------------------------------
+
+    def finalised_request(self) -> SigningRequest:
+        """Returns the SigningRequest with all gas / fee / nonce
+        fields filled from the dialog's current state — ready to
+        hand to a Signer."""
+        if not self._gas_ready:
+            raise SignerError("gas suggestion did not complete")
+        from dataclasses import replace
+        kwargs: dict = {
+            "gas": self.spin_gas.value(),
+            "nonce": self._suggested_nonce,
+        }
+        if self.chain.eip1559:
+            kwargs["max_fee_per_gas"] = _gwei_to_wei(self.spin_max_fee.value())
+            kwargs["max_priority_fee_per_gas"] = _gwei_to_wei(
+                self.spin_priority.value()
+            )
+            kwargs["gas_price"] = None
+        else:
+            kwargs["gas_price"] = _gwei_to_wei(self.spin_gas_price.value())
+            kwargs["max_fee_per_gas"] = None
+            kwargs["max_priority_fee_per_gas"] = None
+        return replace(self.req, **kwargs)

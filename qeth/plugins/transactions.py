@@ -443,6 +443,14 @@ class TransactionsPlugin(Plugin):
         if address is None:
             if self._panel is not None:
                 self._panel.clear()
+            # Drop the rendered-view marker too. Without this, drag-
+            # multi-selecting accounts in the wallet tree (which
+            # emits None because there's no single "current") clears
+            # the panel but leaves _rendered_for pointing at the
+            # last-shown key — clicking back to that same account
+            # then sees view_changed=False in _refresh and never
+            # re-renders, so the panel stays empty.
+            self._rendered_for = None
             return
         self._refresh(address)
 

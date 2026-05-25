@@ -256,7 +256,10 @@ def decode_call(abi: Optional[Abi], input_data: str,
 def _describe(value, inp: dict) -> dict:
     """Build one tree node pairing ``value`` with the ABI input
     spec ``inp``. Recurses into struct components so each inner
-    field carries its Solidity type alongside its decoded value."""
+    field carries its Solidity type alongside its decoded value, and
+    into arrays so each element does too — the UI uses the element
+    list to render long arrays Python-style instead of one wide line.
+    Elements get empty ``name`` (positional in the array)."""
     type_ = inp.get("type", "")
     name = inp.get("name", "")
     components = inp.get("components") or []
@@ -272,8 +275,23 @@ def _describe(value, inp: dict) -> dict:
                     child_value = None
             children.append(_describe(child_value, comp))
         return {"name": name, "type": type_, "children": children}
-    # Everything else — primitives, simple arrays, arrays of tuples
-    # (rendered as a flat string for now) — becomes a leaf.
+    if type_.endswith("]"):
+        # ``address[]`` → element type ``address``;
+        # ``uint256[][2]`` → element type ``uint256[]``.
+        elem_type = type_[:type_.rfind("[")]
+        elem_inp = {"name": "", "type": elem_type}
+        # Arrays of tuples share the parent's ``components`` ABI for
+        # each element — without forwarding it the element-level
+        # _describe would see ``type=tuple`` with no components and
+        # fall through to the leaf branch.
+        if components:
+            elem_inp["components"] = components
+        children: list[dict] = []
+        if isinstance(value, (list, tuple)):
+            for elem in value:
+                children.append(_describe(elem, elem_inp))
+        return {"name": name, "type": type_, "children": children}
+    # Primitives — single-line.
     return {"name": name, "type": type_, "value": _stringify(value, type_)}
 
 

@@ -30,8 +30,7 @@ def _escape_html(text: str) -> str:
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QFontDatabase, QPalette,
-    QTextCharFormat,
+    QDesktopServices, QFont, QFontDatabase, QPalette, QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
@@ -155,113 +154,118 @@ def _render_decoded(text_edit, decoded: dict,
     Struct args expand recursively with deepening indentation; leaf
     args go on one line.
 
-    Uses QTextCursor + QTextCharFormat directly rather than HTML —
-    Qt's HTML renderer silently drops ``<b>`` / ``font-weight`` when
-    the resolved font has no Bold variant. We explicitly walk a
-    preference list of monospace families and pick the first one
-    that is (a) installed and (b) ships a Bold style. The CSS
-    ``monospace`` alias on some systems resolves to families with
-    only a Regular style (e.g. Droid Sans Mono Slashed), which
-    would render the function name visually identical to the rest
-    of the line."""
-    text_edit.clear()
-    cursor = text_edit.textCursor()
-
+    Built as a single HTML string. We can't use ``<pre>`` — Qt's
+    HTML engine renders ``<pre>`` in its own default UI font
+    (``Ubuntu`` on Linux desktops), ignoring the QTextEdit's base
+    font, so columns would misalign. Instead we wrap in a ``<div>``
+    with ``white-space: pre`` (preserves newlines and indentation)
+    and an explicit ``font-family`` set to the family we picked —
+    one that we've checked is installed AND ships a Bold style, so
+    ``<b>`` actually renders bold (a Bold-less family would render
+    the bold span visually identical to the surrounding text, which
+    is the trap we hit before)."""
     mono = _pick_mono_font()
-    base = QTextCharFormat()
-    base.setFont(mono)
-
-    bold = QTextCharFormat(base)
-    bold.setFontWeight(QFont.Bold)
-
-    type_fmt = QTextCharFormat(base)
-    type_fmt.setForeground(QColor(_TYPE_COLOR))
-
-    value_fmt = QTextCharFormat(base)
-    value_fmt.setForeground(QColor(_VALUE_COLOR))
-
-    comment_fmt = QTextCharFormat(base)
-    comment_fmt.setForeground(QColor(_COMMENT_COLOR))
-
-    formats = (base, type_fmt, value_fmt, comment_fmt)
+    text_edit.setFont(mono)
 
     fn_name = decoded.get("function") or "?"
-    cursor.insertText(fn_name, bold)
-    cursor.insertText("(\n", base)
+    args = decoded.get("args") or []
     # Token-amount annotation only kicks in at top level (struct
     # fields are passed token_context=None below). The function
     # must be one of the canonical ERC-20 amount-carrying functions
     # AND the contract must be on the curated token list — both
     # together is what guarantees "uint here means token amount".
-    inner_context = (
-        token_context
-        if token_context is not None
+    use_amounts = (
+        token_context is not None
         and fn_name in _ERC20_AMOUNT_FUNCTIONS
-        else None
     )
-    args = decoded.get("args") or []
+
+    # ``white-space: pre-wrap`` preserves our newlines + indentation
+    # but still lets very long single tokens (e.g. raw uint256 values
+    # printed in decimal) wrap onto the next line at word boundaries,
+    # so the dialog never grows a horizontal scrollbar.
+    # ``word-break: break-all`` extends that to wrap inside hex
+    # strings (which have no spaces and would otherwise overflow).
+    parts = [
+        f'<div style="white-space: pre-wrap; word-break: break-all; '
+        f"font-family: '{mono.family()}', monospace;\">"
+        f"<b>{_escape_html(fn_name)}</b>(\n"
+    ]
     for i, arg in enumerate(args):
-        _insert_arg(
-            cursor, arg, indent=1, formats=formats,
+        parts.append(_arg_html(
+            arg, indent=1,
             last=(i == len(args) - 1),
-            token_context=inner_context,
-        )
-    cursor.insertText(")", base)
+            token_context=token_context if use_amounts else None,
+        ))
+    parts.append(")</div>")
+    text_edit.setHtml("".join(parts))
 
 
-def _insert_arg(cursor, arg: dict, *, indent: int, formats,
-                last: bool,
-                token_context: Optional[dict] = None) -> None:
-    """Write one ``arg`` node (leaf or struct branch) at the current
-    cursor, indented to ``indent`` levels. ``last`` controls the
-    trailing punctuation: non-final entries get a comma, the last
-    in any group just gets a newline (Python-style without trailing
-    commas)."""
-    base, type_fmt, value_fmt, comment_fmt = formats
+def _arg_html(arg: dict, *, indent: int, last: bool,
+              token_context: Optional[dict] = None) -> str:
+    """Serialise one ``arg`` node (leaf, struct branch, or array
+    branch) to an HTML fragment. ``last`` controls the trailing
+    punctuation: non-final entries get a comma, the last in any
+    group just gets a newline (Python-style without trailing
+    commas). Positional nodes (empty ``name`` — array elements)
+    skip the ``name: type =`` prefix and render the value alone."""
     pad = "    " * indent
     tail = "\n" if last else ",\n"
-    cursor.insertText(pad + (arg.get("name") or "") + ": ", base)
+    name = arg.get("name") or ""
     type_ = arg.get("type") or ""
-    cursor.insertText(type_, type_fmt)
-    cursor.insertText(" = ", base)
+    type_span = (
+        f'<span style="color:{_TYPE_COLOR};">'
+        f"{_escape_html(type_)}</span>"
+    )
+    # Named arg → "name: type = …"; positional element of an array
+    # → just the value at the current indent, no annotation.
+    if name:
+        head = f"{pad}{_escape_html(name)}: {type_span} = "
+    else:
+        head = pad
+
     children = arg.get("children")
     if children is not None:
-        # Struct branch — don't propagate token_context into the
-        # children; nested fields aren't part of the ERC-20 surface
-        # the heuristic was scoped to.
-        if children:
-            cursor.insertText("{\n", base)
-            for j, child in enumerate(children):
-                _insert_arg(
-                    cursor, child, indent=indent + 1, formats=formats,
-                    last=(j == len(children) - 1),
-                )
-            cursor.insertText(pad + "}" + tail, base)
-        else:
-            cursor.insertText("{}" + tail, base)
-    else:
-        value = arg.get("value")
-        cursor.insertText("" if value is None else str(value), value_fmt)
-        # Trailing "# X SYMBOL" comment for ERC-20 amounts. Only
-        # uintN leaves on a function the caller marked as amount-
-        # carrying — see _render_decoded for that gating.
-        comment = None
-        if (token_context is not None
-                and type_.startswith("uint")
-                and value is not None):
-            try:
-                raw = int(str(value))
-            except ValueError:
-                raw = None
-            if raw is not None:
-                comment = _format_token_amount(
-                    raw,
-                    token_context["decimals"],
-                    token_context["symbol"],
-                )
-        if comment:
-            cursor.insertText("  # " + comment, comment_fmt)
-        cursor.insertText(tail, base)
+        # Tuple uses { }, array uses [ ]. Empty containers stay on
+        # one line; populated ones break to multi-line so long
+        # arrays don't trigger horizontal scroll.
+        open_b, close_b = ("[", "]") if type_.endswith("]") else ("{", "}")
+        if not children:
+            return head + open_b + close_b + tail
+        inner = "".join(
+            _arg_html(child, indent=indent + 1,
+                       last=(j == len(children) - 1))
+            for j, child in enumerate(children)
+        )
+        return head + open_b + "\n" + inner + f"{pad}{close_b}{tail}"
+
+    value = arg.get("value")
+    value_text = "" if value is None else str(value)
+    value_span = (
+        f'<span style="color:{_VALUE_COLOR};">'
+        f"{_escape_html(value_text)}</span>"
+    )
+    # Trailing "  # X SYMBOL" comment for ERC-20 amounts. Only uintN
+    # leaves on a function the caller marked as amount-carrying —
+    # see _render_decoded for that gating.
+    comment_html = ""
+    if (token_context is not None
+            and type_.startswith("uint")
+            and value is not None):
+        try:
+            raw = int(str(value))
+        except ValueError:
+            raw = None
+        if raw is not None:
+            text = _format_token_amount(
+                raw,
+                token_context["decimals"],
+                token_context["symbol"],
+            )
+            comment_html = (
+                f'  <span style="color:{_COMMENT_COLOR};">'
+                f"# {_escape_html(text)}</span>"
+            )
+    return head + value_span + comment_html + tail
 
 
 def _is_full_history(txs: list[Transaction]) -> bool:
@@ -1051,13 +1055,21 @@ class TransactionDetailsDialog(QDialog):
                         monospace=True))
 
         # Decoded call sits below the form: label on its own line,
-        # then the QTextEdit (read-only, syntax-highlighted via
-        # QTextCharFormat) underneath claiming leftover vertical space.
+        # then the QTextEdit (read-only, with the call rendered as
+        # HTML via setHtml) underneath claiming leftover vertical
+        # space.
         outer.addSpacing(4)
         outer.addWidget(QLabel("Decoded call:"))
         self.decoded_view = QTextEdit()
         self.decoded_view.setReadOnly(True)
         self.decoded_view.setFont(mono)
+        # No horizontal scroll — wrap to widget width, and break
+        # inside long unbroken tokens too (decimal uint256 values
+        # and hex blobs have no spaces and would otherwise overflow).
+        self.decoded_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.decoded_view.setWordWrapMode(
+            QTextOption.WrapAtWordBoundaryOrAnywhere
+        )
         self.decoded_view.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding,
         )

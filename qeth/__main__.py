@@ -28,6 +28,16 @@ def main() -> int:
     app.setApplicationName("qeth")
     app.setOrganizationName("qeth")
 
+    # Pull the web3/eth_abi/requests stack now, while no window
+    # exists yet. They're deferred at import time (qeth.chain only
+    # loads them on first EthClient construction); leaving the
+    # trigger to a worker thread firing right after win.show() puts
+    # the ~400 ms of Python module init in GIL contention with the
+    # main thread's first paint, leaving the window frame visible
+    # but its contents blank until the import finishes.
+    from .chain import _ensure_heavy_imports
+    _ensure_heavy_imports()
+
     store = Store.load()
     rpc = RpcServer(store)
     rpc.start()

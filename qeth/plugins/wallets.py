@@ -32,9 +32,9 @@ from PySide6.QtCore import QByteArray, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar,
+    QPushButton, QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QThread
 
@@ -236,6 +236,13 @@ class WalletsPlugin(Plugin):
         self._tree.setDefaultDropAction(Qt.MoveAction)
         self._tree.itemSelectionChanged.connect(self._on_tree_selection)
         self._tree.reorder_committed.connect(self._on_tree_reordered)
+        # Right-click menu mirrors the top action row (Add / Copy /
+        # Remove) plus Set-as-default — so every button has a menu
+        # equivalent and every menu item has a button equivalent.
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(
+            self._on_tree_context_menu
+        )
         self._splitter.addWidget(self._tree)
 
         self._details = DetailsPanel()
@@ -391,6 +398,31 @@ class WalletsPlugin(Plugin):
                 return
         self._details.clear()
         self.selected_address_changed.emit(None)
+
+    def _on_tree_context_menu(self, pos) -> None:
+        """Tree right-click menu. Mirrors the Add / Copy / Remove
+        button row and exposes Set-as-default — which the details
+        pane below already offers, but having it on the row's right-
+        click means the user doesn't have to navigate down."""
+        addrs = self.selected_addresses()
+        menu = QMenu(self._tree)
+        menu.addAction(self.act_add)
+        if len(addrs) == 1:
+            menu.addAction(self.act_copy)
+            addr = addrs[0]
+            default = self._store.default_account
+            already_default = (
+                default is not None and addr.lower() == default.lower()
+            )
+            if not already_default:
+                act_default = menu.addAction("Set as default")
+                act_default.triggered.connect(
+                    lambda _checked=False, a=addr: self._set_default(a)
+                )
+        if addrs:
+            menu.addSeparator()
+            menu.addAction(self.act_remove)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _copy_selected_address(self) -> None:
         addrs = self.selected_addresses()

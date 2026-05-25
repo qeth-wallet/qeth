@@ -28,14 +28,14 @@ from eth_utils import to_checksum_address
 def _escape_html(text: str) -> str:
     return _html.escape(text, quote=False)
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
-    QDesktopServices, QFont, QFontDatabase, QPalette, QTextOption,
+    QDesktopServices, QFont, QFontDatabase, QIcon, QPalette, QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QMenu, QPushButton, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QStyle, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..abi import BlockscoutAbiSource, decode_call
@@ -421,10 +421,8 @@ class TransactionsPlugin(Plugin):
         )
         dialog.show()
 
-    # No bottom-row actions yet. Future: a Refresh button, a "load
-    # more" cursor, etc. would go here.
     def action_widgets(self):
-        return []
+        return self._panel.action_widgets() if self._panel is not None else []
 
     # --- persistence shim ---------------------------------------------------
 
@@ -767,14 +765,97 @@ class TransactionListPanel(QWidget):
         self.status_lbl.setVisible(False)
         v.addWidget(self.status_lbl)
 
+        # Action buttons — same flat 28×28 style as the Tokens panel,
+        # mounted by Slot on the shared bottom-right row beside the
+        # chain selector. Mirrors the row-level right-click menu so
+        # every action is reachable both ways.
+        style = self.style()
+        self.btn_details = QPushButton()
+        self.btn_details.setIcon(QIcon.fromTheme(
+            "document-properties",
+            style.standardIcon(QStyle.SP_FileDialogDetailedView),
+        ))
+        self.btn_details.setToolTip("Show selected transaction's details")
+        self.btn_details.setEnabled(False)
+
+        self.btn_explorer = QPushButton()
+        # The freedesktop "internet/web browser" icons. Some themes
+        # ship one, some the other; chain them and finally fall back
+        # to a Unicode globe so the button always carries *some*
+        # signifier even on a stripped-down system.
+        _browser_icon = QIcon.fromTheme(
+            "applications-internet",
+            QIcon.fromTheme("internet-web-browser"),
+        )
+        if _browser_icon.isNull() or not _browser_icon.availableSizes():
+            self.btn_explorer.setText("🌐")
+        else:
+            self.btn_explorer.setIcon(_browser_icon)
+        self.btn_explorer.setToolTip("Open selected transaction in the block explorer")
+        self.btn_explorer.setEnabled(False)
+
+        self.btn_copy_hash = QPushButton()
+        self.btn_copy_hash.setIcon(QIcon.fromTheme(
+            "edit-copy",
+            style.standardIcon(QStyle.SP_DialogSaveButton),
+        ))
+        self.btn_copy_hash.setToolTip("Copy selected transaction's hash")
+        self.btn_copy_hash.setEnabled(False)
+
+        for b in (self.btn_details, self.btn_explorer, self.btn_copy_hash):
+            b.setFlat(True)
+            b.setMaximumSize(28, 28)
+            b.setIconSize(QSize(16, 16))
+            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        self.btn_details.clicked.connect(self._details_for_selected)
+        self.btn_explorer.clicked.connect(self._explorer_for_selected)
+        self.btn_copy_hash.clicked.connect(self._copy_hash_for_selected)
+        self.table.itemSelectionChanged.connect(self._update_action_buttons)
+
         # Set by MainWindow before render so we can build explorer URLs
         # and compute SENT/RECEIVED direction labels.
         self._chain = None
         self._viewer: str | None = None
 
+    def action_widgets(self) -> list[QWidget]:
+        """Buttons the slot mounts on its shared bottom-right row."""
+        return [self.btn_details, self.btn_explorer, self.btn_copy_hash]
+
+    def _selected_tx(self) -> Optional["Transaction"]:
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not rows:
+            return None
+        return self._tx_at(rows[0].row())
+
+    def _details_for_selected(self) -> None:
+        tx = self._selected_tx()
+        if tx is not None:
+            self.tx_details_requested.emit(tx)
+
+    def _explorer_for_selected(self) -> None:
+        tx = self._selected_tx()
+        if tx is not None:
+            self._open_in_explorer(tx)
+
+    def _copy_hash_for_selected(self) -> None:
+        tx = self._selected_tx()
+        if tx is not None:
+            QApplication.clipboard().setText(tx.hash)
+
+    def _update_action_buttons(self) -> None:
+        tx = self._selected_tx()
+        has_tx = tx is not None
+        self.btn_details.setEnabled(has_tx)
+        self.btn_copy_hash.setEnabled(has_tx)
+        self.btn_explorer.setEnabled(
+            has_tx and self._chain is not None and bool(self._chain.explorer)
+        )
+
     def set_context(self, chain, viewer_address: str) -> None:
         self._chain = chain
         self._viewer = viewer_address
+        self._update_action_buttons()
 
     def _on_scroll_change(self, value: int) -> None:
         """Emit ``scrolled_to_bottom`` when the user reaches the

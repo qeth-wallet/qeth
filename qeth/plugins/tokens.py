@@ -920,6 +920,16 @@ class TokenListPanel(QWidget):
         self.btn_hide.setToolTip("Hide selected token from this wallet")
         self.btn_hide.setEnabled(False)
 
+        # Copy-contract button — mirrors the "Copy contract address"
+        # item in the context menu so it's reachable from the toolbar
+        # too (consistent with the wallet pane: every menu item has a
+        # button equivalent and vice versa).
+        self.btn_copy = QPushButton()
+        self.btn_copy.setIcon(QIcon.fromTheme("edit-copy",
+                                              style.standardIcon(QStyle.SP_DialogSaveButton)))
+        self.btn_copy.setToolTip("Copy selected token's contract address")
+        self.btn_copy.setEnabled(False)
+
         self.btn_pin = QPushButton()
         _pin_icon = QIcon.fromTheme("emblem-favorite",
                                     QIcon.fromTheme("starred"))
@@ -946,13 +956,15 @@ class TokenListPanel(QWidget):
         )
         self.btn_show_all.setCheckable(True)
 
-        for b in (self.btn_add, self.btn_hide, self.btn_pin, self.btn_show_all):
+        for b in (self.btn_add, self.btn_copy, self.btn_hide,
+                  self.btn_pin, self.btn_show_all):
             b.setFlat(True)
             b.setMaximumSize(28, 28)
             b.setIconSize(QSize(16, 16))
             b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.btn_add.clicked.connect(self.add_custom_requested.emit)
+        self.btn_copy.clicked.connect(self._copy_selected_contract)
         self.btn_hide.clicked.connect(
             lambda: self._emit_for_selected(self.hide_requested)
         )
@@ -973,9 +985,10 @@ class TokenListPanel(QWidget):
         self._risk_cache: "RiskCache | None" = None
 
     def action_widgets(self) -> list[QWidget]:
-        """The +/-/★/👁 buttons, in display order. MainWindow mounts them
+        """The button strip, in display order. MainWindow mounts them
         on the shared bottom-right row beside the chain selector."""
-        return [self.btn_add, self.btn_hide, self.btn_pin, self.btn_show_all]
+        return [self.btn_add, self.btn_copy, self.btn_hide, self.btn_pin,
+                self.btn_show_all]
 
     def header_state(self) -> str:
         """Hex-encoded QHeaderView.saveState() — captures column widths,
@@ -1345,8 +1358,14 @@ class TokenListPanel(QWidget):
 
     def _update_action_buttons(self) -> None:
         enabled = self._selected_token() is not None
+        self.btn_copy.setEnabled(enabled)
         self.btn_hide.setEnabled(enabled)
         self.btn_pin.setEnabled(enabled)
+
+    def _copy_selected_contract(self) -> None:
+        sel = self._selected_token()
+        if sel:
+            QApplication.clipboard().setText(sel[1])
 
     # ---- context menu ---------------------------------------------------
 
@@ -1378,13 +1397,21 @@ class TokenListPanel(QWidget):
         if addr == self.NATIVE_CONTRACT:
             return  # native asset can't be hidden
         menu = QMenu(self)
-        act_hide = menu.addAction(f"Hide {sym_item.text()}")
         act_copy = menu.addAction("Copy contract address")
+        # Pin is one-shot (no unpin UI yet); skip it for already-pinned
+        # tokens so the menu doesn't suggest a no-op.
+        act_pin = None
+        if not self._store.is_force_shown(cid, addr):
+            act_pin = menu.addAction(f"Pin {sym_item.text()}")
+        menu.addSeparator()
+        act_hide = menu.addAction(f"Hide {sym_item.text()}")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_hide:
             self.hide_requested.emit(cid, addr)
         elif chosen is act_copy:
             QApplication.clipboard().setText(addr)
+        elif chosen is act_pin and act_pin is not None:
+            self.pin_requested.emit(cid, addr)
 
 
 # --- Transaction history panel + worker -------------------------------------

@@ -22,6 +22,8 @@ import html as _html
 import logging
 from typing import Optional
 
+from eth_utils import to_checksum_address
+
 
 def _escape_html(text: str) -> str:
     return _html.escape(text, quote=False)
@@ -1030,9 +1032,10 @@ class TransactionDetailsDialog(QDialog):
                     self._link_label(tx.hash,
                                      self._explorer_url("tx", tx.hash),
                                      monospace=True))
+        from_cs = to_checksum_address(tx.from_addr)
         form.addRow("From:",
-                    self._link_label(tx.from_addr,
-                                     self._explorer_url("address", tx.from_addr),
+                    self._link_label(from_cs,
+                                     self._explorer_url("address", from_cs),
                                      monospace=True))
         form.addRow("To:", self._build_to_row(tx, chain, mono))
         # Value rendered through wei_to_ether (Decimal) — never float.
@@ -1184,14 +1187,21 @@ class TransactionDetailsDialog(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
-        addr = tx.to_addr
-        if not addr:
+        if not tx.to_addr:
             label = QLabel("(contract creation)")
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setFont(mono)
             row.addWidget(label)
             row.addStretch(1)
             return container
+
+        # Display in EIP-55 mixed case from here down. Blockscout
+        # returns addresses lower-cased; checksumming on display lets
+        # the eye spot typos / wrong-case copies. Downstream uses
+        # (explorer URLs, the icon cache lookup) are all case-
+        # insensitive, so the rebinding is safe.
+        addr = to_checksum_address(tx.to_addr)
+        from_cs = to_checksum_address(tx.from_addr)
 
         entry = (self._token_info(chain.chain_id, addr)
                  if self._token_info is not None else None)
@@ -1212,7 +1222,7 @@ class TransactionDetailsDialog(QDialog):
             row.addWidget(self._to_icon_label)
 
             token_url = self._explorer_url(
-                "token", addr, ref_addr=tx.from_addr,
+                "token", addr, ref_addr=from_cs,
             )
             if token_url:
                 addr_html = (

@@ -42,9 +42,11 @@ class TestDetailsPanel:
         assert panel.source_lbl.text() == "ledger"
         assert panel.scheme_lbl.text() == "BIP-44"
         assert panel.title.text() == "Cold storage"
-        # Not the default → button should be enabled and read "Set as default".
+        # Not the default account → button is enabled and labelled
+        # "Connect to browser" (clicking it makes this address the
+        # one dapps see via the local JSON-RPC server).
         assert panel.set_default_btn.isEnabled()
-        assert panel.set_default_btn.text() == "Set as default"
+        assert panel.set_default_btn.text() == "Connect to browser"
 
     def test_show_account_marks_default(self, qtbot, tmp_qeth):
         panel = DetailsPanel()
@@ -53,7 +55,7 @@ class TestDetailsPanel:
             "address": ADDR, "source": "ledger",
         }, is_default=True)
         assert not panel.set_default_btn.isEnabled()
-        assert "Default" in panel.set_default_btn.text()
+        assert "Connected" in panel.set_default_btn.text()
 
     def test_clear_resets_fields(self, qtbot, tmp_qeth):
         panel = DetailsPanel()

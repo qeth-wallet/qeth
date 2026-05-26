@@ -1025,6 +1025,44 @@ class TestWalletsPlugin:
         clean False, not an exception."""
         assert wallets_plugin.select_address("") is False
 
+    def test_double_click_sets_default(self, qtbot, wallets_plugin):
+        """Double-click on an address leaf connects it to the
+        browser (sets it as the store's default_account). Same
+        action as the button + right-click menu item; just the
+        no-friction path."""
+        addr1 = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        addr2 = "0x" + "11" * 20
+        wallets_plugin._store.add_account({
+            "address": addr1, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin._store.add_account({
+            "address": addr2, "path": "44'/60'/0'/0/1",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        # default starts as addr1 (first-added). Double-click addr2.
+        assert wallets_plugin._store.default_account == addr1
+        matches = wallets_plugin._tree.findItems(
+            addr2, Qt.MatchContains | Qt.MatchRecursive, 0
+        )
+        wallets_plugin._on_tree_double_clicked(matches[0], 0)
+        assert wallets_plugin._store.default_account == addr2
+
+    def test_double_click_on_group_row_is_noop(self, qtbot, wallets_plugin):
+        """Group rows ("Ledger", scheme subgroups) don't carry an
+        address — double-click does nothing."""
+        addr = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        wallets_plugin._store.add_account({
+            "address": addr, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        ledger_root = wallets_plugin._tree.topLevelItem(0)
+        # Should not raise. Default stays.
+        wallets_plugin._on_tree_double_clicked(ledger_root, 0)
+        assert wallets_plugin._store.default_account == addr
+
     def test_add_ledger_dialog_constructs(self, qtbot, wallets_plugin):
         """Smoke test for the Add account dialog. The dialog is built
         lazily on button click, so an undeclared import (the

@@ -265,6 +265,11 @@ class WalletsPlugin(Plugin):
         self._tree.setDefaultDropAction(Qt.MoveAction)
         self._tree.itemSelectionChanged.connect(self._on_tree_selection)
         self._tree.reorder_committed.connect(self._on_tree_reordered)
+        # Double-click an address leaf = "Connect to browser". The
+        # button + right-click menu offer the same action; this is
+        # just the no-friction path for the user's primary
+        # action-on-account.
+        self._tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         # Right-click menu mirrors the top action row (Add / Copy /
         # Remove) plus Set-as-default — so every button has a menu
         # equivalent and every menu item has a button equivalent.
@@ -408,6 +413,19 @@ class WalletsPlugin(Plugin):
             walk(self._tree.topLevelItem(i))
         self._store.reorder_accounts(ordered)
 
+    def _on_tree_double_clicked(self, item, _column: int) -> None:
+        """Double-click on an address leaf connects that account to
+        the browser (sets it as the default for eth_accounts).
+        No-op for group rows (they have no UserRole address) and
+        for an account that's already connected."""
+        addr = item.data(0, Qt.UserRole)
+        if not isinstance(addr, str) or not addr:
+            return
+        current = self._store.default_account
+        if current is not None and addr.lower() == current.lower():
+            return
+        self._set_default(addr)
+
     def _on_tree_selection(self) -> None:
         addrs = self.selected_addresses()
         # Copy only makes sense for a single address; Remove handles many.
@@ -444,7 +462,7 @@ class WalletsPlugin(Plugin):
                 default is not None and addr.lower() == default.lower()
             )
             if not already_default:
-                act_default = menu.addAction("Set as default")
+                act_default = menu.addAction("Connect to browser")
                 act_default.triggered.connect(
                     lambda _checked=False, a=addr: self._set_default(a)
                 )
@@ -568,16 +586,20 @@ class DetailsPanel(QWidget):
 
         # Short label + tooltip rather than a wide button — keeps the
         # panel narrow-shrinkable. Same policy trick on the button itself.
-        self.set_default_btn = QPushButton("Set as default")
+        # "Connect to browser" makes the action concrete: this is the
+        # address dapps will see via the local JSON-RPC server (Frame
+        # interface), nothing about persistence or "default".
+        self.set_default_btn = QPushButton("Connect to browser")
         self.set_default_btn.setToolTip(
-            "Make this the address dapps see (returned by eth_accounts)"
+            "Make this the address dapps see (returned by eth_accounts "
+            "over the local JSON-RPC server)"
         )
         self.set_default_btn.setEnabled(False)
         # Pin the height. With QSizePolicy.Fixed Qt re-queries sizeHint()
-        # every time the text changes — and "Default ✓" can come out a
-        # touch shorter than "Set as default" depending on the theme. The
-        # snapshot here is taken while the (longer) text is set, so the
-        # disabled state never shrinks.
+        # every time the text changes — and "Connected ✓" can come out
+        # a touch shorter than "Connect to browser" depending on the
+        # theme. The snapshot here is taken while the (longer) text is
+        # set, so the disabled state never shrinks.
         self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.set_default_btn.setMinimumHeight(self.set_default_btn.sizeHint().height())
         self.set_default_btn.clicked.connect(
@@ -596,7 +618,9 @@ class DetailsPanel(QWidget):
         self.source_lbl.setText(account.get("source", "—"))
         self.scheme_lbl.setText(account.get("scheme", "—"))
         self.set_default_btn.setEnabled(not is_default)
-        self.set_default_btn.setText("Default ✓" if is_default else "Set as default")
+        self.set_default_btn.setText(
+            "Connected to browser ✓" if is_default else "Connect to browser"
+        )
         self._render_qr(account["address"])
 
     def _render_qr(self, address: str) -> None:
@@ -616,7 +640,7 @@ class DetailsPanel(QWidget):
             w.setText("—")
         self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
-        self.set_default_btn.setText("Set as default")
+        self.set_default_btn.setText("Connect to browser")
 
 
 # --- Token list panel -------------------------------------------------------

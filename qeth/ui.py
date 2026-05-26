@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
         # Future signers (hot wallet, watch-only) plug into the same
         # Signer ABC; pick the right backend based on the source on
         # the account record.
-        from .ledger import LedgerSigner
+        from .ledger import LedgerSigner, prompt_until_ledger_ready
         signer = LedgerSigner(self.store)
         if not signer.can_sign(finalised.from_addr):
             self.signer_bridge.reject(
@@ -292,6 +292,16 @@ class MainWindow(QMainWindow):
                 SignerError(
                     f"No known signer for {finalised.from_addr}"
                 ),
+            )
+            return
+        # Probe the device upfront so a disconnected / locked Ledger
+        # surfaces as a "Try again" prompt instead of a silent
+        # failure inside the worker (which would just bounce a
+        # -32000 back to the dapp; the user would have to redo the
+        # whole dapp interaction).
+        if not prompt_until_ledger_ready(self):
+            self.signer_bridge.reject(
+                fut, SignerError("User cancelled — Ledger unavailable"),
             )
             return
 

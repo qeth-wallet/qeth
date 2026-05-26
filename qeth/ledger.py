@@ -2,10 +2,74 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
+from PySide6.QtWidgets import QMessageBox, QWidget
 
 from .chain import EthClient
 from .chains import Chain
 from .signing import Signer, SignerError, SigningRequest
+
+
+def is_ledger_available() -> tuple[bool, Optional[str]]:
+    """Probe the Ledger device. Returns ``(True, None)`` when the
+    dongle is connected, unlocked, and has the Ethereum app open;
+    otherwise ``(False, reason)`` where ``reason`` is a short
+    human-readable explanation from ledgereth.
+
+    Side effect: a successful probe leaves ledgereth's module-level
+    dongle cache empty, so the next real sign / discovery call
+    starts from a fresh ``init_dongle`` (consistent with
+    LedgerSigner.sign's "fresh handle per call" invariant — see
+    qeth/ledger.py)."""
+    try:
+        from ledgereth.comms import init_dongle
+        from ledgereth import comms as _comms
+    except ImportError as e:
+        return False, f"ledgereth not installed: {e}"
+    try:
+        dongle = init_dongle()
+    except Exception as e:
+        return False, str(e)
+    # Drop the cache + close the probe handle. ledgereth keeps the
+    # Dongle in a module-level slot across calls; reusing it for
+    # the next real sign is unreliable (see the dongle-cache
+    # discussion in LedgerSigner.sign).
+    _comms.DONGLE_CACHE = None
+    _comms.DONGLE_CONFIG_CACHE = None
+    try:
+        dongle.close()
+    except Exception:
+        pass
+    return True, None
+
+
+def prompt_until_ledger_ready(parent: QWidget) -> bool:
+    """Loop a "Connect your Ledger" modal until the device is
+    available OR the user clicks Cancel. Returns True when ready,
+    False when cancelled.
+
+    Called at the entry points to any Ledger-touching flow
+    (signing, discovery) so a disconnected/locked device produces
+    a clear, actionable prompt instead of a silent worker failure
+    that loses the dapp's pending request."""
+    while True:
+        ok, reason = is_ledger_available()
+        if ok:
+            return True
+        box = QMessageBox(parent)
+        box.setWindowTitle("Ledger not available")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "Connect your Ledger device, unlock it, and open the "
+            "Ethereum app, then click \"Try again\"."
+        )
+        if reason:
+            box.setInformativeText(reason)
+        retry = box.addButton("Try again", QMessageBox.AcceptRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(retry)
+        box.exec()
+        if box.clickedButton() is cancel:
+            return False
 
 
 LEDGER_LIVE = "44'/60'/{i}'/0/0"

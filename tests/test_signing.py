@@ -429,6 +429,46 @@ class TestLedgerSignerLookup:
             signer.sign(req, DEFAULT_CHAINS[0])
 
 
+class TestIsLedgerAvailable:
+    """The pre-flight probe used by signing + discovery to decide
+    whether to open the "Connect your Ledger" prompt or proceed."""
+
+    def test_returns_true_when_init_dongle_succeeds(self, monkeypatch):
+        from qeth.ledger import is_ledger_available
+        from ledgereth import comms as _comms
+
+        class _FakeDongle:
+            def close(self): pass
+
+        fake = _FakeDongle()
+        monkeypatch.setattr(_comms, "init_dongle", lambda: fake)
+        # Cache should be cleared by the probe regardless of prior
+        # state — load it to confirm.
+        monkeypatch.setattr(_comms, "DONGLE_CACHE", fake)
+        monkeypatch.setattr(_comms, "DONGLE_CONFIG_CACHE", object())
+
+        ok, reason = is_ledger_available()
+        assert ok is True
+        assert reason is None
+        # Probe must leave the cache empty so the next real call
+        # opens a fresh handle.
+        assert _comms.DONGLE_CACHE is None
+        assert _comms.DONGLE_CONFIG_CACHE is None
+
+    def test_returns_false_with_reason_when_init_dongle_raises(self, monkeypatch):
+        from qeth.ledger import is_ledger_available
+        from ledgereth import comms as _comms
+
+        def boom():
+            raise RuntimeError("device not connected")
+        monkeypatch.setattr(_comms, "init_dongle", boom)
+
+        ok, reason = is_ledger_available()
+        assert ok is False
+        assert reason is not None
+        assert "device not connected" in reason
+
+
 class TestLedgerDongleCache:
     """ledgereth caches its Dongle handle in a module-level slot.
     Reusing the cached handle across signs is unreliable — the USB

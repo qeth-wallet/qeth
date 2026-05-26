@@ -31,10 +31,10 @@ import segno
 from PySide6.QtCore import QByteArray, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar,
-    QPushButton, QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+    QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStyle,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QThread
 

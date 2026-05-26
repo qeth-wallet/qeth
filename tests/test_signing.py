@@ -429,6 +429,96 @@ class TestLedgerSignerLookup:
             signer.sign(req, DEFAULT_CHAINS[0])
 
 
+class TestLedgerDongleCache:
+    """ledgereth caches its Dongle handle in a module-level slot.
+    Reusing the cached handle across signs is unreliable — the USB
+    session goes stale and the second sign silently fails before
+    the device prompt. LedgerSigner.sign must close + clear the
+    cache after every call, success or failure."""
+
+    def _store(self):
+        class _S:
+            pass
+        s = _S()
+        s.accounts = [{
+            "address": ADDR_CHECKSUM, "source": "ledger",
+            "path": "44'/60'/0'/0/0",
+        }]
+        return s
+
+    def _req(self):
+        return SigningRequest(
+            chain_id=1, from_addr=ADDR_CHECKSUM, to_addr=TOKEN_CHECKSUM,
+            gas=21000, nonce=0,
+            max_fee_per_gas=10**9, max_priority_fee_per_gas=10**8,
+        )
+
+    def _install_fake_dongle(self, monkeypatch):
+        """Plant a fake dongle in ledgereth's cache and a stub
+        create_transaction so the test never touches USB. Returns
+        the fake dongle + a record dict the test can inspect."""
+        from ledgereth import comms as _comms
+        from ledgereth import transactions as _txns
+
+        record = {"closed": False, "create_called": False}
+
+        class _FakeDongle:
+            def close(self):
+                record["closed"] = True
+
+        class _FakeSigned:
+            rawTransaction = "0x02f8"
+
+        def fake_create_transaction(**kwargs):
+            record["create_called"] = True
+            return _FakeSigned()
+
+        fake = _FakeDongle()
+        monkeypatch.setattr(_comms, "DONGLE_CACHE", fake)
+        monkeypatch.setattr(_comms, "DONGLE_CONFIG_CACHE", object())
+        monkeypatch.setattr(_txns, "create_transaction", fake_create_transaction)
+        return fake, record
+
+    def test_sign_closes_and_clears_cache_on_success(self, monkeypatch):
+        from qeth.ledger import LedgerSigner
+        from qeth.chains import DEFAULT_CHAINS
+        from ledgereth import comms as _comms
+
+        fake, record = self._install_fake_dongle(monkeypatch)
+        signer = LedgerSigner(self._store())
+        signer.sign(self._req(), DEFAULT_CHAINS[0])
+
+        assert record["create_called"]
+        assert record["closed"], (
+            "previous dongle handle wasn't closed; next sign will "
+            "fail on stale USB session"
+        )
+        assert _comms.DONGLE_CACHE is None
+        assert _comms.DONGLE_CONFIG_CACHE is None
+
+    def test_sign_closes_and_clears_cache_on_failure(self, monkeypatch):
+        """Same invariant must hold when create_transaction raises
+        (user rejects on device, USB comm error, etc.). Otherwise
+        the next sign attempt inherits a dead handle."""
+        from qeth.ledger import LedgerSigner
+        from qeth.chains import DEFAULT_CHAINS
+        from ledgereth import comms as _comms, transactions as _txns
+
+        fake, record = self._install_fake_dongle(monkeypatch)
+
+        def boom(**kwargs):
+            raise RuntimeError("user rejected on device")
+        monkeypatch.setattr(_txns, "create_transaction", boom)
+
+        signer = LedgerSigner(self._store())
+        with pytest.raises(SignerError):
+            signer.sign(self._req(), DEFAULT_CHAINS[0])
+
+        assert record["closed"]
+        assert _comms.DONGLE_CACHE is None
+        assert _comms.DONGLE_CONFIG_CACHE is None
+
+
 class TestSignAndBroadcastWorker:
     """The worker's failure-path branches are testable by passing a
     mock signer / monkeypatching EthClient. Successful run hits a

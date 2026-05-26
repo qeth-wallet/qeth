@@ -177,6 +177,24 @@ class LedgerSigner(Signer):
             # comms hiccups lands here — surface as SignerError so
             # the RPC handler sees a uniform shape.
             raise SignerError(f"Ledger signing failed: {e}") from e
+        finally:
+            # ledgereth caches the Dongle handle in a module-level
+            # slot across calls. Reusing it between signs is
+            # unreliable: the USB-HID session sometimes goes stale
+            # (device briefly drops at the firmware layer; the
+            # cached pyhidapi handle then yields "device not
+            # connected" on the next exchange without ever waking
+            # the device screen). Close + clear so the next sign
+            # starts from a fresh init_dongle.
+            from ledgereth import comms as _comms
+            cached = _comms.DONGLE_CACHE
+            _comms.DONGLE_CACHE = None
+            _comms.DONGLE_CONFIG_CACHE = None
+            if cached is not None:
+                try:
+                    cached.close()
+                except Exception:
+                    pass
         # ledgereth exposes the encoded signed tx in two shapes that
         # both have the name ``raw_transaction``-ish: an attribute
         # (``rawTransaction`` — a hex-string property) and a method

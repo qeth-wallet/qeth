@@ -1025,6 +1025,18 @@ class TestWalletsPlugin:
         clean False, not an exception."""
         assert wallets_plugin.select_address("") is False
 
+    def test_add_ledger_dialog_constructs(self, qtbot, wallets_plugin):
+        """Smoke test for the Add account dialog. The dialog is built
+        lazily on button click, so an undeclared import (the
+        QComboBox import that went missing in the wallets-plugin
+        refactor) only blew up when the user actually tried to add
+        an account. Constructing it directly here catches that
+        whole class of bug at test time."""
+        from qeth.chains import DEFAULT_CHAINS
+        from qeth.plugins.wallets import AddLedgerDialog
+        dlg = AddLedgerDialog(DEFAULT_CHAINS[0])
+        qtbot.addWidget(dlg)
+
     def test_splitter_state_round_trip(self, wallets_plugin):
         hex_state = wallets_plugin.splitter_state()
         assert hex_state  # non-empty

@@ -1377,7 +1377,9 @@ class TransactionDetailsDialog(QDialog):
                     self._link_label(from_cs,
                                      self._explorer_url("address", from_cs),
                                      monospace=True))
-        form.addRow("To:", self._build_to_row(tx, chain, mono))
+        form.addRow(
+            "To:", self._build_to_row(tx.to_addr, tx.from_addr, chain, mono),
+        )
         # Value rendered through wei_to_ether (Decimal) — never float.
         if tx.value_wei:
             ether = wei_to_ether(tx.value_wei)
@@ -1545,15 +1547,21 @@ class TransactionDetailsDialog(QDialog):
 
     # --- "To:" row composition ------------------------------------------
 
-    def _build_to_row(self, tx: Transaction, chain, mono: QFont) -> QWidget:
+    def _build_to_row(self, to_addr: Optional[str], from_addr: str,
+                      chain, mono: QFont) -> QWidget:
         """The To: cell. Plain address text when the recipient isn't a
-        known ERC-20; address with a leading icon + symbol when it is."""
+        known ERC-20; address with a leading icon + symbol when it is.
+        Both the tx-details dialog and the sign-tx dialog call this
+        with their (to_addr, from_addr) pair — the from_addr is used
+        as the ``a=`` parameter on the token-page URL so the link
+        lands on the user's transfer history rather than the bare
+        contract page."""
         container = QWidget()
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
-        if not tx.to_addr:
+        if not to_addr:
             label = QLabel("(contract creation)")
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setFont(mono)
@@ -1566,8 +1574,8 @@ class TransactionDetailsDialog(QDialog):
         # the eye spot typos / wrong-case copies. Downstream uses
         # (explorer URLs, the icon cache lookup) are all case-
         # insensitive, so the rebinding is safe.
-        addr = to_checksum_address(tx.to_addr)
-        from_cs = to_checksum_address(tx.from_addr)
+        addr = to_checksum_address(to_addr)
+        from_cs = to_checksum_address(from_addr)
 
         entry = (self._token_info(chain.chain_id, addr)
                  if self._token_info is not None else None)
@@ -1818,6 +1826,7 @@ class SignTransactionDialog(QDialog):
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
+                 icon_cache=None,
                  native_price_usd=None,
                  parent=None):
         super().__init__(parent)
@@ -1827,6 +1836,14 @@ class SignTransactionDialog(QDialog):
         self._abi_cache = abi_cache
         self._start_worker = start_worker
         self._token_info = token_info
+        # Same shape as in TransactionDetailsDialog: when the
+        # recipient is a known ERC-20, _build_to_row renders an
+        # icon + symbol + linked-address. Async icon updates land
+        # in _on_to_icon_ready, which checks these two attrs to
+        # know which row to repaint.
+        self._icon_cache = icon_cache
+        self._to_icon_label: Optional[QLabel] = None
+        self._to_addr_lower: Optional[str] = None
         # Decimal USD-per-native price (e.g. ETH price); when set,
         # the Expected-fee line shows a "(0.015 USD)" annotation.
         # None when no cached price is available — the line just
@@ -1877,24 +1894,16 @@ class SignTransactionDialog(QDialog):
             return q
 
         from_cs = to_checksum_address(req.from_addr)
-        to_text: QWidget
-        if req.to_addr:
-            to_cs = to_checksum_address(req.to_addr)
-            entry = (token_info(chain.chain_id, to_cs)
-                     if token_info is not None else None)
-            if entry is not None:
-                to_text = _lbl(
-                    f"{entry.symbol} ({to_cs})", monospace=False,
-                )
-                to_text.setFont(mono)
-            else:
-                to_text = _lbl(to_cs, monospace=True)
-        else:
-            to_text = _lbl("(contract creation)")
-
         header.addRow("Network:", _lbl(f"{chain.name} ({chain.chain_id})"))
-        header.addRow("From:", _lbl(from_cs, monospace=True))
-        header.addRow("To:", to_text)
+        header.addRow(
+            "From:",
+            self._link_label(from_cs,
+                             self._explorer_url("address", from_cs),
+                             monospace=True),
+        )
+        header.addRow(
+            "To:", self._build_to_row(req.to_addr, req.from_addr, chain, mono),
+        )
         if req.value_wei > 0:
             ether = wei_to_ether(req.value_wei)
             header.addRow(
@@ -2133,6 +2142,135 @@ class SignTransactionDialog(QDialog):
         self.max_total_lbl.setText(text)
 
     # --- finalised request -------------------------------------------
+
+    # ---- To: row helpers (mirror TransactionDetailsDialog so the
+    # ---- ERC-20 token row renders identically: icon + symbol +
+    # ---- linked address to /token/<addr>?a=<from>). Duplicated
+    # ---- rather than inherited because the two dialogs already
+    # ---- share enough other state to make a base class awkward.
+
+    def _link_label(self, text: str, url: Optional[str], *,
+                    monospace: bool = False) -> QLabel:
+        if not url:
+            lbl = QLabel(text)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            if monospace:
+                lbl.setFont(self._mono_font)
+            lbl.setWordWrap(True)
+            return lbl
+        style = f"color: {self._link_color}; text-decoration: underline;"
+        if monospace:
+            style += " font-family: monospace;"
+        html = (
+            f'<a href="{_escape_html(url)}" style="{style}">'
+            f"{_escape_html(text)}</a>"
+        )
+        lbl = QLabel(html)
+        lbl.setTextFormat(Qt.RichText)
+        lbl.setOpenExternalLinks(True)
+        lbl.setTextInteractionFlags(
+            Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+        )
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _explorer_url(self, kind: str, addr: str,
+                       *, ref_addr: Optional[str] = None) -> Optional[str]:
+        if not self.chain.explorer or not addr:
+            return None
+        base = self.chain.explorer.rstrip("/")
+        if kind == "tx":
+            return f"{base}/tx/{addr}"
+        if kind == "address":
+            return f"{base}/address/{addr}"
+        if kind == "token":
+            url = f"{base}/token/{addr}"
+            if ref_addr:
+                url += f"?a={ref_addr}"
+            return url
+        return None
+
+    def _build_to_row(self, to_addr: Optional[str], from_addr: str,
+                      chain, mono: QFont) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        if not to_addr:
+            label = QLabel("(contract creation)")
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            label.setFont(mono)
+            row.addWidget(label)
+            row.addStretch(1)
+            return container
+
+        addr = to_checksum_address(to_addr)
+        from_cs = to_checksum_address(from_addr)
+        entry = (self._token_info(chain.chain_id, addr)
+                 if self._token_info is not None else None)
+
+        if entry is not None:
+            self._to_addr_lower = addr.lower()
+            self._to_icon_label = QLabel()
+            self._to_icon_label.setFixedSize(20, 20)
+            self._to_icon_label.setScaledContents(True)
+            row.addWidget(self._to_icon_label)
+
+            token_url = self._explorer_url(
+                "token", addr, ref_addr=from_cs,
+            )
+            if token_url:
+                addr_html = (
+                    f'<a href="{_escape_html(token_url)}" '
+                    f'style="color: {self._link_color}; '
+                    f'text-decoration: underline; '
+                    f'font-family: monospace;">'
+                    f"{_escape_html(addr)}</a>"
+                )
+            else:
+                addr_html = (
+                    f'<span style="font-family: monospace;">'
+                    f"{_escape_html(addr)}</span>"
+                )
+            label = QLabel(
+                f"{_escape_html(entry.symbol)} ({addr_html})"
+            )
+            label.setTextFormat(Qt.RichText)
+            label.setOpenExternalLinks(True)
+            label.setTextInteractionFlags(
+                Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+            )
+            row.addWidget(label, 1)
+
+            if self._icon_cache is not None:
+                pix = self._icon_cache.get(chain.chain_id, addr)
+                if pix is not None and not pix.isNull():
+                    self._to_icon_label.setPixmap(pix)
+                else:
+                    self._icon_cache.icon_ready.connect(self._on_to_icon_ready)
+                    self._icon_cache.request(
+                        chain.chain_id, addr, entry.logo_uri,
+                    )
+        else:
+            row.addWidget(
+                self._link_label(addr,
+                                 self._explorer_url("address", addr),
+                                 monospace=True),
+                1,
+            )
+        return container
+
+    def _on_to_icon_ready(self, chain_id: int, contract: str) -> None:
+        if (self._to_icon_label is None
+                or self._to_addr_lower is None
+                or self._icon_cache is None):
+            return
+        if chain_id != self.chain.chain_id or contract != self._to_addr_lower:
+            return
+        pix = self._icon_cache.get(chain_id, contract)
+        if pix is not None and not pix.isNull():
+            self._to_icon_label.setPixmap(pix)
 
     def finalised_request(self) -> SigningRequest:
         """Returns the SigningRequest with all gas / fee / nonce

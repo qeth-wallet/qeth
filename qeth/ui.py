@@ -265,6 +265,7 @@ class MainWindow(QMainWindow):
             abi_cache=self.transactions_plugin._abi_cache,
             start_worker=self.start_worker,
             token_info=self.token_info,
+            icon_cache=self.icon_cache(),
             native_price_usd=native_price_usd,
             parent=self,
         )

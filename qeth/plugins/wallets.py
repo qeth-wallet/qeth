@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread
 
-from ..chain import wei_to_ether
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
 
@@ -733,14 +732,20 @@ class AddLedgerDialog(QDialog):
         worker.start()
 
     def _on_found(self, acct: DiscoveredAccount) -> None:
-        balance = wei_to_ether(acct.balance_wei)
-        label = (
-            f"#{acct.index:<3} {acct.address}   "
-            f"{balance:.6f} {self._chain.symbol}"
-        )
+        # Annotate each row with its sent-tx count: 0 = never used
+        # from this address, >0 = active wallet. Pre-select the
+        # active ones so they're auto-added on Confirm; the user can
+        # still tick / untick to override.
+        if acct.nonce == 0:
+            usage = "unused"
+        elif acct.nonce == 1:
+            usage = "1 tx"
+        else:
+            usage = f"{acct.nonce} txs"
+        label = f"#{acct.index:<3} {acct.address}   {usage}"
         item = QListWidgetItem(label)
         item.setData(Qt.UserRole, acct)
-        item.setSelected(acct.balance_wei > 0)
+        item.setSelected(acct.nonce > 0)
         self.results.addItem(item)
         if self.progress.maximum() > 0:
             self.progress.setValue(self.progress.value() + 1)

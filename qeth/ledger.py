@@ -27,15 +27,21 @@ class DiscoveredAccount:
     address: str
     path: str
     index: int
-    balance_wei: int = 0
+    # On-chain transaction count for ``address`` at the "latest"
+    # block — i.e. how many txs this wallet has *sent*. We use this
+    # rather than the native balance to identify used accounts:
+    # a wallet that received funds but never signed anything still
+    # has nonce 0, and from the user's perspective is effectively
+    # uncreated (they've never controlled it from this device).
+    nonce: int = 0
 
 
 class LedgerWorker(QThread):
     """Enumerates Ledger accounts in a background thread.
 
-    If `count` is 0, scans until `AUTO_STOP_CONSECUTIVE_ZEROS` empty accounts
-    in a row (up to `AUTO_DETECT_HARD_CAP`). Balances are fetched from
-    `chain` if provided.
+    If `count` is 0, scans until `AUTO_STOP_CONSECUTIVE_ZEROS` consecutive
+    accounts with nonce 0 (up to `AUTO_DETECT_HARD_CAP`). Nonces are
+    fetched from `chain` if provided.
     """
 
     discovered = Signal(object)
@@ -78,12 +84,12 @@ class LedgerWorker(QThread):
             for i in range(max_scan):
                 path = template.format(i=i)
                 acct = get_account_by_path(path, dongle=dongle)
-                balance = self._balance(acct.address) if self.client else 0
+                nonce = self._nonce(acct.address) if self.client else 0
                 self.discovered.emit(DiscoveredAccount(
-                    address=acct.address, path=path, index=i, balance_wei=balance
+                    address=acct.address, path=path, index=i, nonce=nonce
                 ))
                 if auto:
-                    if balance == 0:
+                    if nonce == 0:
                         consecutive_zero += 1
                         if consecutive_zero >= AUTO_STOP_CONSECUTIVE_ZEROS:
                             break
@@ -93,9 +99,14 @@ class LedgerWorker(QThread):
         except Exception as e:
             self.failed.emit(f"Error reading account: {e}")
 
-    def _balance(self, address: str) -> int:
+    def _nonce(self, address: str) -> int:
+        """Latest-block sent-tx count for ``address``. We ask for
+        "latest", not "pending", because we want the canonical
+        on-chain identity of the wallet — a pending tx in the
+        mempool from another client could otherwise tip a fresh
+        address into looking used."""
         try:
-            return self.client.get_balance(address)
+            return self.client.get_transaction_count(address, "latest")
         except Exception:
             return 0
 

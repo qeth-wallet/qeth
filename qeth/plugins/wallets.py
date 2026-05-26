@@ -22,14 +22,18 @@ so the host can refresh the status bar.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import io
 
 import segno
 
+
+log = logging.getLogger("qeth.plugin.wallets")
+
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
+from PySide6.QtGui import QAction, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -41,6 +45,32 @@ from PySide6.QtCore import QThread
 
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
+
+
+def _palette_aware_error_color(palette) -> str:
+    """Pick a "this is an error" red that contrasts against the
+    active palette's window background. QPalette has no Error
+    role — apps reach for ``BrightText`` (theme-dependent, often
+    not actually red) or hardcoded values; we sample the Window
+    luminance and pick a Material-inspired red that reads on
+    that background.
+
+    See also feedback_theme_safe_colors.md — same approach we
+    take for link colours."""
+    window = palette.color(QPalette.Window)
+    lum = window.red() * 0.299 + window.green() * 0.587 + window.blue() * 0.114
+    # Dark window → light red (Material red 300);
+    # light window → deep red (Material red 800).
+    return "#ff6b6b" if lum < 128 else "#c62828"
+
+
+def _palette_aware_ok_color(palette) -> str:
+    """Companion to ``_palette_aware_error_color`` — a green that
+    reads as "ok / success" on the active theme."""
+    window = palette.color(QPalette.Window)
+    lum = window.red() * 0.299 + window.green() * 0.587 + window.blue() * 0.114
+    # Light green on dark, deep green on light.
+    return "#81c784" if lum < 128 else "#2e7d32"
 
 
 class _ReorderTree(QTreeWidget):
@@ -309,6 +339,8 @@ class WalletsPlugin(Plugin):
         # which dialogs they open.
         self.act_add_ledger = QAction("Ledger account…", self)
         self.act_add_ledger.triggered.connect(self._add_ledger)
+        self.act_add_hot = QAction("Hot wallet…", self)
+        self.act_add_hot.triggered.connect(self._add_hot_wallet)
         self.act_add_watch = QAction("Watch-only address…", self)
         self.act_add_watch.triggered.connect(self._add_watch_only)
         # Triggering act_add itself shows the picker menu — invoked
@@ -346,6 +378,7 @@ class WalletsPlugin(Plugin):
         add_btn.setIconSize(QSize(16, 16))
         self._add_menu = QMenu(add_btn)
         self._add_menu.addAction(self.act_add_ledger)
+        self._add_menu.addAction(self.act_add_hot)
         self._add_menu.addAction(self.act_add_watch)
         add_btn.setMenu(self._add_menu)
         add_btn.setPopupMode(QToolButton.InstantPopup)
@@ -422,10 +455,32 @@ class WalletsPlugin(Plugin):
         for g in groups.values():
             g.setExpanded(True)
 
-        # Hot wallet stub — not yet implemented.
-        hot = QTreeWidgetItem(["Hot wallet (0)"])
-        hot.setFlags(Qt.ItemIsEnabled)
-        self._tree.addTopLevelItem(hot)
+        hot_accts = [a for a in self._store.accounts
+                      if a.get("source") == "hot"]
+        hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
+        hot_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+        self._tree.addTopLevelItem(hot_root)
+        for a in hot_accts:
+            addr = a["address"]
+            is_default = (
+                self._store.default_account is not None
+                and addr.lower() == self._store.default_account.lower()
+            )
+            label_text = a.get("label") or ""
+            display = f"[{addr}]" if is_default else f" {addr} "
+            if label_text:
+                display = f"{display}   {label_text}"
+            it = QTreeWidgetItem([display])
+            it.setData(0, Qt.UserRole, addr)
+            it.setFont(0, QFont("monospace"))
+            it.setFlags(
+                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+            )
+            hot_root.addChild(it)
+            if is_default:
+                default_item = it
+        if hot_accts:
+            hot_root.setExpanded(True)
 
         watch_accts = [a for a in self._store.accounts
                         if a.get("source") == "watch_only"]
@@ -568,7 +623,23 @@ class WalletsPlugin(Plugin):
         )
         if reply != QMessageBox.Yes:
             return
+        # Hot wallets carry an on-disk keystore alongside the
+        # config-level account record; remove both. Ledger / watch-
+        # only accounts have nothing on disk to clean up, only the
+        # config record.
+        from ..hot_wallet import delete_keystore
+        hot_addrs = {
+            a["address"].lower() for a in self._store.accounts
+            if a.get("source") == "hot" and a["address"].lower() in
+                {x.lower() for x in addrs}
+        }
         removed = sum(1 for a in addrs if self._store.remove_account(a))
+        for a in addrs:
+            if a.lower() in hot_addrs:
+                try:
+                    delete_keystore(a)
+                except Exception:
+                    log.exception("hot wallet keystore cleanup failed")
         if removed:
             self._rebuild_tree()
             self.default_account_changed.emit()
@@ -596,6 +667,69 @@ class WalletsPlugin(Plugin):
         self.default_account_changed.emit()
         if added and self.host is not None:
             self.host.status_message(f"Added {added} account(s)", 3000)
+
+    def _add_hot_wallet(self) -> None:
+        """Generate a new hot-wallet private key and persist it
+        as a passphrase-encrypted keystore. The passphrase is
+        collected by AddHotWalletDialog; the key is generated via
+        ``os.urandom(32)`` inside hot_wallet.generate_new_keystore
+        so this method never has the raw bytes in memory longer
+        than the encrypt() call."""
+        dlg = AddHotWalletDialog(self._container)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        from ..hot_wallet import encrypt_keystore, save_keystore
+        try:
+            address, keystore = encrypt_keystore(
+                dlg.private_key, dlg.passphrase,
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self._container, "Hot wallet error",
+                f"Failed to encrypt private key:\n\n{e}",
+            )
+            return
+        existing_addrs = {a["address"].lower()
+                          for a in self._store.accounts}
+        if address.lower() in existing_addrs:
+            QMessageBox.warning(
+                self._container, "Hot wallet error",
+                f"An account with address {address} already exists.",
+            )
+            return
+        try:
+            save_keystore(address, keystore)
+        except Exception as e:
+            QMessageBox.critical(
+                self._container, "Hot wallet error",
+                f"Failed to write keystore:\n\n{e}",
+            )
+            return
+        if self._store.add_account({
+            "address": address,
+            "source": "hot",
+            "label": dlg.label,
+        }):
+            self._rebuild_tree()
+            self.default_account_changed.emit()
+            if self.host is not None:
+                self.host.status_message(
+                    f"Hot wallet {address} created", 3000,
+                )
+            # The keystore + passphrase are BOTH required to recover
+            # the funds. Surface that explicitly post-creation —
+            # users tend to overlook the "keep backups" hint in a
+            # generation dialog and only think about it later.
+            from ..hot_wallet import keystore_path
+            QMessageBox.information(
+                self._container, "Hot wallet created",
+                f"Address: {address}\n\n"
+                f"Keystore: {keystore_path(address)}\n\n"
+                "Both the keystore file AND your passphrase are "
+                "required to recover funds. Back up the file and "
+                "remember the passphrase — qeth never sends either "
+                "anywhere."
+            )
 
     def _add_watch_only(self) -> None:
         """Open the small "Add watch-only address" modal and
@@ -1105,6 +1239,232 @@ class AddWatchOnlyDialog(QDialog):
             "source": "watch_only",
             "label": self._label,
         }
+
+
+class AddHotWalletDialog(QDialog):
+    """Generate a new hot wallet: pick a passphrase, get a fresh
+    random key encrypted with it. The keystore file lands in
+    ``~/.qeth/keystores/`` and the passphrase IS the only key —
+    nobody (including qeth) can recover the funds without both."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add hot wallet")
+        # Width is what matters; let Qt auto-size the height to
+        # whatever the form needs once each field has a generous
+        # min-height — no trailing stretch means no empty space
+        # below the form.
+        self.resize(560, 0)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(14)
+
+        warn = QLabel(
+            "qeth will encrypt the private key under your passphrase "
+            "and write the keystore to disk. Both the keystore file "
+            "AND your passphrase are required to recover funds — "
+            "back up the file and remember the passphrase. Lose "
+            "either and the funds are gone."
+        )
+        warn.setWordWrap(True)
+        layout.addWidget(warn)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        # Roomy vertical rhythm between rows; combines with the
+        # per-field minimum height below to keep each input from
+        # collapsing into a thin strip.
+        form.setVerticalSpacing(14)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        # Stretch the fields to fill the dialog width rather than
+        # the default narrow column.
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        # Common minimum height for all the input widgets — Qt's
+        # default QLineEdit height (~24 px on some themes) reads
+        # as "squeezed" next to a sensibly-padded button.
+        _input_min_h = 30
+
+        # Private-key row: text field + dice button that generates
+        # a random 32-byte key. User can also paste their own.
+        # The QWidget wrapper's minimumSizeHint doesn't always
+        # propagate the inner QLineEdit's minimumHeight on every
+        # Qt style; pin it explicitly so this row gets the same
+        # vertical breathing room as the QLineEdits below.
+        pk_row = QWidget()
+        pk_row.setMinimumHeight(_input_min_h)
+        pk_layout = QHBoxLayout(pk_row)
+        pk_layout.setContentsMargins(0, 0, 0, 0)
+        pk_layout.setSpacing(6)
+        self.pk_edit = QLineEdit()
+        self.pk_edit.setPlaceholderText(
+            "64 hex chars (with or without 0x prefix)"
+        )
+        self.pk_edit.setFont(QFont("monospace"))
+        self.pk_edit.setMinimumHeight(_input_min_h)
+        pk_layout.addWidget(self.pk_edit, 1)
+        self.dice_btn = QToolButton()
+        self.dice_btn.setText("🎲")
+        self.dice_btn.setMinimumHeight(_input_min_h)
+        self.dice_btn.setToolTip(
+            "Generate a fresh random 32-byte private key"
+        )
+        self.dice_btn.clicked.connect(self._on_dice_clicked)
+        pk_layout.addWidget(self.dice_btn)
+        form.addRow("Private key:", pk_row)
+
+        self.pass1_edit = QLineEdit()
+        self.pass1_edit.setEchoMode(QLineEdit.Password)
+        self.pass1_edit.setPlaceholderText("Passphrase")
+        self.pass1_edit.setMinimumHeight(_input_min_h)
+        form.addRow("Passphrase:", self.pass1_edit)
+
+        self.pass2_edit = QLineEdit()
+        self.pass2_edit.setEchoMode(QLineEdit.Password)
+        self.pass2_edit.setPlaceholderText("Repeat passphrase")
+        self.pass2_edit.setMinimumHeight(_input_min_h)
+        form.addRow("Confirm:", self.pass2_edit)
+
+        # Live length / match indicator inline with the form so the
+        # user can see at a glance whether their passphrase is past
+        # the 8-char minimum, and whether the two fields agree —
+        # the global match_lbl below was easy to overlook on the
+        # way from the Confirm field to the Add button.
+        # Reserve room for descenders ('p', 'q' on "passphrases…")
+        # — without an explicit minimum height the form-row cell
+        # sized to the empty label's near-zero hint, and the bold
+        # text ended up clipped at the bottom on first display.
+        self.pass_status_lbl = QLabel("")
+        # Use the bold font's height (plus a couple of px) to reserve
+        # the row — the rich-text spans we'll set are bold.
+        from PySide6.QtGui import QFontMetrics
+        bold_font = self.pass_status_lbl.font()
+        bold_font.setBold(True)
+        self.pass_status_lbl.setMinimumHeight(
+            QFontMetrics(bold_font).height() + 4
+        )
+        form.addRow("", self.pass_status_lbl)
+
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("e.g. Daily driver")
+        self.label_edit.setMinimumHeight(_input_min_h)
+        form.addRow("Label (optional):", self.label_edit)
+        layout.addLayout(form)
+
+        # Theme-aware error / ok colours used by both the inline
+        # passphrase progress and the bottom match_lbl.
+        self._err_color = _palette_aware_error_color(self.palette())
+        self._ok_color = _palette_aware_ok_color(self.palette())
+
+        # Inline status / rejection hint for the private-key field.
+        # Styled with the palette-aware error red so it actually
+        # reads as a warning on both light and dark themes — the
+        # previous ``palette(highlight)`` came out as light cyan on
+        # some palettes and was effectively invisible.
+        self.match_lbl = QLabel("")
+        self.match_lbl.setWordWrap(True)
+        self.match_lbl.setStyleSheet(
+            f"color: {self._err_color}; font-weight: bold;"
+        )
+        layout.addWidget(self.match_lbl)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.gen_btn = buttons.addButton(
+            "Add", QDialogButtonBox.AcceptRole,
+        )
+        self.gen_btn.setEnabled(False)
+        buttons.rejected.connect(self.reject)
+        self.gen_btn.clicked.connect(self._on_accept)
+        layout.addWidget(buttons)
+
+        self.pk_edit.textChanged.connect(self._update_state)
+        self.pass1_edit.textChanged.connect(self._update_state)
+        self.pass2_edit.textChanged.connect(self._update_state)
+
+    def _on_dice_clicked(self) -> None:
+        """Fill the private-key field with a fresh 32-byte
+        cryptographically-random value. The user can still edit
+        afterwards — we use whatever's in the field on accept."""
+        from ..hot_wallet import generate_random_private_key
+        self.pk_edit.setText(generate_random_private_key().hex())
+
+    def _parsed_private_key(self) -> Optional[bytes]:
+        """Returns the parsed 32 bytes if the field holds a valid
+        hex private key, else None. Used by _update_state to gate
+        the Add button; ``_on_accept`` re-parses (with the same
+        helper) so a single source of truth catches all the edge
+        cases."""
+        from ..hot_wallet import parse_private_key_hex
+        try:
+            return parse_private_key_hex(self.pk_edit.text())
+        except Exception:
+            return None
+
+    def _update_state(self) -> None:
+        pk_text = self.pk_edit.text()
+        pk_valid = self._parsed_private_key() is not None
+        p1 = self.pass1_edit.text()
+        p2 = self.pass2_edit.text()
+
+        # Inline passphrase progress always shows while the user is
+        # typing, so it's visible right next to the field they just
+        # touched. Green when ≥ 8 chars AND fields match; otherwise
+        # red with a count.
+        if not p1 and not p2:
+            self.pass_status_lbl.setText("")
+        elif len(p1) < 8:
+            self.pass_status_lbl.setText(
+                f"<span style='color: {self._err_color};"
+                f" font-weight: bold;'>"
+                f"{len(p1)}/8 characters</span>"
+            )
+        elif p1 != p2:
+            self.pass_status_lbl.setText(
+                f"<span style='color: {self._err_color};"
+                f" font-weight: bold;'>"
+                f"passphrases don't match</span>"
+            )
+        else:
+            self.pass_status_lbl.setText(
+                f"<span style='color: {self._ok_color};"
+                f" font-weight: bold;'>✓ ok</span>"
+            )
+
+        if not pk_text.strip():
+            self.match_lbl.setText("")
+            self.gen_btn.setEnabled(False)
+            return
+        if not pk_valid:
+            self.match_lbl.setText(
+                "Private key must be 64 hex characters (with or "
+                "without 0x prefix)."
+            )
+            self.gen_btn.setEnabled(False)
+            return
+        if not p1:
+            self.match_lbl.setText("")
+            self.gen_btn.setEnabled(False)
+            return
+        if p1 != p2:
+            self.match_lbl.setText("")
+            self.gen_btn.setEnabled(False)
+            return
+        if len(p1) < 8:
+            self.match_lbl.setText("")
+            self.gen_btn.setEnabled(False)
+            return
+        self.match_lbl.setText("")
+        self.gen_btn.setEnabled(True)
+
+    def _on_accept(self) -> None:
+        priv = self._parsed_private_key()
+        if priv is None:
+            return  # belt + braces; Add button is gated already
+        self.private_key = priv
+        self.passphrase = self.pass1_edit.text()
+        self.label = self.label_edit.text().strip()
+        self.accept()
 
 
 # --- Right-hand details panel ------------------------------------------------

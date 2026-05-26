@@ -1182,6 +1182,60 @@ class TestWalletsPlugin:
         assert not wallets_plugin._details.set_default_btn.isEnabled()
         assert "Watch-only" in wallets_plugin._details.set_default_btn.text()
 
+    def test_add_hot_wallet_dialog_gating(self, qtbot, tmp_qeth):
+        """Walks the Add button's enable/disable through every
+        gate: empty field, bad key, bad passphrase, mismatched
+        passphrase, short passphrase, all-valid."""
+        from qeth.plugins.wallets import AddHotWalletDialog
+        dlg = AddHotWalletDialog()
+        qtbot.addWidget(dlg)
+
+        # Everything empty.
+        assert not dlg.gen_btn.isEnabled()
+
+        # Bad private key — disabled with a hint in match_lbl.
+        dlg.pk_edit.setText("not a key")
+        assert not dlg.gen_btn.isEnabled()
+        assert "64 hex" in dlg.match_lbl.text()
+
+        # Valid private key but no passphrase yet.
+        dlg.pk_edit.setText("a" * 64)
+        assert not dlg.gen_btn.isEnabled()
+
+        # Short passphrase: disabled. Length feedback goes in the
+        # inline ``pass_status_lbl`` next to the form, not the
+        # bottom match_lbl, so the user sees it as they type.
+        dlg.pass1_edit.setText("short")
+        dlg.pass2_edit.setText("short")
+        assert not dlg.gen_btn.isEnabled()
+        assert "5/8" in dlg.pass_status_lbl.text()
+
+        # Mismatched: different hint, still inline.
+        dlg.pass1_edit.setText("longenoughpass")
+        dlg.pass2_edit.setText("longenoughpasS")
+        assert not dlg.gen_btn.isEnabled()
+        assert "don't match" in dlg.pass_status_lbl.text()
+
+        # All valid → enabled, inline says "ok".
+        dlg.pass1_edit.setText("longenoughpass")
+        dlg.pass2_edit.setText("longenoughpass")
+        assert dlg.gen_btn.isEnabled()
+        assert "ok" in dlg.pass_status_lbl.text().lower()
+        assert dlg.match_lbl.text() == ""
+
+    def test_add_hot_wallet_dialog_dice_fills_field(self, qtbot, tmp_qeth):
+        """Clicking the dice button populates the private-key
+        field with a 64-char hex value."""
+        from qeth.plugins.wallets import AddHotWalletDialog
+        dlg = AddHotWalletDialog()
+        qtbot.addWidget(dlg)
+        assert dlg.pk_edit.text() == ""
+        dlg.dice_btn.click()
+        text = dlg.pk_edit.text()
+        assert len(text) == 64
+        # All hex characters.
+        int(text, 16)
+
     def test_add_ledger_dialog_constructs(self, qtbot, wallets_plugin):
         """Smoke test for the Add account dialog. The dialog is built
         lazily on button click, so an undeclared import (the

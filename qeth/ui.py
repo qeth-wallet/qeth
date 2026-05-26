@@ -340,10 +340,42 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(dialog, "Cannot sign", str(e))
             return
 
-        from .ledger import LedgerSigner
-        signer = LedgerSigner(self.store)
+        # Pick the right Signer based on the stored account record.
+        # Hot wallets need a passphrase prompt up-front (on the
+        # main thread) so the worker has the decrypted key by the
+        # time it calls signer.sign().
+        addr_lower = finalised.from_addr.lower()
+        acct = next(
+            (a for a in self.store.accounts
+             if a["address"].lower() == addr_lower),
+            None,
+        )
+        source = acct.get("source") if acct else None
+        from PySide6.QtWidgets import QMessageBox
+        if source == "ledger":
+            from .ledger import LedgerSigner
+            signer = LedgerSigner(self.store)
+            progress_text = "Confirm the transaction on your Ledger device…"
+        elif source == "hot":
+            from PySide6.QtWidgets import QInputDialog, QLineEdit
+            passphrase, ok = QInputDialog.getText(
+                dialog, "Hot wallet",
+                f"Passphrase for {finalised.from_addr}:",
+                QLineEdit.Password, "",
+            )
+            if not ok:
+                return
+            from .hot_wallet import HotWalletSigner
+            signer = HotWalletSigner(self.store, passphrase)
+            # Scrypt-derived key decrypt typically takes ~1 second.
+            progress_text = "Decrypting keystore and signing…"
+        else:
+            QMessageBox.warning(
+                dialog, "Cannot sign",
+                f"No known signer for {finalised.from_addr}",
+            )
+            return
         if not signer.can_sign(finalised.from_addr):
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 dialog, "Cannot sign",
                 f"No known signer for {finalised.from_addr}",
@@ -353,7 +385,7 @@ class MainWindow(QMainWindow):
         dialog.set_signing_in_progress(True)
         from PySide6.QtWidgets import QProgressDialog
         progress = QProgressDialog(
-            "Confirm the transaction on your Ledger device…",
+            progress_text,
             None,           # no cancel button
             0, 0,           # indeterminate spinner
             dialog,         # parent on the sign dialog so the

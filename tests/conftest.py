@@ -30,6 +30,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 def tmp_qeth(tmp_path, monkeypatch) -> Path:
     """Redirect all qeth on-disk locations under ``tmp_path``."""
     import qeth.abi_cache
+    import qeth.hot_wallet
     import qeth.store
     import qeth.token_metadata
     import qeth.tokenlists
@@ -46,6 +47,8 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.transactions_cache, "CACHE_DIR",
                         tmp_path / "transactions")
     monkeypatch.setattr(qeth.abi_cache, "CACHE_DIR", tmp_path / "abi")
+    monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
+                        tmp_path / "keystores")
     return tmp_path
 
 

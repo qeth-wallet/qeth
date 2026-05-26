@@ -872,6 +872,13 @@ class TransactionsPlugin(Plugin):
                 or self.host.current_chain().chain_id != chain_id):
             return
         if not new_rows:
+            # Empty page + empty cache = brand-new account with
+            # zero history. Flip the panel from "Loading…" to the
+            # empty-state message rather than leaving it spinning
+            # forever.
+            if not merged:
+                self._panel.show_empty()
+                self._displayed_count[key] = 0
             return
         # Newer entries (refresh case, nonce above old top) prepend;
         # older entries (scroll case) append. Both grow the visible

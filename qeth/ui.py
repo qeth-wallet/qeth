@@ -240,12 +240,11 @@ class MainWindow(QMainWindow):
 
     def _on_signing_request(self, req, fut) -> None:
         """Slot for ``SignerBridge.request_received`` — runs on the
-        Qt main thread (queued connection). Looks up the right
-        Chain from the RPC's session view, opens the dialog, and
-        resolves / rejects the future. Phase 1: actual signing isn't
-        wired in yet, so confirmed requests still reject with a
-        placeholder error — the goal of this phase is to validate
-        the round-trip plumbing."""
+        Qt main thread (queued connection). Builds the dialog and
+        wires its lifecycle async (no ``exec``), so failures keep
+        the dialog open and surface a popup parented to it. The
+        bridge future is resolved / rejected from the worker
+        callbacks below."""
         chain = next(
             (c for c in self.store.chains if c.chain_id == req.chain_id),
             None,
@@ -255,10 +254,8 @@ class MainWindow(QMainWindow):
                 fut, SignerError(f"Unknown chain {req.chain_id}"),
             )
             return
-        # Native USD price (used by the dialog to annotate the
-        # expected-fee line with a "(… USD)" suffix). Cache miss or
-        # no entry yet → None and the dialog quietly omits the
-        # parenthetical.
+        # Native USD price for the expected-fee line. Cache miss →
+        # None and the dialog quietly omits the parenthetical.
         native_price_usd = self.native_price_usd(
             chain.chain_id, req.from_addr,
         )
@@ -271,49 +268,49 @@ class MainWindow(QMainWindow):
             native_price_usd=native_price_usd,
             parent=self,
         )
-        if dialog.exec() != SignTransactionDialog.Accepted:
-            self.signer_bridge.reject(fut, SignerError("User cancelled"))
-            return
+        dialog.setWindowModality(Qt.WindowModal)
+
+        # Confirm: kick the worker, dialog stays visible.
+        dialog.sign_requested.connect(
+            lambda d=dialog, f=fut, c=chain: self._begin_sign(d, f, c)
+        )
+        # Cancel / close: reject the future, dialog closes.
+        dialog.rejected.connect(
+            lambda f=fut: self.signer_bridge.reject(
+                f, SignerError("User cancelled"),
+            )
+        )
+        dialog.show()
+
+    def _begin_sign(self, dialog, fut, chain) -> None:
+        """Start one sign-and-broadcast attempt. Called every time
+        the user clicks Confirm — including retries after a
+        previous attempt failed."""
         try:
             finalised = dialog.finalised_request()
         except SignerError as e:
-            self.signer_bridge.reject(fut, e)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(dialog, "Cannot sign", str(e))
             return
 
-        # Phase 2: actual sign + broadcast via the Ledger backend.
-        # Future signers (hot wallet, watch-only) plug into the same
-        # Signer ABC; pick the right backend based on the source on
-        # the account record.
-        from .ledger import LedgerSigner, prompt_until_ledger_ready
+        from .ledger import LedgerSigner
         signer = LedgerSigner(self.store)
         if not signer.can_sign(finalised.from_addr):
-            self.signer_bridge.reject(
-                fut,
-                SignerError(
-                    f"No known signer for {finalised.from_addr}"
-                ),
-            )
-            return
-        # Probe the device upfront so a disconnected / locked Ledger
-        # surfaces as a "Try again" prompt instead of a silent
-        # failure inside the worker (which would just bounce a
-        # -32000 back to the dapp; the user would have to redo the
-        # whole dapp interaction).
-        if not prompt_until_ledger_ready(self):
-            self.signer_bridge.reject(
-                fut, SignerError("User cancelled — Ledger unavailable"),
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                dialog, "Cannot sign",
+                f"No known signer for {finalised.from_addr}",
             )
             return
 
-        # Modal "waiting for device" — non-cancellable; the dapp on
-        # the other end of the RPC will time out on its own if the
-        # user walks away.
+        dialog.set_signing_in_progress(True)
         from PySide6.QtWidgets import QProgressDialog
         progress = QProgressDialog(
             "Confirm the transaction on your Ledger device…",
             None,           # no cancel button
-            0, 0,           # indeterminate / spinner
-            self,
+            0, 0,           # indeterminate spinner
+            dialog,         # parent on the sign dialog so the
+                            # progress sits on top of it.
         )
         progress.setWindowTitle("Signing transaction")
         progress.setWindowModality(Qt.WindowModal)
@@ -322,16 +319,18 @@ class MainWindow(QMainWindow):
 
         worker = SignAndBroadcastWorker(signer, finalised, chain)
         worker.broadcast.connect(
-            lambda h, p=progress, f=fut, r=finalised, c=chain:
-                self._on_tx_broadcast(h, p, f, r, c)
+            lambda h, d=dialog, p=progress, f=fut, r=finalised, c=chain:
+                self._on_tx_broadcast(h, d, p, f, r, c)
         )
         worker.failed.connect(
-            lambda msg, p=progress, f=fut: self._on_tx_sign_failed(msg, p, f)
+            lambda msg, d=dialog, p=progress:
+                self._on_tx_sign_failed(msg, d, p)
         )
         self.start_worker(worker)
 
-    def _on_tx_broadcast(self, tx_hash, progress, fut, req, chain) -> None:
+    def _on_tx_broadcast(self, tx_hash, dialog, progress, fut, req, chain) -> None:
         progress.close()
+        dialog.accept()
         self.signer_bridge.resolve(fut, tx_hash)
         # Snapshot the just-sent tx into the transactions list as a
         # pending row so the user sees it immediately — without
@@ -343,18 +342,24 @@ class MainWindow(QMainWindow):
         except Exception:
             import logging
             logging.getLogger("qeth.ui").exception("add_pending failed")
-        # Make the pending row visible: select the ``from`` account
-        # in the wallets tree (pending lives in that account's bucket)
+        # Make the pending row visible: select the from account in
+        # the wallets tree (pending lives in that account's bucket)
         # and flip the right slot to the Transactions tab. Both are
         # idempotent if we're already in the right place.
         self.wallets_plugin.select_address(req.from_addr)
         self.right_slot.set_active(self.transactions_plugin)
         self.status_message(f"Broadcast {tx_hash}", 6000)
 
-    def _on_tx_sign_failed(self, msg: str, progress, fut) -> None:
+    def _on_tx_sign_failed(self, msg: str, dialog, progress) -> None:
+        """Signing failed (Ledger unavailable, user cancelled on
+        device, broadcast rejected, …). Don't close the sign
+        dialog — show the message on top of it and re-enable
+        Confirm so the user can fix the device and retry without
+        losing the dialog state."""
         progress.close()
-        self.signer_bridge.reject(fut, SignerError(msg))
-        self.status_message(f"Signing failed: {msg}", 6000)
+        dialog.set_signing_in_progress(False)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(dialog, "Ledger error", msg)
 
     # --- transitional aliases (kept so existing tests / external code
     # that pokes at the panels directly keeps working).

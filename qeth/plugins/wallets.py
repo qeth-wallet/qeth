@@ -672,11 +672,6 @@ class AddLedgerDialog(QDialog):
         form.addRow("Accounts to scan:", self.count_spin)
         layout.addLayout(form)
 
-        layout.addWidget(QLabel(
-            "Connect your Ledger, unlock it, and open the Ethereum app, then click Scan.\n"
-            f"Balances are queried on {chain.name}; non-empty accounts are pre-selected."
-        ))
-
         self.results = QListWidget()
         self.results.setSelectionMode(QAbstractItemView.ExtendedSelection)
         font = QFont("monospace")
@@ -710,12 +705,6 @@ class AddLedgerDialog(QDialog):
         self._workers: set[QThread] = set()
 
     def _scan(self) -> None:
-        # Probe the device first so a disconnected / locked Ledger
-        # surfaces as a "Try again" prompt instead of a silent
-        # worker failure with a one-line error after a few seconds.
-        from ..ledger import prompt_until_ledger_ready
-        if not prompt_until_ledger_ready(self):
-            return
         self.results.clear()
         self.add_btn.setEnabled(False)
         n = self.count_spin.value()

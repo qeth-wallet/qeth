@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QMessageBox, QWidget
 
 from .chain import EthClient
 from .chains import Chain
@@ -28,7 +27,7 @@ def is_ledger_available() -> tuple[bool, Optional[str]]:
     try:
         dongle = init_dongle()
     except Exception as e:
-        return False, str(e)
+        return False, _explain_ledger_error(e)
     # Drop the cache + close the probe handle. ledgereth keeps the
     # Dongle in a module-level slot across calls; reusing it for
     # the next real sign is unreliable (see the dongle-cache
@@ -42,34 +41,83 @@ def is_ledger_available() -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def prompt_until_ledger_ready(parent: QWidget) -> bool:
-    """Loop a "Connect your Ledger" modal until the device is
-    available OR the user clicks Cancel. Returns True when ready,
-    False when cancelled.
-
-    Called at the entry points to any Ledger-touching flow
-    (signing, discovery) so a disconnected/locked device produces
-    a clear, actionable prompt instead of a silent worker failure
-    that loses the dapp's pending request."""
-    while True:
-        ok, reason = is_ledger_available()
-        if ok:
-            return True
-        box = QMessageBox(parent)
-        box.setWindowTitle("Ledger not available")
-        box.setIcon(QMessageBox.Warning)
-        box.setText(
-            "Connect your Ledger device, unlock it, and open the "
-            "Ethereum app, then click \"Try again\"."
+def _explain_ledger_error(e: Exception) -> str:
+    """Map a ledgereth exception to a single, action-oriented
+    sentence that tells the user what's wrong and what to do.
+    Fallback for unknown error shapes is to surface the raw text
+    along with the SW code when we have one — so future
+    "UNKNOWN" cases stay diagnosable instead of getting hidden."""
+    try:
+        from ledgereth.exceptions import (
+            CommException, LedgerAppNotOpened, LedgerCancel, LedgerError,
+            LedgerErrorCodes, LedgerInvalid, LedgerInvalidADPU,
+            LedgerLocked, LedgerNotFound,
         )
-        if reason:
-            box.setInformativeText(reason)
-        retry = box.addButton("Try again", QMessageBox.AcceptRole)
-        cancel = box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(retry)
-        box.exec()
-        if box.clickedButton() is cancel:
-            return False
+    except ImportError:
+        return f"Ledger error: {e}"
+
+    if isinstance(e, LedgerCancel):
+        return "Transaction rejected on the Ledger device."
+    if isinstance(e, LedgerLocked):
+        return (
+            "Your Ledger is locked. Unlock it (enter your PIN) and "
+            "try again."
+        )
+    if isinstance(e, LedgerAppNotOpened):
+        # Covers APP_SLEEP (0x6804), APP_NOT_STARTED (0x6d00),
+        # APP_NOT_FOUND (0x6d02) — i.e. the screensaver dimmed the
+        # device, the user is on the dashboard, or Ethereum isn't
+        # installed.
+        return (
+            "The Ethereum app isn't open on your Ledger. Wake the "
+            "device and open the Ethereum app, then try again."
+        )
+    if isinstance(e, LedgerNotFound):
+        return (
+            "Ledger device not detected. Make sure it's connected "
+            "via USB and unlocked."
+        )
+    if isinstance(e, LedgerInvalid):
+        return (
+            "Ledger rejected the transaction data as invalid. This "
+            "is usually a bug in the wallet — open an issue with "
+            "the tx details."
+        )
+    if isinstance(e, LedgerInvalidADPU):
+        return (
+            "Ledger communication error (APDU size mismatch). This "
+            "is usually a transport-layer bug."
+        )
+    # Find the status word. ledgereth's comms layer catches
+    # CommException and re-raises a generic LedgerError("Unexpected
+    # error: 0x???? UNKNOWN") from err whenever the SW isn't in
+    # ERROR_CODE_EXCEPTIONS — so by the time the exception reaches
+    # us it's a LedgerError, and the CommException carrying the
+    # sw attribute sits on __cause__. Check both.
+    sw = getattr(e, "sw", None)
+    if sw is None:
+        cause = getattr(e, "__cause__", None)
+        if isinstance(cause, CommException):
+            sw = getattr(cause, "sw", None)
+    if sw is not None:
+        name = LedgerErrorCodes.get_by_value(sw)
+        if name is not None:
+            return f"Ledger error: {name} (0x{sw:04x})"
+        # 0x55xx isn't in any public Ledger SW list but the device
+        # emits it reproducibly when the screensaver turns off
+        # (USB still attached). Steer the user there as the cause
+        # instead of a generic "UNKNOWN".
+        if (sw >> 8) == 0x55:
+            return (
+                "Your Ledger is asleep. Wake it up (press a "
+                "button on the device), open the Ethereum app, "
+                "and try again."
+            )
+        return f"Ledger error: unknown status word 0x{sw:04x}"
+    # LedgerError without a more specific subclass and no SW we
+    # could recover, or anything outside the ledgereth hierarchy
+    # (USB layer, etc.).
+    return f"Ledger error: {e}"
 
 
 LEDGER_LIVE = "44'/60'/{i}'/0/0"
@@ -129,10 +177,7 @@ class LedgerWorker(QThread):
         try:
             dongle = init_dongle()
         except Exception as e:
-            self.failed.emit(
-                "Could not open Ledger. Make sure the device is connected, "
-                f"unlocked, and the Ethereum app is open.\n\n{e}"
-            )
+            self.failed.emit(_explain_ledger_error(e))
             return
 
         template = PATH_SCHEMES.get(self.scheme)
@@ -161,7 +206,11 @@ class LedgerWorker(QThread):
                         consecutive_zero = 0
             self.finished_ok.emit()
         except Exception as e:
-            self.failed.emit(f"Error reading account: {e}")
+            # Same decoder as the init_dongle failure above —
+            # surfaces friendly messages for known errors and the
+            # hex SW for unknown ones, instead of the raw ledgereth
+            # "Unexpected error: 0x???? UNKNOWN" leaking through.
+            self.failed.emit(_explain_ledger_error(e))
 
     def _nonce(self, address: str) -> int:
         """Latest-block sent-tx count for ``address``. We ask for
@@ -250,8 +299,11 @@ class LedgerSigner(Signer):
         except Exception as e:
             # Anything from a user rejecting on the device to USB
             # comms hiccups lands here — surface as SignerError so
-            # the RPC handler sees a uniform shape.
-            raise SignerError(f"Ledger signing failed: {e}") from e
+            # the RPC handler sees a uniform shape. _explain_ledger_
+            # error maps the ledgereth typed exceptions to friendly
+            # sentences, and falls back to the raw status word for
+            # codes ledgereth doesn't have a typed exception for.
+            raise SignerError(_explain_ledger_error(e)) from e
         finally:
             # ledgereth caches the Dongle handle in a module-level
             # slot across calls. Reusing it between signs is

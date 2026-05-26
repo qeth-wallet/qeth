@@ -429,6 +429,102 @@ class TestLedgerSignerLookup:
             signer.sign(req, DEFAULT_CHAINS[0])
 
 
+class TestExplainLedgerError:
+    """The typed ledgereth exceptions get friendly action-oriented
+    messages; anything that falls through carries the SW code so
+    UNKNOWNs stay diagnosable."""
+
+    def test_cancel(self):
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import LedgerCancel
+        msg = _explain_ledger_error(LedgerCancel("rejected"))
+        assert "rejected on the ledger device" in msg.lower()
+
+    def test_locked(self):
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import LedgerLocked
+        msg = _explain_ledger_error(LedgerLocked("locked"))
+        assert "unlock" in msg.lower()
+
+    def test_app_not_opened_covers_sleep(self):
+        """LedgerAppNotOpened is the umbrella for APP_SLEEP /
+        APP_NOT_STARTED / APP_NOT_FOUND — i.e. the screensaver
+        dimmed, the user is on the dashboard, or Ethereum isn't
+        installed."""
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import LedgerAppNotOpened
+        msg = _explain_ledger_error(LedgerAppNotOpened("sleep"))
+        assert "ethereum app" in msg.lower()
+
+    def test_not_found(self):
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import LedgerNotFound
+        msg = _explain_ledger_error(LedgerNotFound("nope"))
+        assert "not detected" in msg.lower()
+
+    def test_unknown_sw_includes_hex_code(self):
+        """A CommException with a status word ledgereth doesn't have
+        a typed exception for must surface the SW (so we can grow
+        the mapping next time) rather than hiding behind 'UNKNOWN'."""
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import CommException
+        e = CommException("weird")
+        e.sw = 0x6f42   # not in LedgerErrorCodes
+        msg = _explain_ledger_error(e)
+        assert "0x6f42" in msg
+        assert "unknown" in msg.lower()
+
+    def test_55xx_sw_means_device_asleep(self):
+        """The 0x55xx range isn't in any public Ledger SW list, but
+        the device emits it reproducibly when the screensaver turns
+        off (USB still attached). User-confirmed mapping — show the
+        sleep cause, not "UNKNOWN" or a generic hex code."""
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import CommException
+        e = CommException("sleep")
+        e.sw = 0x5515
+        msg = _explain_ledger_error(e)
+        assert "asleep" in msg.lower()
+        assert "wake" in msg.lower()
+
+    def test_unknown_sw_extracted_from_cause_chain(self):
+        """Regression: ledgereth's comms layer catches CommException
+        and re-raises ``LedgerError("Unexpected error: 0x???? UNKNOWN")
+        from err``, so by the time we see the exception it's a
+        LedgerError and the CommException is on ``__cause__``. The
+        decoder must walk the cause chain to recover the SW —
+        otherwise the raw "Unexpected error: 0x5515 UNKNOWN" text
+        leaks straight through."""
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import CommException, LedgerError
+        cause = CommException("sleep")
+        cause.sw = 0x5515
+        try:
+            try:
+                raise cause
+            except CommException as err:
+                raise LedgerError(
+                    "Unexpected error: 0x5515 UNKNOWN"
+                ) from err
+        except LedgerError as e:
+            msg = _explain_ledger_error(e)
+        assert "asleep" in msg.lower()
+        assert "UNKNOWN" not in msg, (
+            "raw ledgereth text leaked through — __cause__ wasn't walked"
+        )
+
+    def test_known_sw_without_typed_exception_names_the_code(self):
+        """Codes that ARE in LedgerErrorCodes but not in
+        ERROR_CODE_EXCEPTIONS (e.g. INCORRECT_LENGTH) should at
+        least name the code — much better than 'UNKNOWN'."""
+        from qeth.ledger import _explain_ledger_error
+        from ledgereth.exceptions import CommException
+        e = CommException("size")
+        e.sw = 0x6700   # INCORRECT_LENGTH
+        msg = _explain_ledger_error(e)
+        assert "INCORRECT_LENGTH" in msg or "0x6700" in msg
+
+
 class TestIsLedgerAvailable:
     """The pre-flight probe used by signing + discovery to decide
     whether to open the "Connect your Ledger" prompt or proceed."""

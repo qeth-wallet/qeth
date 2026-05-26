@@ -1802,10 +1802,16 @@ class SignTransactionDialog(QDialog):
     history details dialog, and exposes editable gas / fee fields
     pre-filled by ``GasSuggestionWorker``.
 
-    Phase 1 of the signing feature: the dialog flow is complete but
-    the Confirm path returns a placeholder rejection so the
-    plumbing can be smoke-tested end-to-end before LedgerSigner
-    lands in Phase 2."""
+    The dialog is driven asynchronously by the host: clicking
+    "Confirm and sign" emits ``sign_requested`` (rather than
+    closing the dialog). The host runs signing on a worker; on
+    success it calls ``accept()``; on failure it pops an error
+    parented to the still-open dialog and calls
+    ``set_signing_in_progress(False)`` so the user can retry."""
+
+    # User clicked Confirm and sign. The dialog stays open;
+    # caller does the signing on a worker.
+    sign_requested = Signal()
 
     def __init__(self, req: SigningRequest, chain, *,
                  abi_source: BlockscoutAbiSource,
@@ -1971,7 +1977,14 @@ class SignTransactionDialog(QDialog):
         )
         self.confirm_btn.setEnabled(False)
         self.buttons.rejected.connect(self.reject)
-        self.confirm_btn.clicked.connect(self.accept)
+        # Emit a request signal rather than accept()ing here. The
+        # host runs signing on a worker while the dialog stays
+        # visible; on failure the host pops a popup parented to
+        # this dialog and re-enables the confirm button so the
+        # user can fix the device and retry without losing the
+        # dialog state. The host calls dialog.accept() only on
+        # successful broadcast.
+        self.confirm_btn.clicked.connect(self.sign_requested.emit)
         outer.addWidget(self.buttons)
 
         # --- decode calldata in the background ----------------------
@@ -2060,6 +2073,27 @@ class SignTransactionDialog(QDialog):
     def _on_gas_failed(self, msg: str) -> None:
         self.base_fee_lbl.setText(f"(failed: {msg})")
         # Confirm stays disabled — without fee info we can't submit.
+
+    def set_signing_in_progress(self, busy: bool) -> None:
+        """Lock / unlock the dialog while the host is running the
+        sign-and-broadcast worker. Locked: Confirm + Cancel + all
+        gas spinners disabled (so the user can't fire another sign
+        or close mid-flight). Unlocked: re-enable everything that
+        was enabled before, so the user can fix the device and
+        retry on failure."""
+        self.confirm_btn.setEnabled(not busy and self._gas_ready)
+        # Cancel re-enabled even mid-busy is OK — host treats it as
+        # "user gave up"; but disabling it removes a foot-gun race
+        # against the worker resolving.
+        for btn in self.buttons.buttons():
+            if btn is not self.confirm_btn:
+                btn.setEnabled(not busy)
+        self.spin_gas.setEnabled(not busy and self._gas_ready)
+        if self.chain.eip1559:
+            self.spin_max_fee.setEnabled(not busy and self._gas_ready)
+            self.spin_priority.setEnabled(not busy and self._gas_ready)
+        else:
+            self.spin_gas_price.setEnabled(not busy and self._gas_ready)
 
     def _update_max_total(self) -> None:
         """Expected gas fee at the current settings — what the user

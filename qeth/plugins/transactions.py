@@ -1804,6 +1804,14 @@ class SignTransactionDialog(QDialog):
         # combine baseFee + the (user-editable) priority tip to
         # produce the "expected" rate.
         self._base_fee_wei = 0
+        # The node's own gas estimate — what the chain will actually
+        # charge for a successful tx. The spinner's value (gas LIMIT)
+        # is a ceiling per the project's × 1.5 / dapp-floor policy;
+        # using the limit in the expected-fee math overstates by 50 %
+        # or more. We hold the estimate separately and use it (or the
+        # spinner if the user manually lowered it below the estimate)
+        # for the live "Expected fee" line.
+        self._estimated_gas = 0
 
         self.setWindowTitle("Sign transaction")
         self.resize(720, 640)
@@ -1998,6 +2006,7 @@ class SignTransactionDialog(QDialog):
 
     def _on_gas_suggested(self, info: dict) -> None:
         self._base_fee_wei = int(info.get("base_fee") or 0)
+        self._estimated_gas = int(info.get("estimated_gas") or 0)
         self.spin_gas.setValue(info["gas"])
         self.spin_gas.setEnabled(True)
         if self.chain.eip1559:
@@ -2024,17 +2033,28 @@ class SignTransactionDialog(QDialog):
 
     def _update_max_total(self) -> None:
         """Expected gas fee at the current settings — what the user
-        is actually likely to pay, not the worst-case ceiling. For
-        EIP-1559 that's ``gas × (baseFee + priorityTip)``; in legacy
-        mode it's just ``gas × gasPrice``. Doesn't include the tx's
-        ``value`` — that's shown separately in the Value row above.
+        is actually likely to pay, not the worst-case ceiling.
 
-        When the dialog has a native price cached (loaded from the
-        wallet cache by the host), the line also shows the dollar
-        value in parentheses."""
+        Gas-side: a successful tx is only charged for ``gas_used``,
+        which the node's ``eth_estimateGas`` predicts directly. The
+        spinner shows the gas LIMIT (estimate × 1.5 by policy), so
+        using it here would overstate by 50 % or more. Use the
+        estimate, clamped by the spinner in case the user manually
+        lowered the limit below what the chain expects to consume
+        (in which case the tx will likely run out at the spinner
+        value and pay that much).
+
+        Fee-side: for EIP-1559 that's ``baseFee + priorityTip``; in
+        legacy mode it's the user-set gas price.
+
+        Doesn't include the tx's ``value`` — that's shown separately
+        in the Value row above. When the dialog has a native price
+        cached (loaded from the wallet cache by the host), the line
+        also shows the dollar value in parentheses."""
         if not self._gas_ready:
             return
-        gas = self.spin_gas.value()
+        gas = min(self._estimated_gas or self.spin_gas.value(),
+                  self.spin_gas.value())
         if self.chain.eip1559:
             effective_per_gas_wei = (
                 self._base_fee_wei + _gwei_to_wei(self.spin_priority.value())

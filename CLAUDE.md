@@ -24,9 +24,15 @@ Use **uv** (not raw `python -m venv` / `pip`):
 
 ```bash
 uv venv --system-site-packages    # IMPORTANT: pulls in system PySide6
-uv pip install -e .
+uv sync --inexact                 # installs from uv.lock (reproducible)
 uv run python -m qeth
 ```
+
+`uv.lock` is committed and pins every transitive dependency by hash.
+`uv sync --inexact` reads the lock and installs exactly those
+versions without touching packages already present from
+`--system-site-packages` (notably system PySide6). Use `uv lock`
+to regenerate after editing dependencies in `pyproject.toml`.
 
 `--system-site-packages` is load-bearing on Linux desktops. The PyPI
 `PySide6` wheel ships its own Qt without the qt6ct/KDE platform-theme

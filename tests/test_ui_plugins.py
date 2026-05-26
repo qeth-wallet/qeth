@@ -704,6 +704,94 @@ def tokens_plugin(qtbot, tmp_qeth, monkeypatch):
     return plugin
 
 
+class TestOnReceiptConfirmed:
+    """Plugin slot driven by PendingTxWatcher: replace the pending
+    entry in the cache with one built from the receipt, persist,
+    and re-render the panel if it's currently showing the view."""
+
+    def _pending(self, **overrides) -> Transaction:
+        base = dict(
+            chain_id=1, hash="0x" + "ab" * 32, block_number=0,
+            timestamp=1700, nonce=5, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=2 * 10**9,
+            method_id="", input_data="0x", success=True, pending=True,
+        )
+        base.update(overrides)
+        return Transaction(**base)
+
+    def _confirmed_receipt(self):
+        return {
+            "blockNumber": "0x1234",
+            "gasUsed": "0xc350",
+            "status": "0x1",
+            "effectiveGasPrice": "0x77359400",
+        }
+
+    def test_replaces_pending_entry_and_persists(self, qtbot, tmp_qeth):
+        plugin = TransactionsPlugin()
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [self._pending()]
+        plugin._disk_cache.save(*key, plugin._cache[key])
+
+        plugin._on_receipt_confirmed(ETH, plugin._cache[key][0].hash,
+                                      self._confirmed_receipt())
+
+        tx = plugin._cache[key][0]
+        assert tx.pending is False
+        assert tx.success is True
+        assert tx.block_number == 0x1234
+        # Disk round-trip too.
+        disk = plugin._disk_cache.load(*key)
+        assert disk[0].pending is False
+        assert disk[0].block_number == 0x1234
+
+    def test_bails_when_entry_already_confirmed(self, qtbot, tmp_qeth):
+        """Race: Blockscout refresh got the confirmed entry into the
+        cache before the receipt poll. ``merge_txs`` dedup overrode
+        the pending entry; the slot must no-op rather than rewriting
+        with potentially-staler data."""
+        plugin = TransactionsPlugin()
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        confirmed = self._pending(block_number=999, pending=False)
+        plugin._cache[key] = [confirmed]
+        plugin._on_receipt_confirmed(ETH, confirmed.hash,
+                                      self._confirmed_receipt())
+        # Untouched — same object kept.
+        assert plugin._cache[key][0] is confirmed
+        assert plugin._cache[key][0].block_number == 999
+
+    def test_no_match_in_cache_is_a_noop(self, qtbot, tmp_qeth):
+        """Hash isn't in the cache (e.g. another app removed it).
+        Shouldn't raise, shouldn't mutate."""
+        plugin = TransactionsPlugin()
+        qtbot.addWidget(plugin.widget())
+        other = self._pending(hash="0x" + "cd" * 32)
+        plugin._cache[(ETH.chain_id, ADDR.lower())] = [other]
+        plugin._on_receipt_confirmed(ETH, "0x" + "ee" * 32,
+                                      self._confirmed_receipt())
+        # Still pending, still in cache.
+        assert plugin._cache[(ETH.chain_id, ADDR.lower())][0].pending is True
+
+    def test_rerenders_panel_when_view_is_active(self, qtbot, tmp_qeth):
+        """If ``_rendered_for`` matches the cache key, the panel is
+        re-rendered so the row's status glyph flips from ⏳ to ✓."""
+        plugin = TransactionsPlugin()
+        panel = plugin.widget()
+        qtbot.addWidget(panel)
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [self._pending()]
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions(plugin._cache[key])
+        plugin._rendered_for = key
+        assert panel.table.item(0, 0).text() == "⏳"
+
+        plugin._on_receipt_confirmed(ETH, plugin._cache[key][0].hash,
+                                      self._confirmed_receipt())
+        assert panel.table.item(0, 0).text() == "✓"
+
+
 class TestTokensPlugin:
     def test_widget_returns_token_panel(self, tokens_plugin):
         from qeth.plugins.tokens import TokenListPanel
@@ -888,6 +976,54 @@ class TestWalletsPlugin:
         ) as blocker:
             wallets_plugin._tree.clearSelection()
         assert blocker.args == [None]
+
+    def test_select_address_focuses_matching_leaf(self, qtbot, wallets_plugin):
+        """``select_address`` is what MainWindow calls after a
+        broadcast so the user lands on the from account. Walks the
+        tree and sets currentItem to the matching leaf. Case-
+        insensitive to be lenient with whatever case the request
+        carried."""
+        addr1 = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        addr2 = "0x" + "11" * 20
+        wallets_plugin._store.add_account({
+            "address": addr1, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin._store.add_account({
+            "address": addr2, "path": "44'/60'/0'/0/1",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        # Select addr2 first, then explicitly switch to addr1 via
+        # the API under test.
+        matches = wallets_plugin._tree.findItems(
+            addr2, Qt.MatchContains | Qt.MatchRecursive, 0
+        )
+        wallets_plugin._tree.setCurrentItem(matches[0])
+        assert wallets_plugin.selected_address == addr2
+
+        assert wallets_plugin.select_address(addr1.upper()) is True
+        # Selection moved to addr1.
+        assert wallets_plugin.selected_address == addr1
+
+    def test_select_address_returns_false_when_missing(self, wallets_plugin):
+        """Unknown address → no selection change, returns False."""
+        addr = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        wallets_plugin._store.add_account({
+            "address": addr, "path": "44'/60'/0'/0/0",
+            "source": "ledger", "scheme": "BIP-44", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        ghost = "0x" + "ff" * 20
+        assert wallets_plugin.select_address(ghost) is False
+        # Original selection (default account) preserved.
+        assert wallets_plugin.selected_address == addr
+
+    def test_select_address_with_empty_string(self, wallets_plugin):
+        """Defensive: empty / None addr can come from
+        ``req.from_addr`` if the request was malformed; should be a
+        clean False, not an exception."""
+        assert wallets_plugin.select_address("") is False
 
     def test_splitter_state_round_trip(self, wallets_plugin):
         hex_state = wallets_plugin.splitter_state()

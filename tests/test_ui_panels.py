@@ -213,3 +213,88 @@ class TestTransactionListPanel:
         panel.clear()
         assert panel.table.rowCount() == 0
         assert panel.status_lbl.isHidden()
+
+    def test_pending_tx_marked_with_hourglass(self, qtbot, tmp_qeth):
+        """Status column glyph for ``tx.pending=True``."""
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions([_tx(to_addr="0xbeef", pending=True)])
+        assert panel.table.item(0, 0).text() == "⏳"
+        assert panel.table.item(0, 0).toolTip() == "Pending"
+
+    def test_bulk_populate_temporarily_disables_autosize(
+        self, qtbot, tmp_qeth, monkeypatch,
+    ):
+        """Regression: replacing rows on a ResizeToContents column
+        re-measures the whole column on every setItem, turning a
+        2000-row repopulate into a ~35-second main-thread freeze.
+        ``show_transactions`` must switch the affected columns to
+        ``Fixed`` during populate and restore the prior resize mode
+        afterward. We assert the actual transitions rather than
+        timing, so the test stays fast and deterministic."""
+        from PySide6.QtWidgets import QHeaderView
+
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        # First populate so the table has items at every row (the
+        # bug only triggers on REPLACEMENT setItem calls).
+        panel.show_transactions([_tx(to_addr="0xbeef") for _ in range(3)])
+
+        header = panel.table.horizontalHeader()
+        # Modes recorded by _populate_row each time it's called —
+        # if any of them is ResizeToContents we'd be triggering the
+        # O(N²) path.
+        seen_modes: list[list[QHeaderView.ResizeMode]] = []
+        original_populate = panel._populate_row
+
+        def spy_populate(row, tx):
+            seen_modes.append([
+                header.sectionResizeMode(i)
+                for i in range(panel.table.columnCount())
+            ])
+            original_populate(row, tx)
+
+        monkeypatch.setattr(panel, "_populate_row", spy_populate)
+
+        prior = [header.sectionResizeMode(i)
+                  for i in range(panel.table.columnCount())]
+        panel.show_transactions([_tx(to_addr="0xbeef") for _ in range(3)])
+
+        # No populate call may run while any column is still on
+        # ResizeToContents.
+        for modes in seen_modes:
+            assert QHeaderView.ResizeToContents not in modes, (
+                "_populate_row ran while a column was still "
+                "ResizeToContents; the O(N²) re-measure path is "
+                "back. Modes seen: %r" % modes
+            )
+        # And the resize modes are restored to the user's configured
+        # state after the bulk populate.
+        restored = [header.sectionResizeMode(i)
+                     for i in range(panel.table.columnCount())]
+        assert restored == prior
+
+    def test_bulk_populate_blocks_table_signals(
+        self, qtbot, tmp_qeth,
+    ):
+        """Same bug had a secondary contributor: itemSelectionChanged
+        firing on every setItem when the user had a row selected,
+        which ran _update_action_buttons each time. show_transactions
+        has to ``blockSignals(True)`` during the populate; we verify
+        that no itemSelectionChanged signals reach a subscriber while
+        the table is being rebuilt."""
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        # Populate once so the next call replaces existing items.
+        panel.show_transactions([_tx(to_addr="0xbeef")])
+        panel.table.selectRow(0)
+
+        fires: list[int] = []
+        panel.table.itemSelectionChanged.connect(lambda: fires.append(1))
+        panel.show_transactions([_tx(to_addr="0xbeef")])
+        # No signal should have fired during the bulk replace —
+        # blockSignals discards them.
+        assert fires == []

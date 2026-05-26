@@ -536,8 +536,16 @@ class TokensPlugin(Plugin):
 
         def on_failed(msg: str) -> None:
             self._discovery_in_flight.discard(view_key)
-            if self._panel._chain_id is None and self._displayed_view == view_key:
+            # Always surface the error when the user is still on
+            # this view — otherwise discovery failures (e.g.
+            # Blockscout's tokenlist endpoint timing out for a
+            # high-activity address like Vitalik's) silently leave
+            # the panel empty and the user has no way to tell
+            # whether they just have no tokens or something
+            # actually broke.
+            if self._displayed_view == view_key:
                 self._panel.show_error(msg)
+            log.warning("token discovery failed for %s: %s", address, msg)
 
         worker = TokenListWorker(
             chain, address, self._token_source, self._token_lists, self._store,

@@ -548,9 +548,10 @@ class TestTransactionsPlugin:
                 method_id="", input_data="0x", success=True,
             )
 
-        # Pre-cache nonces 100..149 — that's two Blockscout pages
-        # worth of overlap before the real new data shows up.
-        cached = [_mk(n) for n in range(149, 99, -1)]
+        # Pre-cache nonces 100..199 — pages of overlap before the
+        # real new data. Sized to two full page_size=100 worker
+        # batches so the auto-advance walker has something to chew.
+        cached = [_mk(n) for n in range(199, 99, -1)]
         TransactionCache().save(ETH.chain_id, ADDR, cached)
 
         class _Source:
@@ -561,13 +562,17 @@ class TestTransactionsPlugin:
                 return True
 
             def list_transactions(self, _c, _a, page=1, limit=50):
+                # Honour ``limit`` — has_more (page is full) is
+                # what tells the plugin to keep walking. A hard-
+                # coded 50-row return would let the worker decide
+                # has_more=False on a 100-row limit and short-
+                # circuit the test we're trying to exercise.
                 self.calls.append(page)
                 if page == 1:
-                    return [_mk(n) for n in range(149, 99, -1)]  # overlap
+                    return [_mk(n) for n in range(199, 199 - limit, -1)]
                 if page == 2:
-                    return [_mk(n) for n in range(149, 99, -1)]  # overlap
-                if page == 3:
-                    return [_mk(n) for n in range(99, 49, -1)]   # new!
+                    return [_mk(n) for n in range(99, 99 - limit, -1)
+                            if n >= 0]
                 return []
 
         source = _Source()
@@ -586,19 +591,14 @@ class TestTransactionsPlugin:
         host.start_worker = _start
 
         plugin.on_activated()   # force_fetch=True path
-        # Refresh-newest path: page 1 fetched but no auto-advance.
-        assert source.calls == [1]
-
-        # User scrolls past the cache → load-older path kicks in.
-        # The plugin auto-advances through page-2 overlap and lands
-        # on page 3, which carries genuinely new entries.
+        # Page 1 is pure overlap with the disk cache → 0 new rows
+        # triggers the auto-advance. Page 2 returns the older
+        # nonces, which DO add a full batch of new rows → walker
+        # stops.
+        assert source.calls == [1, 2]
         key = (ETH.chain_id, ADDR.lower())
-        plugin._displayed_count[key] = len(plugin._cache[key])
-        plugin._on_scroll_bottom()
-        assert source.calls == [1, 2, 3]
-        # The newly-discovered nonces are now in the cache.
         merged = plugin._cache[key]
-        assert min(t.nonce for t in merged) == 50
+        assert min(t.nonce for t in merged) == 0
 
     def test_scroll_bottom_advances_to_next_page(self, qtbot, tmp_qeth):
         """The scrolled_to_bottom signal is what drives the
@@ -609,13 +609,16 @@ class TestTransactionsPlugin:
         plugin.attach(host)
         qtbot.addWidget(plugin.widget())
 
-        # Pretend page 1 landed with one sent tx: cursor advances to 2.
+        # Seed page 1 with INITIAL_BATCH-many sent rows so the
+        # auto-walk-to-fill-batch doesn't fire from the seed
+        # itself — we want this test to exercise the scroll
+        # mechanic, not the fill-on-thin-yield walker.
         seed = [Transaction(
-            chain_id=1, hash="0x" + "aa" * 32, block_number=5,
-            timestamp=1, nonce=5, from_addr=ADDR, to_addr="0xbeef",
+            chain_id=1, hash="0x" + format(n, "064x"), block_number=n,
+            timestamp=n, nonce=n, from_addr=ADDR, to_addr="0xbeef",
             value_wei=0, gas_used=0, gas_price_wei=0,
             method_id="", input_data="0x", success=True,
-        )]
+        ) for n in range(plugin.INITIAL_BATCH, 0, -1)]
         plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, seed, True)
         host.started_workers.clear()
 
@@ -1062,6 +1065,80 @@ class TestWalletsPlugin:
         # Should not raise. Default stays.
         wallets_plugin._on_tree_double_clicked(ledger_root, 0)
         assert wallets_plugin._store.default_account == addr
+
+    def test_add_watch_only_dialog_accepts_valid_address(self, qtbot, tmp_qeth):
+        """Lower-case input is checksum-normalised on accept; the
+        result_account() dict has the right shape for
+        Store.add_account."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        addr_lower = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        dlg.address_edit.setText(addr_lower)
+        dlg.label_edit.setText("Treasury")
+        # Add button enables once the address parses.
+        assert dlg.add_btn.isEnabled()
+        dlg._on_accept()
+        acct = dlg.result_account()
+        # EIP-55 mixed case applied.
+        assert acct["address"] == "0x7a16fF8270133F063aAb6C9977183D9e72835428"
+        assert acct["source"] == "watch_only"
+        assert acct["label"] == "Treasury"
+
+    def test_add_watch_only_dialog_rejects_duplicates(self, qtbot, tmp_qeth):
+        """Address already in the wallet → error shown; dialog does
+        not accept."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        existing = {"0x7a16fF8270133F063aAb6C9977183D9e72835428"}
+        dlg = AddWatchOnlyDialog(existing)
+        qtbot.addWidget(dlg)
+        dlg.address_edit.setText(
+            "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        )
+        dlg._on_accept()
+        # ``isVisible`` returns False under the offscreen platform
+        # plugin (no real display), so check the inverse of the
+        # underlying setVisible call.
+        assert not dlg.error_lbl.isHidden()
+        assert "already" in dlg.error_lbl.text().lower()
+
+    def test_add_watch_only_dialog_rejects_garbage_input(self, qtbot, tmp_qeth):
+        """Add button stays disabled for malformed input."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        dlg.address_edit.setText("not an address")
+        assert not dlg.add_btn.isEnabled()
+
+    def test_watch_only_appears_in_tree(self, qtbot, wallets_plugin):
+        """After _add_watch_only persists an account, _rebuild_tree
+        surfaces it under the "Watch only (N)" group."""
+        wallets_plugin._store.add_account({
+            "address": "0x" + "11" * 20,
+            "source": "watch_only",
+            "label": "Cold storage",
+        })
+        wallets_plugin.rebuild_tree()
+        # Walk top-level items to find the "Watch only (1)" group.
+        groups = [
+            wallets_plugin._tree.topLevelItem(i).text(0)
+            for i in range(wallets_plugin._tree.topLevelItemCount())
+        ]
+        assert any(g.startswith("Watch only (1)") for g in groups), groups
+
+    def test_watch_only_disables_connect_to_browser(self, qtbot, wallets_plugin):
+        """The Connect-to-browser button must be off for watch-only
+        accounts — they have no signing key, so dapps that try to
+        sign from them would fail mid-flow. Better to gate up front."""
+        addr = "0x" + "22" * 20
+        wallets_plugin._store.add_account({
+            "address": addr, "source": "watch_only", "label": "",
+        })
+        wallets_plugin.rebuild_tree()
+        # Simulate selecting the watch-only leaf.
+        wallets_plugin.select_address(addr)
+        assert not wallets_plugin._details.set_default_btn.isEnabled()
+        assert "Watch-only" in wallets_plugin._details.set_default_btn.text()
 
     def test_add_ledger_dialog_constructs(self, qtbot, wallets_plugin):
         """Smoke test for the Add account dialog. The dialog is built

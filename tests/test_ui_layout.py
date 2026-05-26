@@ -21,17 +21,16 @@ from qeth.tokens import TokenBalance
 def test_account_actions_present_at_top_of_left_pane(mainwindow):
     """Three account actions (Add / Copy / Remove) are wired up and
     rendered as buttons. They live on the MainWindow so the test
-    doesn't care which container holds them."""
+    doesn't care which container holds them. The Add button uses a
+    QMenu dropdown (Ledger / Watch-only) instead of a single default
+    action, so we look at button text rather than defaultAction."""
     assert mainwindow.act_add.text() == "Add account"
     assert mainwindow.act_copy.text() == "Copy address"
     assert mainwindow.act_remove.text() == "Remove account"
-    # All three actions should be rendered as buttons somewhere visible.
-    rendered_texts = {
-        b.defaultAction().text()
-        for b in mainwindow.findChildren(QToolButton)
-        if b.defaultAction() is not None
+    button_texts = {
+        b.text() for b in mainwindow.findChildren(QToolButton)
     }
-    assert {"Add account", "Copy address", "Remove account"} <= rendered_texts
+    assert {"Add account", "Copy address", "Remove account"} <= button_texts
 
 
 def test_copy_and_remove_disabled_until_account_selected(mainwindow):

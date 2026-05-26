@@ -31,10 +31,11 @@ import segno
 from PySide6.QtCore import QByteArray, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QSizePolicy, QSpinBox, QSplitter, QStyle,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
+    QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QThread
 
@@ -301,8 +302,17 @@ class WalletsPlugin(Plugin):
                             style_proxy.standardIcon(QStyle.SP_FileIcon)),
             "Add account",
         )
-        self.act_add.setToolTip("Add Ledger accounts by scanning derivation paths")
-        self.act_add.triggered.connect(self._add_ledger)
+        self.act_add.setToolTip("Add a Ledger or watch-only account")
+        # Sub-actions used by both the toolbar dropdown and the
+        # tree's right-click menu so the two entry points agree on
+        # which dialogs they open.
+        self.act_add_ledger = QAction("Ledger account…", self)
+        self.act_add_ledger.triggered.connect(self._add_ledger)
+        self.act_add_watch = QAction("Watch-only address…", self)
+        self.act_add_watch.triggered.connect(self._add_watch_only)
+        # Triggering act_add itself shows the picker menu — invoked
+        # via the right-click "Add account" item in the tree.
+        self.act_add.triggered.connect(self._show_add_account_menu)
 
         self.act_copy = QAction(
             QIcon.fromTheme("edit-copy",
@@ -322,7 +332,26 @@ class WalletsPlugin(Plugin):
 
         row = QHBoxLayout()
         row.setContentsMargins(4, 2, 4, 4)
-        for act in (self.act_add, self.act_copy, self.act_remove):
+
+        # Add button: QMenu of "Ledger account…" / "Watch-only
+        # address…". InstantPopup means a click anywhere on the
+        # button opens the menu (no separate arrow split).
+        add_btn = QToolButton()
+        add_btn.setIcon(self.act_add.icon())
+        add_btn.setText(self.act_add.text())
+        add_btn.setToolTip(self.act_add.toolTip())
+        add_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        add_btn.setAutoRaise(True)
+        add_btn.setIconSize(QSize(16, 16))
+        self._add_menu = QMenu(add_btn)
+        self._add_menu.addAction(self.act_add_ledger)
+        self._add_menu.addAction(self.act_add_watch)
+        add_btn.setMenu(self._add_menu)
+        add_btn.setPopupMode(QToolButton.InstantPopup)
+        row.addWidget(add_btn)
+        self._account_buttons.append(add_btn)
+
+        for act in (self.act_copy, self.act_remove):
             btn = QToolButton()
             btn.setDefaultAction(act)
             btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -333,6 +362,13 @@ class WalletsPlugin(Plugin):
             self._account_buttons.append(btn)
         row.addStretch(1)
         return row
+
+    def _show_add_account_menu(self) -> None:
+        """Triggered by act_add (e.g. from the tree's right-click
+        menu). Pops the same Ledger/Watch-only picker as the
+        toolbar dropdown, anchored at the cursor."""
+        from PySide6.QtGui import QCursor
+        self._add_menu.exec(QCursor.pos())
 
     # --- tree population ----------------------------------------------------
 
@@ -382,13 +418,39 @@ class WalletsPlugin(Plugin):
         for g in groups.values():
             g.setExpanded(True)
 
-        # Stubs for the future
+        # Hot wallet stub — not yet implemented.
         hot = QTreeWidgetItem(["Hot wallet (0)"])
         hot.setFlags(Qt.ItemIsEnabled)
         self._tree.addTopLevelItem(hot)
-        watch = QTreeWidgetItem(["Watch only (0)"])
-        watch.setFlags(Qt.ItemIsEnabled)
-        self._tree.addTopLevelItem(watch)
+
+        watch_accts = [a for a in self._store.accounts
+                        if a.get("source") == "watch_only"]
+        watch_root = QTreeWidgetItem([f"Watch only ({len(watch_accts)})"])
+        # Top-level group: not draggable, not a drop target — same
+        # treatment as the Ledger root.
+        watch_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+        self._tree.addTopLevelItem(watch_root)
+        for a in watch_accts:
+            addr = a["address"]
+            is_default = (
+                self._store.default_account is not None
+                and addr.lower() == self._store.default_account.lower()
+            )
+            label_text = a.get("label") or ""
+            display = f"[{addr}]" if is_default else f" {addr} "
+            if label_text:
+                display = f"{display}   {label_text}"
+            it = QTreeWidgetItem([display])
+            it.setData(0, Qt.UserRole, addr)
+            it.setFont(0, QFont("monospace"))
+            it.setFlags(
+                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+            )
+            watch_root.addChild(it)
+            if is_default:
+                default_item = it
+        if watch_accts:
+            watch_root.setExpanded(True)
 
         if default_item is not None:
             self._tree.setCurrentItem(default_item)
@@ -531,6 +593,23 @@ class WalletsPlugin(Plugin):
         if added and self.host is not None:
             self.host.status_message(f"Added {added} account(s)", 3000)
 
+    def _add_watch_only(self) -> None:
+        """Open the small "Add watch-only address" modal and
+        persist the result. Watch-only accounts have no key — they
+        appear in the wallet tree (under "Watch only") so balances
+        and tx history are visible, but Send / Connect-to-browser
+        fail with "No known signer" for them (and the actions are
+        disabled when one is selected)."""
+        existing = {a["address"] for a in self._store.accounts}
+        dlg = AddWatchOnlyDialog(existing, self._container)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if self._store.add_account(dlg.result_account()):
+            self._rebuild_tree()
+            self.default_account_changed.emit()
+            if self.host is not None:
+                self.host.status_message("Watch-only address added", 3000)
+
     def _set_default(self, address: str) -> None:
         self._store.set_default_account(address)
         self._rebuild_tree()
@@ -629,10 +708,28 @@ class DetailsPanel(QWidget):
         self.path_lbl.setText(account.get("path", "—"))
         self.source_lbl.setText(account.get("source", "—"))
         self.scheme_lbl.setText(account.get("scheme", "—"))
-        self.set_default_btn.setEnabled(not is_default)
-        self.set_default_btn.setText(
-            "Connected to browser ✓" if is_default else "Connect to browser"
-        )
+        # Watch-only accounts have no key behind them — connecting
+        # one to the browser would just lead to "No known signer"
+        # popups the moment the dapp tries to sign. Disable the
+        # button + flip the tooltip to explain.
+        is_watch_only = account.get("source") == "watch_only"
+        if is_watch_only:
+            self.set_default_btn.setEnabled(False)
+            self.set_default_btn.setText("Watch-only — read-only")
+            self.set_default_btn.setToolTip(
+                "Watch-only accounts have no signing key — they "
+                "can't be the address dapps see."
+            )
+        else:
+            self.set_default_btn.setEnabled(not is_default)
+            self.set_default_btn.setText(
+                "Connected to browser ✓" if is_default
+                else "Connect to browser"
+            )
+            self.set_default_btn.setToolTip(
+                "Make this the address dapps see (returned by "
+                "eth_accounts over the local JSON-RPC server)"
+            )
         self._render_qr(account["address"])
 
     def _render_qr(self, address: str) -> None:
@@ -792,6 +889,100 @@ class AddLedgerDialog(QDialog):
 
     def selected_accounts(self) -> list[DiscoveredAccount]:
         return [it.data(Qt.UserRole) for it in self.results.selectedItems()]
+
+
+class AddWatchOnlyDialog(QDialog):
+    """Small modal for adding a watch-only address. No signing
+    capability — these accounts can be selected, view balances and
+    transaction history, but Send / Connect-to-browser stay disabled
+    because there's no key behind them.
+
+    Used for tracking other people's wallets (treasury, vesting
+    contracts, friends' addresses) or your own cold-storage addresses
+    without exposing the device for read-only views."""
+
+    def __init__(self, existing_addresses: set[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add watch-only address")
+        # Lower-case set of addresses already in the store, used for
+        # the duplicate check on accept.
+        self._existing = {a.lower() for a in existing_addresses}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        self.address_edit = QLineEdit()
+        self.address_edit.setPlaceholderText("0x… address to watch")
+        self.address_edit.setFont(QFont("monospace"))
+        form.addRow("Address:", self.address_edit)
+
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("e.g. Cold storage, Treasury")
+        form.addRow("Label (optional):", self.label_edit)
+        layout.addLayout(form)
+
+        self.error_lbl = QLabel("")
+        self.error_lbl.setStyleSheet("color: palette(highlighted-text);")
+        self.error_lbl.setVisible(False)
+        layout.addWidget(self.error_lbl)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Cancel,
+        )
+        self.add_btn = buttons.addButton(
+            "Add", QDialogButtonBox.AcceptRole,
+        )
+        self.add_btn.setEnabled(False)
+        buttons.rejected.connect(self.reject)
+        self.add_btn.clicked.connect(self._on_accept)
+        layout.addWidget(buttons)
+
+        self.address_edit.textChanged.connect(self._on_address_changed)
+
+    def _on_address_changed(self) -> None:
+        """Light validation as the user types: enable Add only when
+        the address looks like a 42-char 0x-prefixed hex string.
+        Full checksum normalisation happens on accept so a
+        lower-case paste is accepted."""
+        text = self.address_edit.text().strip()
+        ok = text.startswith("0x") and len(text) == 42
+        try:
+            int(text, 16)
+        except ValueError:
+            ok = False
+        self.add_btn.setEnabled(ok)
+        if not text:
+            self.error_lbl.setVisible(False)
+
+    def _on_accept(self) -> None:
+        from eth_utils import to_checksum_address
+        text = self.address_edit.text().strip()
+        try:
+            checksum = to_checksum_address(text)
+        except Exception as e:
+            self.error_lbl.setText(f"Invalid address: {e}")
+            self.error_lbl.setVisible(True)
+            return
+        if checksum.lower() in self._existing:
+            self.error_lbl.setText(
+                "That address is already in the wallet."
+            )
+            self.error_lbl.setVisible(True)
+            return
+        self._checksum = checksum
+        self._label = self.label_edit.text().strip()
+        self.accept()
+
+    def result_account(self) -> dict:
+        """The new account dict, ready to hand to Store.add_account.
+        Call only after the dialog returned Accepted."""
+        return {
+            "address": self._checksum,
+            "source": "watch_only",
+            "label": self._label,
+        }
 
 
 # --- Right-hand details panel ------------------------------------------------

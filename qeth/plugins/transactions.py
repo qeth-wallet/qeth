@@ -439,7 +439,7 @@ class TransactionsWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, source: TransactionSource, chain, address: str,
-                 page: int = 1, page_size: int = 50,
+                 page: int = 1, page_size: int = 100,
                  sent_only: bool = True, parent=None):
         super().__init__(parent)
         self.source = source
@@ -846,11 +846,20 @@ class TransactionsPlugin(Plugin):
 
         if not has_more or _is_full_history(merged):
             self._exhausted.add(key)
-        elif walk_on_overlap and not new_rows:
-            # Scroll-driven fetch returned only entries we already
-            # have cached — walk forward until we hit genuinely new
-            # older data. (Refresh-newest fetches don't take this
-            # branch; they're one-shot.)
+        elif len(new_rows) < self.INITIAL_BATCH:
+            # Two cases roll up here:
+            # 1. Scroll-driven fetch whose page was mostly cached
+            #    overlap — walk forward to find genuinely new
+            #    older data.
+            # 2. Initial fetch or scroll on a receive-heavy address
+            #    (e.g. an exchange wallet, or Vitalik's): the raw
+            #    page is mostly received txs that the sent-only
+            #    filter strips, yielding far fewer than the page
+            #    size. Walk to fill a batch.
+            # Stops when either has_more goes False (Blockscout is
+            # done) or _is_full_history confirms the cache covers
+            # every nonce; either branch sets _exhausted on the
+            # next fetch.
             self._fetch_page(
                 key, address_lower, page=page_idx + 1,
                 walk_on_overlap=True,

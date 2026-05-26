@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import html as _html
 import logging
+from decimal import Decimal
 from typing import Optional
 
 from eth_utils import to_checksum_address
@@ -550,6 +551,11 @@ class TransactionsPlugin(Plugin):
         token_info = getattr(self.host, "token_info", None)
         icon_cache_fn = getattr(self.host, "icon_cache", None)
         icon_cache = icon_cache_fn() if callable(icon_cache_fn) else None
+        price_lookup = getattr(self.host, "native_price_usd", None)
+        native_price_usd = (
+            price_lookup(chain.chain_id, self.host.selected_address)
+            if callable(price_lookup) else None
+        )
         dialog = TransactionDetailsDialog(
             tx, chain,
             abi_source=self._abi_source,
@@ -557,6 +563,7 @@ class TransactionsPlugin(Plugin):
             start_worker=self.host.start_worker,
             token_info=token_info,
             icon_cache=icon_cache,
+            native_price_usd=native_price_usd,
             parent=self._panel,
         )
         dialog.show()
@@ -1298,6 +1305,7 @@ class TransactionDetailsDialog(QDialog):
                  start_worker,
                  token_info=None,
                  icon_cache=None,
+                 native_price_usd=None,
                  parent=None):
         super().__init__(parent)
         self.tx = tx
@@ -1310,6 +1318,10 @@ class TransactionDetailsDialog(QDialog):
         # and the dialog falls back to a plain address line.
         self._token_info = token_info
         self._icon_cache = icon_cache
+        # Decimal USD-per-native price for the actual-fee annotation.
+        # None when there's no cached price for this (chain, from_addr)
+        # — the fee row then omits the dollar parenthetical.
+        self._native_price_usd = native_price_usd
         self._to_icon_label: Optional[QLabel] = None
         self._to_addr_lower: Optional[str] = None
 
@@ -1377,6 +1389,24 @@ class TransactionDetailsDialog(QDialog):
                     self._value_label(
                         tx.method_id or "(none — plain transfer)",
                         monospace=True))
+
+        # Gas details — skipped for still-pending txs since gas_used
+        # and effectiveGasPrice are only filled in once the receipt
+        # arrives. The pending row's gas_price_wei reflects the user's
+        # signed maxFeePerGas, not what the chain will actually
+        # charge, so showing it as the realised rate would be wrong.
+        if not tx.pending and tx.gas_used > 0:
+            form.addRow("Gas used:",
+                        self._value_label(f"{tx.gas_used:,}"))
+            gwei = wei_to_ether(tx.gas_price_wei) * Decimal(10**9)
+            form.addRow("Gas price:", self._value_label(f"{gwei} gwei"))
+            fee_wei = tx.gas_used * tx.gas_price_wei
+            fee_ether = wei_to_ether(fee_wei)
+            fee_text = f"{fee_ether} {chain.symbol}"
+            if self._native_price_usd is not None:
+                usd = fee_ether * self._native_price_usd
+                fee_text += f"  ({_format_usd(usd)})"
+            form.addRow("Fee paid:", self._value_label(fee_text))
 
         # Decoded call sits below the form: label on its own line,
         # then the QTextEdit (read-only, with the call rendered as

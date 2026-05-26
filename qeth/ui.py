@@ -224,6 +224,18 @@ class MainWindow(QMainWindow):
     def icon_cache(self):
         return self.tokens_plugin.icon_cache
 
+    def native_price_usd(self, chain_id, address):
+        if not address:
+            return None
+        try:
+            cached = self.tokens_plugin._wallet_cache.load(chain_id, address)
+        except Exception:
+            return None
+        if cached is None or not cached.native_price_usd:
+            return None
+        from decimal import Decimal
+        return Decimal(cached.native_price_usd)
+
     # --- signing -------------------------------------------------------
 
     def _on_signing_request(self, req, fut) -> None:
@@ -244,23 +256,12 @@ class MainWindow(QMainWindow):
             )
             return
         # Native USD price (used by the dialog to annotate the
-        # expected-fee line with a "(… USD)" suffix). Loaded from
-        # the wallet cache the Tokens plugin already maintains; if
-        # there's no cached price for this (chain, addr) yet, the
-        # dialog quietly omits the dollar parenthetical.
-        native_price_usd = None
-        try:
-            cached = self.tokens_plugin._wallet_cache.load(
-                chain.chain_id, req.from_addr,
-            )
-            if cached is not None and cached.native_price_usd:
-                from decimal import Decimal
-                native_price_usd = Decimal(cached.native_price_usd)
-        except Exception:
-            # Cache miss / file gone / parse error — fee just shows
-            # without the USD annotation.
-            native_price_usd = None
-
+        # expected-fee line with a "(… USD)" suffix). Cache miss or
+        # no entry yet → None and the dialog quietly omits the
+        # parenthetical.
+        native_price_usd = self.native_price_usd(
+            chain.chain_id, req.from_addr,
+        )
         dialog = SignTransactionDialog(
             req, chain,
             abi_source=self.transactions_plugin._abi_source,

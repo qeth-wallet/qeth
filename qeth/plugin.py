@@ -63,6 +63,14 @@ class Host(Protocol):
         plugins that need to display token icons (after looking up
         the contract via ``token_info``)."""
 
+    def native_price_usd(self, chain_id: int, address: str):
+        """Latest cached USD-per-native price for the given
+        (chain_id, address). Returns a ``Decimal`` when there's a
+        cached entry, ``None`` otherwise. Sourced from the wallet
+        cache TokensPlugin already maintains; used by the
+        transactions dialogs to annotate fees with their dollar
+        value without re-fetching prices."""
+
 
 class Plugin(QObject):
     """One topic in the UI. Subclasses define a ``name`` class attribute

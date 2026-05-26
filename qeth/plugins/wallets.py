@@ -28,7 +28,7 @@ import io
 
 import segno
 
-from PySide6.QtCore import QByteArray, QSize, Qt, Signal
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -940,6 +940,14 @@ class AddWatchOnlyDialog(QDialog):
         layout.addWidget(buttons)
 
         self.address_edit.textChanged.connect(self._on_address_changed)
+        # Debounce ENS lookups until 300 ms after the last keystroke
+        # so we don't fire one per typed character.
+        self._ens_timer = QTimer(self)
+        self._ens_timer.setSingleShot(True)
+        self._ens_timer.setInterval(300)
+        self._ens_timer.timeout.connect(self._kick_ens_lookup)
+        # Track in-flight workers so they survive Python GC.
+        self._ens_workers: list[QThread] = []
 
     def _on_address_changed(self) -> None:
         """Light validation as the user types: enable Add only when
@@ -955,6 +963,50 @@ class AddWatchOnlyDialog(QDialog):
         self.add_btn.setEnabled(ok)
         if not text:
             self.error_lbl.setVisible(False)
+        if ok:
+            # Restart the debounce timer so we only query ENS once
+            # the user stops typing for 300 ms.
+            self._ens_timer.start()
+        else:
+            self._ens_timer.stop()
+
+    def _kick_ens_lookup(self) -> None:
+        """Start a reverse-resolve against Ethereum mainnet. ENS
+        lives on chain 1 regardless of which chain the user is
+        currently viewing on; the resulting name is informational
+        and used only to pre-populate the empty Label field."""
+        text = self.address_edit.text().strip()
+        if not (text.startswith("0x") and len(text) == 42):
+            return
+        from ..chains import DEFAULT_CHAINS
+        from ..ens import EnsReverseWorker
+        mainnet = next(
+            (c for c in DEFAULT_CHAINS if c.chain_id == 1), None,
+        )
+        if mainnet is None:
+            return
+        worker = EnsReverseWorker(mainnet.rpc_url, text)
+        worker.resolved.connect(self._on_ens_resolved)
+        self._ens_workers.append(worker)
+        worker.finished.connect(
+            lambda w=worker: self._ens_workers.remove(w)
+            if w in self._ens_workers else None
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_ens_resolved(self, address: str, name: str) -> None:
+        """Drop the verified ENS name into the Label field — only
+        when the user is still looking at the same address (they
+        may have edited further while the lookup was in flight)
+        AND they haven't typed their own label, which we never
+        overwrite."""
+        if self.address_edit.text().strip().lower() != address.lower():
+            return
+        if self.label_edit.text().strip():
+            return
+        if name:
+            self.label_edit.setText(name)
 
     def _on_accept(self) -> None:
         from eth_utils import to_checksum_address

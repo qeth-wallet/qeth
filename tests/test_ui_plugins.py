@@ -1110,6 +1110,48 @@ class TestWalletsPlugin:
         dlg.address_edit.setText("not an address")
         assert not dlg.add_btn.isEnabled()
 
+    def test_add_watch_only_dialog_fills_label_from_ens(self, qtbot, tmp_qeth):
+        """When ENS reverse-resolution returns a verified name, the
+        Label field is auto-populated — unless the user has typed
+        their own label first, in which case we never overwrite."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        addr = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        dlg.address_edit.setText(addr)
+        # Simulate the worker resolving by calling the slot directly.
+        dlg._on_ens_resolved(addr, "vitalik.eth")
+        assert dlg.label_edit.text() == "vitalik.eth"
+
+    def test_add_watch_only_dialog_does_not_overwrite_user_label(
+        self, qtbot, tmp_qeth,
+    ):
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        addr = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        dlg.address_edit.setText(addr)
+        dlg.label_edit.setText("My label")
+        dlg._on_ens_resolved(addr, "vitalik.eth")
+        assert dlg.label_edit.text() == "My label"
+
+    def test_add_watch_only_dialog_ignores_stale_ens_result(
+        self, qtbot, tmp_qeth,
+    ):
+        """If the user has typed a different address by the time
+        the lookup returns, the result for the old address must be
+        ignored — otherwise stale results would clobber the label
+        the user is currently expecting."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        dlg.address_edit.setText("0x" + "11" * 20)
+        # Resolver returns a name for a now-stale address.
+        dlg._on_ens_resolved(
+            "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "vitalik.eth",
+        )
+        assert dlg.label_edit.text() == ""
+
     def test_watch_only_appears_in_tree(self, qtbot, wallets_plugin):
         """After _add_watch_only persists an account, _rebuild_tree
         surfaces it under the "Watch only (N)" group."""

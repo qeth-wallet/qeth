@@ -97,6 +97,43 @@ class TestRemoveAccount:
         assert s.remove_account("0xCC") is False
 
 
+class TestSetLabel:
+    def test_updates_label_and_persists(self, tmp_qeth):
+        s = Store()
+        s.add_account({"address": "0xAA", "path": "x", "label": "old"})
+        assert s.set_label("0xAA", "new") is True
+        assert s.accounts[0]["label"] == "new"
+        # Round-trips through disk.
+        s2 = Store.load()
+        assert s2.accounts[0]["label"] == "new"
+
+    def test_case_insensitive_address_match(self, tmp_qeth):
+        s = Store()
+        s.add_account({"address": "0xAa", "path": "x"})
+        assert s.set_label("0xaa", "hi") is True
+        assert s.accounts[0]["label"] == "hi"
+
+    def test_unknown_address_returns_false(self, tmp_qeth):
+        s = Store()
+        assert s.set_label("0xCC", "nope") is False
+
+    def test_noop_update_returns_false_and_does_not_resave(
+        self, tmp_qeth, monkeypatch,
+    ):
+        """Setting the label to the same value it already has must
+        not bump the config-file mtime — saves cost and the
+        ``editingFinished`` signal can fire on focus-out without a
+        real edit."""
+        s = Store()
+        s.add_account({"address": "0xAA", "path": "x", "label": "same"})
+        from qeth import store as _store
+        cfg = _store.CONFIG_FILE
+        original_mtime = cfg.stat().st_mtime_ns
+        # set_label with the same value: should report False.
+        assert s.set_label("0xAA", "same") is False
+        assert cfg.stat().st_mtime_ns == original_mtime
+
+
 class TestHideShow:
     def test_hide_removes_from_shown(self, tmp_qeth):
         s = Store()

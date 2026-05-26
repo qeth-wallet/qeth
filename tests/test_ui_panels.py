@@ -41,7 +41,7 @@ class TestDetailsPanel:
         assert panel.path_lbl.text() == "44'/60'/0'/0/0"
         assert panel.source_lbl.text() == "ledger"
         assert panel.scheme_lbl.text() == "BIP-44"
-        assert panel.title.text() == "Cold storage"
+        assert panel.label_edit.text() == "Cold storage"
         # Not the default account → button is enabled and labelled
         # "Connect to browser" (clicking it makes this address the
         # one dapps see via the local JSON-RPC server).
@@ -74,6 +74,41 @@ class TestDetailsPanel:
         with qtbot.waitSignal(panel.set_default_requested, timeout=500) as blocker:
             panel.set_default_btn.click()
         assert blocker.args == [ADDR]
+
+    def test_title_edit_emits_label_changed(self, qtbot, tmp_qeth):
+        """Editing the title and committing (Enter or focus-out)
+        emits ``label_changed(address, new_label)``."""
+        panel = DetailsPanel()
+        qtbot.addWidget(panel)
+        panel.show_account({"address": ADDR, "label": "Old"}, is_default=False)
+        panel.label_edit.setText("New label")
+        with qtbot.waitSignal(panel.label_changed, timeout=500) as blocker:
+            panel._on_label_committed()
+        assert blocker.args == [ADDR, "New label"]
+
+    def test_no_op_title_edit_does_not_emit(self, qtbot, tmp_qeth):
+        """Focusing into the title and back out without changing
+        the text shouldn't fire the signal — otherwise we'd hit the
+        store + rebuild the tree on every selection."""
+        panel = DetailsPanel()
+        qtbot.addWidget(panel)
+        panel.show_account({"address": ADDR, "label": "Same"}, is_default=False)
+        fires: list = []
+        panel.label_changed.connect(lambda a, l: fires.append((a, l)))
+        panel._on_label_committed()
+        assert fires == []
+
+    def test_title_disabled_without_account(self, qtbot, tmp_qeth):
+        """The title is read-only until an account is loaded —
+        otherwise the user could type into the placeholder and we'd
+        have nowhere to persist it."""
+        panel = DetailsPanel()
+        qtbot.addWidget(panel)
+        assert not panel.label_edit.isEnabled()
+        panel.show_account({"address": ADDR, "source": "ledger"}, is_default=False)
+        assert panel.label_edit.isEnabled()
+        panel.clear()
+        assert not panel.label_edit.isEnabled()
 
 
 # --- TokenListPanel rendering ----------------------------------------------

@@ -173,6 +173,24 @@ class Store:
             self.accounts = new_list
         self.save()
 
+    def set_label(self, address: str, label: str) -> bool:
+        """Update the human-readable label on the account whose
+        address matches ``address`` (case-insensitive). Returns
+        True if an account was found and modified, False otherwise.
+        Persists on disk on success."""
+        addr = address.lower()
+        changed = False
+        with self._lock:
+            for a in self.accounts:
+                if a["address"].lower() == addr:
+                    if a.get("label") != label:
+                        a["label"] = label
+                        changed = True
+                    break
+        if changed:
+            self.save()
+        return changed
+
     def set_default_account(self, address: str) -> None:
         with self._lock:
             self.default_account = address

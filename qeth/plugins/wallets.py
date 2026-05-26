@@ -281,6 +281,7 @@ class WalletsPlugin(Plugin):
 
         self._details = DetailsPanel()
         self._details.set_default_requested.connect(self._set_default)
+        self._details.label_changed.connect(self._on_label_changed)
         details_wrap = QFrame()
         details_wrap.setFrameShape(QFrame.StyledPanel)
         dlay = QVBoxLayout(details_wrap)
@@ -400,8 +401,11 @@ class WalletsPlugin(Plugin):
                 self._store.default_account is not None
                 and addr.lower() == self._store.default_account.lower()
             )
-            label = f"[{addr}]" if is_default else f" {addr} "
-            it = QTreeWidgetItem([label])
+            display = f"[{addr}]" if is_default else f" {addr} "
+            label_text = a.get("label") or ""
+            if label_text:
+                display = f"{display}   {label_text}"
+            it = QTreeWidgetItem([display])
             it.setData(0, Qt.UserRole, addr)
             it.setFont(0, QFont("monospace"))
             # Address leaf: selectable + draggable, NOT a drop target
@@ -610,6 +614,17 @@ class WalletsPlugin(Plugin):
             if self.host is not None:
                 self.host.status_message("Watch-only address added", 3000)
 
+    def _on_label_changed(self, address: str, label: str) -> None:
+        """The details panel reported a label edit. Persist via
+        the store, then rebuild the tree so the new label appears
+        next to the address everywhere."""
+        if self._store.set_label(address, label):
+            self._rebuild_tree()
+            if self.host is not None:
+                self.host.status_message(
+                    f"Updated label for {address}", 2500,
+                )
+
     def _set_default(self, address: str) -> None:
         self._store.set_default_account(address)
         self._rebuild_tree()
@@ -621,6 +636,16 @@ class WalletsPlugin(Plugin):
 # --- DetailsPanel + AddLedgerDialog (moved from qeth.ui) -------------------
 
 class DetailsPanel(QWidget):
+    """The right-hand details for the selected account. Title is
+    editable inline — typing into it and committing (Enter or
+    focus-out) emits ``label_changed(address, label)`` so the
+    plugin can persist it via the store.
+    """
+
+    # User edited the title field. Carries (address, new_label).
+    # The plugin pipes this to Store.set_label + tree rebuild.
+    label_changed = Signal(str, str)
+
     set_default_requested = Signal(str)
 
     def __init__(self, parent=None):
@@ -629,12 +654,23 @@ class DetailsPanel(QWidget):
         # No bottom margin so the Set-as-default button can sit flush with
         # the bottom of the splitter (matches the right panel's bottom edge).
         v.setContentsMargins(9, 9, 9, 0)
-        self.title = QLabel("Select an account on the left")
-        f = self.title.font(); f.setPointSize(f.pointSize() + 2); f.setBold(True)
-        self.title.setFont(f)
-        v.addWidget(self.title)
+        # Header placeholder shown when no account is selected.
+        # We hide it (and show the form) once show_account runs.
+        self.placeholder_lbl = QLabel("Select an account on the left")
+        v.addWidget(self.placeholder_lbl)
 
         form = QFormLayout()
+        # Label field — same form treatment as the rest of the
+        # rows. Frameless until focus so the read state looks like
+        # a value rather than an empty input box, but the user can
+        # still click into it. editingFinished fires on Enter or
+        # focus-out.
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("(no label)")
+        self.label_edit.setFrame(False)
+        self.label_edit.setEnabled(False)
+        self.label_edit.editingFinished.connect(self._on_label_committed)
+        form.addRow("Label:", self.label_edit)
         mono = QFont("monospace")
         # Ignored size policy on the long monospace labels: their sizeHint
         # (full 42-char address etc.) shouldn't pin the panel's minimum
@@ -700,10 +736,23 @@ class DetailsPanel(QWidget):
         v.addStretch(1)
         v.addWidget(self.set_default_btn)
         self._current: str | None = None
+        # The label we last loaded into the title field; used by
+        # _on_title_committed to detect actual user edits vs the
+        # user focusing in/out without typing.
+        self._loaded_label: str = ""
 
     def show_account(self, account: dict, is_default: bool) -> None:
         self._current = account["address"]
-        self.title.setText(account.get("label") or "Account")
+        # Suppress the editingFinished signal we'd otherwise emit
+        # from setText — only programmatic loads, not user edits.
+        self.label_edit.blockSignals(True)
+        self.label_edit.setText(account.get("label") or "")
+        self.label_edit.setEnabled(True)
+        self.label_edit.blockSignals(False)
+        # Track the value we just loaded so _on_label_committed can
+        # tell whether the user actually changed anything.
+        self._loaded_label = account.get("label") or ""
+        self.placeholder_lbl.setVisible(False)
         self.address_lbl.setText(account["address"])
         self.path_lbl.setText(account.get("path", "—"))
         self.source_lbl.setText(account.get("source", "—"))
@@ -744,12 +793,33 @@ class DetailsPanel(QWidget):
 
     def clear(self) -> None:
         self._current = None
-        self.title.setText("Select an account on the left")
+        self._loaded_label = ""
+        self.label_edit.blockSignals(True)
+        self.label_edit.setText("")
+        self.label_edit.setEnabled(False)
+        self.label_edit.blockSignals(False)
+        self.placeholder_lbl.setVisible(True)
         for w in (self.address_lbl, self.path_lbl, self.source_lbl, self.scheme_lbl):
             w.setText("—")
         self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
         self.set_default_btn.setText("Connect to browser")
+
+    def _on_label_committed(self) -> None:
+        """Label editingFinished: emit ``label_changed`` so the
+        plugin persists the new label. Guards against firing for
+        no-op edits (the user clicked into the field and back out
+        without typing) and against firing when no account is
+        currently shown."""
+        if self._current is None:
+            return
+        new = self.label_edit.text().strip()
+        if new == self._loaded_label:
+            return
+        # Update the cached value so subsequent focus-out events
+        # in the same session don't re-fire.
+        self._loaded_label = new
+        self.label_changed.emit(self._current, new)
 
 
 # --- Token list panel -------------------------------------------------------

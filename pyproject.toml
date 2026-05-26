@@ -3,6 +3,8 @@ name = "qeth"
 version = "0.1.0"
 description = "Qt-based Ethereum wallet with Ledger support, Frame-compatible JSON-RPC"
 requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 # PySide6 is intentionally NOT listed here. On Linux desktops with a configured
 # Qt theme (qt5ct/qt6ct, KDE Breeze, etc.), the PyPI PySide6 wheel ships its
 # own Qt build that lacks the matching platform-theme plugins, so themes are

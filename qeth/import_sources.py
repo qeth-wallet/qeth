@@ -60,6 +60,13 @@ class ImportSource(ABC):
     # decrypt + re-encrypt so it needs both.
     needs_source_passphrase: bool = False
     needs_target_passphrase: bool = False
+    # Whether the source's per-candidate label is human-
+    # meaningful. Brownie keystore filenames usually are (the
+    # user chose them); Frame ring-signer IDs are not (hex
+    # blobs). When False, the import flow async-fetches an ENS
+    # reverse name and overwrites the label with the verified
+    # name if one resolves.
+    label_is_user_meaningful: bool = True
 
     @abstractmethod
     def default_dir(self) -> Path: ...
@@ -245,6 +252,7 @@ class FrameSource(ImportSource):
     name = "Frame"
     needs_source_passphrase = True
     needs_target_passphrase = True
+    label_is_user_meaningful = False   # hex ID, replace via ENS
 
     def default_dir(self) -> Path:
         return Path.home() / ".config" / "frame" / "signers"
@@ -278,14 +286,18 @@ class FrameSource(ImportSource):
                 except Exception as e:
                     log.debug("skip %s addr %s: %s", p, addr, e)
                     continue
-                # File id is a 64-hex-char blob in Frame; shorten
-                # it for display — the address is the meaningful
-                # identifier anyway.
-                short_id = p.stem[:8] + "…" if len(p.stem) > 8 else p.stem
+                # Frame's file ids are 64-hex-char blobs — useless
+                # as a label. Leave empty for single-key signers
+                # so the wallet tree just shows the address; the
+                # post-import ENS lookup will fill in a verified
+                # name when one exists. For multi-key rings we
+                # keep the "key N/M" tag so the user can tell the
+                # keys apart in the import dialog before picking
+                # which ones to import.
                 if len(addresses) > 1:
-                    label = f"{short_id} (key {idx + 1}/{len(addresses)})"
+                    label = f"key {idx + 1}/{len(addresses)}"
                 else:
-                    label = short_id
+                    label = ""
                 out.append(ImportCandidate(
                     address=addr_cs,
                     label=label,

@@ -30,4 +30,6 @@ DEFAULT_CHAINS: list[Chain] = [
     Chain("Polygon",  137,   "https://polygon.drpc.org",   "MATIC", "https://polygonscan.com",         "polygon-ecosystem-token"),
     Chain("Arbitrum", 42161, "https://arbitrum.drpc.org",  "ETH",   "https://arbiscan.io",             "ethereum"),
     Chain("Base",     8453,  "https://base.drpc.org",      "ETH",   "https://basescan.org",            "ethereum"),
+    # xDai / chiado has its own native; the CoinGecko id is "xdai".
+    Chain("Gnosis",   100,   "https://gnosis.drpc.org",    "XDAI",  "https://gnosisscan.io",           "xdai"),
 ]

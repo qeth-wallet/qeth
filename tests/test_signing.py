@@ -1208,7 +1208,10 @@ class TestRpcEventBroadcast:
                 "wallet_switchEthereumChain", [{"chainId": "0xa"}],
             )
         asyncio.run(go())
-        store.set_current_chain.assert_called_once()
+        # Dapp-driven switch updates the RPC's own chain only —
+        # NOT the wallet UI's chain. The store must NOT be touched.
+        store.set_current_chain.assert_not_called()
+        assert server._rpc_chain_id == 10  # 0xa
         # chainChanged push happened with the right subscription id.
         sent_payloads = [
             _json.loads(c.args[0]) for c in ws.send_str.call_args_list
@@ -1219,6 +1222,37 @@ class TestRpcEventBroadcast:
             and p["params"]["result"] == "0xa"
             for p in sent_payloads
         )
+
+    def test_rpc_chain_is_decoupled_from_store_chain(self):
+        # The dapp's RPC chain is tracked separately from the
+        # wallet UI's chain. ``wallet_switchEthereumChain`` from a
+        # dapp must NOT pull the user's UI selection along — they
+        # should be able to look at Ethereum in the wallet while
+        # the dapp transacts on Polygon.
+        from unittest.mock import MagicMock
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        eth = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+        store = MagicMock()
+        store.current_chain.return_value = eth
+        store.chains = DEFAULT_CHAINS
+        server = RpcServer(store)
+        # Initial: RPC chain mirrors store's current chain.
+        assert server._rpc_chain_id == 1
+
+        # Dapp switches to Polygon.
+        async def switch():
+            await server._dispatch(
+                "wallet_switchEthereumChain", [{"chainId": "0x89"}],
+            )
+        asyncio.run(switch())
+        assert server._rpc_chain_id == 137
+        # Store left alone.
+        store.set_current_chain.assert_not_called()
+        # eth_chainId now reports the dapp chain.
+        async def cid():
+            return await server._dispatch("eth_chainId", [])
+        assert asyncio.run(cid()) == "0x89"
 
     def test_dispatch_switch_unrecognized_chain_does_not_emit(self):
         from unittest.mock import AsyncMock, MagicMock

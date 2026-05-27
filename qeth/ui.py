@@ -486,10 +486,12 @@ class MainWindow(QMainWindow):
             self.store.set_current_chain(int(cid))
             self._refresh_status()
             self.right_slot.broadcast_chain_changed()
-            # Push EIP-1193 chainChanged to any connected dapp via
-            # the WS RPC server so it re-renders without polling.
-            if self.rpc is not None:
-                self.rpc.broadcast_chain_changed(int(cid))
+            # Note: NOT pushing chainChanged to dapps here. The
+            # dapp's chain (RpcServer._rpc_chain_id) is decoupled
+            # from the UI's chain so the user can browse a
+            # different chain than the dapp is transacting on.
+            # Only wallet_switchEthereumChain (dapp-initiated)
+            # changes the dapp chain and emits chainChanged.
 
     def _push_accounts_changed(self) -> None:
         """Slot for default_account_changed — push the EIP-1193

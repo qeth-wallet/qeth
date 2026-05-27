@@ -72,6 +72,15 @@ class RpcServer:
         self._ws_subscriptions: dict[
             web.WebSocketResponse, dict[str, str]
         ] = {}
+        # The chain the RPC server reports to / routes for dapps —
+        # SEPARATE from the wallet UI's chain. A dapp calling
+        # ``wallet_switchEthereumChain`` updates this, NOT the
+        # user's UI selection: the user keeps looking at whatever
+        # chain they picked in the toolbar combo while the dapp
+        # transacts on its own chain. Defaults to the store's
+        # current chain at startup (a natural first guess) and
+        # never persisted — dapp chain is session-only.
+        self._rpc_chain_id: int = store.current_chain().chain_id
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -282,7 +291,33 @@ class RpcServer:
             return {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": e.code, "message": e.message}}
         except Exception as e:
-            log.exception("rpc dispatch failed: %s", method)
+            # Demote transient network blips from ERROR/traceback
+            # to a one-line WARNING. The dapp still gets a proper
+            # JSON-RPC error response; this is only about how
+            # loud the server log is. Suppress entirely when the
+            # aiohttp session is already closed — that means
+            # we're in app shutdown and the dozens of in-flight
+            # requests racing past the close are pure noise.
+            shutting_down = (
+                self._client is None or self._client.closed
+            )
+            transient = (
+                "ServerDisconnectedError",
+                "ClientConnectorError",
+                "ClientOSError",
+                "TimeoutError",
+            )
+            looks_transient = (
+                type(e).__name__ in transient
+                or str(e) == "Session is closed"
+            )
+            if shutting_down:
+                pass   # silent on shutdown
+            elif looks_transient:
+                log.warning("rpc %s: %s: %s",
+                              method, type(e).__name__, e)
+            else:
+                log.exception("rpc dispatch failed: %s", method)
             return {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": -32603, "message": str(e)}}
 
@@ -322,31 +357,41 @@ class RpcServer:
             return [self.store.default_account] if self.store.default_account else []
 
         if method == "eth_chainId":
-            return hex(self.store.current_chain().chain_id)
+            return hex(self._rpc_chain_id)
 
         if method == "net_version":
-            return str(self.store.current_chain().chain_id)
+            return str(self._rpc_chain_id)
 
         if method == "wallet_switchEthereumChain":
             cid = int(params[0]["chainId"], 16)
             if not any(c.chain_id == cid for c in self.store.chains):
                 raise RpcError(4902, "Unrecognized chain")
-            # Don't persist: dapp-driven switches are session-only.
-            # The user's chosen default (set via the UI) survives restarts.
-            self.store.set_current_chain(cid, persist=False)
-            # EIP-1193: emit chainChanged after a successful switch,
-            # including to the dapp that initiated the request and
-            # to any other connected dapps. We're already on the
-            # asyncio loop so push directly rather than scheduling.
+            # Update the RPC's own chain only — the wallet UI's
+            # chain (toolbar combo) is unaffected. The user keeps
+            # browsing on their chosen chain while the dapp
+            # transacts on its own.
+            self._rpc_chain_id = cid
+            # EIP-1193: emit chainChanged after a successful switch
+            # so any subscribed dapps re-render. We're already on
+            # the asyncio loop so push directly.
             await self._broadcast_event("chainChanged", hex(cid))
             await self._broadcast_event("networkChanged", str(cid))
             return None
 
         if method == "wallet_addEthereumChain":
             p = params[0]
+            cid = int(p["chainId"], 16)
+            # If we already know this chain, keep OUR rpc_url — dapps
+            # often supply restricted relay URLs (e.g.
+            # rpc.walletconnect.org) that 403 on calls from non-WC
+            # clients. The user adding the chain via UI gets a
+            # proper DRPC endpoint; the dapp's add request should
+            # be a no-op when we already have a working entry.
+            if any(c.chain_id == cid for c in self.store.chains):
+                return None
             self.store.add_chain(Chain(
                 name=p.get("chainName", "Custom"),
-                chain_id=int(p["chainId"], 16),
+                chain_id=cid,
                 rpc_url=p["rpcUrls"][0],
                 symbol=(p.get("nativeCurrency") or {}).get("symbol", "ETH"),
                 explorer=(p.get("blockExplorerUrls") or [""])[0],
@@ -358,7 +403,7 @@ class RpcServer:
                 raise RpcError(-32601, "No signer wired up")
             try:
                 req = parse_send_transaction_params(
-                    params, self.store.current_chain().chain_id,
+                    params, self._rpc_chain_id,
                     origin=origin,
                 )
             except SignerError as e:
@@ -381,7 +426,14 @@ class RpcServer:
         return await self._proxy(method, params)
 
     async def _proxy(self, method: str, params: list) -> Any:
-        chain = self.store.current_chain()
+        # Route reads to the dapp's chain (set via
+        # wallet_switchEthereumChain), NOT the UI's chain. The
+        # store has the chain dict; we look it up by id.
+        chain = next(
+            (c for c in self.store.chains
+             if c.chain_id == self._rpc_chain_id),
+            self.store.current_chain(),
+        )
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         async with self._client.post(chain.rpc_url, json=payload, timeout=15) as r:
             data = await r.json()

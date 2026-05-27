@@ -55,7 +55,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
 class _FakeRpc:
     """Stand-in for qeth.rpc.RpcServer in UI tests. Doesn't bind a
     socket — MainWindow only reads ``host``/``port``/``error`` and
-    calls ``start``/``stop``."""
+    calls ``start``/``stop``/``broadcast_*``."""
     host = "127.0.0.1"
     port = 0
     error = None
@@ -64,6 +64,12 @@ class _FakeRpc:
         pass
 
     def stop(self) -> None:
+        pass
+
+    def broadcast_accounts_changed(self, accounts) -> None:
+        pass
+
+    def broadcast_chain_changed(self, chain_id) -> None:
         pass
 
 

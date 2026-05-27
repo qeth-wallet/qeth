@@ -1079,3 +1079,163 @@ class TestRpcDispatchSendTransaction:
             asyncio.run(go())
         assert ei.value.code == -32000
         assert "cancelled" in ei.value.message.lower()
+
+
+class TestRpcEventBroadcast:
+    """EIP-1193 push events to connected WS clients —
+    ``accountsChanged`` when the user picks a new default account,
+    ``chainChanged`` when the chain switches (UI- OR dapp-driven).
+
+    Frame's wire format: dapps first ``eth_subscribe`` for the
+    event type and get back a subscription id; the wallet then
+    sends ``eth_subscription`` notifications with that id when the
+    event fires. The browser extension translates these into the
+    standard EIP-1193 events on window.ethereum."""
+
+    def _make_server(self):
+        from unittest.mock import MagicMock
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.chains = DEFAULT_CHAINS
+        return RpcServer(store)
+
+    def test_eth_subscribe_for_wallet_event_returns_sub_id(self):
+        from unittest.mock import MagicMock
+        server = self._make_server()
+        ws = MagicMock(closed=False)
+        async def go():
+            return await server._dispatch(
+                "eth_subscribe", ["accountsChanged"], ws=ws,
+            )
+        sub_id = asyncio.run(go())
+        assert isinstance(sub_id, str)
+        assert sub_id.startswith("0x")
+        # Mapped under (ws, sub_type).
+        assert server._ws_subscriptions[ws]["accountsChanged"] == sub_id
+
+    def test_eth_subscribe_without_ws_context_raises(self):
+        # HTTP-only callers can't be pushed to; refuse the subscribe.
+        from qeth.rpc import RpcError
+        server = self._make_server()
+        async def go():
+            await server._dispatch(
+                "eth_subscribe", ["accountsChanged"], ws=None,
+            )
+        with pytest.raises(RpcError):
+            asyncio.run(go())
+
+    def test_broadcast_event_targets_subscribers_only(self):
+        # ws_a subscribed; ws_b didn't. Only ws_a gets a push.
+        from unittest.mock import AsyncMock, MagicMock
+        import json as _json
+        server = self._make_server()
+        ws_a = MagicMock(closed=False, send_str=AsyncMock())
+        ws_b = MagicMock(closed=False, send_str=AsyncMock())
+        server._ws_clients = {ws_a, ws_b}
+        sub_id = server._register_subscription(ws_a, "accountsChanged")
+
+        asyncio.run(server._broadcast_event(
+            "accountsChanged", ["0x7a16ff"],
+        ))
+        ws_a.send_str.assert_awaited_once()
+        ws_b.send_str.assert_not_awaited()
+        sent = _json.loads(ws_a.send_str.call_args.args[0])
+        assert sent == {
+            "jsonrpc": "2.0",
+            "method": "eth_subscription",
+            "params": {
+                "subscription": sub_id,
+                "result": ["0x7a16ff"],
+            },
+        }
+
+    def test_broadcast_event_prunes_closed_and_flaky_clients(self):
+        from unittest.mock import AsyncMock, MagicMock
+        server = self._make_server()
+        flaky = MagicMock(closed=False, send_str=AsyncMock(
+            side_effect=ConnectionResetError("peer gone"),
+        ))
+        gone = MagicMock(closed=True, send_str=AsyncMock())
+        server._ws_clients = {flaky, gone}
+        server._register_subscription(flaky, "chainChanged")
+        server._register_subscription(gone, "chainChanged")
+
+        asyncio.run(server._broadcast_event("chainChanged", "0x1"))
+        # Both removed from clients + subscriptions.
+        assert flaky not in server._ws_clients
+        assert gone not in server._ws_clients
+        assert flaky not in server._ws_subscriptions
+        assert gone not in server._ws_subscriptions
+
+    def test_event_is_noop_when_loop_not_running(self):
+        # Before .start() or after .stop() — must not raise.
+        server = self._make_server()
+        assert server._loop is None
+        server.broadcast_accounts_changed(["0xabc"])
+        server.broadcast_chain_changed(137)
+
+    def test_eth_unsubscribe_removes_subscription(self):
+        from unittest.mock import MagicMock
+        server = self._make_server()
+        ws = MagicMock(closed=False)
+        sub_id = server._register_subscription(ws, "chainChanged")
+
+        async def go():
+            return await server._dispatch(
+                "eth_unsubscribe", [sub_id], ws=ws,
+            )
+        result = asyncio.run(go())
+        assert result is True
+        assert "chainChanged" not in server._ws_subscriptions.get(ws, {})
+
+    def test_dispatch_switch_chain_emits_chainChanged(self):
+        from unittest.mock import AsyncMock, MagicMock
+        import json as _json
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.chains = DEFAULT_CHAINS
+        server = RpcServer(store)
+        ws = MagicMock(closed=False, send_str=AsyncMock())
+        server._ws_clients = {ws}
+        chain_sub = server._register_subscription(ws, "chainChanged")
+
+        async def go():
+            return await server._dispatch(
+                "wallet_switchEthereumChain", [{"chainId": "0xa"}],
+            )
+        asyncio.run(go())
+        store.set_current_chain.assert_called_once()
+        # chainChanged push happened with the right subscription id.
+        sent_payloads = [
+            _json.loads(c.args[0]) for c in ws.send_str.call_args_list
+        ]
+        assert any(
+            p["method"] == "eth_subscription"
+            and p["params"]["subscription"] == chain_sub
+            and p["params"]["result"] == "0xa"
+            for p in sent_payloads
+        )
+
+    def test_dispatch_switch_unrecognized_chain_does_not_emit(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from qeth.rpc import RpcError, RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.chains = DEFAULT_CHAINS
+        server = RpcServer(store)
+        ws = MagicMock(closed=False, send_str=AsyncMock())
+        server._ws_clients = {ws}
+        server._register_subscription(ws, "chainChanged")
+
+        async def go():
+            await server._dispatch(
+                "wallet_switchEthereumChain", [{"chainId": "0xffffff"}],
+            )
+        with pytest.raises(RpcError):
+            asyncio.run(go())
+        ws.send_str.assert_not_awaited()

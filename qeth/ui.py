@@ -74,6 +74,9 @@ class MainWindow(QMainWindow):
             self.right_slot.broadcast_account_changed
         )
         self.wallets_plugin.default_account_changed.connect(self._refresh_status)
+        self.wallets_plugin.default_account_changed.connect(
+            self._push_accounts_changed
+        )
         self._refresh_status()
         # Replay the current selection. _build_central() above mounted
         # the plugins, which built their widgets, which rebuilt the
@@ -483,3 +486,18 @@ class MainWindow(QMainWindow):
             self.store.set_current_chain(int(cid))
             self._refresh_status()
             self.right_slot.broadcast_chain_changed()
+            # Push EIP-1193 chainChanged to any connected dapp via
+            # the WS RPC server so it re-renders without polling.
+            if self.rpc is not None:
+                self.rpc.broadcast_chain_changed(int(cid))
+
+    def _push_accounts_changed(self) -> None:
+        """Slot for default_account_changed — push the EIP-1193
+        accountsChanged notification to connected dapps. We send
+        the default account (or empty) because that's what
+        ``eth_accounts`` returns; matching the request/response
+        shape keeps dapps consistent."""
+        if self.rpc is None:
+            return
+        accounts = [self.store.default_account] if self.store.default_account else []
+        self.rpc.broadcast_accounts_changed(accounts)

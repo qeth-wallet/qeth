@@ -57,6 +57,21 @@ class RpcServer:
         self._client: Optional[ClientSession] = None
         self._ready = threading.Event()
         self._error: Optional[str] = None
+        # Live WS clients — used to push EIP-1193 events
+        # (accountsChanged, chainChanged) to connected dapps when
+        # the user changes them in the qeth UI. Lives on the
+        # asyncio loop; broadcast_* methods marshal Qt-thread
+        # calls through asyncio.run_coroutine_threadsafe.
+        self._ws_clients: set[web.WebSocketResponse] = set()
+        # Per-WS subscription map: ws → {sub_type: sub_id}.
+        # Populated when a dapp calls eth_subscribe('accountsChanged')
+        # or eth_subscribe('chainChanged'); used by _broadcast_event
+        # to address the matching eth_subscription notifications.
+        # Frame's protocol — without an active subscription the
+        # extension simply ignores the push.
+        self._ws_subscriptions: dict[
+            web.WebSocketResponse, dict[str, str]
+        ] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -137,27 +152,118 @@ class RpcServer:
         origin = request.headers.get("Origin")
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    req = json.loads(msg.data)
-                except Exception:
-                    await ws.send_str(json.dumps(
-                        {"jsonrpc": "2.0", "id": None,
-                         "error": {"code": -32700, "message": "Parse error"}}
-                    ))
-                    continue
-                if isinstance(req, list):
-                    resp = [await self._handle_one(r, origin) for r in req]
-                else:
-                    resp = await self._handle_one(req, origin)
-                await ws.send_str(json.dumps(resp))
-            elif msg.type == WSMsgType.ERROR:
-                break
+        self._ws_clients.add(ws)
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        req = json.loads(msg.data)
+                    except Exception:
+                        await ws.send_str(json.dumps(
+                            {"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32700, "message": "Parse error"}}
+                        ))
+                        continue
+                    if isinstance(req, list):
+                        resp = [
+                            await self._handle_one(r, origin, ws=ws)
+                            for r in req
+                        ]
+                    else:
+                        resp = await self._handle_one(req, origin, ws=ws)
+                    await ws.send_str(json.dumps(resp))
+                elif msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            self._ws_clients.discard(ws)
+            self._ws_subscriptions.pop(ws, None)
         return ws
 
+    # --- event push (Qt-thread → asyncio loop) ----------------------------
+
+    def broadcast_accounts_changed(self, accounts: list[str]) -> None:
+        """EIP-1193 ``accountsChanged`` event. Call from the Qt
+        thread when the user changes the default account; reaches
+        every WS-connected dapp that has subscribed via
+        ``eth_subscribe('accountsChanged')`` as a JSON-RPC
+        ``eth_subscription`` notification (Frame's wire format).
+        The Frame extension translates this into a JS
+        ``provider.emit('accountsChanged', accounts)`` on
+        ``window.ethereum`` so dapps re-render without polling."""
+        self._schedule_event("accountsChanged", accounts)
+
+    def broadcast_chain_changed(self, chain_id: int) -> None:
+        """EIP-1193 ``chainChanged`` event. Hex-encoded chainId per
+        spec. Goes to every dapp that subscribed to either
+        ``chainChanged`` or ``networkChanged``."""
+        hex_id = hex(chain_id)
+        self._schedule_event("chainChanged", hex_id)
+        # Legacy alias some dapps still subscribe to.
+        self._schedule_event("networkChanged", str(chain_id))
+
+    def _schedule_event(self, sub_type: str, result) -> None:
+        """Schedule an eth_subscription notification to every WS
+        client that subscribed to ``sub_type``. Safe from any
+        thread; no-op when the asyncio loop hasn't started yet
+        (server bind failed) or has already stopped."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast_event(sub_type, result), loop,
+        )
+
+    def _register_subscription(self, ws, sub_type: str) -> str:
+        """Allocate a subscription id and remember it under
+        ``ws → sub_type``. Returns the id the dapp will see in
+        ``eth_subscription.params.subscription``."""
+        import uuid
+        sub_id = "0x" + uuid.uuid4().hex
+        self._ws_subscriptions.setdefault(ws, {})[sub_type] = sub_id
+        return sub_id
+
+    def _unregister_subscription(self, ws, sub_id: str) -> None:
+        subs = self._ws_subscriptions.get(ws)
+        if subs is None:
+            return
+        for sub_type, existing in list(subs.items()):
+            if existing == sub_id:
+                del subs[sub_type]
+
+    async def _broadcast_event(self, sub_type: str, result) -> None:
+        """Send an ``eth_subscription`` notification to every WS
+        client subscribed to ``sub_type``. The payload's
+        ``params.subscription`` is the per-client id minted at
+        eth_subscribe time."""
+        if not self._ws_subscriptions:
+            return
+        dead: list[web.WebSocketResponse] = []
+        for ws, subs in list(self._ws_subscriptions.items()):
+            sub_id = subs.get(sub_type)
+            if sub_id is None:
+                continue
+            if ws.closed:
+                dead.append(ws)
+                continue
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_subscription",
+                "params": {"subscription": sub_id, "result": result},
+            }
+            try:
+                await ws.send_str(json.dumps(payload))
+            except Exception as e:
+                log.warning("ws subscription push failed (%s): %s",
+                             sub_type, e)
+                dead.append(ws)
+        for ws in dead:
+            self._ws_subscriptions.pop(ws, None)
+            self._ws_clients.discard(ws)
+
     async def _handle_one(self, req: dict,
-                           origin: Optional[str] = None) -> dict:
+                           origin: Optional[str] = None,
+                           ws: Optional[web.WebSocketResponse] = None,
+                           ) -> dict:
         method = req.get("method")
         params = req.get("params") or []
         rid = req.get("id")
@@ -170,7 +276,7 @@ class RpcServer:
         if isinstance(frame_origin, str) and frame_origin:
             origin = frame_origin
         try:
-            result = await self._dispatch(method, params, origin)
+            result = await self._dispatch(method, params, origin, ws=ws)
             return {"jsonrpc": "2.0", "id": rid, "result": result}
         except RpcError as e:
             return {"jsonrpc": "2.0", "id": rid,
@@ -181,7 +287,37 @@ class RpcServer:
                     "error": {"code": -32603, "message": str(e)}}
 
     async def _dispatch(self, method: str, params: list,
-                         origin: Optional[str] = None) -> Any:
+                         origin: Optional[str] = None,
+                         ws: Optional[web.WebSocketResponse] = None,
+                         ) -> Any:
+        if method == "eth_subscribe":
+            # Frame extends eth_subscribe with wallet-event types
+            # (accountsChanged, chainChanged, networkChanged) on top
+            # of the standard newHeads/logs/etc. Dapps subscribe
+            # once and we push eth_subscription notifications when
+            # the user changes state in the qeth UI.
+            sub_type = params[0] if params else None
+            if sub_type in (
+                "accountsChanged", "chainChanged", "networkChanged",
+            ):
+                if ws is None:
+                    raise RpcError(
+                        -32600,
+                        "eth_subscribe for wallet events requires WebSocket",
+                    )
+                return self._register_subscription(ws, sub_type)
+            # newHeads / logs / newPendingTransactions / syncing fall
+            # through to the upstream RPC — they need their own
+            # subscription bookkeeping (forwarding upstream
+            # notifications back here) which isn't wired up yet.
+            return await self._proxy(method, params)
+
+        if method == "eth_unsubscribe":
+            sub_id = params[0] if params else None
+            if ws is not None and sub_id:
+                self._unregister_subscription(ws, sub_id)
+            return True
+
         if method in ("eth_accounts", "eth_requestAccounts"):
             return [self.store.default_account] if self.store.default_account else []
 
@@ -198,6 +334,12 @@ class RpcServer:
             # Don't persist: dapp-driven switches are session-only.
             # The user's chosen default (set via the UI) survives restarts.
             self.store.set_current_chain(cid, persist=False)
+            # EIP-1193: emit chainChanged after a successful switch,
+            # including to the dapp that initiated the request and
+            # to any other connected dapps. We're already on the
+            # asyncio loop so push directly rather than scheduling.
+            await self._broadcast_event("chainChanged", hex(cid))
+            await self._broadcast_event("networkChanged", str(cid))
             return None
 
         if method == "wallet_addEthereumChain":

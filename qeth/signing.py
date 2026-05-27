@@ -165,6 +165,39 @@ class SignerBridge(QObject):
             fut.set_exception(error)
 
 
+def explain_rpc_error(e: Exception) -> str:
+    """Best-effort extract a human-readable message from an
+    upstream JSON-RPC error. web3.py 7's ``Web3RPCError`` carries
+    the parsed dict on ``.rpc_response``; some other paths bubble
+    the dict's ``repr()`` as the exception text. Either way the
+    ``{message}`` field is what we want to show — the raw repr
+    (``"{'message': '…', 'code': -32000}"``) is what the user
+    complained about."""
+    try:
+        from web3.exceptions import Web3RPCError
+        if isinstance(e, Web3RPCError):
+            resp = getattr(e, "rpc_response", None)
+            if isinstance(resp, dict):
+                err = resp.get("error")
+                if isinstance(err, dict) and err.get("message"):
+                    return str(err["message"])
+    except ImportError:
+        pass
+    text = str(e)
+    # Some web3 versions stringify the response as a Python dict
+    # literal rather than wrapping in Web3RPCError — recover the
+    # message via ast.literal_eval rather than regex.
+    if text.startswith("{") and "'message'" in text:
+        import ast
+        try:
+            data = ast.literal_eval(text)
+            if isinstance(data, dict) and data.get("message"):
+                return str(data["message"])
+        except (ValueError, SyntaxError):
+            pass
+    return text
+
+
 class SignAndBroadcastWorker(QThread):
     """Off-main-thread orchestrator: ``signer.sign(req, chain)`` ->
     ``EthClient(chain).send_raw_transaction(...)`` -> emit the tx
@@ -200,6 +233,6 @@ class SignAndBroadcastWorker(QThread):
             tx_hash = client.send_raw_transaction(raw)
         except Exception as e:
             log.exception("broadcast failed")
-            self.failed.emit(f"Broadcast failed: {e}")
+            self.failed.emit(f"Broadcast failed: {explain_rpc_error(e)}")
             return
         self.broadcast.emit(tx_hash)

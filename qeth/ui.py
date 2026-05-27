@@ -440,7 +440,10 @@ class MainWindow(QMainWindow):
         progress.close()
         dialog.set_signing_in_progress(False)
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(dialog, "Ledger error", msg)
+        # "Signing failed" is signer-neutral — Ledger AND hot
+        # wallets flow through this handler, and broadcast failures
+        # (e.g. insufficient funds) bubble up here too.
+        QMessageBox.warning(dialog, "Signing failed", msg)
         on_fail(msg)
 
     # --- transitional aliases (kept so existing tests / external code

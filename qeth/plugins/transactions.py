@@ -2442,6 +2442,15 @@ class SendTokenDialog(QDialog):
         amount_row.addWidget(self.amount_edit, 1)
         self.max_btn = QPushButton("Max")
         self.max_btn.clicked.connect(self._on_max_clicked)
+        # For native sends Max must deduct a gas reserve — disable
+        # it until GasSuggestionWorker has populated _gas_ready so
+        # we never drop the full balance into the field (chain
+        # rejects with "insufficient funds for gas * price + value"
+        # at broadcast time). For ERC-20s gas is paid in the native
+        # asset, so Max is independent of gas readiness.
+        if asset["is_native"]:
+            self.max_btn.setEnabled(False)
+            self.max_btn.setToolTip("Waiting for gas estimate…")
         amount_row.addWidget(self.max_btn)
         header.addRow("Amount:", amount_box)
 
@@ -2683,9 +2692,34 @@ class SendTokenDialog(QDialog):
     # --- input handling --------------------------------------------
 
     def _on_max_clicked(self) -> None:
+        """For ERC-20s the full balance is sendable — gas is paid
+        in the native asset. For NATIVE sends, deduct the **upper
+        bound** on what the chain may charge: ``gas × maxFeePerGas``
+        (EIP-1559) or ``gas × gasPrice`` (legacy). maxFeePerGas is
+        the hard ceiling the user has authorised, so even if
+        baseFee spikes between Max click and broadcast we won't
+        pay more than this. Bumped 50 % on top to absorb (a) gas
+        estimate undershoot, (b) the user nudging the fee spinners
+        up before sending, (c) basefee bursts past the suggested
+        max. The user explicitly preferred 'too much margin' over
+        'too little' here — leaving dust in the wallet is fine,
+        an 'insufficient funds' reject is not. The Max button is
+        disabled until ``_gas_ready`` so this branch is the only
+        code path for native."""
+        raw = self._asset["balance_raw"]
+        if self._asset["is_native"] and self._gas_ready:
+            gas = max(
+                self._estimated_gas or self.spin_gas.value(),
+                self.spin_gas.value(),
+            )
+            if self.chain.eip1559:
+                ceiling = _gwei_to_wei(self.spin_max_fee.value())
+            else:
+                ceiling = _gwei_to_wei(self.spin_gas_price.value())
+            gas_cost = (gas * ceiling * 3) // 2
+            raw = max(0, raw - gas_cost)
         bal = (
-            Decimal(self._asset["balance_raw"])
-            / (Decimal(10) ** self._asset["decimals"])
+            Decimal(raw) / (Decimal(10) ** self._asset["decimals"])
         )
         self.amount_edit.setText(format(bal, "f"))
 
@@ -2775,6 +2809,9 @@ class SendTokenDialog(QDialog):
         )
         self._suggested_nonce = info.get("nonce")
         self._gas_ready = True
+        if self._asset["is_native"]:
+            self.max_btn.setEnabled(True)
+            self.max_btn.setToolTip("")
         self._update_state()
 
     def _on_gas_failed(self, msg: str) -> None:

@@ -338,6 +338,37 @@ class TestApplyGasPolicyLegacy:
 
 # --- SignerBridge round-trip --------------------------------------------
 
+class TestExplainRpcError:
+    """The upstream JSON-RPC error message should be surfaced as a
+    plain sentence rather than the dict repr the user originally
+    saw (``{'message': 'Insufficient funds…', 'code': -32000}``)."""
+
+    def test_extracts_message_from_dict_repr_string(self):
+        from qeth.signing import explain_rpc_error
+        # Mimic the exception text the user reported.
+        e = RuntimeError(
+            "{'message': 'Insufficient funds for gas * price + value: "
+            "have 1000000000000000 want 1003083850000000', "
+            "'code': -32000}"
+        )
+        msg = explain_rpc_error(e)
+        assert msg.startswith("Insufficient funds")
+        assert "{" not in msg  # the dict repr is gone
+
+    def test_extracts_message_from_web3_rpc_error(self):
+        from qeth.signing import explain_rpc_error
+        from web3.exceptions import Web3RPCError
+        e = Web3RPCError("rpc error")
+        e.rpc_response = {
+            "error": {"message": "nonce too low", "code": -32000},
+        }
+        assert explain_rpc_error(e) == "nonce too low"
+
+    def test_falls_back_to_str_for_non_rpc_exception(self):
+        from qeth.signing import explain_rpc_error
+        assert explain_rpc_error(RuntimeError("plain error")) == "plain error"
+
+
 class TestSignerBridge:
     """The bridge's contract: caller awaits a future, slot resolves
     or rejects. Tested without aiohttp by driving the future directly

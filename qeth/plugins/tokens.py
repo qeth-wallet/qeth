@@ -610,6 +610,29 @@ class TokensPlugin(Plugin):
                 self._displayed_view = view_key
             return
 
+        # Mark this view as the displayed one BEFORE kicking (or
+        # piggy-backing on) the async pipeline. Two reasons:
+        #
+        #  (1) ``_on_combined_ready`` drops stale results by
+        #  comparing against ``_displayed_view``; without setting
+        #  it here, fresh wallets (no cache → the early-render
+        #  branch above didn't run) would have their completed
+        #  discovery silently discarded.
+        #
+        #  (2) Must happen BEFORE the in_flight guard. Otherwise
+        #  the "click fresh wallet → click another → click fresh
+        #  again" sequence falls into the early return below
+        #  WITHOUT clearing the panel or updating
+        #  ``_displayed_view`` — leaving the previous wallet's
+        #  rows on screen and discarding the in-flight result
+        #  when it lands.
+        if is_new_view:
+            if cached is None:
+                # No cache yet — show a placeholder rather than the
+                # previous wallet's contents.
+                self._panel.show_message("Discovering tokens…")
+            self._displayed_view = view_key
+
         # Per-view discovery guard — avoid stacking duplicate
         # Blockscout/multicall/prices chains when _refresh fires
         # multiple times for the same view.
@@ -627,27 +650,29 @@ class TokensPlugin(Plugin):
             # metadata (name/symbol/decimals) is fetched on-chain via
             # multicall (immutable, cached), with Blockscout's values as
             # a one-shot fallback for contracts whose multicall reverts.
-            # Build the multicall set as the union of four sources:
+            # Build the multicall set as the union of three sources:
             #   1. Blockscout's per-holder token list — holder-
             #      specific but lags chain head by minutes.
             #   2. Force-shown contracts (user pinned).
             #   3. Sibling wallets' cached holdings — catches
             #      intra-qeth transfers ahead of Blockscout.
-            #   4. The curated token lists for this chain
-            #      (Uniswap, CoinGecko, Curve, 1inch). Frame-style:
-            #      multicall balanceOf against the whole list, the
-            #      dust filter drops anything the wallet doesn't
-            #      hold. Removes the single-API dependency on
-            #      Blockscout for inbound visibility.
-            # Multicall handles the size cheaply — Multicall3
-            # batches 100 calls per RPC, so a ~5k-token chain is
-            # ~50 RPC calls per refresh.
+            #
+            # Curated token lists (the Frame-style "balanceOf
+            # every known token") were briefly part of this union
+            # but caused Qt to abort the BalanceWorker QThread
+            # mid-flight under the ~5k-contract load (observed on
+            # mainnet: thread destroyed while running). The
+            # functional value the curated path provided — chain-
+            # head visibility on inbound transfers — is already
+            # covered by the receipt scan for transfers between
+            # our own wallets and by Blockscout for everything
+            # else (within minutes of indexing). The curated
+            # metadata cache prefill we did at startup still helps
+            # the receipt-credit path know how to label a fresh
+            # inbound USDT without a separate metadata fetch.
             forced = {a for (cid, a) in self._store.shown_tokens
                       if cid == chain.chain_id}
             siblings = self._sibling_held_contracts(chain.chain_id, address)
-            curated = set(
-                self._token_lists.addresses_for_chain(chain.chain_id)
-            )
             # Drain receipt-derived contracts for THIS view — popped
             # so they don't permanently inflate the multicall set
             # once we've already discovered them.
@@ -659,7 +684,7 @@ class TokensPlugin(Plugin):
             for c in (
                 [b.contract for b in blockscout_tokens]
                 + sorted(forced) + sorted(siblings)
-                + sorted(receipt_extras) + sorted(curated)
+                + sorted(receipt_extras)
             ):
                 cl = c.lower()
                 if cl in seen:

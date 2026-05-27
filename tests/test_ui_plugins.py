@@ -851,6 +851,69 @@ class TestTokensPlugin:
         tokens_plugin._on_pin_token(1, good)
         assert tokens_plugin._store.is_force_shown(1, good)
 
+    def test_fresh_wallet_sets_displayed_view_before_discovery(
+        self, tokens_plugin,
+    ):
+        # Regression: imported / newly-added wallets had no cache,
+        # so the early-render branch (which is the only place
+        # _displayed_view was being set) didn't fire. Discovery
+        # would complete, but _on_combined_ready's stale-results
+        # guard then dropped the results — the panel never
+        # rendered the new wallet's tokens.
+        host = _StubHost(address=ADDR)
+        tokens_plugin._token_lists._loaded = True   # don't gate on net
+        tokens_plugin.attach(host)
+        # No cache for ADDR yet (fresh-import scenario).
+        assert tokens_plugin._wallet_cache.load(1, ADDR) is None
+        # _refresh kicks discovery; we just verify the view was
+        # registered so the subsequent on_combined_ready won't
+        # consider its results stale.
+        tokens_plugin._refresh(ADDR)
+        assert tokens_plugin._displayed_view == (1, ADDR.lower())
+
+    def test_revisiting_fresh_wallet_during_in_flight_discovery_clears_panel(
+        self, tokens_plugin,
+    ):
+        # Click sequence: fresh wallet B (no cache) → wallet A
+        # (any) → fresh wallet B again, all while B's first
+        # discovery is still running. The in_flight guard used to
+        # return early before _displayed_view + panel-clear ran —
+        # so the panel would keep showing A's rows AND B's
+        # eventually-completed discovery would be dropped as
+        # stale. Both fixed: panel clears + displayed_view updates
+        # even when piggy-backing on an existing in-flight pass.
+        host = _StubHost(address=ADDR)
+        tokens_plugin._token_lists._loaded = True
+        tokens_plugin.attach(host)
+
+        # First click on B → marks in-flight + sets displayed_view.
+        B = ADDR
+        tokens_plugin._refresh(B)
+        assert tokens_plugin._displayed_view == (1, B.lower())
+        assert (1, B.lower()) in tokens_plugin._discovery_in_flight
+
+        # Simulate clicking wallet A by directly nudging displayed_view
+        # to a different key (as A's _refresh would).
+        A_key = (1, "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43")
+        tokens_plugin._displayed_view = A_key
+
+        # Second click on B while its discovery is still in flight.
+        # _displayed_view MUST switch back to B (so the in-flight
+        # result isn't dropped) and the panel MUST be cleared (so
+        # A's rows don't linger on B's view).
+        tokens_plugin.widget()  # ensure panel exists
+        from qeth.tokens import TokenBalance
+        # Seed the panel with something so the clear is observable.
+        tokens_plugin.widget().show_balances(
+            host.current_chain(), 10**18, [], {},
+        )
+        assert tokens_plugin.widget().table.rowCount() >= 1
+
+        tokens_plugin._refresh(B)
+        assert tokens_plugin._displayed_view == (1, B.lower())
+        # Panel cleared by show_message.
+        assert tokens_plugin.widget().table.rowCount() == 0
+
 
 class TestSiblingHeldContracts:
     """Cross-wallet token cross-check: when refreshing wallet B, we

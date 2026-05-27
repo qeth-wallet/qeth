@@ -341,10 +341,17 @@ class WalletsPlugin(Plugin):
         self.act_add_ledger.triggered.connect(self._add_ledger)
         self.act_add_hot = QAction("Hot wallet…", self)
         self.act_add_hot.triggered.connect(self._add_hot_wallet)
-        self.act_add_import = QAction("Import from Brownie / Frame…", self)
-        self.act_add_import.triggered.connect(self._import_hot_wallets)
         self.act_add_watch = QAction("Watch-only address…", self)
         self.act_add_watch.triggered.connect(self._add_watch_only)
+        # Import-from-other-wallet actions live below a separator
+        # so the primary "add a new account" actions stay grouped
+        # at the top. Each external source is its own entry +
+        # dialog so the per-source UX (passphrase fields, paths)
+        # isn't muddled with tab switching.
+        self.act_import_brownie = QAction("Import from Brownie…", self)
+        self.act_import_brownie.triggered.connect(self._import_from_brownie)
+        self.act_import_frame = QAction("Import from Frame…", self)
+        self.act_import_frame.triggered.connect(self._import_from_frame)
         # Triggering act_add itself shows the picker menu — invoked
         # via the right-click "Add account" item in the tree.
         self.act_add.triggered.connect(self._show_add_account_menu)
@@ -381,8 +388,10 @@ class WalletsPlugin(Plugin):
         self._add_menu = QMenu(add_btn)
         self._add_menu.addAction(self.act_add_ledger)
         self._add_menu.addAction(self.act_add_hot)
-        self._add_menu.addAction(self.act_add_import)
         self._add_menu.addAction(self.act_add_watch)
+        self._add_menu.addSeparator()
+        self._add_menu.addAction(self.act_import_brownie)
+        self._add_menu.addAction(self.act_import_frame)
         add_btn.setMenu(self._add_menu)
         add_btn.setPopupMode(QToolButton.InstantPopup)
         row.addWidget(add_btn)
@@ -606,6 +615,15 @@ class WalletsPlugin(Plugin):
         addrs = self.selected_addresses()
         if not addrs:
             return
+        # Bucket the selection by source so the confirmation
+        # message tells the user what's actually happening — a
+        # Ledger removal is reversible (re-scan the device), a
+        # hot-wallet removal DELETES the on-disk keystore (real
+        # data loss unless backed up), watch-only just forgets an
+        # address.
+        addrs_lower = {a.lower() for a in addrs}
+        sources = {a.get("source") for a in self._store.accounts
+                    if a["address"].lower() in addrs_lower}
         if len(addrs) == 1:
             prompt = f"Remove {addrs[0]} from this wallet?"
         else:
@@ -615,12 +633,37 @@ class WalletsPlugin(Plugin):
                 f"Remove {len(addrs)} accounts from this wallet?\n\n"
                 f"{preview}{extra}"
             )
+        if sources == {"ledger"}:
+            consequence = (
+                "Keys on your Ledger are untouched; this only forgets "
+                "the addresses locally. You can re-add them via Scan "
+                "at any time."
+            )
+        elif sources == {"hot"}:
+            consequence = (
+                "This will DELETE the on-disk keystore. If you have "
+                "no other backup of the keystore file AND your "
+                "passphrase, funds at these addresses will be "
+                "permanently inaccessible."
+            )
+        elif sources == {"watch_only"}:
+            consequence = (
+                "Watch-only accounts have no key — this just stops "
+                "tracking the addresses. You can re-add them at any "
+                "time."
+            )
+        else:
+            consequence = (
+                "Ledger and watch-only entries are reversible (re-scan "
+                "or re-add), but hot-wallet entries DELETE their on-"
+                "disk keystore — those addresses are unrecoverable "
+                "without an external backup of the keystore + "
+                "passphrase."
+            )
         reply = QMessageBox.question(
             self._container,
             "Remove account" if len(addrs) == 1 else "Remove accounts",
-            f"{prompt}\n\n"
-            "Keys on your Ledger are untouched; this only forgets the "
-            "addresses locally. You can re-add them via Scan at any time.",
+            f"{prompt}\n\n{consequence}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -734,13 +777,19 @@ class WalletsPlugin(Plugin):
                 "anywhere."
             )
 
-    def _import_hot_wallets(self) -> None:
-        """Open the cross-source importer (Brownie / Frame). The
-        dialog handles enumeration, passphrase collection, and
-        decryption/re-encryption per source; here we just persist
-        the keystores and add the corresponding account records."""
+    def _import_from_brownie(self) -> None:
+        self._run_import(_brownie_source())
+
+    def _import_from_frame(self) -> None:
+        self._run_import(_frame_source())
+
+    def _run_import(self, source) -> None:
+        """Open a single-source import dialog, persist the results.
+        Shared between the Brownie and Frame menu entries — only
+        the ImportSource implementation differs."""
         from ..hot_wallet import save_keystore
         dlg = ImportHotWalletsDialog(
+            source,
             existing_addresses={a["address"].lower()
                                  for a in self._store.accounts},
             parent=self._container,
@@ -768,7 +817,8 @@ class WalletsPlugin(Plugin):
             if self.host is not None:
                 self.host.status_message(
                     f"Imported {len(imported)} hot wallet"
-                    f"{'s' if len(imported) != 1 else ''}",
+                    f"{'s' if len(imported) != 1 else ''}"
+                    f" from {source.name}",
                     4000,
                 )
         if failed:
@@ -1515,47 +1565,60 @@ class AddHotWalletDialog(QDialog):
         self.accept()
 
 
+def _brownie_source():
+    """Lazy factory — keeps the import-sources module out of the
+    eager-load path for users who never open the importer."""
+    from ..import_sources import BrownieSource
+    return BrownieSource()
+
+
+def _frame_source():
+    from ..import_sources import FrameSource
+    return FrameSource()
+
+
 class ImportHotWalletsDialog(QDialog):
-    """Cross-source hot-wallet importer.
+    """Single-source hot-wallet importer.
 
-    Two tabs, one per source (Brownie / Frame), each owning its
-    own enumerated list + per-tab passphrase fields. Either tab
-    can populate ``self.imported`` with ``{"address", "label",
-    "keystore"}`` dicts before accepting — the host calls
-    ``save_keystore`` and registers the account record."""
+    One dialog per source (Brownie or Frame), opened from its own
+    menu entry. The dialog wraps a single ``_ImportSourcePanel``
+    — kept as its own widget so we could reuse it elsewhere if we
+    later add more sources, but the user-facing flow is one
+    dialog == one source.
 
-    def __init__(self, existing_addresses: set[str], parent=None):
+    Sets ``self.imported`` to ``[{"address", "label", "keystore"},
+    …]`` before accepting; the host calls ``save_keystore`` and
+    registers the account records."""
+
+    def __init__(self, source, existing_addresses: set[str], parent=None):
         super().__init__(parent)
-        from PySide6.QtWidgets import QTabWidget, QCheckBox
-        self.setWindowTitle("Import hot wallets")
-        self.setMinimumSize(720, 520)
+        self._source = source
+        self.setWindowTitle(f"Import from {source.name}")
+        self.setMinimumSize(720, 480)
         self._existing = {a.lower() for a in existing_addresses}
-        # Filled in by _do_import on Accept — the host reads these.
         self.imported: list[dict] = []
 
         layout = QVBoxLayout(self)
-        intro = QLabel(
-            "Import hot wallets from other Ethereum apps. Brownie "
-            "keystores are copied as-is (your existing passphrase "
-            "is preserved); Frame ring signers are decrypted with "
-            "your Frame passphrase and re-encrypted under a new qeth "
-            "passphrase."
-        )
+        if source.needs_source_passphrase:
+            intro_text = (
+                f"Import accounts from {source.name}. Each selected "
+                f"key is decrypted with your {source.name} passphrase "
+                "and re-encrypted under a new qeth passphrase. The "
+                "original wallet stays untouched."
+            )
+        else:
+            intro_text = (
+                f"Import accounts from {source.name}. Keystores are "
+                "copied as-is — your existing passphrase is preserved "
+                "and you'll use it to sign in qeth too. The source "
+                "directory stays untouched."
+            )
+        intro = QLabel(intro_text)
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        from ..import_sources import SOURCES
-        self.tabs = QTabWidget()
-        # Build one tab per registered source; share the row widget
-        # below the tabs so per-tab passphrase requirements
-        # (Brownie: none, Frame: source + target) drive the same
-        # bottom-row buttons.
-        self._panels: list[_ImportSourcePanel] = []
-        for src in SOURCES:
-            panel = _ImportSourcePanel(src, self._existing, parent=self)
-            self.tabs.addTab(panel, src.name)
-            self._panels.append(panel)
-        layout.addWidget(self.tabs, 1)
+        self.panel = _ImportSourcePanel(source, self._existing, parent=self)
+        layout.addWidget(self.panel, 1)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
@@ -1568,26 +1631,15 @@ class ImportHotWalletsDialog(QDialog):
         btns.addWidget(self.close_btn)
         layout.addLayout(btns)
 
-        # Each panel emits when its checked-set or passphrase
-        # fields change — we recompute whether the Import button
-        # should be active based on the CURRENT tab.
-        for p in self._panels:
-            p.state_changed.connect(self._refresh_import_btn)
-        self.tabs.currentChanged.connect(self._refresh_import_btn)
-
-        # Kick off initial discovery on each tab so the lists are
-        # populated by the time the user looks at them.
-        for p in self._panels:
-            p.refresh()
+        self.panel.state_changed.connect(self._refresh_import_btn)
+        self.panel.refresh()
 
     def _refresh_import_btn(self) -> None:
-        panel = self.tabs.currentWidget()
-        self.import_btn.setEnabled(panel.ready_to_import())
+        self.import_btn.setEnabled(self.panel.ready_to_import())
 
     def _do_import(self) -> None:
-        panel = self.tabs.currentWidget()
         try:
-            results = panel.do_import()
+            results = self.panel.do_import()
         except Exception as e:
             QMessageBox.critical(
                 self, "Import failed",
@@ -1599,7 +1651,8 @@ class ImportHotWalletsDialog(QDialog):
 
 
 class _ImportSourcePanel(QWidget):
-    """One tab inside ImportHotWalletsDialog — the per-source UI.
+    """Single-source import widget hosted inside
+    ImportHotWalletsDialog — the per-source UI.
 
     Owns: directory picker, scan button, candidate list with
     checkboxes, optional source/target passphrase fields. Knows

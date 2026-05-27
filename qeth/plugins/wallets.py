@@ -341,6 +341,8 @@ class WalletsPlugin(Plugin):
         self.act_add_ledger.triggered.connect(self._add_ledger)
         self.act_add_hot = QAction("Hot wallet…", self)
         self.act_add_hot.triggered.connect(self._add_hot_wallet)
+        self.act_add_import = QAction("Import from Brownie / Frame…", self)
+        self.act_add_import.triggered.connect(self._import_hot_wallets)
         self.act_add_watch = QAction("Watch-only address…", self)
         self.act_add_watch.triggered.connect(self._add_watch_only)
         # Triggering act_add itself shows the picker menu — invoked
@@ -379,6 +381,7 @@ class WalletsPlugin(Plugin):
         self._add_menu = QMenu(add_btn)
         self._add_menu.addAction(self.act_add_ledger)
         self._add_menu.addAction(self.act_add_hot)
+        self._add_menu.addAction(self.act_add_import)
         self._add_menu.addAction(self.act_add_watch)
         add_btn.setMenu(self._add_menu)
         add_btn.setPopupMode(QToolButton.InstantPopup)
@@ -729,6 +732,51 @@ class WalletsPlugin(Plugin):
                 "required to recover funds. Back up the file and "
                 "remember the passphrase — qeth never sends either "
                 "anywhere."
+            )
+
+    def _import_hot_wallets(self) -> None:
+        """Open the cross-source importer (Brownie / Frame). The
+        dialog handles enumeration, passphrase collection, and
+        decryption/re-encryption per source; here we just persist
+        the keystores and add the corresponding account records."""
+        from ..hot_wallet import save_keystore
+        dlg = ImportHotWalletsDialog(
+            existing_addresses={a["address"].lower()
+                                 for a in self._store.accounts},
+            parent=self._container,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        imported, failed = [], []
+        for result in dlg.imported:
+            addr = result["address"]
+            try:
+                save_keystore(addr, result["keystore"])
+            except Exception as e:
+                failed.append((addr, str(e)))
+                continue
+            added = self._store.add_account({
+                "address": addr,
+                "source": "hot",
+                "label": result["label"],
+            })
+            if added:
+                imported.append(addr)
+        if imported:
+            self._rebuild_tree()
+            self.default_account_changed.emit()
+            if self.host is not None:
+                self.host.status_message(
+                    f"Imported {len(imported)} hot wallet"
+                    f"{'s' if len(imported) != 1 else ''}",
+                    4000,
+                )
+        if failed:
+            lines = "\n".join(f"  • {a}: {m}" for a, m in failed)
+            QMessageBox.warning(
+                self._container, "Import partly failed",
+                f"Imported {len(imported)} account(s). "
+                f"{len(failed)} failed:\n\n{lines}",
             )
 
     def _add_watch_only(self) -> None:
@@ -1465,6 +1513,260 @@ class AddHotWalletDialog(QDialog):
         self.passphrase = self.pass1_edit.text()
         self.label = self.label_edit.text().strip()
         self.accept()
+
+
+class ImportHotWalletsDialog(QDialog):
+    """Cross-source hot-wallet importer.
+
+    Two tabs, one per source (Brownie / Frame), each owning its
+    own enumerated list + per-tab passphrase fields. Either tab
+    can populate ``self.imported`` with ``{"address", "label",
+    "keystore"}`` dicts before accepting — the host calls
+    ``save_keystore`` and registers the account record."""
+
+    def __init__(self, existing_addresses: set[str], parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QTabWidget, QCheckBox
+        self.setWindowTitle("Import hot wallets")
+        self.setMinimumSize(720, 520)
+        self._existing = {a.lower() for a in existing_addresses}
+        # Filled in by _do_import on Accept — the host reads these.
+        self.imported: list[dict] = []
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Import hot wallets from other Ethereum apps. Brownie "
+            "keystores are copied as-is (your existing passphrase "
+            "is preserved); Frame ring signers are decrypted with "
+            "your Frame passphrase and re-encrypted under a new qeth "
+            "passphrase."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        from ..import_sources import SOURCES
+        self.tabs = QTabWidget()
+        # Build one tab per registered source; share the row widget
+        # below the tabs so per-tab passphrase requirements
+        # (Brownie: none, Frame: source + target) drive the same
+        # bottom-row buttons.
+        self._panels: list[_ImportSourcePanel] = []
+        for src in SOURCES:
+            panel = _ImportSourcePanel(src, self._existing, parent=self)
+            self.tabs.addTab(panel, src.name)
+            self._panels.append(panel)
+        layout.addWidget(self.tabs, 1)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.import_btn = QPushButton("Import selected")
+        self.import_btn.setEnabled(False)
+        self.import_btn.clicked.connect(self._do_import)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.reject)
+        btns.addWidget(self.import_btn)
+        btns.addWidget(self.close_btn)
+        layout.addLayout(btns)
+
+        # Each panel emits when its checked-set or passphrase
+        # fields change — we recompute whether the Import button
+        # should be active based on the CURRENT tab.
+        for p in self._panels:
+            p.state_changed.connect(self._refresh_import_btn)
+        self.tabs.currentChanged.connect(self._refresh_import_btn)
+
+        # Kick off initial discovery on each tab so the lists are
+        # populated by the time the user looks at them.
+        for p in self._panels:
+            p.refresh()
+
+    def _refresh_import_btn(self) -> None:
+        panel = self.tabs.currentWidget()
+        self.import_btn.setEnabled(panel.ready_to_import())
+
+    def _do_import(self) -> None:
+        panel = self.tabs.currentWidget()
+        try:
+            results = panel.do_import()
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Import failed",
+                f"Could not import:\n\n{e}",
+            )
+            return
+        self.imported = results
+        self.accept()
+
+
+class _ImportSourcePanel(QWidget):
+    """One tab inside ImportHotWalletsDialog — the per-source UI.
+
+    Owns: directory picker, scan button, candidate list with
+    checkboxes, optional source/target passphrase fields. Knows
+    nothing about persisting the result — exposes ``do_import``
+    to hand the dialog a list of (address, label, keystore) dicts."""
+
+    state_changed = Signal()
+
+    def __init__(self, source, existing_lower: set[str], parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QFileDialog, QPlainTextEdit
+        self._source = source
+        self._existing = existing_lower
+        self._candidates: list = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # Directory row.
+        dir_row = QHBoxLayout()
+        dir_row.addWidget(QLabel("Directory:"))
+        self.dir_edit = QLineEdit(str(source.default_dir()))
+        self.dir_edit.setFont(QFont("monospace"))
+        dir_row.addWidget(self.dir_edit, 1)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        dir_row.addWidget(browse)
+        self.refresh_btn = QPushButton("Scan")
+        self.refresh_btn.clicked.connect(self.refresh)
+        dir_row.addWidget(self.refresh_btn)
+        layout.addLayout(dir_row)
+
+        # Candidate list.
+        self.list = QListWidget()
+        self.list.setFont(QFont("monospace"))
+        self.list.itemChanged.connect(lambda _: self.state_changed.emit())
+        layout.addWidget(self.list, 1)
+
+        # Status line — "N found, K already imported" / errors.
+        self.status_lbl = QLabel("")
+        self.status_lbl.setWordWrap(True)
+        layout.addWidget(self.status_lbl)
+
+        # Passphrase fields — only shown when the source needs them.
+        form = QFormLayout()
+        form.setVerticalSpacing(8)
+        self.src_pass_edit = None
+        self.dst_pass1_edit = None
+        self.dst_pass2_edit = None
+        if source.needs_source_passphrase:
+            self.src_pass_edit = QLineEdit()
+            self.src_pass_edit.setEchoMode(QLineEdit.Password)
+            self.src_pass_edit.setMinimumHeight(30)
+            self.src_pass_edit.textChanged.connect(
+                lambda _: self.state_changed.emit()
+            )
+            form.addRow(f"{source.name} passphrase:", self.src_pass_edit)
+        if source.needs_target_passphrase:
+            self.dst_pass1_edit = QLineEdit()
+            self.dst_pass1_edit.setEchoMode(QLineEdit.Password)
+            self.dst_pass1_edit.setMinimumHeight(30)
+            self.dst_pass2_edit = QLineEdit()
+            self.dst_pass2_edit.setEchoMode(QLineEdit.Password)
+            self.dst_pass2_edit.setMinimumHeight(30)
+            self.dst_pass1_edit.textChanged.connect(
+                lambda _: self.state_changed.emit()
+            )
+            self.dst_pass2_edit.textChanged.connect(
+                lambda _: self.state_changed.emit()
+            )
+            form.addRow("New qeth passphrase:", self.dst_pass1_edit)
+            form.addRow("Confirm passphrase:", self.dst_pass2_edit)
+        if form.rowCount() > 0:
+            layout.addLayout(form)
+
+    def _browse(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        chosen = QFileDialog.getExistingDirectory(
+            self, f"{self._source.name} directory",
+            self.dir_edit.text(),
+        )
+        if chosen:
+            self.dir_edit.setText(chosen)
+            self.refresh()
+
+    def refresh(self) -> None:
+        from pathlib import Path
+        self.list.clear()
+        self._candidates = []
+        try:
+            cands = self._source.discover(Path(self.dir_edit.text()))
+        except Exception as e:
+            self.status_lbl.setText(f"Scan failed: {e}")
+            self.state_changed.emit()
+            return
+        already = 0
+        for c in cands:
+            item = QListWidgetItem(f"{c.address}   {c.label}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            already_have = c.address.lower() in self._existing
+            if already_have:
+                item.setText(f"{c.address}   {c.label}   (already imported)")
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Unchecked)
+                already += 1
+            else:
+                # Default: tick everything new. User can untick.
+                item.setCheckState(Qt.Checked)
+            self.list.addItem(item)
+            self._candidates.append(c)
+        if not cands:
+            self.status_lbl.setText(
+                f"No {self._source.name} accounts found in this directory."
+            )
+        elif already:
+            self.status_lbl.setText(
+                f"{len(cands)} found ({already} already imported)"
+            )
+        else:
+            self.status_lbl.setText(f"{len(cands)} found")
+        self.state_changed.emit()
+
+    def _checked_candidates(self) -> list:
+        out = []
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.checkState() == Qt.Checked and (item.flags() & Qt.ItemIsEnabled):
+                out.append(self._candidates[i])
+        return out
+
+    def ready_to_import(self) -> bool:
+        if not self._checked_candidates():
+            return False
+        if self.src_pass_edit is not None:
+            if not self.src_pass_edit.text():
+                return False
+        if self.dst_pass1_edit is not None:
+            p1 = self.dst_pass1_edit.text()
+            p2 = self.dst_pass2_edit.text()
+            if not p1 or p1 != p2 or len(p1) < 8:
+                return False
+        return True
+
+    def do_import(self) -> list[dict]:
+        """Run the source's import_one for every checked candidate
+        and return ``[{'address', 'label', 'keystore'}, ...]``. A
+        bad-passphrase error on the first candidate aborts the
+        whole batch — we don't want to import half the ring under
+        the wrong key."""
+        src_pass = self.src_pass_edit.text() if self.src_pass_edit else None
+        dst_pass = (
+            self.dst_pass1_edit.text() if self.dst_pass1_edit else None
+        )
+        results: list[dict] = []
+        for c in self._checked_candidates():
+            addr, ks = self._source.import_one(
+                c,
+                source_passphrase=src_pass,
+                target_passphrase=dst_pass,
+            )
+            results.append({
+                "address": addr,
+                "label": c.label,
+                "keystore": ks,
+            })
+        return results
 
 
 # --- Right-hand details panel ------------------------------------------------

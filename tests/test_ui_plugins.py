@@ -947,6 +947,72 @@ class TestSiblingHeldContracts:
         assert out == set()
 
 
+class TestCuratedListAsDiscoverySource:
+    """Token lists (Uniswap/CoinGecko/Curve/1inch) are exposed via
+    ``TokenLists.addresses_for_chain`` and unioned into the
+    multicall set — so a wallet that holds e.g. USDC will get it
+    discovered even when Blockscout hasn't indexed it for that
+    holder yet. Frame-style scan, but reusing the lists we already
+    fetch + cache."""
+
+    def test_addresses_for_chain_filters_by_chain(self):
+        from qeth.tokenlists import TokenListEntry, TokenLists
+        lists = TokenLists()
+        lists._index = {
+            (1, "0xa"): TokenListEntry(
+                chain_id=1, address="0xa", symbol="USDC", name="USDC",
+                decimals=6, source="t",
+            ),
+            (1, "0xb"): TokenListEntry(
+                chain_id=1, address="0xb", symbol="DAI", name="DAI",
+                decimals=18, source="t",
+            ),
+            (137, "0xc"): TokenListEntry(
+                chain_id=137, address="0xc", symbol="USDT", name="USDT",
+                decimals=6, source="t",
+            ),
+        }
+        assert sorted(lists.addresses_for_chain(1)) == ["0xa", "0xb"]
+        assert lists.addresses_for_chain(137) == ["0xc"]
+        assert lists.addresses_for_chain(42161) == []
+
+    def test_metadata_prefill_populates_cache_from_lists(
+        self, tokens_plugin,
+    ):
+        # MetadataWorker is the slow path (multicall name/symbol/
+        # decimals on chain). The curated lists already carry that
+        # data — prefilling means MetadataWorker can be skipped
+        # entirely for curated contracts on first refresh.
+        from qeth.tokenlists import TokenListEntry
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        tokens_plugin._token_lists._index = {
+            (1, usdc): TokenListEntry(
+                chain_id=1, address=usdc, symbol="USDC",
+                name="USD Coin", decimals=6, source="uniswap",
+            ),
+        }
+        # Cache is empty before prefill.
+        assert tokens_plugin._token_metadata.missing(1, [usdc]) == [usdc]
+        tokens_plugin._prefill_metadata_from_token_lists()
+        # And populated after.
+        assert tokens_plugin._token_metadata.missing(1, [usdc]) == []
+        got = tokens_plugin._token_metadata.get(1, usdc)
+        assert got["symbol"] == "USDC"
+        assert got["name"] == "USD Coin"
+        assert got["decimals"] == 6
+
+    def test_metadata_prefill_handles_no_lists_loaded(
+        self, tokens_plugin,
+    ):
+        # Pre-load state must not raise — the empty index walks
+        # cleanly and the cache stays untouched.
+        tokens_plugin._token_lists._index = {}
+        tokens_plugin._prefill_metadata_from_token_lists()
+        assert tokens_plugin._token_metadata.missing(
+            1, ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"]
+        ) == ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"]
+
+
 # --- WalletsPlugin ----------------------------------------------------------
 
 @pytest.fixture

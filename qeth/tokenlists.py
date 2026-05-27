@@ -361,6 +361,20 @@ class TokenLists:
             return len(self._index)
         return sum(1 for (cid, _) in self._index if cid == chain_id)
 
+    def addresses_for_chain(self, chain_id: int) -> list[str]:
+        """Every curated contract on ``chain_id``, lowercase hex.
+
+        Used as a discovery source in ``TokensPlugin._refresh``:
+        the multicall set is built as ``blockscout ∪ forced ∪
+        siblings ∪ curated`` so a wallet that holds e.g. USDC will
+        have it discovered immediately, regardless of whether
+        Blockscout has indexed it for that holder yet.
+
+        Cheap (single dict scan); returns a fresh list so the
+        caller can sort/mutate safely."""
+        with self._lock:
+            return [addr for (cid, addr) in self._index if cid == chain_id]
+
     @property
     def loaded(self) -> bool:
         return self._loaded

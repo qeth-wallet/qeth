@@ -474,20 +474,32 @@ class TokensPlugin(Plugin):
             # metadata (name/symbol/decimals) is fetched on-chain via
             # multicall (immutable, cached), with Blockscout's values as
             # a one-shot fallback for contracts whose multicall reverts.
-            # Always include force-shown contracts in the multicall set,
-            # even if Blockscout didn't return them. Also union with
-            # contracts held by our OTHER wallets — same idea: catch
-            # an inbound transfer from one of our own wallets ahead
-            # of Blockscout's next discovery cycle (which lags chain
-            # head by minutes).
+            # Build the multicall set as the union of four sources:
+            #   1. Blockscout's per-holder token list — holder-
+            #      specific but lags chain head by minutes.
+            #   2. Force-shown contracts (user pinned).
+            #   3. Sibling wallets' cached holdings — catches
+            #      intra-qeth transfers ahead of Blockscout.
+            #   4. The curated token lists for this chain
+            #      (Uniswap, CoinGecko, Curve, 1inch). Frame-style:
+            #      multicall balanceOf against the whole list, the
+            #      dust filter drops anything the wallet doesn't
+            #      hold. Removes the single-API dependency on
+            #      Blockscout for inbound visibility.
+            # Multicall handles the size cheaply — Multicall3
+            # batches 100 calls per RPC, so a ~5k-token chain is
+            # ~50 RPC calls per refresh.
             forced = {a for (cid, a) in self._store.shown_tokens
                       if cid == chain.chain_id}
             siblings = self._sibling_held_contracts(chain.chain_id, address)
+            curated = set(
+                self._token_lists.addresses_for_chain(chain.chain_id)
+            )
             seen = set()
             contracts: list[str] = []
             for c in (
                 [b.contract for b in blockscout_tokens]
-                + sorted(forced) + sorted(siblings)
+                + sorted(forced) + sorted(siblings) + sorted(curated)
             ):
                 cl = c.lower()
                 if cl in seen:
@@ -875,6 +887,14 @@ class TokensPlugin(Plugin):
             # combined scam check for the alarm-icon decision.
             self._panel._token_lists = self._token_lists
             self._panel._risk_cache = self._risk_cache
+        # Prefill the on-chain metadata cache from the curated
+        # lists. The curated entries already carry symbol/name/
+        # decimals (the JSON we just downloaded HAS this) so
+        # MetadataWorker can skip them entirely — without this,
+        # adding curated tokens to the discovery set would trigger
+        # a ~50-multicall metadata sweep on first refresh of each
+        # chain. Permanent cache; one-shot work per session.
+        self._prefill_metadata_from_token_lists()
         if self.host is None:
             return
         addr = self.host.selected_address
@@ -883,6 +903,27 @@ class TokensPlugin(Plugin):
         elif self._panel is not None:
             self._panel.clear()
             self._displayed_view = None
+
+    def _prefill_metadata_from_token_lists(self) -> None:
+        """Push every (symbol, name, decimals) record from the
+        curated token lists into the on-chain metadata cache so
+        MetadataWorker has nothing to fetch for them later. Idempotent
+        — TokenMetadataCache.put_many overwrites existing keys but
+        the value is identical."""
+        from ..chains import DEFAULT_CHAINS
+        for chain in DEFAULT_CHAINS:
+            meta: dict[str, dict] = {}
+            for addr in self._token_lists.addresses_for_chain(chain.chain_id):
+                entry = self._token_lists.get(chain.chain_id, addr)
+                if entry is None:
+                    continue
+                meta[addr] = {
+                    "symbol": entry.symbol,
+                    "name": entry.name,
+                    "decimals": entry.decimals,
+                }
+            if meta:
+                self._token_metadata.put_many(chain.chain_id, meta)
 
     def _on_lists_load_failed(self, msg: str) -> None:
         if self._panel is not None:

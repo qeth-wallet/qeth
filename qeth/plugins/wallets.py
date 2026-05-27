@@ -1862,15 +1862,21 @@ class _ImportSourcePanel(QWidget):
         dir_row.addWidget(self.refresh_btn)
         layout.addLayout(dir_row)
 
-        # Candidate list.
+        # Candidate list — uses extended SELECTION (click /
+        # Ctrl-click / Shift-click), same UX as the Ledger scan
+        # dialog. We switched from checkboxes-per-row because the
+        # extended-selection feel matches what users already
+        # know from the Ledger flow, and the per-row checkboxes
+        # were visually noisier than a simple highlight.
         self.list = QListWidget()
         self.list.setFont(QFont("monospace"))
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         # Address + label rows can exceed the dialog width; elide
         # in the middle and skip the horizontal scrollbar (same
         # reasoning as the wallet tree).
         self.list.setTextElideMode(Qt.ElideMiddle)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list.itemChanged.connect(lambda _: self.state_changed.emit())
+        self.list.itemSelectionChanged.connect(self.state_changed.emit)
         layout.addWidget(self.list, 1)
 
         # Status line — "N found, K already imported" / errors.
@@ -1933,18 +1939,21 @@ class _ImportSourcePanel(QWidget):
         already = 0
         for c in cands:
             item = QListWidgetItem(f"{c.address}   {c.label}")
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             already_have = c.address.lower() in self._existing
             if already_have:
                 item.setText(f"{c.address}   {c.label}   (already imported)")
-                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
-                item.setCheckState(Qt.Unchecked)
+                # Already-imported rows can't be selected — strip
+                # ItemIsSelectable + ItemIsEnabled so the row
+                # renders muted and won't enter the selection.
+                item.setFlags(Qt.NoItemFlags)
                 already += 1
-            else:
-                # Default: tick everything new. User can untick.
-                item.setCheckState(Qt.Checked)
             self.list.addItem(item)
             self._candidates.append(c)
+            # Pre-select new rows AFTER addItem (selection state
+            # lives on the model, not the item; setting it before
+            # the item joins the model is a no-op).
+            if not already_have:
+                item.setSelected(True)
         if not cands:
             self.status_lbl.setText(
                 f"No {self._source.name} accounts found in this directory."
@@ -1957,16 +1966,16 @@ class _ImportSourcePanel(QWidget):
             self.status_lbl.setText(f"{len(cands)} found")
         self.state_changed.emit()
 
-    def _checked_candidates(self) -> list:
+    def _selected_candidates(self) -> list:
         out = []
         for i in range(self.list.count()):
             item = self.list.item(i)
-            if item.checkState() == Qt.Checked and (item.flags() & Qt.ItemIsEnabled):
+            if item.isSelected() and (item.flags() & Qt.ItemIsEnabled):
                 out.append(self._candidates[i])
         return out
 
     def ready_to_import(self) -> bool:
-        if not self._checked_candidates():
+        if not self._selected_candidates():
             return False
         if self.src_pass_edit is not None:
             if not self.src_pass_edit.text():
@@ -1989,7 +1998,7 @@ class _ImportSourcePanel(QWidget):
             self.dst_pass1_edit.text() if self.dst_pass1_edit else None
         )
         results: list[dict] = []
-        for c in self._checked_candidates():
+        for c in self._selected_candidates():
             addr, ks = self._source.import_one(
                 c,
                 source_passphrase=src_pass,

@@ -30,10 +30,14 @@ Decoding for ``eth_signTypedData_v4``:
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QClipboard, QFont, QGuiApplication
+from PySide6.QtCore import QRegularExpression, Qt, Signal
+from PySide6.QtGui import (
+    QClipboard, QColor, QFont, QGuiApplication, QPalette,
+    QSyntaxHighlighter, QTextCharFormat,
+)
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
@@ -41,6 +45,84 @@ from PySide6.QtWidgets import (
 )
 
 from ..signing import MessageSigningRequest, TypedDataSigningRequest
+
+
+class _JsonHighlighter(QSyntaxHighlighter):
+    """Minimal JSON syntax highlighter for the typed-data + section
+    headers view. Distinguishes keys, string values, numbers,
+    keywords (true/false/null), and our ``=== Section ===`` /
+    ``--- Subsection ---`` markers so the structure reads clearly
+    at a glance instead of looking like opaque text.
+
+    Colors come from the active palette: text-colour with varying
+    alpha + a green / orange / muted derived from the window
+    background's luminance, so the highlighter works on both light
+    and dark themes."""
+
+    def __init__(self, document, palette):
+        super().__init__(document)
+        text_color = palette.color(QPalette.Text)
+        window = palette.color(QPalette.Window)
+        lum = (
+            window.red() * 0.299
+            + window.green() * 0.587
+            + window.blue() * 0.114
+        )
+        is_dark = lum < 128
+
+        # Key (string before colon): the default text colour bumped
+        # toward the accent — most themes ship this as a blueish
+        # link colour.
+        key_fmt = QTextCharFormat()
+        key_fmt.setForeground(palette.color(QPalette.Link))
+        key_fmt.setFontWeight(QFont.Bold)
+
+        # String VALUES: a muted green that works on both themes.
+        string_fmt = QTextCharFormat()
+        string_fmt.setForeground(QColor("#7cb342" if is_dark else "#2e7d32"))
+
+        # Numbers and booleans / null: warm accent for both themes.
+        number_fmt = QTextCharFormat()
+        number_fmt.setForeground(QColor("#f48fb1" if is_dark else "#c2185b"))
+
+        keyword_fmt = QTextCharFormat()
+        keyword_fmt.setForeground(QColor("#ce93d8" if is_dark else "#7b1fa2"))
+        keyword_fmt.setFontWeight(QFont.Bold)
+
+        # Section headers (=== ... === and --- ... ---) get a
+        # palette text colour + bold so the eye finds them first.
+        header_fmt = QTextCharFormat()
+        header_fmt.setForeground(text_color)
+        header_fmt.setFontWeight(QFont.Bold)
+
+        self._rules: list[tuple[QRegularExpression, QTextCharFormat]] = [
+            # Key BEFORE value-colour rules so it wins.
+            (QRegularExpression(r'"[^"\\]*(?:\\.[^"\\]*)*"\s*(?=:)'),
+             key_fmt),
+            # Then string values (any remaining quoted string).
+            (QRegularExpression(r'"[^"\\]*(?:\\.[^"\\]*)*"'),
+             string_fmt),
+            # Numbers (including negative + scientific).
+            (QRegularExpression(r'\b-?\d+(\.\d+)?([eE][+-]?\d+)?\b'),
+             number_fmt),
+            # JSON keywords.
+            (QRegularExpression(r'\b(true|false|null)\b'),
+             keyword_fmt),
+            # Our own section headers ("=== Domain ===" etc.).
+            (QRegularExpression(r'^={3,}.*={3,}$',
+                                QRegularExpression.MultilineOption),
+             header_fmt),
+            (QRegularExpression(r'^-{3,}.*-{3,}$',
+                                QRegularExpression.MultilineOption),
+             header_fmt),
+        ]
+
+    def highlightBlock(self, text: str) -> None:
+        for rx, fmt in self._rules:
+            it = rx.globalMatch(text)
+            while it.hasNext():
+                m = it.next()
+                self.setFormat(m.capturedStart(), m.capturedLength(), fmt)
 
 
 def _is_printable_utf8(b: bytes) -> Optional[str]:
@@ -149,6 +231,13 @@ class SignMessageDialog(QDialog):
                 view.setPlainText("0x" + req.raw.hex())
         else:
             view.setPlainText(_format_typed_data(req.typed_data))
+            # EIP-712 IS structured — colour the keys, values,
+            # numbers, and section headers so the eye can parse
+            # what's being signed at a glance. The plain-text
+            # message above doesn't need it.
+            self._highlighter = _JsonHighlighter(
+                view.document(), self.palette(),
+            )
         return view
 
     def set_signing_in_progress(self, busy: bool) -> None:

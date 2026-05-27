@@ -2524,7 +2524,7 @@ class SendTokenDialog(QDialog):
             self.spin_gas_price.setEnabled(False)
             gas_form.addRow("Gas price:", self.spin_gas_price)
 
-        self.base_fee_lbl = self._value_label("(fetching…)")
+        self.base_fee_lbl = self._value_label("(enter recipient to estimate)")
         gas_form.addRow("Network base fee:", self.base_fee_lbl)
         self.max_total_lbl = self._value_label("—")
         gas_form.addRow("Expected fee:", self.max_total_lbl)
@@ -2568,20 +2568,28 @@ class SendTokenDialog(QDialog):
             if sp is not None:
                 sp.valueChanged.connect(self._update_max_total)
 
+        # Estimate gas only against the recipient the user has
+        # actually typed — never against a placeholder. ERC-20
+        # transfer cost depends heavily on the recipient's storage
+        # slot (cold vs warm, zero vs non-zero balance) and a
+        # placeholder is just wrong in some direction. Until a
+        # valid address lands the spinners stay un-populated and
+        # the Send button stays disabled. Debounced so each
+        # keystroke doesn't fire an RPC call.
+        from PySide6.QtCore import QTimer
+        self._reestimate_timer = QTimer(self)
+        self._reestimate_timer.setSingleShot(True)
+        self._reestimate_timer.setInterval(400)
+        self._reestimate_timer.timeout.connect(self._reestimate_gas)
+        self._last_estimated_recipient: Optional[str] = None
+        self.recipient_edit.textChanged.connect(
+            lambda _t: self._reestimate_timer.start()
+        )
+
         # Render an empty-state preview right away so the user can
         # see the shape of the tx they're about to build before they
         # type anything.
         self._refresh_decoded_view()
-
-        # Kick a gas estimation with placeholder calldata so the
-        # spinners pre-fill quickly. ERC-20 transfer gas is roughly
-        # constant regardless of the actual recipient/amount; we
-        # don't re-estimate as the user types.
-        placeholder = self._build_request(use_placeholders=True)
-        gas_worker = GasSuggestionWorker(chain, placeholder)
-        gas_worker.suggested.connect(self._on_gas_suggested)
-        gas_worker.failed.connect(self._on_gas_failed)
-        self._start_worker(gas_worker)
 
     # --- header helpers -------------------------------------------
 
@@ -2732,7 +2740,13 @@ class SendTokenDialog(QDialog):
         except Exception:
             return None
 
-    def _parsed_amount_raw(self) -> Optional[int]:
+    def _parsed_amount_raw_unchecked(self) -> Optional[int]:
+        """Parse the amount field WITHOUT comparing against the
+        cached balance. The calldata preview uses this so that
+        typing always updates the rendered transfer(_to, _value) —
+        even when the cached balance is stale (e.g. right after a
+        dapp swap before our balances refresh). The Send button
+        still gates on the balance via ``_parsed_amount_raw``."""
         text = self.amount_edit.text().strip()
         if not text:
             return None
@@ -2743,9 +2757,17 @@ class SendTokenDialog(QDialog):
         if amount <= 0:
             return None
         amount_raw = int(amount * (Decimal(10) ** self._asset["decimals"]))
-        if amount_raw <= 0 or amount_raw > self._asset["balance_raw"]:
+        return amount_raw if amount_raw > 0 else None
+
+    def _parsed_amount_raw(self) -> Optional[int]:
+        """Strict parse — used to enable/disable the Send button.
+        Returns None if the typed amount exceeds the wallet-cached
+        balance. The cap protects against the obvious mistake but
+        is not authoritative (cache can lag the chain by minutes)."""
+        raw = self._parsed_amount_raw_unchecked()
+        if raw is None or raw > self._asset["balance_raw"]:
             return None
-        return amount_raw
+        return raw
 
     def _update_state(self) -> None:
         ok = (
@@ -2769,7 +2791,12 @@ class SendTokenDialog(QDialog):
             )
             return
         recipient = self._parsed_recipient()
-        amount_raw = self._parsed_amount_raw()
+        # Unchecked variant: the preview should reflect whatever
+        # the user typed, even if it exceeds our cached balance
+        # snapshot (the cache lags the chain — typically after a
+        # dapp swap). The Send button still gates on the strict
+        # variant below in ``_update_state``.
+        amount_raw = self._parsed_amount_raw_unchecked()
         # Use sentinels for missing inputs so the user sees the
         # shape of the call as they type, rather than an empty box.
         recipient_str = recipient if recipient is not None else "0x…"
@@ -2816,6 +2843,44 @@ class SendTokenDialog(QDialog):
 
     def _on_gas_failed(self, msg: str) -> None:
         self.base_fee_lbl.setText(f"(failed: {msg})")
+
+    def _reestimate_gas(self) -> None:
+        """Re-run gas estimation against the recipient the user has
+        actually typed. Called debounced from recipient_edit's
+        textChanged. Skips when the recipient is invalid (still
+        typing) or unchanged since the last estimate (no
+        duplicate calls)."""
+        recipient = self._parsed_recipient()
+        if recipient is None:
+            return
+        if recipient == self._last_estimated_recipient:
+            return
+        self._last_estimated_recipient = recipient
+        # Use the placeholder amount (1 unit) — amount barely
+        # affects the storage-cost calculus; recipient is what
+        # matters. The Confirm-time finalised request still uses
+        # the user's actual amount, so this only influences the
+        # gas LIMIT we set.
+        if self._asset["is_native"]:
+            probe = SigningRequest(
+                chain_id=self.chain.chain_id,
+                from_addr=self._from_addr,
+                to_addr=recipient,
+                value_wei=1,
+                data="0x",
+            )
+        else:
+            probe = SigningRequest(
+                chain_id=self.chain.chain_id,
+                from_addr=self._from_addr,
+                to_addr=to_checksum_address(self._asset["contract"]),
+                value_wei=0,
+                data=_erc20_transfer_calldata(recipient, 1),
+            )
+        gas_worker = GasSuggestionWorker(self.chain, probe)
+        gas_worker.suggested.connect(self._on_gas_suggested)
+        gas_worker.failed.connect(self._on_gas_failed)
+        self._start_worker(gas_worker)
 
     def _update_max_total(self) -> None:
         if not self._gas_ready:
@@ -2866,21 +2931,15 @@ class SendTokenDialog(QDialog):
 
     # --- request construction --------------------------------------
 
-    def _build_request(self, *, use_placeholders: bool = False
-                       ) -> SigningRequest:
+    def _build_request(self) -> SigningRequest:
         """Construct the SigningRequest from the current widget
-        state. ``use_placeholders=True`` substitutes the from-addr
-        (for recipient) and 1 unit (for amount) so the gas worker
-        has valid inputs at dialog-open time, before the user has
-        typed anything."""
-        if use_placeholders:
-            recipient = self._from_addr
-            amount_raw = 1
-        else:
-            recipient = self._parsed_recipient()
-            amount_raw = self._parsed_amount_raw()
-            if recipient is None or amount_raw is None:
-                raise SignerError("Recipient or amount missing")
+        state. Raises SignerError if recipient or amount aren't
+        valid (the dialog's gas-estimate path checks recipient
+        independently via ``_parsed_recipient``)."""
+        recipient = self._parsed_recipient()
+        amount_raw = self._parsed_amount_raw()
+        if recipient is None or amount_raw is None:
+            raise SignerError("Recipient or amount missing")
         if self._asset["is_native"]:
             return SigningRequest(
                 chain_id=self.chain.chain_id,

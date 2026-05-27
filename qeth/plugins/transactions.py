@@ -627,8 +627,24 @@ class TransactionsPlugin(Plugin):
         cached entry for this (chain, hash) and replace it with the
         confirmed form built from the receipt. No-op if the entry
         isn't in cache (e.g. already overwritten by a Blockscout
-        refresh — the new entry wins)."""
+        refresh — the new entry wins).
+
+        Also forwards the receipt to TokensPlugin so its Transfer-
+        event scan can pick up any ERC-20 contract that touched
+        one of our wallets — this is the only way to learn about
+        the receive-side of a swap before Blockscout indexes it
+        (3+ minutes lag on busy chains)."""
         chain_id = chain.chain_id
+        # Forward to TokensPlugin regardless of whether we still
+        # have a matching pending entry — the tokens scan only
+        # cares about the logs, not the local cache state.
+        if self.host is not None:
+            tokens_plugin = getattr(self.host, "tokens_plugin", None)
+            if tokens_plugin is not None:
+                try:
+                    tokens_plugin.note_receipt_logs(chain, receipt)
+                except Exception:
+                    log.exception("note_receipt_logs failed")
         for key, txs in list(self._cache.items()):
             if key[0] != chain_id:
                 continue

@@ -1013,6 +1013,309 @@ class TestCuratedListAsDiscoverySource:
         ) == ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"]
 
 
+class TestReceiptTransferScan:
+    """When a tx confirms, parse the receipt logs for ERC-20
+    Transfer events whose from/to is one of our wallets. Those
+    contracts join the next multicall set for the affected wallet —
+    catches swap output tokens at chain-head speed instead of
+    waiting minutes for Blockscout to index them."""
+
+    TRANSFER_TOPIC0 = (
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    )
+    USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    ME = "0x747e9Baf074A770655d0C2EF4A46dB83Ad1Ed93F"
+    UNI_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C05861564"
+
+    def _topic_addr(self, addr: str) -> str:
+        # ERC-20 Transfer encodes addresses as 32-byte left-padded
+        # hex strings in topics[1] / topics[2].
+        return "0x" + "0" * 24 + addr[2:].lower()
+
+    def _swap_receipt(self) -> dict:
+        # Synthesised receipt: ME sends USDT to the router, gets
+        # USDC back. The dust filter would still drop unrelated
+        # transfers in real receipts; here we only assert which
+        # contracts get extracted.
+        return {
+            "logs": [
+                {
+                    "address": self.USDT,
+                    "topics": [
+                        self.TRANSFER_TOPIC0,
+                        self._topic_addr(self.ME),
+                        self._topic_addr(self.UNI_ROUTER),
+                    ],
+                    "data": "0x" + "00" * 32,
+                },
+                {
+                    "address": self.USDC,
+                    "topics": [
+                        self.TRANSFER_TOPIC0,
+                        self._topic_addr(self.UNI_ROUTER),
+                        self._topic_addr(self.ME),
+                    ],
+                    "data": "0x" + "00" * 32,
+                },
+            ],
+        }
+
+    def test_extracts_contracts_from_swap_receipt(self, tokens_plugin):
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        tokens_plugin.note_receipt_logs(ETH, self._swap_receipt())
+        key = (ETH.chain_id, self.ME.lower())
+        contracts = {c.lower() for c in tokens_plugin._receipt_contracts[key]}
+        assert contracts == {self.USDC.lower(), self.USDT.lower()}
+
+    def test_ignores_transfers_not_touching_our_wallets(
+        self, tokens_plugin,
+    ):
+        # Two unrelated addresses — neither is in our store.
+        other_a = "0x1111111111111111111111111111111111111111"
+        other_b = "0x2222222222222222222222222222222222222222"
+        receipt = {
+            "logs": [{
+                "address": self.USDC,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(other_a),
+                    self._topic_addr(other_b),
+                ],
+                "data": "0x" + "00" * 32,
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+        assert tokens_plugin._receipt_contracts == {}
+
+    def test_ignores_erc721_transfers(self, tokens_plugin):
+        # ERC-721 Transfer has the same selector but a 4th
+        # indexed topic (the tokenId). len(topics)!=3 must skip.
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        nft = "0x1234567890123456789012345678901234567890"
+        receipt = {
+            "logs": [{
+                "address": nft,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(self.UNI_ROUTER),
+                    self._topic_addr(self.ME),
+                    "0x" + "00" * 31 + "01",  # tokenId
+                ],
+                "data": "0x",
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+        assert tokens_plugin._receipt_contracts == {}
+
+    def test_handles_empty_or_missing_logs(self, tokens_plugin):
+        # Three flavours of "nothing to do" — must all no-op
+        # without raising.
+        tokens_plugin.note_receipt_logs(ETH, {})
+        tokens_plugin.note_receipt_logs(ETH, {"logs": []})
+        tokens_plugin.note_receipt_logs(ETH, None)
+        assert tokens_plugin._receipt_contracts == {}
+
+    def test_handles_attributedict_receipt_from_web3py(self, tokens_plugin):
+        # web3.py 7 returns receipts as AttributeDict which is a
+        # Mapping but NOT a dict subclass. The earlier
+        # ``isinstance(receipt, dict)`` early-return skipped every
+        # real receipt — discovery never picked up the post-tx
+        # balances. Real receipts must reach the loop.
+        from web3.datastructures import AttributeDict
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        receipt = AttributeDict({
+            "logs": [AttributeDict({
+                "address": self.USDC,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(self.UNI_ROUTER),
+                    self._topic_addr(self.ME),
+                ],
+                "data": "0x" + "00" * 32,
+            })],
+        })
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+        key = (ETH.chain_id, self.ME.lower())
+        assert self.USDC.lower() in {
+            c.lower() for c in tokens_plugin._receipt_contracts[key]
+        }
+
+    def test_handles_hexbytes_topics_from_web3py(self, tokens_plugin):
+        # web3.py 7 returns log topics as HexBytes — str(HexBytes(b'…'))
+        # is the BYTES literal, not the hex form. The earlier
+        # str(topics[0]).lower() == TRANSFER_TOPIC0 check silently
+        # never matched. Real receipts must work end-to-end.
+        from hexbytes import HexBytes
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        receipt = {
+            "logs": [{
+                "address": self.USDT,
+                "topics": [
+                    HexBytes(self.TRANSFER_TOPIC0),
+                    HexBytes(self._topic_addr(self.UNI_ROUTER)),
+                    HexBytes(self._topic_addr(self.ME)),
+                ],
+                "data": HexBytes("0x" + "00" * 32),
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+        key = (ETH.chain_id, self.ME.lower())
+        contracts = {c.lower() for c in tokens_plugin._receipt_contracts[key]}
+        assert contracts == {self.USDT.lower()}
+
+    def test_credits_received_tokens_directly_to_recipient_cache(
+        self, tokens_plugin,
+    ):
+        # The user's exact failing case: sender wallet broadcasts a
+        # USDT transfer to receiver wallet. After the receipt
+        # confirms, the receiver's CACHE must hold USDT — even if
+        # the receiver isn't the current view (so the next time
+        # the user opens it, USDT is already there).
+        from qeth.tokenlists import TokenListEntry
+        USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        # Curated entry → metadata prefill knows USDT.
+        tokens_plugin._token_lists._index = {
+            (1, USDT): TokenListEntry(
+                chain_id=1, address=USDT, symbol="USDT",
+                name="Tether USD", decimals=6, source="curated",
+            ),
+        }
+        tokens_plugin._prefill_metadata_from_token_lists()
+
+        # Synthesize a Transfer(ME ← someone, 500 USDT).
+        # 500 * 1e6 = 500_000_000 = 0x1DCD6500 padded to 32 bytes.
+        value_hex = "0x" + "0" * 56 + "1dcd6500"
+        sender = "0xD4fB1AEC8bEEb79c66603016A7c204FCbAA56E3B"
+        receipt = {
+            "logs": [{
+                "address": USDT,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(sender),
+                    self._topic_addr(self.ME),
+                ],
+                "data": value_hex,
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+
+        # Cache now has USDT @ 500_000_000 for ME.
+        cached = tokens_plugin._wallet_cache.load(1, self.ME.lower())
+        assert cached is not None
+        usdt_entries = [t for t in cached.tokens
+                        if t.contract.lower() == USDT.lower()]
+        assert len(usdt_entries) == 1
+        assert usdt_entries[0].balance_raw == 500_000_000
+        assert usdt_entries[0].symbol == "USDT"
+
+    def test_credit_bumps_existing_token_balance(self, tokens_plugin):
+        # If the recipient already had some of this token cached,
+        # apply the delta in place rather than appending a dup.
+        from qeth.wallet_cache import CachedToken, CachedWallet
+        USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        # Pre-seed cache with 100 USDT.
+        cw = CachedWallet(
+            chain_id=1, address=self.ME.lower(),
+            native_balance_wei=0,
+        )
+        cw.tokens.append(CachedToken(
+            contract=USDT, symbol="USDT", name="Tether USD",
+            decimals=6, logo_uri=None,
+            balance_raw=100_000_000, price_usd=None,
+            balance_updated=0, price_updated=0,
+        ))
+        tokens_plugin._wallet_cache.save(cw)
+
+        # Receive another 500 USDT.
+        value_hex = "0x" + "0" * 56 + "1dcd6500"
+        receipt = {
+            "logs": [{
+                "address": USDT,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(self.UNI_ROUTER),
+                    self._topic_addr(self.ME),
+                ],
+                "data": value_hex,
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+
+        cached = tokens_plugin._wallet_cache.load(1, self.ME.lower())
+        usdt_entries = [t for t in cached.tokens
+                        if t.contract.lower() == USDT.lower()]
+        assert len(usdt_entries) == 1  # no duplicate
+        # 100 + 500 = 600 USDT raw.
+        assert usdt_entries[0].balance_raw == 600_000_000
+
+    def test_credit_skips_unknown_token_without_metadata(
+        self, tokens_plugin,
+    ):
+        # If the inbound contract isn't in our metadata cache (not
+        # curated, never seen), don't fabricate a CachedToken with
+        # placeholder symbol/decimals — wait for the next full
+        # discovery to fetch metadata properly.
+        unknown = "0x" + "01" * 20
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        # Token_metadata cache empty (no prefill).
+        value_hex = "0x" + "0" * 56 + "1dcd6500"
+        receipt = {
+            "logs": [{
+                "address": unknown,
+                "topics": [
+                    self.TRANSFER_TOPIC0,
+                    self._topic_addr(self.UNI_ROUTER),
+                    self._topic_addr(self.ME),
+                ],
+                "data": value_hex,
+            }],
+        }
+        tokens_plugin.note_receipt_logs(ETH, receipt)
+
+        cached = tokens_plugin._wallet_cache.load(1, self.ME.lower())
+        # Either no cache file at all OR an empty token list —
+        # either way, no garbage entry was added.
+        if cached is not None:
+            assert not [t for t in cached.tokens
+                        if t.contract.lower() == unknown.lower()]
+        # And the contract IS stashed for the next discovery,
+        # which will fetch metadata properly.
+        key = (1, self.ME.lower())
+        assert unknown in {
+            c.lower() for c in tokens_plugin._receipt_contracts[key]
+        }
+
+    def test_receipt_extras_drained_into_discovery(self, tokens_plugin):
+        # Stash some contracts under (chain, addr) directly, then
+        # simulate on_discovered consuming them by popping the
+        # same key. After pop, the dict shouldn't carry them.
+        key = (ETH.chain_id, self.ME.lower())
+        tokens_plugin._receipt_contracts[key] = {self.USDC, self.USDT}
+        # Simulate on_discovered's drain.
+        drained = tokens_plugin._receipt_contracts.pop(key, set())
+        assert {c.lower() for c in drained} == {
+            self.USDC.lower(), self.USDT.lower(),
+        }
+        assert key not in tokens_plugin._receipt_contracts
+
+
 # --- WalletsPlugin ----------------------------------------------------------
 
 @pytest.fixture

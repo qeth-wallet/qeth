@@ -232,6 +232,12 @@ class TokensPlugin(Plugin):
         self._show_all = False
         self._displayed_view: Optional[tuple[int, str]] = None
         self._discovery_in_flight: set[tuple[int, str]] = set()
+        # Per (chain_id, addr_lower): contracts pulled from a
+        # confirmed tx receipt's Transfer logs since the last
+        # successful discovery for this wallet. Drained when that
+        # discovery runs (on_discovered unions them into the
+        # multicall set, then pop). See note_receipt_logs.
+        self._receipt_contracts: dict[tuple[int, str], set[str]] = {}
         # Lifecycle objects (built lazily / in attach).
         self._panel = None
         self._refresh_timer: Optional[QTimer] = None
@@ -381,6 +387,153 @@ class TokensPlugin(Plugin):
 
     # --- core refresh pipeline ---------------------------------------------
 
+    # keccak256("Transfer(address,address,uint256)") — the ERC-20
+    # transfer event signature. ERC-721 uses the SAME selector but
+    # with the tokenId as a third indexed topic (4 topics total),
+    # so a ``len(topics) == 3`` filter cleanly excludes 721s.
+    _TRANSFER_TOPIC0 = (
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    )
+
+    @staticmethod
+    def _topic_hex(topic) -> str:
+        """Normalise a log topic to a lowercase 0x-prefixed hex
+        string. web3.py 7 hands topics back as ``HexBytes``;
+        ``str(HexBytes(b'\\xdd...'))`` returns the BYTES literal
+        ``"b'\\xdd...'"``, not the hex form — comparing against a
+        ``"0xdd…"`` string never matches. Use ``.hex()`` (which
+        ``HexBytes`` defines as the raw hex without prefix) when
+        available, otherwise treat the value as already-a-string."""
+        if hasattr(topic, "hex"):
+            h = topic.hex()
+            return h if h.startswith("0x") else "0x" + h.lower()
+        return str(topic).lower()
+
+    def note_receipt_logs(self, chain, receipt) -> None:
+        """Called by TransactionsPlugin when a tx receipt comes in.
+        Parse the receipt's logs for ERC-20 Transfer events that
+        touch any of our wallets and stash the (token, wallet)
+        pairs for the next discovery refresh.
+
+        Without this, a swap (USDT → USDC, ETH → DAI, …) leaves
+        the receiving wallet showing only the old token until
+        Blockscout indexes the inbound — minutes. With it, the
+        moment the tx confirms we know which token contracts
+        touched our wallets and force them into the next multicall
+        set. Refresh fires immediately if the affected wallet is
+        the one currently being viewed."""
+        # web3.py 7 returns receipts as AttributeDict, which is a
+        # Mapping but NOT a dict subclass — so isinstance(receipt,
+        # dict) is False and skipping that way silently no-ops
+        # every call. Use duck-typing on .get() instead. A plain
+        # dict also matches (used in tests + the raw RPC path).
+        if receipt is None or not hasattr(receipt, "get"):
+            return
+        logs = receipt.get("logs")
+        if not logs:
+            return
+        our_addrs = {a["address"].lower() for a in self._store.accounts}
+        chain_id = chain.chain_id
+        affected_wallets: set[str] = set()
+        for log in logs:
+            topics = log.get("topics") or []
+            if len(topics) != 3:
+                continue
+            if self._topic_hex(topics[0]) != self._TRANSFER_TOPIC0:
+                continue
+            token = log.get("address")
+            if not token:
+                continue
+            # Topic addresses are 32-byte left-padded; take the
+            # right 20 bytes (40 hex chars) of the normalised topic.
+            from_lower = "0x" + self._topic_hex(topics[1])[-40:]
+            to_lower = "0x" + self._topic_hex(topics[2])[-40:]
+            # Parse the value (uint256 in log.data, not in topics).
+            try:
+                value = int(self._topic_hex(log.get("data") or "0x0"), 16)
+            except ValueError:
+                value = 0
+            for party, is_recipient in ((from_lower, False),
+                                          (to_lower, True)):
+                if party in our_addrs:
+                    key = (chain_id, party)
+                    self._receipt_contracts.setdefault(
+                        key, set()
+                    ).add(token)
+                    affected_wallets.add(party)
+                    # On the RECEIVING side, apply the credit
+                    # straight to the wallet's cache so the new
+                    # holding is visible the next time the user
+                    # views that wallet — without waiting for a
+                    # discovery cycle on a wallet they may not be
+                    # currently viewing. On the sender side we
+                    # rely on the user's normal-view refresh: the
+                    # sender's wallet is usually the active view
+                    # when a tx is broadcast, so its discovery
+                    # picks up the new (lower) balance moments
+                    # after the receipt comes in.
+                    if is_recipient and value > 0:
+                        self._apply_receipt_credit_to_cache(
+                            chain, party, token, value,
+                        )
+        if not affected_wallets or self.host is None:
+            return
+        current = self.host.selected_address
+        if current is None:
+            return
+        chain_now = self.host.current_chain()
+        if (chain_now.chain_id == chain_id
+                and current.lower() in affected_wallets):
+            self._invalidate_view_and_refresh()
+
+    def _apply_receipt_credit_to_cache(
+        self, chain, address_lower: str, contract: str, delta: int,
+    ) -> None:
+        """Bump the cached balance for (chain, address, contract)
+        by ``delta`` raw units. If the token isn't in the cache,
+        add it — but only when we have its metadata locally (from
+        the curated lists' prefill or a prior multicall). For
+        unknown contracts we skip; the next discovery will pick
+        them up with proper metadata. Saves the cache on the
+        worker thread."""
+        import time
+        cached = self._wallet_cache.load(chain.chain_id, address_lower)
+        contract_lower = contract.lower()
+        now = int(time.time())
+        if cached is None:
+            # No cache file yet — create one so the next view
+            # has the new holding to render.
+            cached = CachedWallet(
+                chain_id=chain.chain_id,
+                address=address_lower,
+                native_balance_wei=0,
+                native_balance_updated=0,
+            )
+        # Update in place if present.
+        for tok in cached.tokens:
+            if tok.contract.lower() == contract_lower:
+                tok.balance_raw = max(0, int(tok.balance_raw) + int(delta))
+                tok.balance_updated = now
+                self._wallet_cache.save(cached)
+                return
+        # Otherwise add it — but only with metadata in hand.
+        meta = self._token_metadata.get(chain.chain_id, contract_lower)
+        if meta is None:
+            return
+        entry = self._token_lists.get(chain.chain_id, contract_lower)
+        cached.tokens.append(CachedToken(
+            contract=contract_lower,
+            symbol=meta["symbol"],
+            name=meta["name"],
+            decimals=meta["decimals"],
+            logo_uri=entry.logo_uri if entry else None,
+            balance_raw=int(delta),
+            price_usd=None,
+            balance_updated=now,
+            price_updated=0,
+        ))
+        self._wallet_cache.save(cached)
+
     def _sibling_held_contracts(self, chain_id: int,
                                  self_address: str) -> set[str]:
         """Every token contract that has appeared in any OTHER
@@ -495,11 +648,18 @@ class TokensPlugin(Plugin):
             curated = set(
                 self._token_lists.addresses_for_chain(chain.chain_id)
             )
+            # Drain receipt-derived contracts for THIS view — popped
+            # so they don't permanently inflate the multicall set
+            # once we've already discovered them.
+            receipt_extras = self._receipt_contracts.pop(
+                (chain.chain_id, address.lower()), set()
+            )
             seen = set()
             contracts: list[str] = []
             for c in (
                 [b.contract for b in blockscout_tokens]
-                + sorted(forced) + sorted(siblings) + sorted(curated)
+                + sorted(forced) + sorted(siblings)
+                + sorted(receipt_extras) + sorted(curated)
             ):
                 cl = c.lower()
                 if cl in seen:

@@ -852,6 +852,101 @@ class TestTokensPlugin:
         assert tokens_plugin._store.is_force_shown(1, good)
 
 
+class TestSiblingHeldContracts:
+    """Cross-wallet token cross-check: when refreshing wallet B, we
+    extend the multicall set with contracts that any of our OTHER
+    wallets hold a positive balance of on the same chain. Catches
+    intra-wallet transfers ahead of Blockscout's next discovery
+    cycle (which can lag by minutes)."""
+
+    USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    A = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+    B = "0xa9D1e08C7793af67e9d92fe308d5697FB81d3E43"
+
+    def _populate(self, plugin, *, sibling_addr, contracts_with_balance,
+                  contracts_zero=()):
+        from qeth.wallet_cache import CachedToken, CachedWallet
+        # Register the sibling as one of "our" accounts.
+        plugin._store.add_account({
+            "address": sibling_addr, "source": "watch_only",
+            "label": "Sibling",
+        })
+        cw = CachedWallet(
+            chain_id=1, address=sibling_addr.lower(),
+            native_balance_wei=0,
+        )
+        for c in contracts_with_balance:
+            cw.tokens.append(CachedToken(
+                contract=c.lower(), symbol="X", name="X",
+                decimals=6, logo_uri=None, balance_raw=1_000_000,
+                price_usd=None, balance_updated=0, price_updated=0,
+            ))
+        for c in contracts_zero:
+            cw.tokens.append(CachedToken(
+                contract=c.lower(), symbol="X", name="X",
+                decimals=6, logo_uri=None, balance_raw=0,
+                price_usd=None, balance_updated=0, price_updated=0,
+            ))
+        plugin._wallet_cache.save(cw)
+
+    def test_returns_contracts_held_by_other_wallets(
+        self, tokens_plugin,
+    ):
+        self._populate(
+            tokens_plugin, sibling_addr=self.B,
+            contracts_with_balance=[self.USDC, self.DAI],
+        )
+        out = tokens_plugin._sibling_held_contracts(1, self.A)
+        assert {c.lower() for c in out} == {
+            self.USDC.lower(), self.DAI.lower(),
+        }
+
+    def test_excludes_self_address(self, tokens_plugin):
+        # Cache the CURRENT wallet too — it must NOT appear in its
+        # own sibling list (would cause double-counting).
+        self._populate(
+            tokens_plugin, sibling_addr=self.A,
+            contracts_with_balance=[self.USDC],
+        )
+        out = tokens_plugin._sibling_held_contracts(1, self.A)
+        assert out == set()
+
+    def test_includes_zero_balance_holdings(self, tokens_plugin):
+        # A wallet that recently sent its full USDC stash to another
+        # of our wallets would have balance_raw = 0 in cache. If we
+        # filtered those out, the recipient's cross-check would
+        # never query USDC and we'd miss the inbound. Include them.
+        self._populate(
+            tokens_plugin, sibling_addr=self.B,
+            contracts_with_balance=[self.USDC],
+            contracts_zero=[self.DAI],
+        )
+        out = tokens_plugin._sibling_held_contracts(1, self.A)
+        assert {c.lower() for c in out} == {
+            self.USDC.lower(), self.DAI.lower(),
+        }
+
+    def test_scoped_to_chain_id(self, tokens_plugin):
+        # Sibling caches are per (chain, address). A DAI holding on
+        # mainnet must not leak into the Polygon multicall set.
+        self._populate(
+            tokens_plugin, sibling_addr=self.B,
+            contracts_with_balance=[self.USDC],
+        )
+        out_polygon = tokens_plugin._sibling_held_contracts(137, self.A)
+        assert out_polygon == set()
+
+    def test_handles_no_other_wallets(self, tokens_plugin):
+        # Only the current wallet in the store — must return empty,
+        # never raise.
+        tokens_plugin._store.add_account({
+            "address": self.A, "source": "ledger", "label": "Me",
+        })
+        out = tokens_plugin._sibling_held_contracts(1, self.A)
+        assert out == set()
+
+
 # --- WalletsPlugin ----------------------------------------------------------
 
 @pytest.fixture

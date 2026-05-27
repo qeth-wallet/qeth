@@ -381,6 +381,45 @@ class TokensPlugin(Plugin):
 
     # --- core refresh pipeline ---------------------------------------------
 
+    def _sibling_held_contracts(self, chain_id: int,
+                                 self_address: str) -> set[str]:
+        """Every token contract that has appeared in any OTHER
+        wallet's cache on this chain, returned as checksum
+        addresses suitable for merging into the multicall set.
+
+        Why this exists: a user can send USDC from wallet A to
+        wallet B inside qeth; B's Blockscout token-discovery is a
+        few blocks behind chain head and may miss the inbound
+        transfer for minutes. The receiving wallet then looks
+        empty in the UI until the next discovery cycle. By cross-
+        checking balanceOf on the union of "every token any of my
+        OTHER wallets has ever cached" we catch the new holding at
+        chain-head speed without waiting for Blockscout to catch
+        up.
+
+        We deliberately DON'T filter on the sibling's current
+        balance > 0: if A sent its full USDC stash to B and A's
+        cache was refreshed first, A would show 0 USDC and a
+        ``balance > 0`` filter would drop USDC from the set — so
+        the cross-check on B would never query it. Including
+        zero-balance siblings catches that exact case. The cost is
+        a few extra multicall slots per refresh; cheap.
+
+        Reads cached snapshots only — no extra RPC. Excludes the
+        current address."""
+        self_lower = self_address.lower()
+        contracts: set[str] = set()
+        for acct in self._store.accounts:
+            sibling = acct.get("address", "")
+            if not sibling or sibling.lower() == self_lower:
+                continue
+            cached = self._wallet_cache.load(chain_id, sibling)
+            if cached is None:
+                continue
+            for token in cached.tokens:
+                contracts.add(token.contract)
+        return contracts
+
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
             return
@@ -395,7 +434,12 @@ class TokensPlugin(Plugin):
             self._displayed_view = view_key
             # Only kick off a multicall balance refresh once per view;
             # repeated _refresh calls for the same view don't need
-            # another round-trip.
+            # another round-trip. We deliberately DON'T inject
+            # sibling-held contracts here — _on_balance_refresh
+            # only updates tokens that are already in the cached
+            # set (no metadata for new contracts at this stage), so
+            # the extra calls would be wasted. The full discovery
+            # pass below picks up sibling-only contracts properly.
             bw = BalanceWorker(
                 chain, address, [t.contract for t in cached.tokens],
             )
@@ -431,12 +475,20 @@ class TokensPlugin(Plugin):
             # multicall (immutable, cached), with Blockscout's values as
             # a one-shot fallback for contracts whose multicall reverts.
             # Always include force-shown contracts in the multicall set,
-            # even if Blockscout didn't return them.
+            # even if Blockscout didn't return them. Also union with
+            # contracts held by our OTHER wallets — same idea: catch
+            # an inbound transfer from one of our own wallets ahead
+            # of Blockscout's next discovery cycle (which lags chain
+            # head by minutes).
             forced = {a for (cid, a) in self._store.shown_tokens
                       if cid == chain.chain_id}
+            siblings = self._sibling_held_contracts(chain.chain_id, address)
             seen = set()
             contracts: list[str] = []
-            for c in [b.contract for b in blockscout_tokens] + sorted(forced):
+            for c in (
+                [b.contract for b in blockscout_tokens]
+                + sorted(forced) + sorted(siblings)
+            ):
                 cl = c.lower()
                 if cl in seen:
                     continue

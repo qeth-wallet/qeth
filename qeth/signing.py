@@ -112,11 +112,128 @@ def parse_send_transaction_params(
     )
 
 
+@dataclass
+class MessageSigningRequest:
+    """``personal_sign`` request — sign a human-readable text or
+    raw bytes prefixed with the EIP-191 personal-message tag
+    (``\\x19Ethereum Signed Message:\\n<len>``).
+
+    ``raw`` is the message bytes (NOT 0x-prefixed). The dialog
+    can render it as UTF-8 when it decodes cleanly, else hex.
+    """
+    from_addr: str
+    raw: bytes
+    origin: Optional[str] = None
+
+
+@dataclass
+class TypedDataSigningRequest:
+    """``eth_signTypedData_v4`` request — EIP-712 structured data.
+
+    ``typed_data`` is the parsed JSON object with ``domain``,
+    ``types``, ``primaryType``, and ``message``. Dialog renders
+    a tree of the message; signer uses ``encode_typed_data``
+    + ``Account.sign_hash`` (hot wallet) or Ledger's typed-data
+    flow (Ledger).
+    """
+    from_addr: str
+    typed_data: dict
+    origin: Optional[str] = None
+
+
+def parse_personal_sign_params(
+    params: list, *, origin: Optional[str] = None,
+) -> MessageSigningRequest:
+    """Parse the dapp's ``personal_sign`` params into a typed
+    request.
+
+    EIP-191 wire shape: ``personal_sign(message, address)`` —
+    yes, message FIRST in personal_sign, the opposite of
+    ``eth_sign(address, message)``. Both message and address
+    are hex-encoded. We accept either order by sniffing which
+    arg looks like an address; lots of dapps in the wild get
+    the order wrong.
+
+    ``message`` may also arrive as a plain UTF-8 string with no
+    ``0x`` prefix (some legacy paths); treat anything that isn't
+    valid hex as the literal string."""
+    if len(params) < 2:
+        raise SignerError("personal_sign expects [message, address]")
+    a, b = params[0], params[1]
+    # Sniff which arg is the address.
+    def _looks_like_addr(x) -> bool:
+        return (isinstance(x, str) and x.startswith("0x")
+                and len(x) == 42)
+    if _looks_like_addr(a) and not _looks_like_addr(b):
+        message_raw, addr = b, a
+    else:
+        message_raw, addr = a, b
+    try:
+        from_addr = to_checksum_address(addr)
+    except Exception as e:
+        raise SignerError(f"invalid signer address: {e}") from e
+    raw = _decode_message_bytes(message_raw)
+    return MessageSigningRequest(from_addr=from_addr, raw=raw, origin=origin)
+
+
+def _decode_message_bytes(value) -> bytes:
+    """``personal_sign`` messages arrive as hex (``0x...``) or as
+    plain UTF-8 (legacy). Try hex first; fall back to UTF-8.
+    Returns the raw bytes BEFORE the EIP-191 prefix is added."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    s = str(value)
+    if s.startswith("0x") or s.startswith("0X"):
+        try:
+            return bytes.fromhex(s[2:])
+        except ValueError:
+            pass
+    return s.encode("utf-8")
+
+
+def parse_typed_data_params(
+    params: list, *, origin: Optional[str] = None,
+) -> TypedDataSigningRequest:
+    """Parse the dapp's ``eth_signTypedData_v4`` params:
+    ``[address, typedData]``. ``typedData`` may be a JSON string
+    or an already-parsed object (some clients serialise; some
+    don't — accept both)."""
+    if len(params) < 2:
+        raise SignerError(
+            "eth_signTypedData_v4 expects [address, typedData]",
+        )
+    addr_raw, data_raw = params[0], params[1]
+    try:
+        from_addr = to_checksum_address(addr_raw)
+    except Exception as e:
+        raise SignerError(f"invalid signer address: {e}") from e
+    if isinstance(data_raw, str):
+        import json as _json
+        try:
+            typed = _json.loads(data_raw)
+        except Exception as e:
+            raise SignerError(f"typed data not valid JSON: {e}") from e
+    else:
+        typed = data_raw
+    if not isinstance(typed, dict):
+        raise SignerError("typed data must be an object")
+    return TypedDataSigningRequest(
+        from_addr=from_addr, typed_data=typed, origin=origin,
+    )
+
+
 class Signer(ABC):
-    """Backend that can produce a signed-and-RLP-encoded transaction
-    for a given finalised request. ``can_sign`` lets the dialog
-    refuse the request up front when the ``from`` address has no
-    known signer."""
+    """Backend that can produce a signed payload for a given
+    request. Three flavours of request:
+
+    - ``SigningRequest`` → signed-and-RLP-encoded transaction
+      bytes, ready for ``eth_sendRawTransaction``.
+    - ``MessageSigningRequest`` → ``personal_sign`` 65-byte
+      ECDSA signature.
+    - ``TypedDataSigningRequest`` → EIP-712 typed-data signature.
+
+    ``can_sign`` lets the caller refuse up front when the
+    ``from`` address has no known signer."""
 
     @abstractmethod
     def can_sign(self, address: str) -> bool:
@@ -125,6 +242,16 @@ class Signer(ABC):
     @abstractmethod
     def sign(self, req: SigningRequest, chain) -> bytes:
         """Return the raw bytes to hand to ``eth_sendRawTransaction``."""
+
+    @abstractmethod
+    def sign_message(self, req: MessageSigningRequest) -> bytes:
+        """Return the 65-byte ``personal_sign`` signature for the
+        EIP-191 prefixed message. No chain context — message
+        signatures are chain-agnostic."""
+
+    @abstractmethod
+    def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
+        """Return the 65-byte EIP-712 signature."""
 
 
 class SignerBridge(QObject):
@@ -139,10 +266,14 @@ class SignerBridge(QObject):
     # awaiting RPC coroutine never resumes.
     request_received = Signal(object, object)
 
-    async def submit_async(self, req: SigningRequest) -> str:
+    async def submit_async(self, req) -> str:
         """Called from the aiohttp event loop. Emits the signal
         (cross-thread, queued onto the Qt main loop) and awaits the
-        future. Returns the broadcast tx hash, or raises
+        future. ``req`` is one of ``SigningRequest``,
+        ``MessageSigningRequest``, or ``TypedDataSigningRequest`` —
+        the slot dispatches by type. The future's resolved value
+        is a 0x-prefixed hex string: a tx hash for ``SigningRequest``,
+        a 65-byte signature for the message types. Raises
         ``SignerError`` on cancel / signing failure."""
         fut: Future = Future()
         self.request_received.emit(req, fut)
@@ -236,3 +367,48 @@ class SignAndBroadcastWorker(QThread):
             self.failed.emit(f"Broadcast failed: {explain_rpc_error(e)}")
             return
         self.broadcast.emit(tx_hash)
+
+
+class SignMessageWorker(QThread):
+    """Off-main-thread orchestrator for personal_sign and
+    eth_signTypedData_v4. Hot wallets call scrypt + Account.sign_*
+    here (slow), Ledger calls block waiting for the user to confirm
+    on the device — either way the work must not block the UI.
+
+    Accepts either a ``MessageSigningRequest`` (personal_sign) or
+    a ``TypedDataSigningRequest`` (EIP-712); dispatches to the
+    matching signer method. The emitted signature is a 0x-prefixed
+    65-byte hex string ready to hand back to the dapp."""
+
+    signed = Signal(str)      # 0x-prefixed signature hex
+    failed = Signal(str)      # human-readable reason
+
+    def __init__(self, signer: Signer, req, parent=None):
+        super().__init__(parent)
+        self._signer = signer
+        self._req = req
+
+    def run(self) -> None:
+        try:
+            if isinstance(self._req, MessageSigningRequest):
+                raw = self._signer.sign_message(self._req)
+            elif isinstance(self._req, TypedDataSigningRequest):
+                raw = self._signer.sign_typed_data(self._req)
+            else:
+                raise SignerError(
+                    f"unsupported request type {type(self._req).__name__}"
+                )
+        except SignerError as e:
+            self.failed.emit(str(e))
+            return
+        except Exception as e:
+            log.exception("message signer raised unexpectedly")
+            self.failed.emit(f"Signing failed: {e}")
+            return
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) != 65:
+            self.failed.emit(
+                f"unexpected signature shape: {type(raw).__name__} "
+                f"len={len(raw) if isinstance(raw, (bytes, bytearray)) else '?'}",
+            )
+            return
+        self.signed.emit("0x" + bytes(raw).hex())

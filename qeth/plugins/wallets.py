@@ -325,6 +325,7 @@ class WalletsPlugin(Plugin):
         self._details = DetailsPanel()
         self._details.set_default_requested.connect(self._set_default)
         self._details.label_changed.connect(self._on_label_changed)
+        self._details.sign_message_requested.connect(self._on_sign_message)
         details_wrap = QFrame()
         details_wrap.setFrameShape(QFrame.StyledPanel)
         dlay = QVBoxLayout(details_wrap)
@@ -931,6 +932,15 @@ class WalletsPlugin(Plugin):
         # Re-run selection to refresh the details-panel button state.
         self._on_tree_selection()
 
+    def _on_sign_message(self, address: str) -> None:
+        """Forward to host. ``MainWindow.open_sign_message_dialog``
+        runs the compose + review + signing flow."""
+        if self.host is None:
+            return
+        opener = getattr(self.host, "open_sign_message_dialog", None)
+        if callable(opener):
+            opener(address)
+
 
 # --- DetailsPanel + AddLedgerDialog (moved from qeth.ui) -------------------
 
@@ -946,6 +956,10 @@ class DetailsPanel(QWidget):
     label_changed = Signal(str, str)
 
     set_default_requested = Signal(str)
+    # Emitted when the user clicks "Sign message…" on this account.
+    # The plugin forwards it to the host (MainWindow) which opens
+    # the ComposeMessageDialog → SignMessageDialog flow.
+    sign_message_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1031,8 +1045,40 @@ class DetailsPanel(QWidget):
         self.set_default_btn.clicked.connect(
             lambda: self._current and self.set_default_requested.emit(self._current)
         )
-        # Stretch pushes the button to the very bottom of the panel.
+
+        # "Sign message…" — opens the compose dialog for the
+        # currently-shown account. Disabled when nothing's
+        # selected or when the account has no signer (watch-only).
+        self.sign_message_btn = QPushButton("Sign message…")
+        _sig_icon = QIcon.fromTheme(
+            "document-edit",
+            QIcon.fromTheme(
+                "edit-paste",
+                QApplication.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            ),
+        )
+        if not _sig_icon.isNull() and _sig_icon.availableSizes():
+            self.sign_message_btn.setIcon(_sig_icon)
+        self.sign_message_btn.setToolTip(
+            "Sign a text message or EIP-712 typed-data object with "
+            "this account's key. Watch-only accounts can't sign."
+        )
+        self.sign_message_btn.setEnabled(False)
+        self.sign_message_btn.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred,
+        )
+        self.sign_message_btn.setMinimumHeight(
+            self.sign_message_btn.sizeHint().height()
+        )
+        self.sign_message_btn.clicked.connect(
+            lambda: self._current and self.sign_message_requested.emit(
+                self._current
+            )
+        )
+
+        # Stretch pushes the buttons to the very bottom of the panel.
         v.addStretch(1)
+        v.addWidget(self.sign_message_btn)
         v.addWidget(self.set_default_btn)
         self._current: str | None = None
         # The label we last loaded into the title field; used by
@@ -1078,6 +1124,9 @@ class DetailsPanel(QWidget):
                 "Make this the address dapps see (returned by "
                 "eth_accounts over the local JSON-RPC server)"
             )
+        # Same key-bearing-account check as Connect-to-browser:
+        # watch-only can't sign messages.
+        self.sign_message_btn.setEnabled(not is_watch_only)
         self._render_qr(account["address"])
 
     def _render_qr(self, address: str) -> None:
@@ -1103,6 +1152,7 @@ class DetailsPanel(QWidget):
         self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
         self.set_default_btn.setText("Connect to browser")
+        self.sign_message_btn.setEnabled(False)
 
     def _on_label_committed(self) -> None:
         """Label editingFinished: emit ``label_changed`` so the

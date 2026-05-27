@@ -1081,6 +1081,167 @@ class TestRpcDispatchSendTransaction:
         assert "cancelled" in ei.value.message.lower()
 
 
+class TestParsePersonalSignParams:
+    """``personal_sign`` is the message-first cousin of ``eth_sign``
+    (which is address-first). Dapps confuse the two; the parser
+    sniffs which arg is the address rather than trusting order."""
+
+    def test_message_first_address_second(self):
+        from qeth.signing import parse_personal_sign_params
+        req = parse_personal_sign_params([
+            "0x" + b"hello".hex(),
+            ADDR_CHECKSUM,
+        ])
+        assert req.from_addr == ADDR_CHECKSUM
+        assert req.raw == b"hello"
+
+    def test_address_first_message_second(self):
+        from qeth.signing import parse_personal_sign_params
+        req = parse_personal_sign_params([
+            ADDR_CHECKSUM,
+            "0x" + b"hello".hex(),
+        ])
+        assert req.from_addr == ADDR_CHECKSUM
+        assert req.raw == b"hello"
+
+    def test_plain_utf8_message_no_hex_prefix(self):
+        from qeth.signing import parse_personal_sign_params
+        req = parse_personal_sign_params([
+            "Welcome to qeth!", ADDR_CHECKSUM,
+        ])
+        assert req.raw == b"Welcome to qeth!"
+
+    def test_missing_args_raises(self):
+        from qeth.signing import parse_personal_sign_params, SignerError
+        with pytest.raises(SignerError):
+            parse_personal_sign_params([ADDR_CHECKSUM])
+
+
+class TestParseTypedDataParams:
+    """``eth_signTypedData_v4`` accepts either a JSON-string
+    second arg or an already-parsed object. Both must work."""
+
+    def _typed(self) -> dict:
+        return {
+            "domain": {"name": "x", "version": "1", "chainId": 1,
+                       "verifyingContract": "0x" + "00" * 20},
+            "types": {"EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ]},
+            "primaryType": "EIP712Domain",
+            "message": {},
+        }
+
+    def test_accepts_dict(self):
+        from qeth.signing import parse_typed_data_params
+        req = parse_typed_data_params([ADDR_CHECKSUM, self._typed()])
+        assert req.from_addr == ADDR_CHECKSUM
+        assert req.typed_data["primaryType"] == "EIP712Domain"
+
+    def test_accepts_json_string(self):
+        import json as _json
+        from qeth.signing import parse_typed_data_params
+        req = parse_typed_data_params(
+            [ADDR_CHECKSUM, _json.dumps(self._typed())],
+        )
+        assert req.typed_data["domain"]["name"] == "x"
+
+    def test_bad_json_raises(self):
+        from qeth.signing import parse_typed_data_params, SignerError
+        with pytest.raises(SignerError):
+            parse_typed_data_params([ADDR_CHECKSUM, "not-json"])
+
+
+class TestRpcDispatchMessageSigning:
+    """eth_sign is refused; personal_sign and eth_signTypedData_v*
+    flow through the bridge."""
+
+    def _make_server(self, bridge=None):
+        from unittest.mock import MagicMock
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.chains = DEFAULT_CHAINS
+        return RpcServer(store, signer_bridge=bridge)
+
+    def test_eth_sign_refused(self):
+        from qeth.rpc import RpcError
+        server = self._make_server()
+
+        async def go():
+            await server._dispatch("eth_sign", [ADDR_CHECKSUM, "0x00"])
+
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(go())
+        assert ei.value.code == -32601
+        assert "unsafe" in ei.value.message.lower()
+
+    def test_personal_sign_routes_through_bridge(self, qtbot):
+        from qeth.signing import (
+            MessageSigningRequest, SignerBridge,
+        )
+        bridge = SignerBridge()
+        captured: list = []
+
+        def on_request(req, fut):
+            captured.append(req)
+            bridge.resolve(fut, "0x" + "ab" * 65)
+        bridge.request_received.connect(on_request)
+
+        server = self._make_server(bridge=bridge)
+
+        async def go():
+            return await server._dispatch(
+                "personal_sign",
+                ["0x" + b"hi".hex(), ADDR_CHECKSUM],
+            )
+
+        result = asyncio.run(go())
+        assert result == "0x" + "ab" * 65
+        assert len(captured) == 1
+        assert isinstance(captured[0], MessageSigningRequest)
+        assert captured[0].raw == b"hi"
+
+    def test_signTypedData_v4_routes_through_bridge(self, qtbot):
+        from qeth.signing import (
+            SignerBridge, TypedDataSigningRequest,
+        )
+        bridge = SignerBridge()
+        captured: list = []
+
+        def on_request(req, fut):
+            captured.append(req)
+            bridge.resolve(fut, "0x" + "cd" * 65)
+        bridge.request_received.connect(on_request)
+
+        server = self._make_server(bridge=bridge)
+        typed = {
+            "domain": {"name": "x", "version": "1", "chainId": 1,
+                       "verifyingContract": "0x" + "00" * 20},
+            "types": {"EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ]},
+            "primaryType": "EIP712Domain",
+            "message": {},
+        }
+
+        async def go():
+            return await server._dispatch(
+                "eth_signTypedData_v4", [ADDR_CHECKSUM, typed],
+            )
+
+        result = asyncio.run(go())
+        assert result == "0x" + "cd" * 65
+        assert isinstance(captured[0], TypedDataSigningRequest)
+
+
 class TestRpcEventBroadcast:
     """EIP-1193 push events to connected WS clients —
     ``accountsChanged`` when the user picks a new default account,
@@ -1222,6 +1383,36 @@ class TestRpcEventBroadcast:
             and p["params"]["result"] == "0xa"
             for p in sent_payloads
         )
+
+    def test_set_rpc_chain_updates_id_and_emits_chainChanged(self):
+        # UI ⇒ RPC asymmetric link: when the user picks a chain in
+        # the wallet combo we update the RPC chain AND push
+        # chainChanged to subscribed dapps, so they see the new
+        # chainId immediately (Gnosis Pay-style "provided 1" errors
+        # go away once the user explicitly picks Gnosis in qeth).
+        from unittest.mock import AsyncMock, MagicMock
+        import json as _json
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.chains = DEFAULT_CHAINS
+        server = RpcServer(store)
+        ws = MagicMock(closed=False, send_str=AsyncMock())
+        server._ws_clients = {ws}
+        server._register_subscription(ws, "chainChanged")
+        server._register_subscription(ws, "networkChanged")
+
+        # _schedule_event needs a running loop to actually push;
+        # capture the calls instead so we can assert without
+        # spinning up asyncio.
+        seen: list = []
+        server._schedule_event = lambda t, r: seen.append((t, r))
+
+        server.set_rpc_chain(100)
+        assert server._rpc_chain_id == 100
+        assert ("chainChanged", "0x64") in seen
+        assert ("networkChanged", "100") in seen
 
     def test_rpc_chain_is_decoupled_from_store_chain(self):
         # The dapp's RPC chain is tracked separately from the

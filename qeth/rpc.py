@@ -8,7 +8,9 @@ from aiohttp import ClientSession, WSMsgType, web
 
 from .chains import Chain
 from .signing import (
-    SignerBridge, SignerError, parse_send_transaction_params,
+    SignerBridge, SignerError,
+    parse_personal_sign_params, parse_send_transaction_params,
+    parse_typed_data_params,
 )
 
 log = logging.getLogger("qeth.rpc")
@@ -189,6 +191,18 @@ class RpcServer:
         return ws
 
     # --- event push (Qt-thread → asyncio loop) ----------------------------
+
+    def set_rpc_chain(self, chain_id: int) -> None:
+        """Update the dapp-facing chain AND push chainChanged /
+        networkChanged to every subscribed dapp. Called when the
+        wallet UI's chain combo flips — the user's preferred
+        chain doubles as the dapp default until a dapp overrides
+        via ``wallet_switchEthereumChain``. Safe from any thread:
+        the broadcast is scheduled on the asyncio loop via
+        ``_schedule_event``."""
+        self._rpc_chain_id = int(chain_id)
+        self._schedule_event("chainChanged", hex(chain_id))
+        self._schedule_event("networkChanged", str(chain_id))
 
     def broadcast_accounts_changed(self, accounts: list[str]) -> None:
         """EIP-1193 ``accountsChanged`` event. Call from the Qt
@@ -416,12 +430,52 @@ class RpcServer:
                 raise RpcError(-32000, str(e))
             return tx_hash
 
+        if method == "eth_sign":
+            # ``eth_sign`` lets a dapp pass an arbitrary 32-byte
+            # hash for signing — dangerous because that hash
+            # could be a transaction digest in disguise. Modern
+            # wallets refuse it (Frame, MetaMask default off).
+            # Tell the dapp to use ``personal_sign``.
+            raise RpcError(
+                -32601,
+                "eth_sign refused (unsafe). Use personal_sign instead.",
+            )
+
+        if method in ("personal_sign", "personal_signMessage"):
+            if self.signer_bridge is None:
+                raise RpcError(-32601, "No signer wired up")
+            try:
+                msg_req = parse_personal_sign_params(params, origin=origin)
+            except SignerError as e:
+                raise RpcError(-32602, str(e))
+            try:
+                sig_hex = await self.signer_bridge.submit_async(msg_req)
+            except SignerError as e:
+                raise RpcError(-32000, str(e))
+            return sig_hex
+
         if method in (
-            "eth_signTransaction",
-            "personal_sign", "eth_sign",
-            "eth_signTypedData", "eth_signTypedData_v3", "eth_signTypedData_v4",
+            "eth_signTypedData",
+            "eth_signTypedData_v3",
+            "eth_signTypedData_v4",
         ):
-            raise RpcError(-32601, "Signing not implemented in MVP")
+            if self.signer_bridge is None:
+                raise RpcError(-32601, "No signer wired up")
+            try:
+                td_req = parse_typed_data_params(params, origin=origin)
+            except SignerError as e:
+                raise RpcError(-32602, str(e))
+            try:
+                sig_hex = await self.signer_bridge.submit_async(td_req)
+            except SignerError as e:
+                raise RpcError(-32000, str(e))
+            return sig_hex
+
+        if method == "eth_signTransaction":
+            raise RpcError(
+                -32601,
+                "eth_signTransaction not supported (use eth_sendTransaction)",
+            )
 
         return await self._proxy(method, params)
 

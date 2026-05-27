@@ -247,7 +247,17 @@ class MainWindow(QMainWindow):
         wires its lifecycle async (no ``exec``), so failures keep
         the dialog open and surface a popup parented to it. The
         bridge future is resolved / rejected from the worker
-        callbacks below."""
+        callbacks below.
+
+        ``req`` is one of: ``SigningRequest`` (transactions),
+        ``MessageSigningRequest`` (personal_sign), or
+        ``TypedDataSigningRequest`` (EIP-712). Dispatch by type."""
+        from .signing import (
+            MessageSigningRequest as _MR, TypedDataSigningRequest as _TR,
+        )
+        if isinstance(req, (_MR, _TR)):
+            self._launch_message_sign(req, fut)
+            return
         chain = next(
             (c for c in self.store.chains if c.chain_id == req.chain_id),
             None,
@@ -411,6 +421,183 @@ class MainWindow(QMainWindow):
         )
         self.start_worker(worker)
 
+    def _pick_signer_for(self, dialog, address: str):
+        """Pick a Signer instance based on the account's source.
+        For hot wallets, prompts for the passphrase on the main
+        thread BEFORE returning (so the worker's slow scrypt
+        decrypt can run off-thread). Returns
+        ``(signer, progress_text)`` or ``(None, None)`` if the
+        user cancelled the passphrase prompt / no signer exists.
+        Shows its own QMessageBox for the "no signer" case."""
+        from PySide6.QtWidgets import QMessageBox
+        addr_lower = address.lower()
+        acct = next(
+            (a for a in self.store.accounts
+             if a["address"].lower() == addr_lower),
+            None,
+        )
+        source = acct.get("source") if acct else None
+        if source == "ledger":
+            from .ledger import LedgerSigner
+            return (
+                LedgerSigner(self.store),
+                "Confirm on your Ledger device…",
+            )
+        if source == "hot":
+            from PySide6.QtWidgets import QInputDialog, QLineEdit
+            passphrase, ok = QInputDialog.getText(
+                dialog, "Hot wallet",
+                f"Passphrase for {address}:",
+                QLineEdit.Password, "",
+            )
+            if not ok:
+                return None, None
+            from .hot_wallet import HotWalletSigner
+            return (
+                HotWalletSigner(self.store, passphrase),
+                "Decrypting keystore and signing…",
+            )
+        QMessageBox.warning(
+            dialog, "Cannot sign",
+            f"No known signer for {address}",
+        )
+        return None, None
+
+    def _launch_message_sign(self, req, fut) -> None:
+        """Dapp-initiated personal_sign / eth_signTypedData_v4 flow.
+        Mirror of ``_on_signing_request`` for transactions, but
+        the worker is ``SignMessageWorker`` and the result is a
+        signature hex string rather than a tx hash."""
+        from .plugins.sign_message import SignMessageDialog
+        dialog = SignMessageDialog(req, parent=self)
+
+        def on_confirm():
+            self._run_message_sign(
+                req, dialog,
+                on_signed=lambda sig: self.signer_bridge.resolve(fut, sig),
+                on_fail=lambda msg: self.signer_bridge.reject(
+                    fut, SignerError(msg),
+                ),
+            )
+
+        dialog.sign_requested.connect(on_confirm)
+        dialog.rejected.connect(
+            lambda: self.signer_bridge.reject(
+                fut, SignerError("User cancelled"),
+            )
+        )
+        dialog.show()
+
+    def _run_message_sign(self, req, dialog, *, on_signed, on_fail) -> None:
+        """One signing attempt — picks the signer, prompts for
+        passphrase if it's a hot wallet, kicks SignMessageWorker
+        off the main thread. Errors keep the dialog open so the
+        user can retry."""
+        from .signing import SignMessageWorker
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        signer, progress_text = self._pick_signer_for(
+            dialog, req.from_addr,
+        )
+        if signer is None:
+            return
+        if not signer.can_sign(req.from_addr):
+            QMessageBox.warning(
+                dialog, "Cannot sign",
+                f"No known signer for {req.from_addr}",
+            )
+            return
+
+        dialog.set_signing_in_progress(True)
+        progress = QProgressDialog(
+            progress_text, None, 0, 0, dialog,
+        )
+        progress.setWindowTitle("Signing message")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        worker = SignMessageWorker(signer, req)
+        worker.signed.connect(
+            lambda sig, d=dialog, p=progress, ok=on_signed:
+                self._on_message_signed(sig, d, p, ok)
+        )
+        worker.failed.connect(
+            lambda msg, d=dialog, p=progress, of=on_fail:
+                self._on_message_sign_failed(msg, d, p, of)
+        )
+        self.start_worker(worker)
+
+    def _on_message_signed(self, sig_hex, dialog, progress, on_signed):
+        progress.close()
+        dialog.accept()
+        on_signed(sig_hex)
+
+    def _on_message_sign_failed(self, msg, dialog, progress, on_fail):
+        progress.close()
+        dialog.set_signing_in_progress(False)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(dialog, "Signing failed", msg)
+        on_fail(msg)
+
+    def open_sign_message_dialog(self, address: str) -> None:
+        """User-initiated 'sign anything you paste' flow. Triggered
+        from the details panel button. Opens
+        ``ComposeMessageDialog`` to collect the payload; the
+        compose dialog IS the review — the user just typed the
+        text, no separate confirmation step needed. After signing,
+        ``SignatureResultDialog`` shows the 0x-hex with a copy-
+        to-clipboard button (no dapp to receive it
+        automatically)."""
+        from .plugins.sign_message import ComposeMessageDialog
+
+        compose = ComposeMessageDialog(address, parent=self)
+        compose.request_built.connect(self._sign_local_message)
+        compose.show()
+
+    def _sign_local_message(self, req) -> None:
+        """Sign a locally-composed message (from
+        ComposeMessageDialog). No review step — the user typed it
+        themselves. Picks signer, prompts for passphrase if hot,
+        runs SignMessageWorker, then shows the resulting
+        signature."""
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        signer, progress_text = self._pick_signer_for(self, req.from_addr)
+        if signer is None:
+            return
+        if not signer.can_sign(req.from_addr):
+            QMessageBox.warning(
+                self, "Cannot sign",
+                f"No known signer for {req.from_addr}",
+            )
+            return
+
+        progress = QProgressDialog(progress_text, None, 0, 0, self)
+        progress.setWindowTitle("Signing message")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        from .signing import SignMessageWorker
+        worker = SignMessageWorker(signer, req)
+        worker.signed.connect(
+            lambda sig, p=progress: self._on_local_message_signed(sig, p)
+        )
+        worker.failed.connect(
+            lambda msg, p=progress: self._on_local_message_sign_failed(msg, p)
+        )
+        self.start_worker(worker)
+
+    def _on_local_message_signed(self, signature_hex, progress) -> None:
+        from .plugins.sign_message import SignatureResultDialog
+        progress.close()
+        dlg = SignatureResultDialog(signature_hex, parent=self)
+        dlg.show()
+
+    def _on_local_message_sign_failed(self, msg, progress) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        progress.close()
+        QMessageBox.warning(self, "Signing failed", msg)
+
     def _on_tx_broadcast(self, tx_hash, dialog, progress, req, chain,
                           on_broadcast) -> None:
         progress.close()
@@ -486,12 +673,18 @@ class MainWindow(QMainWindow):
             self.store.set_current_chain(int(cid))
             self._refresh_status()
             self.right_slot.broadcast_chain_changed()
-            # Note: NOT pushing chainChanged to dapps here. The
-            # dapp's chain (RpcServer._rpc_chain_id) is decoupled
-            # from the UI's chain so the user can browse a
-            # different chain than the dapp is transacting on.
-            # Only wallet_switchEthereumChain (dapp-initiated)
-            # changes the dapp chain and emits chainChanged.
+            # The UI chain is the user's preferred chain — also
+            # update the dapp-facing RPC chain so connected dapps
+            # see it (eth_chainId, eth_signTypedData_v4 domain
+            # checks). Dapp-initiated wallet_switchEthereumChain
+            # is the only thing that can override this asymmetric
+            # link; UI ⇒ dapp, but dapp-switches stay session-only
+            # and don't pull the UI back. So a user can browse on
+            # Gnosis in the wallet, open Gnosis Pay, and have it
+            # see chainId 100 immediately instead of getting
+            # "provided 1" complaints.
+            if self.rpc is not None:
+                self.rpc.set_rpc_chain(int(cid))
 
     def _push_accounts_changed(self) -> None:
         """Slot for default_account_changed — push the EIP-1193

@@ -72,6 +72,9 @@ class _FakeRpc:
     def broadcast_chain_changed(self, chain_id) -> None:
         pass
 
+    def set_rpc_chain(self, chain_id) -> None:
+        pass
+
 
 @pytest.fixture
 def fake_rpc() -> _FakeRpc:

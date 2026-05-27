@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 from .chains import Chain
-from .signing import Signer, SignerError, SigningRequest
+from .signing import (
+    MessageSigningRequest, Signer, SignerError, SigningRequest,
+    TypedDataSigningRequest,
+)
 
 
 log = logging.getLogger("qeth.hot_wallet")
@@ -137,6 +140,69 @@ class HotWalletSigner(Signer):
                     for a in self._store.accounts):
             return False
         return keystore_path(address).exists()
+
+    def _load_priv(self, address: str) -> bytes:
+        """Shared decrypt path for sign / sign_message /
+        sign_typed_data — scrypt + AES + the friendly
+        ``Wrong passphrase`` re-raise."""
+        if not self.can_sign(address):
+            raise SignerError(
+                f"No hot wallet keystore for {address}"
+            )
+        keystore = load_keystore(address)
+        try:
+            from eth_account import Account
+            return Account.decrypt(keystore, self._passphrase)
+        except ValueError as e:
+            msg = str(e).lower()
+            if "mac" in msg or "password" in msg or "decryption" in msg:
+                raise SignerError("Wrong passphrase.") from e
+            raise SignerError(f"Failed to decrypt keystore: {e}") from e
+        except Exception as e:
+            raise SignerError(f"Failed to decrypt keystore: {e}") from e
+
+    def sign_message(self, req: MessageSigningRequest) -> bytes:
+        """personal_sign — EIP-191 prefixed bytes, 65-byte ECDSA."""
+        priv = self._load_priv(req.from_addr)
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        signable = encode_defunct(primitive=req.raw)
+        signed = Account.sign_message(signable, private_key=priv)
+        return self._extract_signature(signed)
+
+    def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
+        """EIP-712 — domain + types + primaryType + message."""
+        priv = self._load_priv(req.from_addr)
+        from eth_account import Account
+        from eth_account.messages import encode_typed_data
+        # encode_typed_data accepts the full v4 typed-data dict
+        # (with EIP712Domain in types or auto-inferred).
+        signable = encode_typed_data(full_message=req.typed_data)
+        signed = Account.sign_message(signable, private_key=priv)
+        return self._extract_signature(signed)
+
+    @staticmethod
+    def _extract_signature(signed) -> bytes:
+        """``SignedMessage`` exposes ``signature`` (Hexbytes) — but
+        the attribute name varies across eth_account versions
+        (some have ``signature``, some only the int components).
+        Try the common shapes and fall back to constructing from
+        r/s/v if needed."""
+        sig = getattr(signed, "signature", None)
+        if sig is not None:
+            if hasattr(sig, "to_0x_hex"):
+                hex_str = sig.to_0x_hex()
+            elif hasattr(sig, "hex"):
+                h = sig.hex()
+                hex_str = h if h.startswith("0x") else "0x" + h
+            else:
+                hex_str = str(sig)
+            return bytes.fromhex(hex_str[2:])
+        # Fallback: build from r/s/v (eth_account always has these).
+        r = signed.r.to_bytes(32, "big")
+        s = signed.s.to_bytes(32, "big")
+        v = bytes([signed.v])
+        return r + s + v
 
     def sign(self, req: SigningRequest, chain: Chain) -> bytes:
         if not self.can_sign(req.from_addr):

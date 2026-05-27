@@ -5,7 +5,10 @@ from PySide6.QtCore import QThread, Signal
 
 from .chain import EthClient
 from .chains import Chain
-from .signing import Signer, SignerError, SigningRequest
+from .signing import (
+    MessageSigningRequest, Signer, SignerError, SigningRequest,
+    TypedDataSigningRequest,
+)
 
 
 def is_ledger_available() -> tuple[bool, Optional[str]]:
@@ -339,4 +342,110 @@ class LedgerSigner(Signer):
         if isinstance(raw, str):
             raw = bytes.fromhex(raw[2:] if raw.startswith("0x") else raw)
         return raw
+
+    def sign_message(self, req: MessageSigningRequest) -> bytes:
+        """personal_sign on the Ledger. The device prompts the user
+        to review the message (truncated on screen) and confirm —
+        same UX as MetaMask's "Sign" popup."""
+        path = self._require_path(req.from_addr)
+        try:
+            from ledgereth.messages import sign_message
+        except ImportError as e:
+            raise SignerError(f"ledgereth not installed: {e}") from e
+        try:
+            signed = sign_message(req.raw, sender_path=path)
+        except Exception as e:
+            raise SignerError(_explain_ledger_error(e)) from e
+        finally:
+            _clear_dongle_cache()
+        return _extract_ledger_signature(signed)
+
+    def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
+        """EIP-712 v4 — the Ledger Ethereum app does the full
+        struct-hash walk on-device when the data is small enough,
+        else falls back to a "blind sign" prompt the user must
+        enable in the device settings."""
+        path = self._require_path(req.from_addr)
+        try:
+            from ledgereth.messages import sign_typed_data_draft
+        except ImportError as e:
+            raise SignerError(f"ledgereth not installed: {e}") from e
+        # ledgereth's draft signer expects the pre-computed domain
+        # separator + message hash. Compute via eth_account so the
+        # hashing matches what the dapp expects.
+        try:
+            from eth_account.messages import _hash_eip191_message, encode_typed_data
+        except ImportError as e:
+            raise SignerError(f"eth_account missing: {e}") from e
+        try:
+            signable = encode_typed_data(full_message=req.typed_data)
+            # signable.body is the 64-byte (domain_hash || message_hash)
+            # blob that the EIP-191 v0x01 prefix wraps. Split into
+            # the two 32-byte halves for ledgereth.
+            body = signable.body
+            domain_hash = body[:32]
+            message_hash = body[32:64]
+        except Exception as e:
+            raise SignerError(f"failed to hash typed data: {e}") from e
+        try:
+            signed = sign_typed_data_draft(
+                domain_hash, message_hash, sender_path=path,
+            )
+        except Exception as e:
+            raise SignerError(_explain_ledger_error(e)) from e
+        finally:
+            _clear_dongle_cache()
+        return _extract_ledger_signature(signed)
+
+    def _require_path(self, address: str) -> str:
+        acct = self._lookup(address)
+        if acct is None:
+            raise SignerError(
+                f"No Ledger account known for {address}"
+            )
+        path = acct.get("path")
+        if not path:
+            raise SignerError(
+                f"Account {address} has no derivation path on file"
+            )
+        return path
+
+
+def _clear_dongle_cache() -> None:
+    """Mirror of the post-sign cleanup in LedgerSigner.sign — the
+    USB-HID handle ledgereth caches gets stale between calls."""
+    try:
+        from ledgereth import comms as _comms
+    except ImportError:
+        return
+    cached = _comms.DONGLE_CACHE
+    _comms.DONGLE_CACHE = None
+    _comms.DONGLE_CONFIG_CACHE = None
+    if cached is not None:
+        try:
+            cached.close()
+        except Exception:
+            pass
+
+
+def _extract_ledger_signature(signed) -> bytes:
+    """ledgereth's SignedMessage exposes r/s/v as ints; some
+    versions also have ``.signature``. Build the 65-byte
+    r||s||v blob defensively."""
+    sig = getattr(signed, "signature", None)
+    if isinstance(sig, (bytes, bytearray)) and len(sig) == 65:
+        return bytes(sig)
+    if isinstance(sig, str):
+        return bytes.fromhex(sig[2:] if sig.startswith("0x") else sig)
+    r = int(signed.r).to_bytes(32, "big")
+    s = int(signed.s).to_bytes(32, "big")
+    v = int(signed.v)
+    # Ledger returns v as 27/28 for legacy or chain-id-shifted for
+    # EIP-155. For personal_sign / EIP-712 the conventional v is
+    # 27/28; normalise.
+    if v >= 27:
+        v_byte = bytes([v % 256])
+    else:
+        v_byte = bytes([v + 27])
+    return r + s + v_byte
 

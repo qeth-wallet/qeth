@@ -168,6 +168,71 @@ class TestHotWalletSigner:
         with pytest.raises(SignerError, match="passphrase"):
             signer.sign(req, DEFAULT_CHAINS[0])
 
+    def test_sign_message_round_trips_via_recover(self, tmp_qeth):
+        # personal_sign: sign a plain UTF-8 message, then use
+        # eth_account.Account.recover_message to verify the
+        # signature came from our address.
+        from qeth.signing import MessageSigningRequest
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        signer = HotWalletSigner(
+            _fake_store({"address": addr, "source": "hot", "label": ""}),
+            PASSPHRASE,
+        )
+        msg = b"Welcome to qeth!"
+        sig = signer.sign_message(
+            MessageSigningRequest(from_addr=addr, raw=msg),
+        )
+        assert isinstance(sig, bytes) and len(sig) == 65
+        signable = encode_defunct(primitive=msg)
+        recovered = Account.recover_message(signable, signature=sig)
+        assert recovered.lower() == addr.lower()
+
+    def test_sign_typed_data_round_trips_via_recover(self, tmp_qeth):
+        # eth_signTypedData_v4: a minimal EIP-712 message (the
+        # canonical Mail example from the spec). recover_message
+        # with the same structured data must return our address.
+        from qeth.signing import TypedDataSigningRequest
+        from eth_account import Account
+        from eth_account.messages import encode_typed_data
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        signer = HotWalletSigner(
+            _fake_store({"address": addr, "source": "hot", "label": ""}),
+            PASSPHRASE,
+        )
+        typed = {
+            "domain": {
+                "name": "qeth-test",
+                "version": "1",
+                "chainId": 1,
+                "verifyingContract": "0x" + "00" * 20,
+            },
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"},
+                ],
+                "Greeting": [
+                    {"name": "to", "type": "string"},
+                    {"name": "body", "type": "string"},
+                ],
+            },
+            "primaryType": "Greeting",
+            "message": {"to": "World", "body": "hello"},
+        }
+        sig = signer.sign_typed_data(
+            TypedDataSigningRequest(from_addr=addr, typed_data=typed),
+        )
+        assert isinstance(sig, bytes) and len(sig) == 65
+        signable = encode_typed_data(full_message=typed)
+        recovered = Account.recover_message(signable, signature=sig)
+        assert recovered.lower() == addr.lower()
+
     def test_sign_produces_a_valid_signed_eip1559_tx(self, tmp_qeth):
         """End-to-end: generate, sign, then have eth_account
         round-trip the raw bytes back to a Transaction to confirm

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .branding import app_icon_for
 from .rpc import RpcServer
 from .store import Store
+from .tray import install_tray
 from .ui import MainWindow
 
 
@@ -58,6 +59,10 @@ def main() -> int:
 
     win = MainWindow(store, rpc)
     win.show()
+    # Minimise → tray when the platform has one. Keep a reference
+    # so Python doesn't GC the controller; Qt's parent ownership
+    # ties its lifetime to the window.
+    _tray = install_tray(app, win)  # noqa: F841 — kept-alive ref
     try:
         return app.exec()
     finally:

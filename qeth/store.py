@@ -10,18 +10,37 @@ from .chains import Chain, DEFAULT_CHAINS
 _CHAIN_FIELDS = {f.name for f in fields(Chain)}
 
 
+# For chains we ship in DEFAULT_CHAINS, the user can only edit the
+# RPC URL (via the chain-RPC dialog). Everything else — name,
+# symbol, explorer, coingecko_id, eip1559 — is canonical metadata
+# we maintain. Older configs sometimes carry a stale or even wrong
+# value here (chain 56 was manually added before BNB shipped, so
+# it had coingecko_id="ethereum" → BNB native got priced as ETH).
+# Defaults' metadata wins for shipped chains; persisted only
+# contributes ``rpc_url``.
+_USER_EDITABLE_FIELDS = {"rpc_url"}
+
+
 def _merge_chain(persisted: dict) -> Chain:
-    """Build a Chain from a persisted dict, filling in any missing fields
-    from DEFAULT_CHAINS when chain_id matches (so old configs pick up
-    newly-added fields like coingecko_id). Persisted values win when
-    both sides have a value."""
+    """Build a Chain from a persisted dict.
+
+    Shipped defaults (DEFAULT_CHAINS): take canonical metadata from
+    the default, overlay only the user-editable fields (rpc_url)
+    from the persisted entry. Old configs that carried a wrong
+    coingecko_id / symbol from a manual add silently heal.
+
+    Custom chains (not in DEFAULT_CHAINS): use persisted as-is.
+    Dropping unknown keys keeps forwards compatibility with
+    configs from a newer build."""
     cid = persisted.get("chain_id")
     default = next((d for d in DEFAULT_CHAINS if d.chain_id == cid), None)
-    base = default.to_dict() if default else {}
-    merged = {**base, **persisted}
-    # Drop any keys that aren't on the current Chain dataclass (forwards-
-    # compatible with old configs that might carry unknown fields).
-    return Chain(**{k: v for k, v in merged.items() if k in _CHAIN_FIELDS})
+    if default is None:
+        return Chain(**{k: v for k, v in persisted.items() if k in _CHAIN_FIELDS})
+    base = default.to_dict()
+    for f in _USER_EDITABLE_FIELDS:
+        if persisted.get(f):
+            base[f] = persisted[f]
+    return Chain(**{k: v for k, v in base.items() if k in _CHAIN_FIELDS})
 
 CONFIG_DIR = Path.home() / ".qeth"
 CONFIG_FILE = CONFIG_DIR / "config.json"

@@ -28,12 +28,19 @@ DEFAULT_TIMEOUT = 8.0
 BATCH_SIZE = 100  # URL length is the real constraint; 100 keys is well under it.
 
 # chain_id -> DefiLlama chain slug used in coin keys like "ethereum:0x...".
+# When a chain is missing here, fetch() silently skips all ERC-20
+# price requests for it — the tokens panel then drops every priced
+# row at the "price is None" filter, so the wallet looks empty
+# even when discovery itself works. Keep this map in step with
+# DEFAULT_CHAINS additions.
 DEFILLAMA_CHAIN_SLUGS: dict[int, str] = {
     1:     "ethereum",
     10:    "optimism",
+    56:    "bsc",
+    100:   "xdai",
     137:   "polygon",
-    42161: "arbitrum",
     8453:  "base",
+    42161: "arbitrum",
 }
 
 

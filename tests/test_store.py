@@ -190,14 +190,37 @@ class TestChainMigration:
 
     def test_unknown_extra_fields_are_dropped(self, tmp_qeth):
         """Forward-compat: a future schema field should be silently
-        ignored by an older client, not crash with TypeError."""
+        ignored by an older client, not crash with TypeError. Use a
+        custom chain_id (not in DEFAULT_CHAINS) so the persisted
+        name carries through — shipped defaults intentionally win
+        on metadata fields now, but unknown chains keep persisted
+        values as-is."""
         c = {
-            "name": "X", "chain_id": 1, "rpc_url": "x",
-            "symbol": "ETH", "explorer": "",
+            "name": "X", "chain_id": 424242, "rpc_url": "x",
+            "symbol": "XYZ", "explorer": "",
             "future_field_we_dont_know_about": "ignored",
         }
         chain = _merge_chain(c)
         assert chain.name == "X"
+
+    def test_shipped_chain_metadata_heals_from_default(self, tmp_qeth):
+        """A persisted BNB entry that was added manually before we
+        shipped chain 56 as a default would carry the wrong
+        coingecko_id ("ethereum"), causing the native price lookup
+        to return ETH's value instead of BNB's. Merging against
+        the shipped default heals it without the user having to
+        edit ~/.qeth/config.json by hand."""
+        old = {
+            "name": "BNB Smart Chain", "chain_id": 56,
+            "rpc_url": "https://bsc.drpc.org",
+            "symbol": "BNB",
+            "explorer": "https://bscscan.com",
+            "coingecko_id": "ethereum",   # the stale wrong value
+        }
+        chain = _merge_chain(old)
+        assert chain.coingecko_id == "binancecoin"
+        # User-edited RPC URL still survives.
+        assert chain.rpc_url == "https://bsc.drpc.org"
 
 
 class TestPersistedHiddenSet:

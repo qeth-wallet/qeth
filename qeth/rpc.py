@@ -4,7 +4,10 @@ import logging
 import threading
 from typing import Any, Optional
 
-from aiohttp import ClientSession, WSMsgType, web
+from aiohttp import (
+    ClientConnectorError, ClientOSError, ClientSession,
+    ServerDisconnectedError, WSMsgType, web,
+)
 
 from .chains import Chain
 from .signing import (
@@ -83,6 +86,8 @@ class RpcServer:
         # current chain at startup (a natural first guess) and
         # never persisted — dapp chain is session-only.
         self._rpc_chain_id: int = store.current_chain().chain_id
+        # Per-upstream-host fail-fast cool-down. See _proxy below.
+        self._host_last_fail: dict[str, float] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -312,17 +317,24 @@ class RpcServer:
             # aiohttp session is already closed — that means
             # we're in app shutdown and the dozens of in-flight
             # requests racing past the close are pure noise.
+            #
+            # ``isinstance`` not ``type(e).__name__ in ...`` —
+            # ClientConnectorError has a family of more specific
+            # subclasses (ClientConnectorDNSError,
+            # ClientConnectorSSLError, ClientConnectorCertificateError, …)
+            # that the string check silently missed, so when DNS
+            # died for eth.drpc.org we dumped a 40-line traceback
+            # for every dapp poll → multiple per second.
             shutting_down = (
                 self._client is None or self._client.closed
             )
-            transient = (
-                "ServerDisconnectedError",
-                "ClientConnectorError",
-                "ClientOSError",
-                "TimeoutError",
-            )
             looks_transient = (
-                type(e).__name__ in transient
+                isinstance(e, (
+                    ClientConnectorError,
+                    ClientOSError,
+                    ServerDisconnectedError,
+                    asyncio.TimeoutError,
+                ))
                 or str(e) == "Session is closed"
             )
             if shutting_down:
@@ -479,6 +491,15 @@ class RpcServer:
 
         return await self._proxy(method, params)
 
+    # Recent transient failures per upstream host. When a host has
+    # failed within the last ``_FAIL_FAST_S`` seconds we short-
+    # circuit subsequent requests instead of grinding through
+    # another full DNS / connect timeout. Browser dapps poll
+    # multiple methods per second, so without this each one would
+    # add 1-15 s of wasted asyncio-thread time + a log line, which
+    # is what made the app appear to hang when DRPC's DNS went out.
+    _FAIL_FAST_S = 5.0
+
     async def _proxy(self, method: str, params: list) -> Any:
         # Route reads to the dapp's chain (set via
         # wallet_switchEthereumChain), NOT the UI's chain. The
@@ -488,9 +509,33 @@ class RpcServer:
              if c.chain_id == self._rpc_chain_id),
             self.store.current_chain(),
         )
+        host = chain.rpc_url
+        now = asyncio.get_event_loop().time()
+        last_fail = self._host_last_fail.get(host)
+        if last_fail is not None and (now - last_fail) < self._FAIL_FAST_S:
+            # A previous request to this host has just failed —
+            # don't pile on another 15 s timeout. The dapp gets a
+            # standard JSON-RPC error and can retry; meanwhile the
+            # background re-probe path (the next request after
+            # the cool-down) tells us if connectivity is back.
+            raise RpcError(-32603, "upstream temporarily unreachable")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        async with self._client.post(chain.rpc_url, json=payload, timeout=15) as r:
-            data = await r.json()
+        try:
+            async with self._client.post(
+                chain.rpc_url, json=payload, timeout=15,
+            ) as r:
+                data = await r.json()
+        except (
+            ClientConnectorError,
+            ClientOSError,
+            ServerDisconnectedError,
+            asyncio.TimeoutError,
+        ):
+            self._host_last_fail[host] = now
+            raise
+        # Successful response — clear any prior fail-fast cooldown
+        # so the very next request goes through normally.
+        self._host_last_fail.pop(host, None)
         if "error" in data and data["error"]:
             err = data["error"]
             raise RpcError(err.get("code", -32603), err.get("message", "upstream error"))

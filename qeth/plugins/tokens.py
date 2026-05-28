@@ -1208,17 +1208,17 @@ class TokenListPanel(QWidget):
         # Selection still highlights the whole row (SelectRows + the rule
         # below). Hover style is set to match default so it produces no
         # visible change.
+        # Selection paint is swapped between solid (focused) and
+        # outlined (unfocused) by the focus-aware filter
+        # installed in MainWindow. We seed the stylesheet here
+        # with just padding + hover; the filter appends the
+        # focused/unfocused selection rules.
         self.table.setStyleSheet(
             "QTableView::item {"
             "  padding: 3px 6px;"
             "  border: 0;"
             "}"
             "QTableView::item:hover { background: transparent; }"
-            "QTableView::item:selected,"
-            "QTableView::item:selected:hover {"
-            "  background: palette(highlight);"
-            "  color: palette(highlighted-text);"
-            "}"
         )
         self.table.setIconSize(QSize(20, 20))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)

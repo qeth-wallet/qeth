@@ -6,10 +6,13 @@ and ``.plugins.wallets``. This module just orchestrates: instantiates
 the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QThread
+from PySide6.QtCore import (
+    QByteArray, QEvent, QObject, QSize, Qt, QThread,
+)
 from PySide6.QtGui import QIcon, QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox, QLabel, QMainWindow, QSplitter, QStatusBar,
+    QTableWidget, QTreeWidget,
 )
 
 from .icons import bundled_chain_icon
@@ -204,8 +207,17 @@ class MainWindow(QMainWindow):
             for w in central.findChildren(QWidget):
                 if w in tab_stops:
                     w.setFocusPolicy(Qt.StrongFocus)
-                else:
-                    w.setFocusPolicy(Qt.ClickFocus)
+                    continue
+                # Don't touch widgets that live INSIDE one of the
+                # tab-stop lists. QTreeWidget / QTableWidget use
+                # an internal viewport / header / scrollbar chain
+                # as focus proxies; calling
+                # ``setFocusPolicy(ClickFocus)`` on those silently
+                # demotes the tree itself back to ClickFocus,
+                # undoing the StrongFocus we just set.
+                if any(w is t or _is_descendant(w, t) for t in tab_stops):
+                    continue
+                w.setFocusPolicy(Qt.ClickFocus)
         # Native tab-order chain (useful if focus arrives via
         # Qt-internal navigation, not just our filter).
         for prev, nxt in zip(tab_stops, tab_stops[1:]):
@@ -217,6 +229,13 @@ class MainWindow(QMainWindow):
         self._tab_cycle_filter = _TabCycleFilter(self, tab_stops)
         for w in tab_stops:
             w.installEventFilter(self._tab_cycle_filter)
+        # Norton-Commander cursor style: focused list paints
+        # solid selection (default), unfocused list paints
+        # outline-only. Delegate handles the cell-by-cell paint;
+        # the table stylesheets no longer carry a ``:selected``
+        # rule so they don't beat us.
+        for w in tab_stops:
+            _apply_focus_aware_selection(w)
         # Initial focus on the wallet tree so arrow keys work
         # immediately.
         tab_stops[0].setFocus(Qt.OtherFocusReason)
@@ -854,3 +873,87 @@ class _TabCycleFilter(QObject):
     def _active_right_table(self):
         active = self._mw.right_slot.active()
         return self._table_for_plugin(active) if active is not None else None
+
+
+def _is_descendant(child, ancestor) -> bool:
+    """True if ``child`` is the ``ancestor`` or any of its
+    descendants in the QObject tree. Used to skip widgets nested
+    inside list views — their internal focus-proxy chain can
+    feed a demote-to-ClickFocus call back up to the list
+    itself."""
+    p = child
+    while p is not None:
+        if p is ancestor:
+            return True
+        p = p.parent()
+    return False
+
+
+def _apply_focus_aware_selection(widget) -> None:
+    """Norton-Commander-style cursor: swaps the widget's
+    stylesheet between a "focused" variant (solid filled
+    selection) and an "unfocused" variant (outlined selection)
+    on every FocusIn / FocusOut event. The base widget classes
+    have to be the actual concrete classes (QTreeView,
+    QTableView, etc.) — QSS doesn't match ``QAbstractItemView``
+    in practice."""
+    selectors = {
+        QTreeWidget: "QTreeView",
+        QTableWidget: "QTableView",
+    }
+    # Pick the most specific selector among the widget's MRO.
+    selector = "QAbstractItemView"
+    for cls, sel in selectors.items():
+        if isinstance(widget, cls):
+            selector = sel
+            break
+    filt = _SelectionStyleFilter(widget, selector)
+    widget.installEventFilter(filt)
+    widget._selection_style_filter = filt
+    # Apply the initial state.
+    filt.apply(widget.hasFocus())
+
+
+class _SelectionStyleFilter(QObject):
+    """Per-widget event filter that rewrites the widget's
+    stylesheet on FocusIn / FocusOut, swapping between a solid-
+    fill selection (focused) and an outlined selection
+    (unfocused). The widget's existing stylesheet is preserved
+    as a prefix; only the selection rules are added/replaced."""
+
+    def __init__(self, widget, selector):
+        super().__init__(widget)
+        self._widget = widget
+        self._selector = selector
+        # Snapshot any stylesheet the panel set up at
+        # construction (padding, hover, headers, …) — we
+        # concatenate the selection rules onto this base.
+        self._base_qss = widget.styleSheet() or ""
+
+    def apply(self, focused: bool) -> None:
+        if focused:
+            sel_qss = (
+                f"{self._selector}::item:selected,"
+                f"{self._selector}::item:selected:hover {{"
+                f"  background: palette(highlight);"
+                f"  color: palette(highlighted-text);"
+                f"}}"
+            )
+        else:
+            sel_qss = (
+                f"{self._selector}::item:selected,"
+                f"{self._selector}::item:selected:hover {{"
+                f"  background: transparent;"
+                f"  color: palette(text);"
+                f"  border-top: 1px solid palette(highlight);"
+                f"  border-bottom: 1px solid palette(highlight);"
+                f"}}"
+            )
+        self._widget.setStyleSheet(self._base_qss + sel_qss)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn:
+            self.apply(True)
+        elif event.type() == QEvent.FocusOut:
+            self.apply(False)
+        return False

@@ -969,18 +969,13 @@ class TransactionListPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setShowGrid(False)
-        # Same selection/hover normalization as TokenListPanel.
+        # Padding + hover only — see TokenListPanel comment.
         self.table.setStyleSheet(
             "QTableView::item {"
             "  padding: 3px 6px;"
             "  border: 0;"
             "}"
             "QTableView::item:hover { background: transparent; }"
-            "QTableView::item:selected,"
-            "QTableView::item:selected:hover {"
-            "  background: palette(highlight);"
-            "  color: palette(highlighted-text);"
-            "}"
         )
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)

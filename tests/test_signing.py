@@ -253,7 +253,10 @@ class TestApplyGasPolicy1559:
         )
         assert out["max_priority_fee_per_gas"] == 10**9  # 20 gwei × 0.05
 
-    def test_dapp_fee_values_raise_the_floor(self):
+    def test_dapp_max_fee_raises_the_floor(self):
+        # Dapp's maxFeePerGas raises our suggestion (it's an upper-
+        # bound safety buffer — keeping the ceiling low risks a
+        # stuck tx if baseFee spikes).
         out = apply_gas_policy(
             estimated_gas=21_000,
             eip1559=True,
@@ -264,9 +267,26 @@ class TestApplyGasPolicy1559:
                 max_priority_fee_per_gas=5 * 10**9,
             ),
         )
-        # Dapp's 100 gwei > our 20; dapp's 5 gwei priority > our 0.5
         assert out["max_fee_per_gas"] == 100 * 10**9
-        assert out["max_priority_fee_per_gas"] == 5 * 10**9
+
+    def test_dapp_priority_fee_is_ignored(self):
+        # Priority is what the user actually pays — dapps in the
+        # wild set it conservatively-high "just in case" (a tx
+        # with dapp-priority=2 gwei on Ethereum when baseFee is
+        # 0.1 gwei costs ~20× the chain cost). Always use 5 % of
+        # baseFee regardless of dapp's request.
+        out = apply_gas_policy(
+            estimated_gas=21_000,
+            eip1559=True,
+            base_fee_wei=10 * 10**9,
+            gas_price_wei=0,
+            req=_req(
+                max_fee_per_gas=100 * 10**9,
+                max_priority_fee_per_gas=5 * 10**9,
+            ),
+        )
+        # 5 % of 10 gwei, ignoring dapp's 5 gwei request.
+        assert out["max_priority_fee_per_gas"] == (10 * 10**9 * 5) // 100
 
     def test_falls_back_to_gas_price_when_base_fee_missing(self):
         """eip1559 chain whose latest block has no baseFeePerGas

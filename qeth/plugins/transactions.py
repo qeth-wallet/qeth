@@ -1760,13 +1760,21 @@ def apply_gas_policy(
       gas limit                = max(estimate × 1.5, dapp gas)
       EIP-1559 chain:
         maxFeePerGas           = baseFee × 2  (≥ dapp's)
-        maxPriorityFeePerGas   = baseFee × 0.05  (≥ dapp's)
+        maxPriorityFeePerGas   = baseFee × 0.05  (ALWAYS — dapp's
+                                 value is ignored)
       Legacy chain:
         gasPrice               = current × 1.35  (≥ dapp's)
 
-    Dapp-supplied numbers act as a floor — we never silently lower
-    what the dapp asked for, so a time-sensitive tx that explicitly
-    overpays still goes out at the right price."""
+    Dapp-supplied gas limit and maxFeePerGas act as a floor — we
+    never silently lower these because they're safety buffers (a
+    time-sensitive tx that explicitly overpays the maxFee still
+    needs that ceiling to land). The priority fee is different:
+    it's the tip the user actually pays, and dapps in the wild
+    set it conservatively-high "just in case" (some set 2 gwei
+    on Ethereum even when baseFee is 0.1 gwei — 20× the chain
+    cost). Always override to 5 % of baseFee; the user can still
+    bump it via the priority-fee spinner in the dialog if they
+    want faster inclusion."""
     target_gas = (estimated_gas * 3) // 2
     if req.gas is not None and req.gas > target_gas:
         target_gas = req.gas
@@ -1782,9 +1790,7 @@ def apply_gas_policy(
         if (req.max_fee_per_gas is not None
                 and req.max_fee_per_gas > max_fee):
             max_fee = req.max_fee_per_gas
-        if (req.max_priority_fee_per_gas is not None
-                and req.max_priority_fee_per_gas > priority):
-            priority = req.max_priority_fee_per_gas
+        # Note: NO dapp floor on priority. See docstring.
         out["max_fee_per_gas"] = max_fee
         out["max_priority_fee_per_gas"] = priority
         out["base_fee"] = ref

@@ -1224,6 +1224,11 @@ class TokenListPanel(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # Enter / Return on the focused tokens table opens the Send
+        # dialog for the highlighted row — same as clicking the
+        # Send button on the toolbar. Installed as an event filter
+        # rather than a keyPressEvent override to avoid subclassing.
+        self.table.installEventFilter(self)
         self.table.setSortingEnabled(True)
         # Default: by Value (USD) descending. setSortIndicator only sets the
         # arrow; the actual sort kicks in each time we toggle sortingEnabled
@@ -1764,6 +1769,15 @@ class TokenListPanel(QWidget):
             QApplication.clipboard().setText(sel[1])
 
     # ---- context menu ---------------------------------------------------
+
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt method name
+        from PySide6.QtCore import QEvent
+        if (obj is self.table
+                and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            self._emit_for_selected(self.send_requested)
+            return True
+        return super().eventFilter(obj, event)
 
     def _on_cell_double_clicked(self, row: int, _col: int) -> None:
         """Emit ``transfers_requested`` for non-native rows. The

@@ -83,6 +83,20 @@ class _ReorderTree(QTreeWidget):
     the on-disk account list to match."""
 
     reorder_committed = Signal()
+    # Fired when the user presses Return / Enter while a row is
+    # selected. The plugin connects this to "connect to browser"
+    # (same as double-clicking the address). Carries the address.
+    enter_pressed = Signal(str)
+
+    def keyPressEvent(self, event):  # noqa: N802 — Qt method name
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            current = self.currentItem()
+            if current is not None:
+                addr = current.data(0, Qt.UserRole)
+                if isinstance(addr, str) and addr:
+                    self.enter_pressed.emit(addr)
+                    return
+        super().keyPressEvent(event)
 
     def dropEvent(self, event):  # noqa: N802 — Qt method name
         source_items = self.selectedItems()
@@ -313,6 +327,8 @@ class WalletsPlugin(Plugin):
         # just the no-friction path for the user's primary
         # action-on-account.
         self._tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        # Enter on the focused tree = same thing.
+        self._tree.enter_pressed.connect(self._on_tree_enter_pressed)
         # Right-click menu mirrors the top action row (Add / Copy /
         # Remove) plus Set-as-default — so every button has a menu
         # equivalent and every menu item has a button equivalent.
@@ -571,6 +587,14 @@ class WalletsPlugin(Plugin):
         if current is not None and addr.lower() == current.lower():
             return
         self._set_default(addr)
+
+    def _on_tree_enter_pressed(self, address: str) -> None:
+        """Enter / Return on a focused account leaf: same as
+        double-click → connect to browser."""
+        current = self._store.default_account
+        if current is not None and address.lower() == current.lower():
+            return
+        self._set_default(address)
 
     def _on_tree_selection(self) -> None:
         addrs = self.selected_addresses()

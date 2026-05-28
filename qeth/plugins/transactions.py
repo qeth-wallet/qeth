@@ -980,6 +980,10 @@ class TransactionListPanel(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_double_click)
+        # Enter / Return on the focused transactions table opens
+        # the details dialog for the highlighted row — same as
+        # double-click.
+        self.table.installEventFilter(self)
         # ElideMiddle on the view lets the Hash column adapt: the full
         # hash is stored in the cell, and Qt truncates at paint time
         # only as much as needed to fit the column width — so the
@@ -1250,6 +1254,18 @@ class TransactionListPanel(QWidget):
         tx = self._tx_at(row)
         if tx is not None:
             self.tx_details_requested.emit(tx)
+
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt method name
+        from PySide6.QtCore import QEvent
+        if (obj is self.table
+                and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            row = self.table.currentRow()
+            tx = self._tx_at(row) if row >= 0 else None
+            if tx is not None:
+                self.tx_details_requested.emit(tx)
+            return True
+        return super().eventFilter(obj, event)
 
     def _open_in_explorer(self, tx: Transaction) -> None:
         if self._chain is None or not self._chain.explorer:

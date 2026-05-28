@@ -582,6 +582,12 @@ class TokensPlugin(Plugin):
 
         cached = self._wallet_cache.load(chain.chain_id, address)
         if cached is not None and is_new_view:
+            # Drop user-hidden tokens before rendering. The disk
+            # cache deliberately keeps them around — unhide should
+            # bring them back instantly without re-discovering —
+            # but they must not appear on the table.
+            if not self._show_all:
+                cached = self._filter_hidden_from_cache(chain, cached)
             # Immediate render from cache; no flicker while we refresh.
             self._panel.show_cached(chain, cached)
             self._displayed_view = view_key
@@ -869,9 +875,23 @@ class TokensPlugin(Plugin):
         )
         self._save_wallet_cache(chain, address, native_wei, cache_visible, prices, entries)
 
+    def _filter_hidden_from_cache(self, chain, cached):
+        """Return a shallow copy of ``cached`` with user-hidden
+        tokens removed. Keeps the disk cache itself untouched so
+        unhiding still has the entry to bring back."""
+        kept = [
+            t for t in cached.tokens
+            if not self._store.is_hidden(chain.chain_id, t.contract)
+        ]
+        if len(kept) == len(cached.tokens):
+            return cached
+        from dataclasses import replace
+        return replace(cached, tokens=kept)
+
     def _compute_visible_tokens(self, chain, tokens: list, prices,
                                 show_all: bool | None = None) -> list:
-        """Apply dust + force-show filter and sort by USD value desc."""
+        """Apply hide + dust + force-show filter and sort by USD
+        value desc."""
         if show_all is None:
             show_all = self._show_all
         dust = TokenListPanel.DUST_USD_THRESHOLD
@@ -880,6 +900,16 @@ class TokensPlugin(Plugin):
             addr = b.contract.lower()
             if show_all:
                 out.append(b)
+                continue
+            # User-hidden tokens drop out entirely (unless
+            # spotlight/show_all is on, where everything passes).
+            # Has to live here as well as in the Blockscout-source
+            # worker — the multicall + tokenlist discovery path
+            # comes through this function without going through
+            # WalletTokensLoader's filter, so SUSHI/ZIK and other
+            # priced curated entries would otherwise re-surface on
+            # every refresh.
+            if self._store.is_hidden(chain.chain_id, addr):
                 continue
             if self._store.is_force_shown(chain.chain_id, addr):
                 out.append(b)

@@ -1387,17 +1387,21 @@ class TestRpcEventBroadcast:
         server = RpcServer(store)
         ws = MagicMock(closed=False, send_str=AsyncMock())
         server._ws_clients = {ws}
+        # Treat this ws as the calling dapp's socket so the
+        # scoped chainChanged broadcast actually reaches it.
+        server._ws_origin[ws] = "https://app.example"
         chain_sub = server._register_subscription(ws, "chainChanged")
 
         async def go():
             return await server._dispatch(
                 "wallet_switchEthereumChain", [{"chainId": "0xa"}],
+                origin="https://app.example",
             )
         asyncio.run(go())
-        # Dapp-driven switch updates the RPC's own chain only —
-        # NOT the wallet UI's chain. The store must NOT be touched.
+        # Dapp-driven switch updates only that origin's chain.
+        # The store and other origins remain untouched.
         store.set_current_chain.assert_not_called()
-        assert server._rpc_chain_id == 10  # 0xa
+        assert server._rpc_chain_id_by_origin["https://app.example"] == 10
         # chainChanged push happened with the right subscription id.
         sent_payloads = [
             _json.loads(c.args[0]) for c in ws.send_str.call_args_list
@@ -1409,14 +1413,14 @@ class TestRpcEventBroadcast:
             for p in sent_payloads
         )
 
-    def test_set_rpc_chain_updates_id_and_emits_chainChanged(self):
+    def test_set_rpc_chain_emits_chainChanged_to_unscoped(self):
         # UI ⇒ RPC asymmetric link: when the user picks a chain in
-        # the wallet combo we update the RPC chain AND push
-        # chainChanged to subscribed dapps, so they see the new
-        # chainId immediately (Gnosis Pay-style "provided 1" errors
-        # go away once the user explicitly picks Gnosis in qeth).
+        # the wallet combo, dapps that haven't pinned themselves
+        # via wallet_switchEthereumChain see the new chainId
+        # immediately. The store is now the source of truth for
+        # the default chain, so set_rpc_chain itself stores
+        # nothing — it just pushes scoped notifications.
         from unittest.mock import AsyncMock, MagicMock
-        import json as _json
         from qeth.rpc import RpcServer
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
@@ -1429,22 +1433,29 @@ class TestRpcEventBroadcast:
         server._register_subscription(ws, "networkChanged")
 
         # _schedule_event needs a running loop to actually push;
-        # capture the calls instead so we can assert without
-        # spinning up asyncio.
+        # capture the calls (with kwargs) instead.
         seen: list = []
-        server._schedule_event = lambda t, r: seen.append((t, r))
+        server._schedule_event = (
+            lambda t, r, **kw: seen.append((t, r, kw))
+        )
 
         server.set_rpc_chain(100)
-        assert server._rpc_chain_id == 100
-        assert ("chainChanged", "0x64") in seen
-        assert ("networkChanged", "100") in seen
+        # Both notifications fire, both filtered to unscoped
+        # subscribers (dapps that haven't picked their own chain).
+        assert (
+            "chainChanged", "0x64", {"only_unscoped": True}
+        ) in seen
+        assert (
+            "networkChanged", "100", {"only_unscoped": True}
+        ) in seen
 
     def test_rpc_chain_is_decoupled_from_store_chain(self):
         # The dapp's RPC chain is tracked separately from the
         # wallet UI's chain. ``wallet_switchEthereumChain`` from a
         # dapp must NOT pull the user's UI selection along — they
         # should be able to look at Ethereum in the wallet while
-        # the dapp transacts on Polygon.
+        # the dapp transacts on Polygon. Tracking is per-origin so
+        # other dapps stay on the UI's chain.
         from unittest.mock import MagicMock
         from qeth.rpc import RpcServer
         from qeth.chains import DEFAULT_CHAINS
@@ -1453,22 +1464,34 @@ class TestRpcEventBroadcast:
         store.current_chain.return_value = eth
         store.chains = DEFAULT_CHAINS
         server = RpcServer(store)
-        # Initial: RPC chain mirrors store's current chain.
-        assert server._rpc_chain_id == 1
+        # Initial: any origin sees the store's current chain.
+        assert server._chain_for_origin("https://a.example") == 1
 
-        # Dapp switches to Polygon.
+        # Dapp at a.example switches to Polygon.
         async def switch():
             await server._dispatch(
                 "wallet_switchEthereumChain", [{"chainId": "0x89"}],
+                origin="https://a.example",
             )
         asyncio.run(switch())
-        assert server._rpc_chain_id == 137
+        assert server._chain_for_origin("https://a.example") == 137
+        # Other origins still see Ethereum.
+        assert server._chain_for_origin("https://b.example") == 1
         # Store left alone.
         store.set_current_chain.assert_not_called()
-        # eth_chainId now reports the dapp chain.
-        async def cid():
-            return await server._dispatch("eth_chainId", [])
-        assert asyncio.run(cid()) == "0x89"
+        # eth_chainId, asked by a.example, reports the dapp chain.
+        async def cid_a():
+            return await server._dispatch(
+                "eth_chainId", [], origin="https://a.example",
+            )
+        assert asyncio.run(cid_a()) == "0x89"
+        # eth_chainId, asked by an unrelated origin, still reports
+        # Ethereum — this is the leak the per-origin tracking fixes.
+        async def cid_b():
+            return await server._dispatch(
+                "eth_chainId", [], origin="https://b.example",
+            )
+        assert asyncio.run(cid_b()) == "0x1"
 
     def test_dispatch_switch_unrecognized_chain_does_not_emit(self):
         from unittest.mock import AsyncMock, MagicMock

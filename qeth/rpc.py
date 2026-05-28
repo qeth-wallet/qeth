@@ -77,15 +77,23 @@ class RpcServer:
         self._ws_subscriptions: dict[
             web.WebSocketResponse, dict[str, str]
         ] = {}
-        # The chain the RPC server reports to / routes for dapps —
-        # SEPARATE from the wallet UI's chain. A dapp calling
-        # ``wallet_switchEthereumChain`` updates this, NOT the
-        # user's UI selection: the user keeps looking at whatever
-        # chain they picked in the toolbar combo while the dapp
-        # transacts on its own chain. Defaults to the store's
-        # current chain at startup (a natural first guess) and
-        # never persisted — dapp chain is session-only.
-        self._rpc_chain_id: int = store.current_chain().chain_id
+        # Per-origin chain override. Each dapp (identified by its
+        # Origin header / Frame's ``__frameOrigin``) can call
+        # ``wallet_switchEthereumChain`` to pin itself to a chain;
+        # other dapps see the wallet UI's current chain.
+        # Previously this was a single global value, so 1inch
+        # switching to zkSync Era pulled every other open tab onto
+        # zkSync until the user restarted. Origins that haven't
+        # overridden fall back to ``store.current_chain()`` at
+        # read time, so a UI toolbar flip automatically reaches
+        # unscoped dapps.
+        self._rpc_chain_id_by_origin: dict[str, int] = {}
+        # WS connection → origin captured at handshake. Lets
+        # _broadcast_event scope chainChanged pushes correctly:
+        # an override-driven chainChanged goes only to that
+        # origin's sockets, while a UI-driven one goes only to
+        # sockets whose origin doesn't carry an override.
+        self._ws_origin: dict[web.WebSocketResponse, Optional[str]] = {}
         # Per-upstream-host fail-fast cool-down. See _proxy below.
         self._host_last_fail: dict[str, float] = {}
 
@@ -169,6 +177,7 @@ class RpcServer:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self._ws_clients.add(ws)
+        self._ws_origin[ws] = origin
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -193,21 +202,36 @@ class RpcServer:
         finally:
             self._ws_clients.discard(ws)
             self._ws_subscriptions.pop(ws, None)
+            self._ws_origin.pop(ws, None)
         return ws
 
     # --- event push (Qt-thread → asyncio loop) ----------------------------
 
+    def _chain_for_origin(self, origin: Optional[str]) -> int:
+        """The chain id this origin should see. Per-origin override
+        if it has one, otherwise the wallet UI's current chain.
+        ``None`` and ``""`` share the same "origin-less" slot so
+        direct callers (curl, tests) can also switch chains and
+        see the override on subsequent reads."""
+        cid = self._rpc_chain_id_by_origin.get(origin or "")
+        if cid is not None:
+            return cid
+        return self.store.current_chain().chain_id
+
     def set_rpc_chain(self, chain_id: int) -> None:
-        """Update the dapp-facing chain AND push chainChanged /
-        networkChanged to every subscribed dapp. Called when the
-        wallet UI's chain combo flips — the user's preferred
-        chain doubles as the dapp default until a dapp overrides
-        via ``wallet_switchEthereumChain``. Safe from any thread:
-        the broadcast is scheduled on the asyncio loop via
-        ``_schedule_event``."""
-        self._rpc_chain_id = int(chain_id)
-        self._schedule_event("chainChanged", hex(chain_id))
-        self._schedule_event("networkChanged", str(chain_id))
+        """Called when the wallet UI's chain combo flips. The
+        store has already been updated (it's the source of truth
+        for the default-chain-for-dapps); here we only need to
+        push chainChanged / networkChanged to subscribers whose
+        origin hasn't pinned itself via wallet_switchEthereumChain.
+        Safe from any thread: the broadcast is scheduled on the
+        asyncio loop via ``_schedule_event``."""
+        self._schedule_event(
+            "chainChanged", hex(chain_id), only_unscoped=True,
+        )
+        self._schedule_event(
+            "networkChanged", str(chain_id), only_unscoped=True,
+        )
 
     def broadcast_accounts_changed(self, accounts: list[str]) -> None:
         """EIP-1193 ``accountsChanged`` event. Call from the Qt
@@ -229,16 +253,28 @@ class RpcServer:
         # Legacy alias some dapps still subscribe to.
         self._schedule_event("networkChanged", str(chain_id))
 
-    def _schedule_event(self, sub_type: str, result) -> None:
+    def _schedule_event(
+        self, sub_type: str, result,
+        *, only_origin: Optional[str] = None,
+        only_unscoped: bool = False,
+    ) -> None:
         """Schedule an eth_subscription notification to every WS
         client that subscribed to ``sub_type``. Safe from any
         thread; no-op when the asyncio loop hasn't started yet
-        (server bind failed) or has already stopped."""
+        (server bind failed) or has already stopped.
+
+        Filter kwargs are forwarded to ``_broadcast_event`` — see
+        its docstring for the scoping semantics."""
         loop = self._loop
         if loop is None or not loop.is_running():
             return
         asyncio.run_coroutine_threadsafe(
-            self._broadcast_event(sub_type, result), loop,
+            self._broadcast_event(
+                sub_type, result,
+                only_origin=only_origin,
+                only_unscoped=only_unscoped,
+            ),
+            loop,
         )
 
     def _register_subscription(self, ws, sub_type: str) -> str:
@@ -258,11 +294,24 @@ class RpcServer:
             if existing == sub_id:
                 del subs[sub_type]
 
-    async def _broadcast_event(self, sub_type: str, result) -> None:
-        """Send an ``eth_subscription`` notification to every WS
-        client subscribed to ``sub_type``. The payload's
-        ``params.subscription`` is the per-client id minted at
-        eth_subscribe time."""
+    async def _broadcast_event(
+        self, sub_type: str, result,
+        *, only_origin: Optional[str] = None,
+        only_unscoped: bool = False,
+    ) -> None:
+        """Send an ``eth_subscription`` notification to subscribed
+        WS clients. Filters:
+
+        - ``only_origin``: deliver only to sockets whose handshake
+          origin matched. Used for origin-scoped events like the
+          chainChanged that follows a ``wallet_switchEthereumChain``
+          — other dapps must not be yanked onto the new chain.
+        - ``only_unscoped``: deliver only to sockets whose origin
+          has NOT set a per-origin chain override. Used for the
+          UI-driven chainChanged that fires when the user flips
+          the toolbar combo — dapps that have explicitly switched
+          their chain stay on the chain they picked.
+        """
         if not self._ws_subscriptions:
             return
         dead: list[web.WebSocketResponse] = []
@@ -272,6 +321,12 @@ class RpcServer:
                 continue
             if ws.closed:
                 dead.append(ws)
+                continue
+            ws_origin = self._ws_origin.get(ws)
+            if only_origin is not None and ws_origin != only_origin:
+                continue
+            if (only_unscoped
+                    and (ws_origin or "") in self._rpc_chain_id_by_origin):
                 continue
             payload = {
                 "jsonrpc": "2.0",
@@ -371,7 +426,7 @@ class RpcServer:
             # through to the upstream RPC — they need their own
             # subscription bookkeeping (forwarding upstream
             # notifications back here) which isn't wired up yet.
-            return await self._proxy(method, params)
+            return await self._proxy(method, params, origin=origin)
 
         if method == "eth_unsubscribe":
             sub_id = params[0] if params else None
@@ -383,25 +438,31 @@ class RpcServer:
             return [self.store.default_account] if self.store.default_account else []
 
         if method == "eth_chainId":
-            return hex(self._rpc_chain_id)
+            return hex(self._chain_for_origin(origin))
 
         if method == "net_version":
-            return str(self._rpc_chain_id)
+            return str(self._chain_for_origin(origin))
 
         if method == "wallet_switchEthereumChain":
             cid = int(params[0]["chainId"], 16)
             if not any(c.chain_id == cid for c in self.store.chains):
                 raise RpcError(4902, "Unrecognized chain")
-            # Update the RPC's own chain only — the wallet UI's
-            # chain (toolbar combo) is unaffected. The user keeps
-            # browsing on their chosen chain while the dapp
-            # transacts on its own.
-            self._rpc_chain_id = cid
+            # Update only the calling origin's chain — the wallet
+            # UI and other open dapps are unaffected. Origin-less
+            # requests (e.g. direct curl, no header) get treated
+            # as a per-empty-string override so a subsequent call
+            # from the same client sees the same chain.
+            self._rpc_chain_id_by_origin[origin or ""] = cid
             # EIP-1193: emit chainChanged after a successful switch
-            # so any subscribed dapps re-render. We're already on
-            # the asyncio loop so push directly.
-            await self._broadcast_event("chainChanged", hex(cid))
-            await self._broadcast_event("networkChanged", str(cid))
+            # so any subscribed dapps re-render. Scoped to the
+            # requesting origin so we don't yank other dapps onto
+            # this chain.
+            await self._broadcast_event(
+                "chainChanged", hex(cid), only_origin=origin,
+            )
+            await self._broadcast_event(
+                "networkChanged", str(cid), only_origin=origin,
+            )
             return None
 
         if method == "wallet_addEthereumChain":
@@ -429,7 +490,7 @@ class RpcServer:
                 raise RpcError(-32601, "No signer wired up")
             try:
                 req = parse_send_transaction_params(
-                    params, self._rpc_chain_id,
+                    params, self._chain_for_origin(origin),
                     origin=origin,
                 )
             except SignerError as e:
@@ -489,7 +550,7 @@ class RpcServer:
                 "eth_signTransaction not supported (use eth_sendTransaction)",
             )
 
-        return await self._proxy(method, params)
+        return await self._proxy(method, params, origin=origin)
 
     # Recent transient failures per upstream host. When a host has
     # failed within the last ``_FAIL_FAST_S`` seconds we short-
@@ -500,13 +561,16 @@ class RpcServer:
     # is what made the app appear to hang when DRPC's DNS went out.
     _FAIL_FAST_S = 5.0
 
-    async def _proxy(self, method: str, params: list) -> Any:
-        # Route reads to the dapp's chain (set via
-        # wallet_switchEthereumChain), NOT the UI's chain. The
-        # store has the chain dict; we look it up by id.
+    async def _proxy(
+        self, method: str, params: list,
+        origin: Optional[str] = None,
+    ) -> Any:
+        # Route reads to the requesting origin's chain (per
+        # wallet_switchEthereumChain), falling back to the wallet
+        # UI's chain when this origin hasn't pinned itself.
+        cid = self._chain_for_origin(origin)
         chain = next(
-            (c for c in self.store.chains
-             if c.chain_id == self._rpc_chain_id),
+            (c for c in self.store.chains if c.chain_id == cid),
             self.store.current_chain(),
         )
         host = chain.rpc_url

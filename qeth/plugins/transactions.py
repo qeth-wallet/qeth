@@ -1804,10 +1804,13 @@ def apply_gas_policy(
     Policy:
 
       gas limit                = max(estimate × 1.5, dapp gas)
-      EIP-1559 chain:
+      EIP-1559 chain, baseFee > 0:
         maxFeePerGas           = baseFee × 2  (≥ dapp's)
         maxPriorityFeePerGas   = baseFee × 0.05  (ALWAYS — dapp's
                                  value is ignored)
+      EIP-1559 chain, baseFee == 0 (BSC-style):
+        maxFeePerGas           = gasPrice × 2  (≥ dapp's)
+        maxPriorityFeePerGas   = gasPrice (network's required minimum)
       Legacy chain:
         gasPrice               = current × 1.35  (≥ dapp's)
 
@@ -1827,12 +1830,24 @@ def apply_gas_policy(
     out: dict = {"gas": target_gas, "estimated_gas": estimated_gas,
                   "eip1559": eip1559}
     if eip1559:
-        # Fall back to gas_price reading when baseFeePerGas is absent
-        # (theoretical for an "eip1559" chain but tolerated — keeps
-        # us from emitting nonsense suggestions).
-        ref = base_fee_wei if base_fee_wei > 0 else gas_price_wei
-        max_fee = ref * 2
-        priority = (ref * 5) // 100
+        if base_fee_wei > 0:
+            # Ethereum-flavoured: baseFee already covers the bulk
+            # of the cost, so a 5 % tip is a reasonable hint to
+            # validators.
+            ref = base_fee_wei
+            max_fee = ref * 2
+            priority = (ref * 5) // 100
+        else:
+            # baseFee == 0 (BNB Smart Chain and friends): the
+            # network's reported gas_price IS the mandatory
+            # minimum priority fee. Taking 5 % of it lands the tx
+            # under the chain's accept threshold — BSC rejects
+            # outright with "gas tip cap below minimum needed".
+            # Use gas_price as the priority floor and double it
+            # as the max_fee ceiling.
+            ref = gas_price_wei
+            max_fee = ref * 2
+            priority = ref
         if (req.max_fee_per_gas is not None
                 and req.max_fee_per_gas > max_fee):
             max_fee = req.max_fee_per_gas

@@ -289,17 +289,22 @@ class TestApplyGasPolicy1559:
         assert out["max_priority_fee_per_gas"] == (10 * 10**9 * 5) // 100
 
     def test_falls_back_to_gas_price_when_base_fee_missing(self):
-        """eip1559 chain whose latest block has no baseFeePerGas
-        (theoretical, but tolerated). gas_price reading takes over."""
+        """EIP-1559 chain with baseFee=0 (BNB Smart Chain and
+        friends): gas_price IS the network's required priority
+        floor, not a reference value for a 5 % tip. Taking 5 %
+        would land below BSC's accept threshold ("gas tip cap
+        below minimum needed")."""
         out = apply_gas_policy(
             estimated_gas=21_000,
             eip1559=True,
             base_fee_wei=0,
-            gas_price_wei=8 * 10**9,
+            gas_price_wei=50_000_000,   # 0.05 gwei, BSC's current min
             req=_req(),
         )
-        assert out["base_fee"] == 8 * 10**9
-        assert out["max_fee_per_gas"] == 16 * 10**9
+        assert out["base_fee"] == 50_000_000
+        # Priority equals gas_price, not 5 % of it.
+        assert out["max_priority_fee_per_gas"] == 50_000_000
+        assert out["max_fee_per_gas"] == 100_000_000
 
 
 class TestFormatUsd:

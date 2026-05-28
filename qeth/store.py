@@ -203,6 +203,21 @@ class Store:
             self.chains.append(chain)
         self.save()
 
+    def set_chain_rpc_url(self, chain_id: int, rpc_url: str) -> bool:
+        """Override the RPC URL for an existing chain. Returns
+        True if the chain was found and updated, False otherwise.
+        Used by the chain-RPC dialog so the user can swap a rate-
+        limited endpoint without re-adding the whole chain."""
+        with self._lock:
+            for c in self.chains:
+                if c.chain_id == int(chain_id):
+                    c.rpc_url = rpc_url
+                    break
+            else:
+                return False
+        self.save()
+        return True
+
     # --- token-level user overrides -----------------------------------------
 
     def is_hidden(self, chain_id: int, address: str) -> bool:

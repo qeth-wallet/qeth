@@ -11,7 +11,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QIcon, QKeyEvent, QPalette, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QLabel, QMainWindow, QSplitter, QStatusBar,
+    QComboBox, QDialog, QLabel, QMainWindow, QSplitter, QStatusBar,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTreeWidget,
 )
@@ -156,6 +156,61 @@ class MainWindow(QMainWindow):
         combo.currentIndexChanged.connect(self._on_chain_changed)
         return combo
 
+    def _build_chain_rpc_button(self):
+        """Little ⋯ button next to the chain combo: opens the
+        chain-RPC editor so the user can swap a rate-limited
+        endpoint for any chain without re-adding it. The dialog
+        offers manual paste OR a pick-from-chainlist.org list."""
+        from PySide6.QtWidgets import QToolButton
+        btn = QToolButton()
+        # Try the freedesktop gear / settings icon names in order
+        # of which I see most consistently rendered as a gear
+        # across KDE / GNOME / Adwaita / Breeze. If none of them
+        # resolves to a real icon, fall back to the U+2699 gear
+        # glyph rather than a generic placeholder — the user
+        # explicitly asked for something that *looks* like a
+        # config control.
+        icon = QIcon()
+        for name in (
+            "configure", "preferences-system",
+            "applications-system", "emblem-system",
+            "system-run", "preferences-other",
+        ):
+            cand = QIcon.fromTheme(name)
+            if not cand.isNull() and cand.availableSizes():
+                icon = cand
+                break
+        if not icon.isNull():
+            btn.setIcon(icon)
+        else:
+            btn.setText("⚙")
+            f = btn.font()
+            f.setPointSizeF(f.pointSizeF() * 1.15)
+            btn.setFont(f)
+        btn.setToolTip("Edit the RPC endpoint for the current chain")
+        btn.setAutoRaise(True)
+        btn.clicked.connect(self._on_edit_chain_rpc)
+        return btn
+
+    def _on_edit_chain_rpc(self) -> None:
+        from .chain_rpc_dialog import ChainRpcDialog
+        chain = self.store.current_chain()
+        dlg = ChainRpcDialog(chain, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        new_url = dlg.rpc_url
+        if not new_url or new_url == chain.rpc_url:
+            return
+        if self.store.set_chain_rpc_url(chain.chain_id, new_url):
+            self.status_message(
+                f"RPC for {chain.name} updated to {new_url}", 4000,
+            )
+            # The chain object held by the store has been mutated
+            # in place, so subsequent EthClient instances see the
+            # new URL. Broadcast a chain change so the right slot
+            # refreshes against the new endpoint.
+            self.right_slot.broadcast_chain_changed()
+
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Horizontal)
 
@@ -170,6 +225,8 @@ class MainWindow(QMainWindow):
         self.right_slot.add_plugin(self.transactions_plugin, self)
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
+        self.chain_rpc_btn = self._build_chain_rpc_button()
+        self.right_slot.add_shared_widget(self.chain_rpc_btn)
         outer.addWidget(self.right_slot)
 
         outer.setStretchFactor(0, 1)

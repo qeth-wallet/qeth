@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from . import USER_AGENT
 from .chains import Chain
-from .tokens import BLOCKSCOUT_INSTANCES
+from .tokens import BLOCKSCOUT_INSTANCES, ETHERSCAN_V2_CHAINS, ETHERSCAN_V2_BASE
 
 
 class TxDirection(enum.Enum):
@@ -163,6 +163,98 @@ def _parse_blockscout_tx(entry: dict, chain_id: int) -> Optional[Transaction]:
         )
     except (KeyError, ValueError, TypeError):
         return None
+
+
+class EtherscanV2TransactionSource(TransactionSource):
+    """Etherscan v2 multichain ``module=account&action=txlist``.
+
+    Response shape is the same v1 schema Blockscout returns, so the
+    free ``_parse_blockscout_tx`` function does double duty — only
+    the URL changes. Requires a global API key fetched dynamically
+    so the user can paste it at runtime."""
+
+    def __init__(
+        self,
+        get_api_key,
+        timeout: float = 20.0,
+        transport: Optional[Transport] = None,
+        supported_chains: frozenset[int] | None = None,
+    ):
+        self._get_api_key = get_api_key
+        self.timeout = timeout
+        self._transport: Transport = transport or _urllib_transport
+        self._supported = (
+            supported_chains
+            if supported_chains is not None
+            else ETHERSCAN_V2_CHAINS
+        )
+
+    def supports(self, chain: Chain) -> bool:
+        if chain.chain_id not in self._supported:
+            return False
+        return bool(self._get_api_key())
+
+    def list_transactions(
+        self,
+        chain: Chain,
+        address: str,
+        page: int = 1,
+        limit: int = 50,
+    ) -> list[Transaction]:
+        key = self._get_api_key()
+        if not key:
+            raise UnsupportedChain("No Etherscan API key configured")
+        params = [
+            ("chainid", str(chain.chain_id)),
+            ("module", "account"),
+            ("action", "txlist"),
+            ("address", address),
+            ("sort", "desc"),
+            ("page", str(max(1, int(page)))),
+            ("offset", str(max(1, int(limit)))),
+            ("apikey", key),
+        ]
+        url = f"{ETHERSCAN_V2_BASE}?" + urllib.parse.urlencode(params)
+        raw = self._transport(url, self.timeout)
+        data = json.loads(raw)
+
+        if data.get("status") != "1":
+            msg = (data.get("message") or "").lower()
+            if "no transactions" in msg or "not found" in msg:
+                return []
+            raise TransactionSourceError(
+                data.get("message") or "etherscan error"
+            )
+
+        out: list[Transaction] = []
+        for entry in data.get("result") or []:
+            tx = _parse_blockscout_tx(entry, chain.chain_id)
+            if tx is not None:
+                out.append(tx)
+        return out
+
+
+class RoutedTransactionSource(TransactionSource):
+    """Prefer ``primary`` when it supports the chain, fall back to
+    ``secondary``. Mirrors ``RoutedTokenSource``."""
+
+    def __init__(self, primary: TransactionSource, secondary: TransactionSource):
+        self._primary = primary
+        self._secondary = secondary
+
+    def supports(self, chain: Chain) -> bool:
+        return self._primary.supports(chain) or self._secondary.supports(chain)
+
+    def list_transactions(
+        self, chain: Chain, address: str, page: int = 1, limit: int = 50,
+    ) -> list[Transaction]:
+        if self._primary.supports(chain):
+            return self._primary.list_transactions(chain, address, page, limit)
+        if self._secondary.supports(chain):
+            return self._secondary.list_transactions(chain, address, page, limit)
+        raise UnsupportedChain(
+            f"No transaction source supports chain {chain.chain_id}"
+        )
 
 
 class BlockscoutTransactionSource(TransactionSource):

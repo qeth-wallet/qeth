@@ -95,15 +95,21 @@ class _ChainlistLoader(QThread):
 
 
 class ChainRpcDialog(QDialog):
-    """Edit the JSON-RPC URL for one chain.
+    """Edit the JSON-RPC URL for one chain, plus the (global)
+    Etherscan v2 API key.
 
-    Host (MainWindow) reads ``self.rpc_url`` after
-    ``exec() == Accepted`` and persists it via
-    ``Store.set_chain_rpc_url``."""
+    Host (MainWindow) reads ``self.rpc_url`` and
+    ``self.etherscan_api_key`` after ``exec() == Accepted`` and
+    persists them via ``Store.set_chain_rpc_url`` /
+    ``Store.set_etherscan_api_key`` respectively. The Etherscan
+    field is global (one key covers every chain Etherscan v2
+    supports), but the dialog is reachable from any chain so it
+    can be set / changed from wherever the user happens to be."""
 
-    def __init__(self, chain, parent=None):
+    def __init__(self, chain, parent=None, etherscan_api_key: str = ""):
         super().__init__(parent)
         self._chain = chain
+        self._initial_etherscan_key = etherscan_api_key or ""
         # url -> (latency_ms or None, ok); used to sort the
         # picker once all probes have come back.
         self._results: dict[str, tuple[Optional[float], bool]] = {}
@@ -144,6 +150,27 @@ class ChainRpcDialog(QDialog):
         self.status_lbl.setStyleSheet("color: gray;")
         outer.addWidget(self.status_lbl)
 
+        # Etherscan v2 key: optional, global. Lives below the
+        # picker so users see it without scrolling but the chain-
+        # specific bits stay on top. The label spells out that
+        # one key covers every supported chain so people don't
+        # try to enter a different key per dialog open.
+        key_form = QFormLayout()
+        key_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        key_form.setHorizontalSpacing(12)
+        key_form.setVerticalSpacing(8)
+        self.etherscan_edit = QLineEdit(self._initial_etherscan_key)
+        self.etherscan_edit.setFont(mono)
+        self.etherscan_edit.setMinimumHeight(30)
+        self.etherscan_edit.setPlaceholderText(
+            "Leave blank to use Blockscout only"
+        )
+        key_form.addRow(
+            "Etherscan v2 key (all chains):",
+            self.etherscan_edit,
+        )
+        outer.addLayout(key_form)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
         )
@@ -151,10 +178,18 @@ class ChainRpcDialog(QDialog):
         btns.rejected.connect(self.reject)
         outer.addWidget(btns)
 
-        # Track on self so Python doesn't GC the QThread mid-run;
-        # deleteLater on finish cleans up if the dialog closes
-        # while still probing.
-        self._loader = _ChainlistLoader(chain.chain_id, parent=self)
+        # Parent the loader to the QApplication, not to the
+        # dialog, so it can outlive the dialog when the user
+        # cancels mid-probe. The blocking ``urlopen`` calls in the
+        # probe pool can't be cooperatively interrupted, so the
+        # only safe options are (a) wait for them on close, or
+        # (b) detach. (b) is friendlier — the dialog closes
+        # instantly and the loader runs to completion in the
+        # background, then cleans itself up via ``deleteLater``.
+        from PySide6.QtCore import QCoreApplication
+        self._loader = _ChainlistLoader(
+            chain.chain_id, parent=QCoreApplication.instance(),
+        )
         self._loader.loaded.connect(self._on_chainlist_loaded)
         self._loader.probed.connect(self._on_probed)
         self._loader.probing_done.connect(self._on_probing_done)
@@ -162,17 +197,33 @@ class ChainRpcDialog(QDialog):
         self._loader.finished.connect(self._loader.deleteLater)
         self._loader.start()
 
-    def closeEvent(self, event):  # noqa: N802 — Qt method name
-        # Wait for the loader to finish so its QThread destructor
-        # doesn't abort() the whole process when the dialog is
-        # destroyed mid-probe.
-        if self._loader is not None and self._loader.isRunning():
-            self._loader.wait(_PROBE_TIMEOUT_S * 1000 + 500)
-        super().closeEvent(event)
+    def done(self, result):  # noqa: N802 — Qt method name
+        # Both Accept and Reject (and any other ``done(...)`` path
+        # like the WM close button) flow through here. Disconnect
+        # before the dialog dies so signals from the still-running
+        # loader don't fire into a half-destroyed receiver and
+        # SEGFAULT. The loader is parented to the QApplication
+        # (see __init__), so cutting it loose is safe — it'll
+        # finish on its own and deleteLater itself.
+        if self._loader is not None:
+            try:
+                self._loader.loaded.disconnect()
+                self._loader.probed.disconnect()
+                self._loader.probing_done.disconnect()
+                self._loader.failed.disconnect()
+            except (RuntimeError, TypeError):
+                # Already disconnected, or the QThread destructor
+                # ran ahead of us — nothing useful to do.
+                pass
+        super().done(result)
 
     @property
     def rpc_url(self) -> str:
         return self.url_edit.text().strip()
+
+    @property
+    def etherscan_api_key(self) -> str:
+        return self.etherscan_edit.text().strip()
 
     # --- loader callbacks -------------------------------------
 

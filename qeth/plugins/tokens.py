@@ -41,7 +41,9 @@ from ..prices import DefiLlamaPrices, Price, PriceSource
 from ..risk import GoPlusRisk, RiskCache
 from ..token_metadata import TokenMetadataCache
 from ..tokenlists import TokenListEntry, TokenLists
-from ..tokens import BlockscoutSource, TokenBalance
+from ..tokens import (
+    BlockscoutSource, EtherscanV2Source, RoutedTokenSource, TokenBalance,
+)
 from ..wallet_cache import CachedToken, CachedWallet, WalletCache
 
 
@@ -220,7 +222,16 @@ class TokensPlugin(Plugin):
         super().__init__()
         self._store = store
         # Sources (constructed once, reused across refreshes).
-        self._token_source = BlockscoutSource()
+        # Etherscan v2 is preferred when a key is configured (more
+        # reliable + covers chains Blockscout doesn't, e.g. BSC).
+        # Blockscout is the always-available fallback for the
+        # chains it serves. Both lookups consult the store at
+        # call time so changes to the key take effect on the very
+        # next refresh without re-instantiating either source.
+        self._token_source = RoutedTokenSource(
+            EtherscanV2Source(lambda: self._store.etherscan_api_key),
+            BlockscoutSource(),
+        )
         self._token_lists = TokenLists()
         self._icon_cache = IconCache()
         self._price_source: PriceSource = DefiLlamaPrices()

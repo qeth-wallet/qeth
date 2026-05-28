@@ -52,6 +52,11 @@ class Store:
         # by an opaque panel name. Lets users drag columns to widths
         # they prefer and have those persist across runs.
         self.header_states: dict[str, str] = {}
+        # Etherscan v2 API key — global (one key covers every chain
+        # the unified v2 API supports). When set, the tokens /
+        # transactions plugins prefer Etherscan over Blockscout for
+        # discovery; empty means "Blockscout only".
+        self.etherscan_api_key: Optional[str] = None
 
     @classmethod
     def load(cls) -> "Store":
@@ -97,6 +102,9 @@ class Store:
                     str(k): str(v) for k, v in raw_headers.items()
                     if isinstance(v, str)
                 }
+            etherscan_key = data.get("etherscan_api_key")
+            if isinstance(etherscan_key, str) and etherscan_key.strip():
+                s.etherscan_api_key = etherscan_key.strip()
         return s
 
     def save(self) -> None:
@@ -118,6 +126,7 @@ class Store:
                 "splitter_state_main": self.splitter_state_main,
                 "splitter_state_left": self.splitter_state_left,
                 "header_states": dict(self.header_states),
+                "etherscan_api_key": self.etherscan_api_key,
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(data, indent=2))
@@ -213,6 +222,18 @@ class Store:
                 return
             self.chains.append(chain)
         self.save()
+
+    def set_etherscan_api_key(self, key: Optional[str]) -> bool:
+        """Persist the (global) Etherscan v2 API key. Empty string
+        and None both clear the override. Returns True when the
+        stored value actually changed."""
+        cleaned = (key or "").strip() or None
+        with self._lock:
+            if self.etherscan_api_key == cleaned:
+                return False
+            self.etherscan_api_key = cleaned
+        self.save()
+        return True
 
     def set_chain_rpc_url(self, chain_id: int, rpc_url: str) -> bool:
         """Override the RPC URL for an existing chain. Returns

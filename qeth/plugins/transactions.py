@@ -47,7 +47,8 @@ from ..signing import SignerError, SigningRequest
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
 from ..transactions import (
-    BlockscoutTransactionSource, Transaction, TransactionSource,
+    BlockscoutTransactionSource, EtherscanV2TransactionSource,
+    RoutedTransactionSource, Transaction, TransactionSource,
 )
 from ..transactions_cache import TransactionCache, merge_txs
 
@@ -491,10 +492,26 @@ class TransactionsPlugin(Plugin):
         disk_cache: Optional[TransactionCache] = None,
         abi_source: Optional[BlockscoutAbiSource] = None,
         abi_cache: Optional[AbiCache] = None,
+        store=None,
     ):
         super().__init__()
         # Source / cache injection both let tests pass fakes.
-        self._source: TransactionSource = source or BlockscoutTransactionSource()
+        # Default source: prefer Etherscan v2 when the store has a
+        # key, fall back to Blockscout. When no store is given
+        # (tests / standalone construction), behaviour matches the
+        # original bare-Blockscout setup.
+        if source is None:
+            blockscout = BlockscoutTransactionSource()
+            if store is not None:
+                source = RoutedTransactionSource(
+                    EtherscanV2TransactionSource(
+                        lambda: store.etherscan_api_key,
+                    ),
+                    blockscout,
+                )
+            else:
+                source = blockscout
+        self._source: TransactionSource = source
         self._disk_cache = disk_cache if disk_cache is not None else TransactionCache()
         # ABI machinery for the details dialog. Lazy fetch + disk-
         # cache so each contract address is looked up at most once.

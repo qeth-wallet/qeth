@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         # Topic plugins. Each owns its sources/caches/workers/widgets.
         self.wallets_plugin = WalletsPlugin(self.store)
         self.tokens_plugin = TokensPlugin(self.store)
-        self.transactions_plugin = TransactionsPlugin()
+        self.transactions_plugin = TransactionsPlugin(store=self.store)
 
         # Signing bridge: the RPC server hands incoming signing
         # requests through this object, the slot below opens the
@@ -195,20 +195,35 @@ class MainWindow(QMainWindow):
     def _on_edit_chain_rpc(self) -> None:
         from .chain_rpc_dialog import ChainRpcDialog
         chain = self.store.current_chain()
-        dlg = ChainRpcDialog(chain, parent=self)
+        dlg = ChainRpcDialog(
+            chain, parent=self,
+            etherscan_api_key=self.store.etherscan_api_key or "",
+        )
         if dlg.exec() != QDialog.Accepted:
             return
+        # Both the chain RPC URL and the (global) Etherscan key
+        # come from the same dialog. Apply both; either may have
+        # changed independently. A "refresh against new endpoint"
+        # broadcast covers either change — both affect what the
+        # right-slot plugins see on their next discovery.
         new_url = dlg.rpc_url
-        if not new_url or new_url == chain.rpc_url:
-            return
-        if self.store.set_chain_rpc_url(chain.chain_id, new_url):
+        url_changed = bool(
+            new_url and new_url != chain.rpc_url
+            and self.store.set_chain_rpc_url(chain.chain_id, new_url)
+        )
+        key_changed = self.store.set_etherscan_api_key(dlg.etherscan_api_key)
+        if url_changed:
             self.status_message(
                 f"RPC for {chain.name} updated to {new_url}", 4000,
             )
-            # The chain object held by the store has been mutated
-            # in place, so subsequent EthClient instances see the
-            # new URL. Broadcast a chain change so the right slot
-            # refreshes against the new endpoint.
+        elif key_changed:
+            self.status_message(
+                "Etherscan API key updated"
+                if self.store.etherscan_api_key
+                else "Etherscan API key cleared",
+                4000,
+            )
+        if url_changed or key_changed:
             self.right_slot.broadcast_chain_changed()
 
     def _build_central(self) -> None:

@@ -67,6 +67,17 @@ class Store:
             chains_data = data.get("chains")
             if chains_data:
                 s.chains = [_merge_chain(c) for c in chains_data]
+                # Forward-fill: when DEFAULT_CHAINS gains a new
+                # entry (e.g. BNB Smart Chain shipped after the
+                # user's last save), append it so existing
+                # installs pick it up without a manual add-chain
+                # dance. qeth has no remove-chain UI, so anything
+                # missing here was added to the defaults after
+                # this config was last written.
+                known = {c.chain_id for c in s.chains}
+                for d in DEFAULT_CHAINS:
+                    if d.chain_id not in known:
+                        s.chains.append(d)
             s.hidden_tokens = {
                 (int(t["chain_id"]), str(t["address"]).lower())
                 for t in data.get("hidden_tokens", [])

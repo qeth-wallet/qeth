@@ -41,12 +41,14 @@ def _ensure_heavy_imports() -> None:
     from eth_abi import encode as abi_encode
     from web3 import Web3
     from web3.exceptions import Web3RPCError
+    from web3.middleware import ExtraDataToPOAMiddleware
     from web3.providers.rpc import HTTPProvider
     g["requests"] = requests
     g["abi_decode"] = abi_decode
     g["abi_encode"] = abi_encode
     g["Web3"] = Web3
     g["Web3RPCError"] = Web3RPCError
+    g["ExtraDataToPOAMiddleware"] = ExtraDataToPOAMiddleware
     g["HTTPProvider"] = HTTPProvider
 
 USER_AGENT = "qeth/0.1"
@@ -124,6 +126,20 @@ class EthClient:
             request_kwargs={"timeout": timeout},
             session=self._session,
         ))
+        # PoA chains (BSC, Polygon-PoS, Avalanche C-Chain, …) put
+        # validator signatures in the block header's extraData
+        # field, which is 65–280 bytes instead of the 32 web3.py
+        # validates by default — and the validation runs on every
+        # ``eth_getBlockBy*`` response, including the raw
+        # ``rpc()`` path (web3.py 7 routes raw requests through
+        # the middleware onion too). The middleware truncates
+        # extraData to 32 bytes on the way back; harmless on
+        # non-PoA chains because qeth never reads extraData
+        # anyway, so we inject unconditionally instead of gating
+        # on a per-chain flag we'd have to maintain.
+        self._w3.middleware_onion.inject(
+            ExtraDataToPOAMiddleware, layer=0,
+        )
 
     @property
     def w3(self):

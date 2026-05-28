@@ -32,4 +32,10 @@ DEFAULT_CHAINS: list[Chain] = [
     Chain("Base",     8453,  "https://base.drpc.org",      "ETH",   "https://basescan.org",            "ethereum"),
     # xDai / chiado has its own native; the CoinGecko id is "xdai".
     Chain("Gnosis",   100,   "https://gnosis.drpc.org",    "XDAI",  "https://gnosisscan.io",           "xdai"),
+    # BNB Smart Chain — PoA consensus (validator sigs in extraData),
+    # but EthClient injects ExtraDataToPOAMiddleware so the standard
+    # block-reading paths just work. EIP-1559 is supported since
+    # BEP-336 (2024) though baseFee is typically 0; gas_price
+    # fallback in the suggestion worker handles that case cleanly.
+    Chain("BNB Smart Chain", 56, "https://bsc.drpc.org",   "BNB",   "https://bscscan.com",             "binancecoin"),
 ]

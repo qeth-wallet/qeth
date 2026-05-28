@@ -288,12 +288,13 @@ class TestTransactionsPlugin:
         # Filter off → both rows pass through unchanged.
         assert len(emitted[0]) == 2
 
-    def test_initial_open_renders_whole_cache(self, qtbot, tmp_qeth):
-        """The whole on-disk cache lands on the table in one shot when
-        the view is first activated. Load-on-scroll handles only the
-        network side (fetching older pages from Blockscout) — the
-        cache itself is small enough to populate up-front and lets
-        the user see everything they've already paged in."""
+    def test_initial_open_renders_bounded_window(self, qtbot, tmp_qeth):
+        """First activation materialises only the first
+        ``INITIAL_VISIBLE`` cached rows onto the table — full
+        repaints on caches with thousands of entries used to
+        freeze the main thread for ~900 ms on busy wallets. The
+        rest stays in the in-memory cache for scroll-to-bottom
+        to reveal."""
         from qeth.transactions_cache import TransactionCache
         big = [
             Transaction(
@@ -313,11 +314,63 @@ class TestTransactionsPlugin:
         qtbot.addWidget(plugin.widget())
         plugin.on_account_changed(ADDR)
 
-        # Cache hydrated and entire row count on the table.
+        # Cache hydrated fully; only INITIAL_VISIBLE rendered.
         key = (ETH.chain_id, ADDR.lower())
         assert len(plugin._cache[key]) == 1000
+        assert plugin.widget().table.rowCount() == plugin.INITIAL_VISIBLE
+        assert plugin._displayed_count[key] == plugin.INITIAL_VISIBLE
+
+    def test_scroll_bottom_reveals_more_cache_before_network(
+        self, qtbot, tmp_qeth,
+    ):
+        """When the displayed window is narrower than the cached
+        list, scroll-to-bottom must reveal more cached rows
+        in-memory before issuing any network call. Only once the
+        cache is fully revealed does the load-older-from-network
+        path engage."""
+        from qeth.transactions_cache import TransactionCache
+        big = [
+            Transaction(
+                chain_id=1, hash="0x" + format(i, "064x"),
+                block_number=i, timestamp=i, nonce=i,
+                from_addr=ADDR, to_addr="0xfeed",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+            for i in range(1000)
+        ]
+        TransactionCache().save(ETH.chain_id, ADDR, big)
+
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.on_account_changed(ADDR)
+
+        key = (ETH.chain_id, ADDR.lower())
+        # Track network calls — the cache-reveal path must NOT
+        # cause any. We monkey-patch _fetch_page on the instance.
+        calls: list = []
+
+        def _fake_fetch(k, addr, page, walk_on_overlap=False):
+            calls.append((k, addr, page))
+        plugin._fetch_page = _fake_fetch
+
+        # Reveal more from cache: 200 → 400, no network call.
+        plugin._on_scroll_bottom()
+        assert plugin._displayed_count[key] == 400
+        assert plugin.widget().table.rowCount() == 400
+        assert calls == []
+
+        # Keep revealing until cache is fully displayed.
+        while plugin._displayed_count[key] < 1000:
+            plugin._on_scroll_bottom()
         assert plugin.widget().table.rowCount() == 1000
-        assert plugin._displayed_count[key] == 1000
+        assert calls == []
+
+        # Now that cache is exhausted, next scroll goes to network.
+        plugin._on_scroll_bottom()
+        assert len(calls) == 1
 
     def test_render_decoded_lays_out_python_signature(self, qtbot, tmp_qeth):
         """Decoded calls render with type annotations and the function
@@ -521,10 +574,10 @@ class TestTransactionsPlugin:
         plugin.attach(host)
         qtbot.addWidget(plugin.widget())
 
-        # First activation paints the entire cache (300 rows).
+        # First activation paints up to INITIAL_VISIBLE rows.
         plugin.on_activated()
         first_count = plugin.widget().table.rowCount()
-        assert first_count == 300
+        assert first_count == min(plugin.INITIAL_VISIBLE, 300)
 
         # Tab switch away then back — second on_activated for the
         # same view must NOT touch the table.

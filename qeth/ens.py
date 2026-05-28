@@ -18,6 +18,8 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from . import USER_AGENT
+
 
 log = logging.getLogger("qeth.ens")
 
@@ -45,7 +47,7 @@ def lookup_ens_name(rpc_url: str, address: str) -> Optional[str]:
         w3 = Web3(HTTPProvider(
             rpc_url,
             request_kwargs={
-                "headers": {"User-Agent": "qeth/0.1"},
+                "headers": {"User-Agent": USER_AGENT},
                 "timeout": 15,
             },
         ))

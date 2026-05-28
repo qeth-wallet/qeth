@@ -21,10 +21,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import USER_AGENT
+
 log = logging.getLogger("qeth.risk")
 
 CACHE_DIR = Path.home() / ".qeth" / "risk"
-USER_AGENT = "qeth/0.1"
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_TTL_SECONDS = 7 * 86400  # 1 week; contracts can become risky later
 BATCH_SIZE = 100

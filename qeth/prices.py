@@ -19,11 +19,11 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
+from . import USER_AGENT
 from .chains import Chain
 
 log = logging.getLogger("qeth.prices")
 
-USER_AGENT = "qeth/0.1"
 DEFAULT_TIMEOUT = 8.0
 BATCH_SIZE = 100  # URL length is the real constraint; 100 keys is well under it.
 

@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import USER_AGENT
+
 
 log = logging.getLogger("qeth.chainlist")
 
@@ -32,7 +34,6 @@ CHAINS_URL = "https://chainid.network/chains.json"
 CACHE_DIR = Path.home() / ".qeth" / "chainlist"
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_TIMEOUT = 20.0
-USER_AGENT = "qeth/0.1"
 
 
 @dataclass

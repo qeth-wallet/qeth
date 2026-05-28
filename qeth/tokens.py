@@ -16,9 +16,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
 
+from . import USER_AGENT
 from .chains import Chain
-
-USER_AGENT = "qeth/0.1"
 
 
 @dataclass(frozen=True)

@@ -23,12 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from . import USER_AGENT
+
 log = logging.getLogger("qeth.tokenlists")
 
 CACHE_DIR = Path.home() / ".qeth" / "tokenlists"
 DEFAULT_TIMEOUT = 8.0
 DEFAULT_TTL_SECONDS = 24 * 3600
-USER_AGENT = "qeth/0.1"
 
 # Heuristic spam-filter inputs. Kept here rather than in the UI module
 # because deciding "is this token suspicious" is a data concern that

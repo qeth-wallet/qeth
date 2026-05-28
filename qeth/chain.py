@@ -51,7 +51,7 @@ def _ensure_heavy_imports() -> None:
     g["ExtraDataToPOAMiddleware"] = ExtraDataToPOAMiddleware
     g["HTTPProvider"] = HTTPProvider
 
-USER_AGENT = "qeth/0.1"
+from . import USER_AGENT
 
 # Native asset has 18 decimals on every EVM chain we currently support.
 _WEI_PER_ETHER = Decimal(10) ** 18

@@ -16,12 +16,13 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QPainter, QPainterPath, QPixmap
 
+from . import USER_AGENT
+
 log = logging.getLogger("qeth.icons")
 
 ICONS_DIR = Path.home() / ".qeth" / "icons"
 BUNDLED_NATIVE_DIR = Path(__file__).parent / "assets" / "native"
 BUNDLED_CHAIN_DIR = Path(__file__).parent / "assets" / "chains"
-USER_AGENT = "qeth/0.1"
 FETCH_TIMEOUT = 10.0
 
 

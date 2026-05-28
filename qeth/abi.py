@@ -24,10 +24,10 @@ import urllib.parse
 import urllib.request
 from typing import Optional, Union
 
+from . import USER_AGENT
 from .tokens import BLOCKSCOUT_INSTANCES   # reuse the per-chain map
 
 
-USER_AGENT = "qeth/0.1"
 log = logging.getLogger("qeth.abi")
 
 Abi = list[dict]

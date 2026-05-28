@@ -18,10 +18,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from . import USER_AGENT
 from .chains import Chain
 from .tokens import BLOCKSCOUT_INSTANCES
-
-USER_AGENT = "qeth/0.1"
 
 
 class TxDirection(enum.Enum):

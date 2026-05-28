@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 18 325 240" width="325" height="240">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="60 18 262 240" width="262" height="240">
   <g transform="translate(0,18)">
     <g stroke="#15140f" stroke-linecap="round" fill="none">
-      <line x1="44" y1="74" x2="150" y2="74" stroke-width="9" opacity="0.85"></line>
-      <line x1="6" y1="116" x2="150" y2="116" stroke-width="12" opacity="1"></line>
-      <line x1="58" y1="158" x2="150" y2="158" stroke-width="8" opacity="0.6"></line>
+      <line x1="94" y1="74" x2="150" y2="74" stroke-width="9" opacity="0.85"></line>
+      <line x1="72" y1="116" x2="150" y2="116" stroke-width="12" opacity="1"></line>
+      <line x1="106" y1="158" x2="150" y2="158" stroke-width="8" opacity="0.6"></line>
     </g>
     <g transform="translate(166,0) skewX(-16) translate(-150,0)">
       <g transform="translate(150,0)">

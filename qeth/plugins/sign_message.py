@@ -383,5 +383,9 @@ class SignatureResultDialog(QDialog):
         btn_row.addStretch(1)
         close_btn = QPushButton("&Close")
         close_btn.clicked.connect(self.accept)
+        # Dismissing is the natural default for a result dialog —
+        # otherwise Qt's auto-default would put Enter on Copy (the
+        # first button), which silently copies on an accidental Enter.
+        close_btn.setDefault(True)
         btn_row.addWidget(close_btn)
         outer.addLayout(btn_row)

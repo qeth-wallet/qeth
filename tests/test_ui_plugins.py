@@ -550,6 +550,31 @@ class TestTransactionsPlugin:
         assert dialog.tx is sample_tx
         assert dialog.chain is ETH
 
+    def test_details_dialog_closes_on_escape(self, qtbot, tmp_qeth):
+        """Esc must dismiss the (modeless) details dialog — its Close
+        button has no mnemonic, so Escape is the keyboard exit."""
+        from unittest.mock import MagicMock
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from qeth.plugins.transactions import TransactionDetailsDialog
+
+        tx = Transaction(
+            chain_id=1, hash="0x" + "aa" * 32, block_number=1,
+            timestamp=1779618611, nonce=1, from_addr=ADDR,
+            to_addr="0x" + "22" * 20, value_wei=0, gas_used=21000,
+            gas_price_wei=10**9, method_id="", input_data="0x", success=True,
+        )
+        dlg = TransactionDetailsDialog(
+            tx, ETH, abi_source=MagicMock(), abi_cache=MagicMock(),
+            start_worker=lambda w: None, token_info=lambda *a: None,
+            icon_cache=MagicMock(), native_price_usd=None,
+        )
+        qtbot.addWidget(dlg)
+        dlg.show()
+        assert dlg.isVisible()
+        QTest.keyClick(dlg, Qt.Key_Escape)
+        assert not dlg.isVisible()
+
     def test_tab_reactivation_preserves_table(self, qtbot, tmp_qeth):
         """Switching away to the Tokens tab and back must NOT throw
         away anything on screen. The plugin sees on_activated for the

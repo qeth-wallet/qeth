@@ -366,3 +366,27 @@ class TestRecipientTokenContractHint:
         )
         assert dlg._recipient_hint == ""
         assert dlg.recipient_edit.styleSheet() == ""
+
+
+class TestSendDialogKeyboardDefaults:
+    """Enter should trigger Send (the affirmative) and Esc should
+    cancel — the GNOME-HIG default-button / escape contract."""
+
+    def test_send_is_the_default_button(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg.show()
+        # QDialogButtonBox promotes the AcceptRole button to default on
+        # show; confirm it's Send (so Enter confirms, not Cancel).
+        from PySide6.QtWidgets import QPushButton
+        defaults = [b.text() for b in dlg.findChildren(QPushButton)
+                    if b.isDefault()]
+        assert defaults == ["&Send"]
+
+    def test_escape_closes(self, qtbot, monkeypatch):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg.show()
+        assert dlg.isVisible()
+        QTest.keyClick(dlg, Qt.Key_Escape)
+        assert not dlg.isVisible()

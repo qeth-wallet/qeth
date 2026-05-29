@@ -390,3 +390,38 @@ class TestSendDialogKeyboardDefaults:
         assert dlg.isVisible()
         QTest.keyClick(dlg, Qt.Key_Escape)
         assert not dlg.isVisible()
+
+
+class TestGasProgressiveDisclosure:
+    """Gas controls live behind a collapsed expander; the Expected fee
+    summary stays visible (GNOME-HIG progressive disclosure)."""
+
+    def test_gas_controls_hidden_until_expanded(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg.show()
+        # Collapsed by default → spinner not visible, but the Expected
+        # fee summary label IS.
+        assert not dlg._gas_section.is_expanded()
+        assert not dlg.spin_gas.isVisible()
+        assert dlg.max_total_lbl.isVisible()
+        # Expand → spinner shows.
+        dlg._gas_section.set_expanded(True)
+        qtbot.waitUntil(lambda: dlg.spin_gas.isVisible(), timeout=1000)
+        assert dlg.spin_gas.isVisible()
+
+    def test_summary_label_is_outside_the_collapsible(self, qtbot, monkeypatch):
+        # The fee summary must not be a descendant of the collapsible
+        # content, or it would vanish when collapsed.
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        section = dlg._gas_section
+        assert not _is_descendant(dlg.max_total_lbl, section)
+        assert _is_descendant(dlg.spin_gas, section)
+
+
+def _is_descendant(widget, ancestor) -> bool:
+    w = widget.parentWidget()
+    while w is not None:
+        if w is ancestor:
+            return True
+        w = w.parentWidget()
+    return False

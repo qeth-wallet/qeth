@@ -37,7 +37,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
-    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from ..abi import BlockscoutAbiSource, decode_call
@@ -1940,6 +1941,47 @@ class GasSuggestionWorker(QThread):
             self.failed.emit(str(e))
 
 
+class _CollapsibleSection(QWidget):
+    """A disclosure triangle + label that shows/hides a content area.
+
+    Progressive disclosure (GNOME HIG): advanced controls stay tucked
+    away behind a header the user can expand, instead of crowding the
+    dialog. Collapsed by default. The header is a flat (border-less)
+    QToolButton with a rotating arrow so it reads as an expander rather
+    than a button."""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self._toggle = QToolButton()
+        self._toggle.setText(title)
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(False)
+        self._toggle.setAutoRaise(True)
+        self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._toggle.setArrowType(Qt.RightArrow)
+        self._toggle.toggled.connect(self._on_toggled)
+        lay.addWidget(self._toggle)
+        self._content = QWidget()
+        self._content.setVisible(False)
+        lay.addWidget(self._content)
+
+    def set_content_layout(self, layout) -> None:
+        self._content.setLayout(layout)
+
+    def _on_toggled(self, expanded: bool) -> None:
+        self._toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._content.setVisible(expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._toggle.setChecked(expanded)
+
+    def is_expanded(self) -> bool:
+        return self._toggle.isChecked()
+
+
 class SignTransactionDialog(QDialog):
     """Confirmation dialog for an incoming ``eth_sendTransaction``
     from the Frame RPC. Reuses the decoded-call renderer used by the
@@ -2074,12 +2116,14 @@ class SignTransactionDialog(QDialog):
         outer.addWidget(self.decoded_view, 1)
 
         # --- gas / fee editors ---------------------------------------
+        # The auto gas policy is sensible, so the editable controls live
+        # behind a collapsed "Gas settings" expander (progressive
+        # disclosure). The Expected fee summary stays visible below it.
         outer.addSpacing(4)
-        outer.addWidget(QLabel("Gas settings:"))
+        self._gas_section = _CollapsibleSection("Gas settings")
         gas_form = QFormLayout()
         gas_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         gas_form.setHorizontalSpacing(16)
-        outer.addLayout(gas_form)
 
         self.spin_gas = QSpinBox()
         self.spin_gas.setRange(21_000, _GAS_LIMIT_MAX)
@@ -2118,9 +2162,17 @@ class SignTransactionDialog(QDialog):
 
         self.base_fee_lbl = _lbl("(fetching…)")
         gas_form.addRow("Network base fee:", self.base_fee_lbl)
+        self._gas_section.set_content_layout(gas_form)
+        outer.addWidget(self._gas_section)
 
+        # Always-visible fee summary (the number the user actually
+        # decides on; the editable knobs above are the detail).
+        summary = QFormLayout()
+        summary.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        summary.setHorizontalSpacing(16)
         self.max_total_lbl = _lbl("—")
-        gas_form.addRow("Expected fee:", self.max_total_lbl)
+        summary.addRow("Expected fee:", self.max_total_lbl)
+        outer.addLayout(summary)
 
         # --- buttons -------------------------------------------------
         self.buttons = QDialogButtonBox(
@@ -2603,13 +2655,14 @@ class SendTokenDialog(QDialog):
         )
         outer.addWidget(self.decoded_view, 1)
 
-        # Gas section — mirrors SignTransactionDialog.
+        # Gas section — mirrors SignTransactionDialog. Editable controls
+        # live behind a collapsed "Gas settings" expander (progressive
+        # disclosure); the fee summary stays visible.
         outer.addSpacing(4)
-        outer.addWidget(QLabel("Gas settings:"))
+        self._gas_section = _CollapsibleSection("Gas settings")
         gas_form = QFormLayout()
         gas_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         gas_form.setHorizontalSpacing(16)
-        outer.addLayout(gas_form)
 
         self.spin_gas = QSpinBox()
         self.spin_gas.setRange(21_000, _GAS_LIMIT_MAX)
@@ -2648,17 +2701,25 @@ class SendTokenDialog(QDialog):
 
         self.base_fee_lbl = self._value_label("(enter recipient to estimate)")
         gas_form.addRow("Network base fee:", self.base_fee_lbl)
+        self._gas_section.set_content_layout(gas_form)
+        outer.addWidget(self._gas_section)
+
+        # Always-visible fee summary.
+        summary = QFormLayout()
+        summary.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        summary.setHorizontalSpacing(16)
         self.max_total_lbl = self._value_label("—")
-        gas_form.addRow("Expected fee:", self.max_total_lbl)
+        summary.addRow("Expected fee:", self.max_total_lbl)
         # When sending native ETH, the value moves out of the wallet
         # too — so a "Total leaving wallet" line that combines fee +
         # value is genuinely useful. For ERC-20s it'd just duplicate
         # the Amount field, so we only show it for native sends.
         if asset["is_native"]:
             self.total_lbl = self._value_label("—")
-            gas_form.addRow("Total to send:", self.total_lbl)
+            summary.addRow("Total to send:", self.total_lbl)
         else:
             self.total_lbl = None
+        outer.addLayout(summary)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.confirm_btn = self.buttons.addButton(

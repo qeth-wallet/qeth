@@ -31,12 +31,13 @@ USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 
 
 def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
-                  worker_factory=None, known_addresses=None):
+                  worker_factory=None, known_addresses=None, token_info=None):
     """Construct a SendTokenDialog without firing a real
     GasSuggestionWorker (which would hit the network). We replace
     the worker class with a stub so the rest of the dialog wiring
     still runs. ``worker_factory`` lets a test substitute a stub
-    that captures the requests it sees."""
+    that captures the requests it sees. ``token_info`` stubs the
+    curated-token lookup used to flag token-contract recipients."""
     import qeth.plugins.transactions as tx
     if worker_factory is None:
         worker_factory = lambda *a, **kw: MagicMock(
@@ -59,6 +60,7 @@ def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
         abi_cache=MagicMock(),
         start_worker=lambda w: None,
         known_addresses=known_addresses,
+        token_info=token_info,
     )
     qtbot.addWidget(dlg)
     return dlg
@@ -271,7 +273,7 @@ class TestRecipientOwnWalletHint:
             known_addresses=[FROM, OWN_OTHER],
         )
         dlg.recipient_edit.setText(OWN_OTHER)
-        assert dlg._recipient_is_known is True
+        assert dlg._recipient_hint == "own"
         ss = dlg.recipient_edit.styleSheet()
         assert "background-color" in ss and "color" in ss
         assert dlg.recipient_edit.toolTip()  # explains the tint
@@ -282,7 +284,7 @@ class TestRecipientOwnWalletHint:
             known_addresses=[OWN_OTHER.lower()],
         )
         dlg.recipient_edit.setText(OWN_OTHER.upper().replace("0X", "0x"))
-        assert dlg._recipient_is_known is True
+        assert dlg._recipient_hint == "own"
 
     def test_stranger_leaves_default_style(self, qtbot, monkeypatch):
         dlg = _make_dialog(
@@ -290,7 +292,7 @@ class TestRecipientOwnWalletHint:
             known_addresses=[FROM],
         )
         dlg.recipient_edit.setText(STRANGER)
-        assert dlg._recipient_is_known is False
+        assert dlg._recipient_hint == ""
         assert dlg.recipient_edit.styleSheet() == ""
 
     def test_clears_when_address_edited_away(self, qtbot, monkeypatch):
@@ -299,14 +301,68 @@ class TestRecipientOwnWalletHint:
             known_addresses=[OWN_OTHER],
         )
         dlg.recipient_edit.setText(OWN_OTHER)
-        assert dlg._recipient_is_known is True
+        assert dlg._recipient_hint == "own"
         # Backspace one char — no longer a valid/known address.
         dlg.recipient_edit.setText(OWN_OTHER[:-1])
-        assert dlg._recipient_is_known is False
+        assert dlg._recipient_hint == ""
         assert dlg.recipient_edit.styleSheet() == ""
 
     def test_no_known_addresses_never_tints(self, qtbot, monkeypatch):
         dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
         dlg.recipient_edit.setText(OWN_OTHER)
-        assert dlg._recipient_is_known is False
+        assert dlg._recipient_hint == ""
+        assert dlg.recipient_edit.styleSheet() == ""
+
+
+class TestRecipientTokenContractHint:
+    """Sending a token (or ETH) to a token contract almost always
+    burns the funds, so the recipient field turns red. Detection is
+    local: the asset's own contract, or any address on the curated
+    token lists (so it catches tokens the user doesn't hold). Red
+    outranks the green own-wallet hint."""
+
+    def test_sending_to_the_assets_own_contract_is_flagged(
+        self, qtbot, monkeypatch,
+    ):
+        # Sending USDC to the USDC contract — classic footgun.
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg.recipient_edit.setText(USDC_CONTRACT)
+        assert dlg._recipient_hint == "token"
+        ss = dlg.recipient_edit.styleSheet()
+        assert "background-color" in ss and "color" in ss
+        assert "burn" in dlg.recipient_edit.toolTip().lower()
+
+    def test_curated_token_not_held_is_flagged(self, qtbot, monkeypatch):
+        some_token = "0x1111111111111111111111111111111111111111"
+        # token_info returns truthy => it's a known token contract.
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            token_info=lambda cid, addr: (
+                object() if addr.lower() == some_token else None
+            ),
+        )
+        dlg.recipient_edit.setText(some_token)
+        assert dlg._recipient_hint == "token"
+
+    def test_red_outranks_green_when_address_is_both(
+        self, qtbot, monkeypatch,
+    ):
+        addr = "0x2222222222222222222222222222222222222222"
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[addr],
+            token_info=lambda cid, a: object() if a.lower() == addr else None,
+        )
+        dlg.recipient_edit.setText(addr)
+        assert dlg._recipient_hint == "token"  # danger wins
+
+    def test_plain_eoa_recipient_is_not_flagged(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            token_info=lambda cid, addr: None,  # not a known token
+        )
+        dlg.recipient_edit.setText(
+            "0x000000000000000000000000000000000000dEaD"
+        )
+        assert dlg._recipient_hint == ""
         assert dlg.recipient_edit.styleSheet() == ""

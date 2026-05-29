@@ -2498,7 +2498,7 @@ class SendTokenDialog(QDialog):
         self._known_addresses = {
             a.lower() for a in (known_addresses or ())
         }
-        self._recipient_is_known = False
+        self._recipient_hint = ""  # "", "own", or "token"
         self._gas_ready = False
         self._base_fee_wei = 0
         self._estimated_gas = 0
@@ -2859,22 +2859,55 @@ class SendTokenDialog(QDialog):
         except Exception:
             return None
 
+    def _recipient_is_token(self, recipient: str) -> bool:
+        """True when the recipient address is itself a token contract —
+        either the token we're about to send, or any token on the
+        curated lists (so it catches tokens the user doesn't hold).
+        Sending tokens/ETH to a token contract almost always burns the
+        funds, hence the red flag."""
+        rl = recipient.lower()
+        contract = self._asset.get("contract")
+        if contract and contract.lower() == rl:
+            return True
+        if self._token_info is not None:
+            try:
+                return self._token_info(self.chain.chain_id, recipient) is not None
+            except Exception:
+                return False
+        return False
+
     def _update_recipient_hint(self) -> None:
-        """Tint the recipient field when it resolves to one of the
-        user's own wallets, so a self-send is unmistakable. We override
-        BOTH background and text colour as a self-consistent green pair
-        (light-green field, dark-green text), so it stays legible in any
-        palette — a hardcoded background left to the palette's default
-        text would wash out under a dark theme. Cleared otherwise."""
+        """Tint the recipient field to flag two situations, each set as
+        a self-consistent (background, text) colour pair so it stays
+        legible in any palette — a hardcoded background left to the
+        palette's default text would wash out under a dark theme:
+
+          - red: sending to a token contract (almost always a mistake
+            that burns the funds) — wins over the green hint;
+          - green: sending to one of the user's own wallets.
+
+        Cleared to the default style otherwise."""
         recipient = self._parsed_recipient()
-        is_known = (
-            recipient is not None
-            and recipient.lower() in self._known_addresses
-        )
-        if is_known == self._recipient_is_known:
+        if recipient is None:
+            hint = ""
+        elif self._recipient_is_token(recipient):
+            hint = "token"
+        elif recipient.lower() in self._known_addresses:
+            hint = "own"
+        else:
+            hint = ""
+        if hint == self._recipient_hint:
             return  # no change — avoid restyling on every keystroke
-        self._recipient_is_known = is_known
-        if is_known:
+        self._recipient_hint = hint
+        if hint == "token":
+            self.recipient_edit.setStyleSheet(
+                "QLineEdit { background-color: #f6d4d7; color: #7f1d1d; }"
+            )
+            self.recipient_edit.setToolTip(
+                "This is a token contract — sending here usually burns "
+                "the funds"
+            )
+        elif hint == "own":
             self.recipient_edit.setStyleSheet(
                 "QLineEdit { background-color: #d7f0db; color: #14532d; }"
             )

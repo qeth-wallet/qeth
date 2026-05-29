@@ -1106,6 +1106,102 @@ class TestRpcDispatchSendTransaction:
         assert "cancelled" in ei.value.message.lower()
 
 
+class TestRpcProxyFailFast:
+    """_proxy's per-host fail-fast cooldown. When an upstream RPC times
+    out or drops the connection, the host is marked and subsequent
+    requests short-circuit for _FAIL_FAST_S instead of each grinding
+    through another ~15 s timeout — the behaviour that kept the app
+    responsive when DRPC's DNS went out. A successful response clears
+    the mark so the next request flows normally."""
+
+    def _make_server(self):
+        from unittest.mock import MagicMock
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        store.chains = list(DEFAULT_CHAINS)
+        # origin=None routes to current_chain (no per-origin override).
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        return RpcServer(store), DEFAULT_CHAINS[0].rpc_url
+
+    def _client(self, mode: str, result=None):
+        """Fake aiohttp session. mode='fail' drops the connection on
+        entry; mode='ok' returns ``result``. Counts post() calls so a
+        test can prove the wire was never touched."""
+        from aiohttp import ServerDisconnectedError
+        payload = result or {"jsonrpc": "2.0", "id": 1, "result": "0x10"}
+
+        class _Resp:
+            async def json(self_inner):
+                return payload
+
+        class _CM:
+            async def __aenter__(self_inner):
+                if mode == "fail":
+                    raise ServerDisconnectedError()
+                return _Resp()
+
+            async def __aexit__(self_inner, *_a):
+                return False
+
+        class _Client:
+            def __init__(self_inner):
+                self_inner.calls = 0
+
+            def post(self_inner, *_a, **_k):
+                self_inner.calls += 1
+                return _CM()
+
+        return _Client()
+
+    def test_transient_failure_marks_the_host(self):
+        from aiohttp import ServerDisconnectedError
+        server, host = self._make_server()
+        server._client = self._client("fail")
+
+        async def go():
+            with pytest.raises(ServerDisconnectedError):
+                await server._proxy("eth_blockNumber", [])
+            return host in server._host_last_fail
+
+        assert asyncio.run(go()) is True
+
+    def test_within_cooldown_short_circuits_without_calling_upstream(self):
+        from qeth.rpc import RpcError
+        server, host = self._make_server()
+        client = self._client("ok")  # would succeed if it were ever called
+        server._client = client
+
+        async def go():
+            loop = asyncio.get_event_loop()
+            server._host_last_fail[host] = loop.time()  # failed just now
+            with pytest.raises(RpcError) as ei:
+                await server._proxy("eth_blockNumber", [])
+            return ei.value.code, client.calls
+
+        code, calls = asyncio.run(go())
+        assert code == -32603
+        assert calls == 0  # never hit the wire during the cooldown
+
+    def test_success_after_cooldown_clears_the_mark(self):
+        server, host = self._make_server()
+        client = self._client("ok")
+        server._client = client
+
+        async def go():
+            loop = asyncio.get_event_loop()
+            # A failure older than the cooldown window: the next request
+            # should re-probe rather than short-circuit.
+            server._host_last_fail[host] = loop.time() - server._FAIL_FAST_S - 1
+            result = await server._proxy("eth_blockNumber", [])
+            return result, host in server._host_last_fail, client.calls
+
+        result, still_marked, calls = asyncio.run(go())
+        assert result == "0x10"
+        assert still_marked is False  # cleared on success
+        assert calls == 1
+
+
 class TestParsePersonalSignParams:
     """``personal_sign`` is the message-first cousin of ``eth_sign``
     (which is address-first). Dapps confuse the two; the parser

@@ -1539,7 +1539,7 @@ class TransactionDetailsDialog(QDialog):
 
         # Buttons row: Explorer + Close.
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        explorer_btn = QPushButton("Open in block explorer")
+        explorer_btn = QPushButton("&Open in block explorer")
         # Same browser icon as the Transactions list's external-
         # link button so "go to the explorer" reads identically
         # wherever the user encounters it.
@@ -2127,7 +2127,7 @@ class SignTransactionDialog(QDialog):
             QDialogButtonBox.Cancel,
         )
         self.confirm_btn = self.buttons.addButton(
-            "Confirm and sign", QDialogButtonBox.AcceptRole,
+            "&Confirm and sign", QDialogButtonBox.AcceptRole,
         )
         # Checkmark icon — universal "approve". Distinguishes the
         # primary action visually from Cancel, which Qt themes
@@ -2548,7 +2548,7 @@ class SendTokenDialog(QDialog):
         self.recipient_edit = QLineEdit()
         self.recipient_edit.setPlaceholderText("0x… recipient address")
         self.recipient_edit.setFont(mono)
-        header.addRow("To:", self.recipient_edit)
+        header.addRow("&To:", self.recipient_edit)
 
         # Amount + Max + balance label.
         amount_box = QWidget()
@@ -2558,7 +2558,7 @@ class SendTokenDialog(QDialog):
         self.amount_edit = QLineEdit()
         self.amount_edit.setPlaceholderText(f"Amount in {asset['symbol']}")
         amount_row.addWidget(self.amount_edit, 1)
-        self.max_btn = QPushButton("Max")
+        self.max_btn = QPushButton("Ma&x")
         self.max_btn.clicked.connect(self._on_max_clicked)
         # For native sends Max must deduct a gas reserve — disable
         # it until GasSuggestionWorker has populated _gas_ready so
@@ -2570,7 +2570,11 @@ class SendTokenDialog(QDialog):
             self.max_btn.setEnabled(False)
             self.max_btn.setToolTip("Waiting for gas estimate…")
         amount_row.addWidget(self.max_btn)
-        header.addRow("Amount:", amount_box)
+        # Buddy the mnemonic to the inner line-edit, not the row
+        # container, so Alt+A lands the cursor in the amount field.
+        amount_lbl = QLabel("&Amount:")
+        amount_lbl.setBuddy(self.amount_edit)
+        header.addRow(amount_lbl, amount_box)
 
         balance_dec = (
             Decimal(asset["balance_raw"]) / (Decimal(10) ** asset["decimals"])
@@ -2658,7 +2662,7 @@ class SendTokenDialog(QDialog):
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.confirm_btn = self.buttons.addButton(
-            "Send", QDialogButtonBox.AcceptRole,
+            "&Send", QDialogButtonBox.AcceptRole,
         )
         # Same mail-send icon as the toolbar Send button on the
         # tokens panel — same meaning across all the places the

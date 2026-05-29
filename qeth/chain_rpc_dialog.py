@@ -131,7 +131,7 @@ class ChainRpcDialog(QDialog):
         self.url_edit = QLineEdit(chain.rpc_url)
         self.url_edit.setFont(mono)
         self.url_edit.setMinimumHeight(30)
-        form.addRow("RPC URL:", self.url_edit)
+        form.addRow("RPC &URL:", self.url_edit)
         outer.addLayout(form)
 
         outer.addWidget(QLabel(
@@ -166,7 +166,7 @@ class ChainRpcDialog(QDialog):
             "Leave blank to use Blockscout only"
         )
         key_form.addRow(
-            "Etherscan v2 key (all chains):",
+            "&Etherscan v2 key (all chains):",
             self.etherscan_edit,
         )
         outer.addLayout(key_form)

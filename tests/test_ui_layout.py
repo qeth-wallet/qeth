@@ -24,11 +24,15 @@ def test_account_actions_present_at_top_of_left_pane(mainwindow):
     doesn't care which container holds them. The Add button uses a
     QMenu dropdown (Ledger / Watch-only) instead of a single default
     action, so we look at button text rather than defaultAction."""
-    assert mainwindow.act_add.text() == "Add account"
-    assert mainwindow.act_copy.text() == "Copy address"
-    assert mainwindow.act_remove.text() == "Remove account"
+    # Texts carry GNOME-HIG access-key mnemonics ("&A" → Alt+A).
+    assert mainwindow.act_add.text() == "&Add account"
+    assert mainwindow.act_copy.text() == "&Copy address"
+    assert mainwindow.act_remove.text() == "&Remove account"
+    # Strip mnemonics: buttons built via setDefaultAction (copy/remove)
+    # drop the "&" from text(), while the setText-based Add button keeps
+    # it — both still trigger on Alt+letter. Compare on the plain label.
     button_texts = {
-        b.text() for b in mainwindow.findChildren(QToolButton)
+        b.text().replace("&", "") for b in mainwindow.findChildren(QToolButton)
     }
     assert {"Add account", "Copy address", "Remove account"} <= button_texts
 

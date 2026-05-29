@@ -1299,7 +1299,7 @@ class TokenListPanel(QWidget):
         # from the icon-only utility buttons to its right. Disabled
         # until a row is selected. Sends either the selected ERC-20
         # or the native asset (when the native row is selected).
-        self.btn_send = QPushButton("Send")
+        self.btn_send = QPushButton("&Send")
         _send_icon = QIcon.fromTheme(
             "mail-send",
             QIcon.fromTheme(
@@ -1310,7 +1310,7 @@ class TokenListPanel(QWidget):
         if _send_icon.isNull() or not _send_icon.availableSizes():
             # Fall back to a unicode paper-plane in environments
             # whose icon theme lacks the freedesktop send glyphs.
-            self.btn_send.setText("➤ Send")
+            self.btn_send.setText("➤ &Send")
         else:
             self.btn_send.setIcon(_send_icon)
         self.btn_send.setToolTip(

@@ -293,7 +293,7 @@ class ComposeMessageDialog(QDialog):
         outer.addWidget(self.kind_lbl)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.sign_btn = buttons.addButton("Sign", QDialogButtonBox.AcceptRole)
+        self.sign_btn = buttons.addButton("&Sign", QDialogButtonBox.AcceptRole)
         self.sign_btn.setEnabled(False)
         self.sign_btn.clicked.connect(self._emit_request)
         buttons.rejected.connect(self.reject)
@@ -374,13 +374,13 @@ class SignatureResultDialog(QDialog):
         outer.addWidget(self.sig_view, 1)
 
         btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy")
+        copy_btn = QPushButton("Cop&y")
         copy_btn.clicked.connect(
             lambda: QGuiApplication.clipboard().setText(signature_hex)
         )
         btn_row.addWidget(copy_btn)
         btn_row.addStretch(1)
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton("&Close")
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         outer.addLayout(btn_row)

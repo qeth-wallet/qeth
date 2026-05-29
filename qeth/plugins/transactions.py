@@ -2481,6 +2481,7 @@ class SendTokenDialog(QDialog):
                  token_info=None,
                  icon_cache=None,
                  native_price_usd=None,
+                 known_addresses=None,
                  parent=None):
         super().__init__(parent)
         self._asset = asset
@@ -2492,6 +2493,12 @@ class SendTokenDialog(QDialog):
         self._token_info = token_info
         self._icon_cache = icon_cache
         self._native_price_usd = native_price_usd
+        # Addresses the user owns (lowercased), so we can flag when the
+        # recipient is one of their own wallets. Empty set = no hints.
+        self._known_addresses = {
+            a.lower() for a in (known_addresses or ())
+        }
+        self._recipient_is_known = False
         self._gas_ready = False
         self._base_fee_wei = 0
         self._estimated_gas = 0
@@ -2674,6 +2681,7 @@ class SendTokenDialog(QDialog):
         # Confirm button enable state and (for native) the Total line.
         # Gas spinners re-render the Expected fee + Total.
         self.recipient_edit.textChanged.connect(self._update_state)
+        self.recipient_edit.textChanged.connect(self._update_recipient_hint)
         self.amount_edit.textChanged.connect(self._update_state)
         for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
             if sp is not None:
@@ -2850,6 +2858,30 @@ class SendTokenDialog(QDialog):
             return to_checksum_address(text)
         except Exception:
             return None
+
+    def _update_recipient_hint(self) -> None:
+        """Tint the recipient field when it resolves to one of the
+        user's own wallets, so a self-send is unmistakable. We override
+        BOTH background and text colour as a self-consistent green pair
+        (light-green field, dark-green text), so it stays legible in any
+        palette — a hardcoded background left to the palette's default
+        text would wash out under a dark theme. Cleared otherwise."""
+        recipient = self._parsed_recipient()
+        is_known = (
+            recipient is not None
+            and recipient.lower() in self._known_addresses
+        )
+        if is_known == self._recipient_is_known:
+            return  # no change — avoid restyling on every keystroke
+        self._recipient_is_known = is_known
+        if is_known:
+            self.recipient_edit.setStyleSheet(
+                "QLineEdit { background-color: #d7f0db; color: #14532d; }"
+            )
+            self.recipient_edit.setToolTip("This is one of your own wallets")
+        else:
+            self.recipient_edit.setStyleSheet("")
+            self.recipient_edit.setToolTip("")
 
     def _parsed_amount_raw_unchecked(self) -> Optional[int]:
         """Parse the amount field WITHOUT comparing against the

@@ -31,7 +31,7 @@ USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 
 
 def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
-                  worker_factory=None):
+                  worker_factory=None, known_addresses=None):
     """Construct a SendTokenDialog without firing a real
     GasSuggestionWorker (which would hit the network). We replace
     the worker class with a stub so the rest of the dialog wiring
@@ -58,6 +58,7 @@ def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
         abi_source=MagicMock(),
         abi_cache=MagicMock(),
         start_worker=lambda w: None,
+        known_addresses=known_addresses,
     )
     qtbot.addWidget(dlg)
     return dlg
@@ -250,3 +251,62 @@ class TestGasReestimateOnRecipientChange:
         dlg.recipient_edit.setText("0xa9d1")
         dlg._reestimate_gas()
         assert len(constructed) == before
+
+
+# A second wallet the user owns (checksum-mixed to prove we match
+# case-insensitively against the lowercased known set).
+OWN_OTHER = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+STRANGER = "0x1111111111111111111111111111111111111111"
+
+
+class TestRecipientOwnWalletHint:
+    """Typing a recipient that is one of the user's own wallets tints
+    the field (light-green bg + dark-green text, set together so it's
+    legible in any palette). Anything else leaves it on the default
+    style."""
+
+    def test_own_wallet_tints_the_field(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[FROM, OWN_OTHER],
+        )
+        dlg.recipient_edit.setText(OWN_OTHER)
+        assert dlg._recipient_is_known is True
+        ss = dlg.recipient_edit.styleSheet()
+        assert "background-color" in ss and "color" in ss
+        assert dlg.recipient_edit.toolTip()  # explains the tint
+
+    def test_case_insensitive_match(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[OWN_OTHER.lower()],
+        )
+        dlg.recipient_edit.setText(OWN_OTHER.upper().replace("0X", "0x"))
+        assert dlg._recipient_is_known is True
+
+    def test_stranger_leaves_default_style(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[FROM],
+        )
+        dlg.recipient_edit.setText(STRANGER)
+        assert dlg._recipient_is_known is False
+        assert dlg.recipient_edit.styleSheet() == ""
+
+    def test_clears_when_address_edited_away(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[OWN_OTHER],
+        )
+        dlg.recipient_edit.setText(OWN_OTHER)
+        assert dlg._recipient_is_known is True
+        # Backspace one char — no longer a valid/known address.
+        dlg.recipient_edit.setText(OWN_OTHER[:-1])
+        assert dlg._recipient_is_known is False
+        assert dlg.recipient_edit.styleSheet() == ""
+
+    def test_no_known_addresses_never_tints(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg.recipient_edit.setText(OWN_OTHER)
+        assert dlg._recipient_is_known is False
+        assert dlg.recipient_edit.styleSheet() == ""

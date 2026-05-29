@@ -542,6 +542,7 @@ class MainWindow(QMainWindow):
             native_price_usd=self.native_price_usd(
                 chain.chain_id, from_addr,
             ),
+            known_addresses=[a["address"] for a in self.store.accounts],
             parent=self,
         )
         self._launch_sign_flow(

@@ -30,6 +30,35 @@ def _alert(parent, primary: str, secondary: str, icon) -> int:
     return _build(parent, primary, secondary, icon).exec()
 
 
+def _build_confirm(parent, primary: str, secondary: str, action: str,
+                   destructive: bool):
+    """Build a confirmation box with a verb button instead of Yes/No
+    (HIG: the affirmative button names the action it performs), Cancel
+    as the safe default + Escape target, and a two-tier message."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning if destructive else QMessageBox.Question)
+    box.setText(primary)
+    if secondary:
+        box.setInformativeText(secondary)
+    accept = box.addButton(action, QMessageBox.AcceptRole)
+    cancel = box.addButton("&Cancel", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    return box, accept
+
+
+def confirm(parent, primary: str, secondary: str = "", *,
+            action: str, destructive: bool = False) -> bool:
+    """Ask the user to confirm an action. ``action`` is the verb on the
+    affirmative button (e.g. "&Remove"); the other button is Cancel and
+    is the default, so an accidental Enter/Escape is safe. Returns True
+    only if the user clicked the action button."""
+    box, accept = _build_confirm(parent, primary, secondary, action,
+                                 destructive)
+    box.exec()
+    return box.clickedButton() is accept
+
+
 def warn(parent, primary: str, secondary: str = "") -> int:
     return _alert(parent, primary, secondary, QMessageBox.Warning)
 

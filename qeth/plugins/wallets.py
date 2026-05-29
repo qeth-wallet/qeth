@@ -37,13 +37,13 @@ from PySide6.QtGui import QAction, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton,
+    QListWidgetItem, QMenu, QProgressBar, QPushButton,
     QSizePolicy, QSpinBox, QSplitter, QStyle, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QThread
 
-from ..alerts import error, info, warn
+from ..alerts import confirm, error, info, warn
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
 
@@ -664,14 +664,13 @@ class WalletsPlugin(Plugin):
         sources = {a.get("source") for a in self._store.accounts
                     if a["address"].lower() in addrs_lower}
         if len(addrs) == 1:
-            prompt = f"Remove {addrs[0]} from this wallet?"
+            prompt = "Remove this account from the wallet?"
+            detail_head = addrs[0]
         else:
             preview = "\n".join(f"  • {a}" for a in addrs[:5])
             extra = f"\n  … and {len(addrs) - 5} more" if len(addrs) > 5 else ""
-            prompt = (
-                f"Remove {len(addrs)} accounts from this wallet?\n\n"
-                f"{preview}{extra}"
-            )
+            prompt = f"Remove these {len(addrs)} accounts from the wallet?"
+            detail_head = f"{preview}{extra}"
         if sources == {"ledger"}:
             consequence = (
                 "Keys on your Ledger are untouched; this only forgets "
@@ -699,14 +698,10 @@ class WalletsPlugin(Plugin):
                 "without an external backup of the keystore + "
                 "passphrase."
             )
-        reply = QMessageBox.question(
-            self._container,
-            "Remove account" if len(addrs) == 1 else "Remove accounts",
-            f"{prompt}\n\n{consequence}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        if not confirm(
+            self._container, prompt, f"{detail_head}\n\n{consequence}",
+            action="&Remove", destructive=True,
+        ):
             return
         # Hot wallets carry an on-disk keystore alongside the
         # config-level account record; remove both. Ledger / watch-

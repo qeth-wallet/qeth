@@ -1849,14 +1849,15 @@ class TokenListPanel(QWidget):
         if addr == self.NATIVE_CONTRACT:
             return  # native asset can't be hidden
         menu = QMenu(self)
-        act_copy = menu.addAction("Copy Contract Address")
+        # Reuse the panel buttons' icons so the menu matches the toolbar.
+        act_copy = menu.addAction(self.btn_copy.icon(), "Copy Contract Address")
         # Pin is one-shot (no unpin UI yet); skip it for already-pinned
         # tokens so the menu doesn't suggest a no-op.
         act_pin = None
         if not self._store.is_force_shown(cid, addr):
-            act_pin = menu.addAction(f"Pin {sym_item.text()}")
+            act_pin = menu.addAction(self.btn_pin.icon(), f"Pin {sym_item.text()}")
         menu.addSeparator()
-        act_hide = menu.addAction(f"Hide {sym_item.text()}")
+        act_hide = menu.addAction(self.btn_hide.icon(), f"Hide {sym_item.text()}")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_hide:
             self.hide_requested.emit(cid, addr)

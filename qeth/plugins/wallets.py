@@ -648,7 +648,8 @@ class WalletsPlugin(Plugin):
                 default is not None and addr.lower() == default.lower()
             )
             if not already_default:
-                act_default = menu.addAction("Connect to Browser")
+                act_default = menu.addAction(
+                    self._details.set_default_btn.icon(), "Connect to Browser")
                 act_default.triggered.connect(
                     lambda _checked=False, a=addr: self._set_default(a)
                 )

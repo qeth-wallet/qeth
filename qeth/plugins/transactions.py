@@ -79,14 +79,18 @@ def _install_copy_menu(label: "QLabel", value: str, url: "Optional[str]") -> Non
 
     label.setContextMenuPolicy(Qt.CustomContextMenu)
     noun = _copy_noun(value)
+    copy_icon = QIcon.fromTheme("edit-copy")
+    open_icon = QIcon.fromTheme(
+        "applications-internet", QIcon.fromTheme("internet-web-browser")
+    )
 
     def _show(pos):
         menu = QMenu(label)
-        menu.addAction(f"Copy {noun}").triggered.connect(
+        menu.addAction(copy_icon, f"Copy {noun}").triggered.connect(
             lambda: QApplication.clipboard().setText(value)
         )
         if url:
-            menu.addAction("Open in Browser").triggered.connect(
+            menu.addAction(open_icon, "Open in Browser").triggered.connect(
                 lambda: QDesktopServices.openUrl(QUrl(url))
             )
         menu.exec(label.mapToGlobal(pos))
@@ -1385,10 +1389,14 @@ class TransactionListPanel(QWidget):
         if tx is None:
             return
         menu = QMenu(self)
-        act_details = menu.addAction("Show Transaction Details…")
-        act_open = menu.addAction("Open in Block Explorer")
+        # Reuse the panel buttons' icons so the menu matches the toolbar.
+        act_details = menu.addAction(
+            self.btn_details.icon(), "Show Transaction Details…")
+        act_open = menu.addAction(
+            self.btn_explorer.icon(), "Open in Block Explorer")
         act_open.setEnabled(bool(self._chain and self._chain.explorer))
-        act_copy_hash = menu.addAction("Copy Tx Hash")
+        act_copy_hash = menu.addAction(
+            self.btn_copy_hash.icon(), "Copy Tx Hash")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_details:
             self.tx_details_requested.emit(tx)

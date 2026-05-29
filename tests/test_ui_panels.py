@@ -123,7 +123,21 @@ def token_panel(qtbot, tmp_qeth):
     return panel
 
 
+def _has_copy_shortcut(table) -> bool:
+    from PySide6.QtGui import QKeySequence
+    return any(
+        a.shortcut() == QKeySequence(QKeySequence.Copy)
+        and a.shortcutContext() == Qt.WidgetWithChildrenShortcut
+        for a in table.actions()
+    )
+
+
 class TestTokenListPanel:
+    def test_ctrl_c_copies_contract_address(self, token_panel):
+        # Ctrl+C is wired on the table (scoped to it), and triggers the
+        # same handler as the Copy button — copying the contract address.
+        assert _has_copy_shortcut(token_panel.table)
+
     def test_native_row_pinned_at_index_zero(self, token_panel):
         token_panel.show_balances(ETH, native_wei=10**18, tokens=[], list_entries={})
         assert token_panel.table.rowCount() == 1
@@ -184,6 +198,11 @@ def _tx(**kw) -> Transaction:
 
 
 class TestTransactionListPanel:
+    def test_ctrl_c_copies_tx_hash(self, qtbot, tmp_qeth):
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        assert _has_copy_shortcut(panel.table)
+
     def test_empty_list_shows_status_message(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
         qtbot.addWidget(panel)

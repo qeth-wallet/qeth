@@ -25,7 +25,9 @@ from decimal import Decimal
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QIcon
+from PySide6.QtGui import (
+    QAction, QDesktopServices, QFont, QIcon, QKeySequence,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog,
     QMenu, QPushButton, QSizePolicy, QStyle, QTableWidget,
@@ -1382,6 +1384,13 @@ class TokenListPanel(QWidget):
         )
         self.btn_add.clicked.connect(self.add_custom_requested.emit)
         self.btn_copy.clicked.connect(self._copy_selected_contract)
+        # Ctrl+C copies the selected token's contract address, scoped to
+        # the table so it only fires when this tab has focus.
+        copy_act = QAction(self.table)
+        copy_act.setShortcut(QKeySequence.Copy)
+        copy_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        copy_act.triggered.connect(self._copy_selected_contract)
+        self.table.addAction(copy_act)
         self.btn_hide.clicked.connect(
             lambda: self._emit_for_selected(self.hide_requested)
         )

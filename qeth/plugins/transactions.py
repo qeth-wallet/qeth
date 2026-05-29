@@ -31,7 +31,8 @@ def _escape_html(text: str) -> str:
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QDesktopServices, QFont, QFontDatabase, QIcon, QPalette, QTextOption,
+    QAction, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence,
+    QPalette, QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
@@ -1156,6 +1157,13 @@ class TransactionListPanel(QWidget):
         self.btn_details.clicked.connect(self._details_for_selected)
         self.btn_explorer.clicked.connect(self._explorer_for_selected)
         self.btn_copy_hash.clicked.connect(self._copy_hash_for_selected)
+        # Ctrl+C copies the selected transaction's hash, scoped to the
+        # table so it only fires when this tab has focus.
+        copy_act = QAction(self.table)
+        copy_act.setShortcut(QKeySequence.Copy)
+        copy_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        copy_act.triggered.connect(self._copy_hash_for_selected)
+        self.table.addAction(copy_act)
         self.table.itemSelectionChanged.connect(self._update_action_buttons)
 
         # Set by MainWindow before render so we can build explorer URLs

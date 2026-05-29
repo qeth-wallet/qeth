@@ -10,6 +10,7 @@ multicall3 balanceOf), Alchemy ``alchemy_getTokenBalances``, Covalent.
 """
 
 import json
+import logging
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
@@ -18,6 +19,8 @@ from decimal import Decimal
 
 from . import USER_AGENT
 from .chains import Chain
+
+log = logging.getLogger("qeth.tokens")
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,14 @@ ETHERSCAN_V2_CHAINS: frozenset[int] = frozenset({
 })
 ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 
+# Etherscan v2's per-page hard cap for addresstokenbalance. We request
+# exactly this many rows in one shot (no pagination loop) — see the note
+# in EtherscanV2Source.list_balances. If a wallet ever holds this many
+# distinct token contracts the result is silently truncated, which is
+# the failure mode that once hid a real holding behind offset=100, so we
+# log when we land exactly on the cap rather than guessing it's complete.
+ETHERSCAN_PAGE_CAP = 10000
+
 
 class EtherscanV2Source(TokenSource):
     """Etherscan v2 unified-multichain tokenlist endpoint.
@@ -115,19 +126,20 @@ class EtherscanV2Source(TokenSource):
         key = self._get_api_key()
         if not key:
             raise UnsupportedChain("No Etherscan API key configured")
-        # offset=10000 is Etherscan v2's per-page cap. Anything
-        # smaller silently truncates wallets with long-tail
+        # offset=ETHERSCAN_PAGE_CAP is Etherscan v2's per-page cap.
+        # Anything smaller silently truncates wallets with long-tail
         # holdings — the wallet held a curated, priced, ~$9k YB
         # position that sat at index >100 and was invisible until
-        # we asked for the full page. Pagination beyond 10k would
-        # need a loop, but no real holding pattern hits that.
+        # we asked for the full page. Pagination beyond the cap would
+        # need a loop, but no real holding pattern hits that (and we
+        # log below if a wallet ever lands exactly on the cap).
         params = [
             ("chainid", str(chain.chain_id)),
             ("module", "account"),
             ("action", "addresstokenbalance"),
             ("address", address),
             ("page", "1"),
-            ("offset", "10000"),
+            ("offset", str(ETHERSCAN_PAGE_CAP)),
             ("apikey", key),
         ]
         url = f"{ETHERSCAN_V2_BASE}?" + urllib.parse.urlencode(params)
@@ -144,8 +156,22 @@ class EtherscanV2Source(TokenSource):
                 return []
             raise TokenSourceError(data.get("message") or "etherscan error")
 
+        result = data.get("result") or []
+        if len(result) >= ETHERSCAN_PAGE_CAP:
+            # Landed exactly on (or past) the single-page cap: the
+            # wallet almost certainly has more tokens than we fetched
+            # and the tail is truncated. Surface it instead of
+            # silently returning a partial list (this is the offset=100
+            # bug class — a missing holding looks identical to "no such
+            # token"). Fixing it would mean paginating page=2,3,…
+            log.warning(
+                "etherscan tokenlist hit the %d-row page cap for %s on "
+                "chain %d — holdings beyond that are truncated",
+                ETHERSCAN_PAGE_CAP, address, chain.chain_id,
+            )
+
         out: list[TokenBalance] = []
-        for entry in data.get("result") or []:
+        for entry in result:
             try:
                 decimals_raw = entry.get("TokenDivisor") or entry.get("decimals") or "18"
                 out.append(TokenBalance(

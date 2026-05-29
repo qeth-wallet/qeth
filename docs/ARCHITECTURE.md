@@ -631,6 +631,10 @@ it.
 re-runs a full discovery; it's the common path behind hide/pin/show-all toggles,
 custom-token add, and receipt credits.
 
+**Keyboard:** `Ctrl+C` copies the selected token's contract address — a Copy
+action on the table, tree-scoped (`WidgetWithChildrenShortcut`) like the
+accounts panel (§8.1), reusing the Copy button's handler.
+
 ---
 
 ## 10. Transactions plugin — `plugins/transactions.py`
@@ -642,6 +646,8 @@ history source (§4.6). **Bounded initial render** (`INITIAL_VISIBLE = 200`)
 avoids O(N²) row re-measurement on large histories; more rows reveal on
 scroll-to-bottom, then network pages are walked. `update_tx_by_hash` repaints a
 single row (used for pending→confirmed) instead of rebuilding the table.
+**Keyboard:** `Ctrl+C` copies the selected transaction's hash (table-scoped,
+reusing the Copy-Tx-Hash handler).
 
 ### 10.2 Pending → confirmed
 

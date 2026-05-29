@@ -47,7 +47,7 @@ class TestDetailsPanel:
         # one dapps see via the local JSON-RPC server).
         assert panel.set_default_btn.isEnabled()
         # Text carries a GNOME-HIG access-key mnemonic (Alt+B).
-        assert panel.set_default_btn.text() == "Connect to &browser"
+        assert panel.set_default_btn.text() == "Connect to &Browser"
 
     def test_show_account_marks_default(self, qtbot, tmp_qeth):
         panel = DetailsPanel()

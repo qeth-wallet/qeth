@@ -1344,10 +1344,10 @@ class TransactionListPanel(QWidget):
         if tx is None:
             return
         menu = QMenu(self)
-        act_details = menu.addAction("Show transaction details…")
-        act_open = menu.addAction("Open in block explorer")
+        act_details = menu.addAction("Show Transaction Details…")
+        act_open = menu.addAction("Open in Block Explorer")
         act_open.setEnabled(bool(self._chain and self._chain.explorer))
-        act_copy_hash = menu.addAction("Copy tx hash")
+        act_copy_hash = menu.addAction("Copy Tx Hash")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_details:
             self.tx_details_requested.emit(tx)
@@ -1539,7 +1539,7 @@ class TransactionDetailsDialog(QDialog):
 
         # Buttons row: Explorer + Close.
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        explorer_btn = QPushButton("&Open in block explorer")
+        explorer_btn = QPushButton("&Open in Block Explorer")
         # Same browser icon as the Transactions list's external-
         # link button so "go to the explorer" reads identically
         # wherever the user encounters it.
@@ -2002,7 +2002,7 @@ class SignTransactionDialog(QDialog):
         # for the live "Expected fee" line.
         self._estimated_gas = 0
 
-        self.setWindowTitle("Sign transaction")
+        self.setWindowTitle("Sign Transaction")
         self.resize(720, 640)
         self._link_color = self.palette().color(QPalette.WindowText).name()
 
@@ -2127,7 +2127,7 @@ class SignTransactionDialog(QDialog):
             QDialogButtonBox.Cancel,
         )
         self.confirm_btn = self.buttons.addButton(
-            "&Confirm and sign", QDialogButtonBox.AcceptRole,
+            "&Confirm and Sign", QDialogButtonBox.AcceptRole,
         )
         # Checkmark icon — universal "approve". Distinguishes the
         # primary action visually from Cancel, which Qt themes

@@ -1849,7 +1849,7 @@ class TokenListPanel(QWidget):
         if addr == self.NATIVE_CONTRACT:
             return  # native asset can't be hidden
         menu = QMenu(self)
-        act_copy = menu.addAction("Copy contract address")
+        act_copy = menu.addAction("Copy Contract Address")
         # Pin is one-shot (no unpin UI yet); skip it for already-pinned
         # tokens so the menu doesn't suggest a no-op.
         act_pin = None

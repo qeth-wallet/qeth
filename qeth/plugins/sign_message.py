@@ -173,9 +173,9 @@ class SignMessageDialog(QDialog):
         super().__init__(parent)
         self._req = req
         if isinstance(req, MessageSigningRequest):
-            self.setWindowTitle("Sign message")
+            self.setWindowTitle("Sign Message")
         else:
-            self.setWindowTitle("Sign typed data (EIP-712)")
+            self.setWindowTitle("Sign Typed Data (EIP-712)")
         self.resize(680, 540)
 
         outer = QVBoxLayout(self)
@@ -262,7 +262,7 @@ class ComposeMessageDialog(QDialog):
     def __init__(self, from_addr: str, parent=None):
         super().__init__(parent)
         self._from_addr = from_addr
-        self.setWindowTitle(f"Sign message with {from_addr[:10]}…")
+        self.setWindowTitle(f"Sign Message with {from_addr[:10]}…")
         self.resize(640, 480)
 
         outer = QVBoxLayout(self)

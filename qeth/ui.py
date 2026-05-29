@@ -620,7 +620,7 @@ class MainWindow(QMainWindow):
             dialog,         # parent on the sign dialog so the
                             # progress sits on top of it.
         )
-        progress.setWindowTitle("Signing transaction")
+        progress.setWindowTitle("Signing Transaction")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
@@ -726,7 +726,7 @@ class MainWindow(QMainWindow):
         progress = QProgressDialog(
             progress_text, None, 0, 0, dialog,
         )
-        progress.setWindowTitle("Signing message")
+        progress.setWindowTitle("Signing Message")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
@@ -786,7 +786,7 @@ class MainWindow(QMainWindow):
             return
 
         progress = QProgressDialog(progress_text, None, 0, 0, self)
-        progress.setWindowTitle("Signing message")
+        progress.setWindowTitle("Signing Message")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()

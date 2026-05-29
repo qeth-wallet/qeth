@@ -25,16 +25,16 @@ def test_account_actions_present_at_top_of_left_pane(mainwindow):
     QMenu dropdown (Ledger / Watch-only) instead of a single default
     action, so we look at button text rather than defaultAction."""
     # Texts carry GNOME-HIG access-key mnemonics ("&A" → Alt+A).
-    assert mainwindow.act_add.text() == "&Add account"
-    assert mainwindow.act_copy.text() == "&Copy address"
-    assert mainwindow.act_remove.text() == "&Remove account"
+    assert mainwindow.act_add.text() == "&Add Account"
+    assert mainwindow.act_copy.text() == "&Copy Address"
+    assert mainwindow.act_remove.text() == "&Remove Account"
     # Strip mnemonics: buttons built via setDefaultAction (copy/remove)
     # drop the "&" from text(), while the setText-based Add button keeps
     # it — both still trigger on Alt+letter. Compare on the plain label.
     button_texts = {
         b.text().replace("&", "") for b in mainwindow.findChildren(QToolButton)
     }
-    assert {"Add account", "Copy address", "Remove account"} <= button_texts
+    assert {"Add Account", "Copy Address", "Remove Account"} <= button_texts
 
 
 def test_copy_and_remove_disabled_until_account_selected(mainwindow):

@@ -362,17 +362,17 @@ class WalletsPlugin(Plugin):
         self.act_add = QAction(
             QIcon.fromTheme("document-new",
                             style_proxy.standardIcon(QStyle.SP_FileIcon)),
-            "&Add account",
+            "&Add Account",
         )
         self.act_add.setToolTip("Add a Ledger or watch-only account")
         # Sub-actions used by both the toolbar dropdown and the
         # tree's right-click menu so the two entry points agree on
         # which dialogs they open.
-        self.act_add_ledger = QAction("&Ledger account…", self)
+        self.act_add_ledger = QAction("&Ledger Account…", self)
         self.act_add_ledger.triggered.connect(self._add_ledger)
-        self.act_add_hot = QAction("&Hot wallet…", self)
+        self.act_add_hot = QAction("&Hot Wallet…", self)
         self.act_add_hot.triggered.connect(self._add_hot_wallet)
-        self.act_add_watch = QAction("&Watch-only address…", self)
+        self.act_add_watch = QAction("&Watch-only Address…", self)
         self.act_add_watch.triggered.connect(self._add_watch_only)
         # Import-from-other-wallet actions live below a separator
         # so the primary "add a new account" actions stay grouped
@@ -390,7 +390,7 @@ class WalletsPlugin(Plugin):
         self.act_copy = QAction(
             QIcon.fromTheme("edit-copy",
                             style_proxy.standardIcon(QStyle.SP_DialogSaveButton)),
-            "&Copy address",
+            "&Copy Address",
         )
         self.act_copy.setEnabled(False)
         self.act_copy.triggered.connect(self._copy_selected_address)
@@ -398,7 +398,7 @@ class WalletsPlugin(Plugin):
         self.act_remove = QAction(
             QIcon.fromTheme("list-remove",
                             style_proxy.standardIcon(QStyle.SP_TrashIcon)),
-            "&Remove account",
+            "&Remove Account",
         )
         self.act_remove.setEnabled(False)
         self.act_remove.triggered.connect(self._remove_selected_account)
@@ -633,7 +633,7 @@ class WalletsPlugin(Plugin):
                 default is not None and addr.lower() == default.lower()
             )
             if not already_default:
-                act_default = menu.addAction("Connect to browser")
+                act_default = menu.addAction("Connect to Browser")
                 act_default.triggered.connect(
                     lambda _checked=False, a=addr: self._set_default(a)
                 )
@@ -1051,7 +1051,7 @@ class DetailsPanel(QWidget):
         # "Connect to browser" makes the action concrete: this is the
         # address dapps will see via the local JSON-RPC server (Frame
         # interface), nothing about persistence or "default".
-        self.set_default_btn = QPushButton("Connect to &browser")
+        self.set_default_btn = QPushButton("Connect to &Browser")
         # Globe / browser icon for "make this address visible to the
         # web". Same icon the Transactions list uses for "Open in
         # block explorer" — reuse keeps the "exposed to the web"
@@ -1084,7 +1084,7 @@ class DetailsPanel(QWidget):
         # "Sign message…" — opens the compose dialog for the
         # currently-shown account. Disabled when nothing's
         # selected or when the account has no signer (watch-only).
-        self.sign_message_btn = QPushButton("Sign &message…")
+        self.sign_message_btn = QPushButton("Sign &Message…")
         _sig_icon = QIcon.fromTheme(
             "document-edit",
             QIcon.fromTheme(
@@ -1144,7 +1144,7 @@ class DetailsPanel(QWidget):
         is_watch_only = account.get("source") == "watch_only"
         if is_watch_only:
             self.set_default_btn.setEnabled(False)
-            self.set_default_btn.setText("Watch-only — read-only")
+            self.set_default_btn.setText("Watch-only — Read-only")
             self.set_default_btn.setToolTip(
                 "Watch-only accounts have no signing key — they "
                 "can't be the address dapps see."
@@ -1152,8 +1152,8 @@ class DetailsPanel(QWidget):
         else:
             self.set_default_btn.setEnabled(not is_default)
             self.set_default_btn.setText(
-                "Connected to browser ✓" if is_default
-                else "Connect to &browser"
+                "Connected to Browser ✓" if is_default
+                else "Connect to &Browser"
             )
             self.set_default_btn.setToolTip(
                 "Make this the address dapps see (returned by "
@@ -1186,7 +1186,7 @@ class DetailsPanel(QWidget):
             w.setText("—")
         self.qr_lbl.clear()
         self.set_default_btn.setEnabled(False)
-        self.set_default_btn.setText("Connect to &browser")
+        self.set_default_btn.setText("Connect to &Browser")
         self.sign_message_btn.setEnabled(False)
 
     def _on_label_committed(self) -> None:
@@ -1220,7 +1220,7 @@ class AddLedgerDialog(QDialog):
     def __init__(self, chain, parent=None):
         super().__init__(parent)
         self._chain = chain
-        self.setWindowTitle("Add Ledger accounts")
+        self.setWindowTitle("Add Ledger Accounts")
         self.setMinimumSize(640, 460)
 
         layout = QVBoxLayout(self)
@@ -1264,7 +1264,7 @@ class AddLedgerDialog(QDialog):
         )
         if not _scan_icon.isNull() and _scan_icon.availableSizes():
             self.scan_btn.setIcon(_scan_icon)
-        self.add_btn = QPushButton("&Add selected")
+        self.add_btn = QPushButton("&Add Selected")
         # Same "+" icon the toolbar Add buttons use across the app —
         # keeps the meaning stable wherever the user sees it.
         _add_icon = QIcon.fromTheme(
@@ -1406,7 +1406,7 @@ class AddWatchOnlyDialog(QDialog):
 
     def __init__(self, existing_addresses: set[str], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add watch-only address")
+        self.setWindowTitle("Add Watch-only Address")
         # Lower-case set of addresses already in the store, used for
         # the duplicate check on accept.
         self._existing = {a.lower() for a in existing_addresses}
@@ -1548,7 +1548,7 @@ class AddHotWalletDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add hot wallet")
+        self.setWindowTitle("Add Hot Wallet")
         # Width is what matters; let Qt auto-size the height to
         # whatever the form needs once each field has a generous
         # min-height — no trailing stretch means no empty space
@@ -1823,7 +1823,7 @@ class ImportHotWalletsDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        self.import_btn = QPushButton("&Import selected")
+        self.import_btn = QPushButton("&Import Selected")
         self.import_btn.setEnabled(False)
         self.import_btn.clicked.connect(self._do_import)
         self.close_btn = QPushButton("&Close")

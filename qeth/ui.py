@@ -23,6 +23,7 @@ from .plugins.transactions import (
     SignTransactionDialog, TransactionsPlugin,
 )
 from .plugins.wallets import WalletsPlugin
+from .alerts import warn
 from .signing import SignAndBroadcastWorker, SignerBridge, SignerError
 
 
@@ -566,8 +567,7 @@ class MainWindow(QMainWindow):
         try:
             finalised = dialog.finalised_request()
         except SignerError as e:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(dialog, "Cannot sign", str(e))
+            warn(dialog, "Cannot sign", str(e))
             return
 
         # Pick the right Signer based on the stored account record.
@@ -581,7 +581,6 @@ class MainWindow(QMainWindow):
             None,
         )
         source = acct.get("source") if acct else None
-        from PySide6.QtWidgets import QMessageBox
         if source == "ledger":
             from .ledger import LedgerSigner
             signer = LedgerSigner(self.store)
@@ -600,13 +599,13 @@ class MainWindow(QMainWindow):
             # Scrypt-derived key decrypt typically takes ~1 second.
             progress_text = "Decrypting keystore and signing…"
         else:
-            QMessageBox.warning(
+            warn(
                 dialog, "Cannot sign",
                 f"No known signer for {finalised.from_addr}",
             )
             return
         if not signer.can_sign(finalised.from_addr):
-            QMessageBox.warning(
+            warn(
                 dialog, "Cannot sign",
                 f"No known signer for {finalised.from_addr}",
             )
@@ -646,7 +645,6 @@ class MainWindow(QMainWindow):
         ``(signer, progress_text)`` or ``(None, None)`` if the
         user cancelled the passphrase prompt / no signer exists.
         Shows its own QMessageBox for the "no signer" case."""
-        from PySide6.QtWidgets import QMessageBox
         addr_lower = address.lower()
         acct = next(
             (a for a in self.store.accounts
@@ -674,7 +672,7 @@ class MainWindow(QMainWindow):
                 HotWalletSigner(self.store, passphrase),
                 "Decrypting keystore and signing…",
             )
-        QMessageBox.warning(
+        warn(
             dialog, "Cannot sign",
             f"No known signer for {address}",
         )
@@ -711,14 +709,14 @@ class MainWindow(QMainWindow):
         off the main thread. Errors keep the dialog open so the
         user can retry."""
         from .signing import SignMessageWorker
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtWidgets import QProgressDialog
         signer, progress_text = self._pick_signer_for(
             dialog, req.from_addr,
         )
         if signer is None:
             return
         if not signer.can_sign(req.from_addr):
-            QMessageBox.warning(
+            warn(
                 dialog, "Cannot sign",
                 f"No known signer for {req.from_addr}",
             )
@@ -752,8 +750,7 @@ class MainWindow(QMainWindow):
     def _on_message_sign_failed(self, msg, dialog, progress, on_fail):
         progress.close()
         dialog.set_signing_in_progress(False)
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(dialog, "Signing failed", msg)
+        warn(dialog, "Signing failed", msg)
         on_fail(msg)
 
     def open_sign_message_dialog(self, address: str) -> None:
@@ -777,12 +774,12 @@ class MainWindow(QMainWindow):
         themselves. Picks signer, prompts for passphrase if hot,
         runs SignMessageWorker, then shows the resulting
         signature."""
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtWidgets import QProgressDialog
         signer, progress_text = self._pick_signer_for(self, req.from_addr)
         if signer is None:
             return
         if not signer.can_sign(req.from_addr):
-            QMessageBox.warning(
+            warn(
                 self, "Cannot sign",
                 f"No known signer for {req.from_addr}",
             )
@@ -811,9 +808,8 @@ class MainWindow(QMainWindow):
         dlg.show()
 
     def _on_local_message_sign_failed(self, msg, progress) -> None:
-        from PySide6.QtWidgets import QMessageBox
         progress.close()
-        QMessageBox.warning(self, "Signing failed", msg)
+        warn(self, "Signing failed", msg)
 
     def _on_tx_broadcast(self, tx_hash, dialog, progress, req, chain,
                           on_broadcast) -> None:
@@ -852,11 +848,10 @@ class MainWindow(QMainWindow):
         losing the dialog state."""
         progress.close()
         dialog.set_signing_in_progress(False)
-        from PySide6.QtWidgets import QMessageBox
         # "Signing failed" is signer-neutral — Ledger AND hot
         # wallets flow through this handler, and broadcast failures
         # (e.g. insufficient funds) bubble up here too.
-        QMessageBox.warning(dialog, "Signing failed", msg)
+        warn(dialog, "Signing failed", msg)
         on_fail(msg)
 
     # --- transitional aliases (kept so existing tests / external code

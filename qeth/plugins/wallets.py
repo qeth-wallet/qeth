@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread
 
+from ..alerts import error, info, warn
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
 
@@ -777,7 +778,7 @@ class WalletsPlugin(Plugin):
                 dlg.private_key, dlg.passphrase,
             )
         except Exception as e:
-            QMessageBox.critical(
+            error(
                 self._container, "Hot wallet error",
                 f"Failed to encrypt private key:\n\n{e}",
             )
@@ -785,7 +786,7 @@ class WalletsPlugin(Plugin):
         existing_addrs = {a["address"].lower()
                           for a in self._store.accounts}
         if address.lower() in existing_addrs:
-            QMessageBox.warning(
+            warn(
                 self._container, "Hot wallet error",
                 f"An account with address {address} already exists.",
             )
@@ -793,7 +794,7 @@ class WalletsPlugin(Plugin):
         try:
             save_keystore(address, keystore)
         except Exception as e:
-            QMessageBox.critical(
+            error(
                 self._container, "Hot wallet error",
                 f"Failed to write keystore:\n\n{e}",
             )
@@ -814,7 +815,7 @@ class WalletsPlugin(Plugin):
             # users tend to overlook the "keep backups" hint in a
             # generation dialog and only think about it later.
             from ..hot_wallet import keystore_path
-            QMessageBox.information(
+            info(
                 self._container, "Hot wallet created",
                 f"Address: {address}\n\n"
                 f"Keystore: {keystore_path(address)}\n\n"
@@ -876,7 +877,7 @@ class WalletsPlugin(Plugin):
                 self._kick_ens_label_lookups(imported)
         if failed:
             lines = "\n".join(f"  • {a}: {m}" for a, m in failed)
-            QMessageBox.warning(
+            warn(
                 self._container, "Import partly failed",
                 f"Imported {len(imported)} account(s). "
                 f"{len(failed)} failed:\n\n{lines}",
@@ -1387,7 +1388,7 @@ class AddLedgerDialog(QDialog):
     def _on_failed(self, msg: str) -> None:
         self.progress.setVisible(False)
         self.scan_btn.setEnabled(True)
-        QMessageBox.critical(self, "Ledger error", msg)
+        error(self, "Ledger error", msg)
 
     def selected_accounts(self) -> list[DiscoveredAccount]:
         return [it.data(Qt.UserRole) for it in self.results.selectedItems()]
@@ -1841,7 +1842,7 @@ class ImportHotWalletsDialog(QDialog):
         try:
             results = self.panel.do_import()
         except Exception as e:
-            QMessageBox.critical(
+            error(
                 self, "Import failed",
                 f"Could not import:\n\n{e}",
             )

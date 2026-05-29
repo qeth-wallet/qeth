@@ -28,10 +28,11 @@ from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog,
-    QMenu, QMessageBox, QPushButton, QSizePolicy, QStyle, QTableWidget,
+    QMenu, QPushButton, QSizePolicy, QStyle, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from ..alerts import warn
 from ..chain import EthClient, wei_to_ether
 from ..formatting import format_balance as _format_balance
 from ..formatting import format_usd as _format_usd
@@ -1043,7 +1044,7 @@ class TokensPlugin(Plugin):
             return
         addr = (addr or "").strip()
         if not (addr.startswith("0x") and len(addr) == 42):
-            QMessageBox.warning(
+            warn(
                 self._panel, "Invalid address",
                 "Expected a 0x-prefixed 40-character hex address.",
             )
@@ -1051,7 +1052,7 @@ class TokensPlugin(Plugin):
         try:
             int(addr[2:], 16)
         except ValueError:
-            QMessageBox.warning(
+            warn(
                 self._panel, "Invalid address",
                 "Address must be hexadecimal.",
             )
@@ -1060,13 +1061,13 @@ class TokensPlugin(Plugin):
         try:
             meta = EthClient(chain).multicall_erc20_metadata([addr])
         except Exception as e:
-            QMessageBox.warning(
+            warn(
                 self._panel, "Read failed",
                 f"Couldn't read ERC-20 metadata: {e}",
             )
             return
         if not meta:
-            QMessageBox.warning(
+            warn(
                 self._panel, "Not a token",
                 "Contract didn't respond to ERC-20 metadata calls "
                 "(name/symbol/decimals). It might not be an ERC-20.",
@@ -1080,7 +1081,7 @@ class TokensPlugin(Plugin):
             chain.chain_id, addr, m.get("symbol", ""), m.get("name", "")
         )
         if scam:
-            QMessageBox.warning(
+            warn(
                 self._panel, "Heuristic warning",
                 f"Added {m['symbol']!r} ({m['name']}). Heads up: it "
                 "matches our scam heuristic (URL or impersonating a "

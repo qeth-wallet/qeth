@@ -2,7 +2,8 @@ import locale
 import logging
 import sys
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
+from .alerts import warn
 
 from .branding import app_icon_for
 from .rpc import RpcServer
@@ -49,7 +50,7 @@ def main() -> int:
     rpc.start()
 
     if rpc.error:
-        QMessageBox.warning(
+        warn(
             None,
             "qeth — JSON-RPC failed to start",
             f"Could not bind to {rpc.host}:{rpc.port}.\n\n{rpc.error}\n\n"

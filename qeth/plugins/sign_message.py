@@ -40,11 +40,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
+    QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QSizePolicy, QStyle, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..signing import MessageSigningRequest, TypedDataSigningRequest
+from ..alerts import warn
 
 
 class _JsonHighlighter(QSyntaxHighlighter):
@@ -331,7 +332,7 @@ class ComposeMessageDialog(QDialog):
             try:
                 typed = json.loads(stripped)
             except Exception as e:
-                QMessageBox.warning(
+                warn(
                     self, "Bad typed data", f"JSON parse failed: {e}",
                 )
                 return

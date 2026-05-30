@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -203,6 +204,64 @@ def probe_rpc(
     if cid != int(expected_chain_id):
         return False, latency, f"chain mismatch ({cid})"
     return True, latency, None
+
+
+def probe_simulate_v1(url: str, *, timeout: float = 5.0) -> Optional[bool]:
+    """Probe whether ``url`` implements ``eth_simulateV1`` — the one-call
+    simulation method qeth's event preview prefers (much faster than the
+    local fork). Returns:
+
+    - ``True``  — the endpoint ran the call and returned a result.
+    - ``False`` — a definitive ``-32601`` / method-not-found (e.g.
+      cloudflare-eth, DRPC's Arbitrum, the zkSync gateways).
+    - ``None``  — inconclusive (unreachable, rate-limited, odd error):
+      shown as 'unknown' rather than a wrong ✗.
+
+    A throwaway read-only simulation (a 1-wei self-send), so it's safe to
+    fire at arbitrary public endpoints."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    dead = "0x000000000000000000000000000000000000dEaD"
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "eth_simulateV1",
+        "params": [{
+            "blockStateCalls": [{"calls": [
+                {"from": dead, "to": dead, "value": "0x1"}]}],
+            "traceTransfers": False, "validation": False,
+        }, "latest"],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            obj = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # A JSON-RPC -32601 often rides on an HTTP 4xx; read the body.
+        try:
+            obj = json.loads(e.read())
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if "result" in obj:
+        return True
+    err = obj.get("error") or {}
+    code = err.get("code") if isinstance(err, dict) else None
+    msg = (err.get("message") if isinstance(err, dict) else "") or ""
+    m = msg.lower()
+    if (code == -32601 or "not found" in m or "not support" in m
+            or "not available" in m or "unsupport" in m or "not whitelisted" in m
+            or "does not exist" in m or "disabled" in m):
+        return False
+    return None   # rate-limit / other error → unknown
 
 
 def lookup(

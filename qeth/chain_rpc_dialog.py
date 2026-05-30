@@ -52,7 +52,8 @@ class _ChainlistLoader(QThread):
     thread pool drains."""
 
     loaded = Signal(object)              # ChainEntry | None
-    probed = Signal(str, bool, object)   # url, ok, latency_ms (or None)
+    # url, ok, latency_ms (or None), simv1 (True/False/None)
+    probed = Signal(str, bool, object, object)
     probing_done = Signal()
     failed = Signal(str)
 
@@ -62,7 +63,7 @@ class _ChainlistLoader(QThread):
 
     def run(self) -> None:
         try:
-            from .chainlist import lookup, probe_rpc
+            from .chainlist import lookup, probe_rpc, probe_simulate_v1
             entry = lookup(self._chain_id)
         except Exception as e:
             self.failed.emit(str(e))
@@ -76,21 +77,26 @@ class _ChainlistLoader(QThread):
         if not urls:
             self.probing_done.emit()
             return
+
+        def _probe_one(u):
+            # Reachability + latency first; only ask reachable endpoints
+            # about eth_simulateV1 (saves a round-trip on dead URLs).
+            ok, latency, _ = probe_rpc(u, self._chain_id,
+                                       timeout=_PROBE_TIMEOUT_S)
+            simv1 = (probe_simulate_v1(u, timeout=_PROBE_TIMEOUT_S)
+                     if ok else None)
+            return ok, latency, simv1
+
         max_workers = min(_PROBE_CONCURRENCY, len(urls))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {
-                ex.submit(
-                    probe_rpc, u, self._chain_id,
-                    timeout=_PROBE_TIMEOUT_S,
-                ): u for u in urls
-            }
+            futs = {ex.submit(_probe_one, u): u for u in urls}
             for fut in as_completed(futs):
                 url = futs[fut]
                 try:
-                    ok, latency, _ = fut.result()
+                    ok, latency, simv1 = fut.result()
                 except Exception:
-                    ok, latency = False, None
-                self.probed.emit(url, ok, latency)
+                    ok, latency, simv1 = False, None, None
+                self.probed.emit(url, ok, latency, simv1)
         self.probing_done.emit()
 
 
@@ -110,9 +116,10 @@ class ChainRpcDialog(QDialog):
         super().__init__(parent)
         self._chain = chain
         self._initial_etherscan_key = etherscan_api_key or ""
-        # url -> (latency_ms or None, ok); used to sort the
-        # picker once all probes have come back.
-        self._results: dict[str, tuple[Optional[float], bool]] = {}
+        # url -> (latency_ms or None, ok, simv1); used to sort the
+        # picker once all probes have come back. simv1 is True/False/None
+        # (supports eth_simulateV1 / definitively not / unknown).
+        self._results: dict[str, tuple[Optional[float], bool, object]] = {}
         self._total_to_probe = 0
         self._done_probing = 0
         self.setWindowTitle(f"RPC for {chain.name} ({chain.chain_id})")
@@ -264,10 +271,10 @@ class ChainRpcDialog(QDialog):
         )
 
     def _on_probed(
-        self, url: str, ok: bool, latency_ms,
+        self, url: str, ok: bool, latency_ms, simv1=None,
     ) -> None:
         self._results[url] = (
-            float(latency_ms) if latency_ms is not None else None, ok,
+            float(latency_ms) if latency_ms is not None else None, ok, simv1,
         )
         self._done_probing += 1
         # Find the row carrying this URL and update its text /
@@ -278,6 +285,7 @@ class ChainRpcDialog(QDialog):
                 it.setText(self._format_row(
                     url, ok,
                     float(latency_ms) if latency_ms is not None else None,
+                    simv1,
                 ))
                 if ok:
                     it.setFlags(
@@ -296,26 +304,34 @@ class ChainRpcDialog(QDialog):
         # Drop failed rows, then sort surviving rows by latency
         # ascending. We rebuild item text via the same formatter
         # so the visible row stays consistent.
-        survivors: list[tuple[float, str]] = []
-        for url, (latency, ok) in self._results.items():
+        # Rank simulateV1-capable endpoints first (they make tx-event
+        # previews a single fast call), then by latency within each group.
+        survivors: list[tuple[int, float, str, object]] = []
+        for url, (latency, ok, simv1) in self._results.items():
             if ok and latency is not None:
-                survivors.append((latency, url))
-        survivors.sort()
+                survivors.append((0 if simv1 is True else 1, latency, url,
+                                  simv1))
+        survivors.sort(key=lambda t: (t[0], t[1]))
         self.picker.clear()
-        for latency, url in survivors:
-            item = QListWidgetItem(self._format_row(url, True, latency))
+        n_sim = 0
+        for _rank, latency, url, simv1 in survivors:
+            item = QListWidgetItem(self._format_row(url, True, latency, simv1))
             item.setData(Qt.UserRole, url)
             self.picker.addItem(item)
+            if simv1 is True:
+                n_sim += 1
         if not survivors:
             self.status_lbl.setText(
                 "No reachable public endpoints for this chain. "
                 "Enter a URL manually above."
             )
         else:
+            extra = (f" ⚡ marks the {n_sim} that support eth_simulateV1 "
+                     f"(fast tx-event previews)." if n_sim else "")
             self.status_lbl.setText(
-                f"{len(survivors)} reachable endpoint(s), "
-                f"sorted by latency. Click one to fill the URL "
-                f"field above."
+                f"{len(survivors)} reachable endpoint(s), simulateV1 first "
+                f"then by latency. Click one to fill the URL field above."
+                + extra
             )
 
     def _on_chainlist_failed(self, msg: str) -> None:
@@ -333,14 +349,20 @@ class ChainRpcDialog(QDialog):
     @staticmethod
     def _format_row(
         url: str, ok: Optional[bool], latency_ms: Optional[float],
+        simv1: object = None,
     ) -> str:
         """Single source of truth for picker-row text. ``ok=None``
         is the in-flight ``probing…`` state; ``ok=True`` shows
-        latency; ``ok=False`` shows a failure marker."""
+        latency; ``ok=False`` shows a failure marker. ``simv1`` (True/
+        False/None) adds a fixed-width eth_simulateV1 capability tag."""
         if ok is None:
             chip = "  …    "
         elif ok and latency_ms is not None:
             chip = f"{latency_ms:5.0f} ms"
         else:
             chip = "  ✗    "
-        return f"{chip}  {url}"
+        # Fixed-width so URLs stay column-aligned: ⚡ supported, blank
+        # otherwise (a definitive 'no' or 'unknown' both read as no badge —
+        # the absence of ⚡ is the signal).
+        sim = "⚡sim" if simv1 is True else "    "
+        return f"{chip}  {sim}  {url}"

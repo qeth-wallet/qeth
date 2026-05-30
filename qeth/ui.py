@@ -1165,7 +1165,16 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
                 painter.restore()
             return
 
-        super().paint(painter, option, index)
+        # Not selected: default paint, but never the per-cell focus
+        # rectangle. The view's *current* index (set by a row insert,
+        # rebuild, or an auto-switch that moves focus here) would
+        # otherwise draw a stray dotted outline on an unselected cell —
+        # e.g. the narrow status-icon cell of a freshly-prepended
+        # pending row, where it reads as a box in the empty space beside
+        # the icon. Selection, not the current cell, is what we surface.
+        opt = QStyleOptionViewItem(option)
+        opt.state &= ~QStyle.State_HasFocus
+        super().paint(painter, opt, index)
 
 
 from PySide6.QtCore import QPoint as _QPoint   # noqa: E402

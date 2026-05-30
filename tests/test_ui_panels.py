@@ -392,3 +392,46 @@ class TestTransactionListPanel:
         # No signal should have fired during the bulk replace —
         # blockSignals discards them.
         assert fires == []
+
+
+class TestFocusAwareDelegate:
+    """The list delegate must never paint the per-cell focus rectangle
+    on an *unselected* cell — Qt would otherwise outline the view's
+    current index (set by a row insert / rebuild / auto-switch), drawing
+    a stray box beside e.g. a pending row's status icon."""
+
+    def _delegate(self, qtbot):
+        from qeth.ui import _apply_focus_aware_selection
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions([_tx(to_addr="0xbeef")])
+        _apply_focus_aware_selection(panel.table)
+        return panel, panel.table._focus_aware_delegate
+
+    def test_strips_focus_rect_on_unselected_cell(self, qtbot, tmp_qeth, monkeypatch):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+        panel, delegate = self._delegate(qtbot)
+        index = panel.table.model().index(0, 0)
+
+        captured = {}
+        def spy(self, painter, opt, idx):
+            captured["state"] = opt.state
+        monkeypatch.setattr(QStyledItemDelegate, "paint", spy)
+
+        option = QStyleOptionViewItem()
+        delegate.initStyleOption(option, index)
+        # Current-but-unselected cell while the view has focus.
+        option.state |= QStyle.State_HasFocus
+        option.state &= ~QStyle.State_Selected
+
+        pm = QPixmap(80, 20)
+        painter = QPainter(pm)
+        try:
+            delegate.paint(painter, option, index)
+        finally:
+            painter.end()
+
+        assert "state" in captured            # fell through to super().paint
+        assert not (captured["state"] & QStyle.State_HasFocus)   # rect suppressed

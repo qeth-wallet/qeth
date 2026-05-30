@@ -52,6 +52,19 @@ def test_accounts_tree_has_copy_and_delete_shortcuts(mainwindow):
     assert wp.act_remove in tree_actions
 
 
+def test_wallet_tree_group_roots_have_icons(mainwindow):
+    """The Ledger / Hot wallet / Watch-only group roots carry the same
+    icons as their add-account menu actions (always present — the roots
+    render even with zero accounts in the group)."""
+    wp = mainwindow.wallets_plugin
+    tree = wp._tree
+    roots = {tree.topLevelItem(i).text(0).split(" (")[0]: tree.topLevelItem(i)
+             for i in range(tree.topLevelItemCount())}
+    assert {"Ledger", "Hot wallet", "Watch only"} <= set(roots)
+    for name in ("Ledger", "Hot wallet", "Watch only"):
+        assert not roots[name].icon(0).isNull(), f"{name} root has no icon"
+
+
 def test_copy_and_remove_disabled_until_account_selected(mainwindow):
     """No tree selection (default for an empty store) → Copy and Remove
     actions are disabled; Add is always available."""

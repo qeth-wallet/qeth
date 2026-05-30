@@ -302,6 +302,9 @@ class WalletsPlugin(Plugin):
         self._tree = _ReorderTree()
         self._tree.setHeaderLabels(["Accounts"])
         self._tree.setRootIsDecorated(True)
+        # Group roots carry themed icons; keep them small + aligned with
+        # the toolbar/menu icons rather than the style's larger default.
+        self._tree.setIconSize(QSize(16, 16))
         self._tree.setTextElideMode(Qt.ElideMiddle)
         # Never show a horizontal scrollbar in the wallet tree —
         # addresses are 42 chars + label and the left pane gets
@@ -499,6 +502,9 @@ class WalletsPlugin(Plugin):
         self._tree.clear()
         ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
         ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
+        # Reuse the add-account menu icons so the tree groups and the
+        # picker stay visually consistent (hardware device / key / eye).
+        ledger_root.setIcon(0, self.act_add_ledger.icon())
         # Group containers: not draggable, not drop targets (we only
         # allow re-ordering inside scheme subgroups).
         ledger_root.setFlags(Qt.ItemIsEnabled)
@@ -545,6 +551,7 @@ class WalletsPlugin(Plugin):
         hot_accts = [a for a in self._store.accounts
                       if a.get("source") == "hot"]
         hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
+        hot_root.setIcon(0, self.act_add_hot.icon())
         hot_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
         self._tree.addTopLevelItem(hot_root)
         for a in hot_accts:
@@ -572,6 +579,7 @@ class WalletsPlugin(Plugin):
         watch_accts = [a for a in self._store.accounts
                         if a.get("source") == "watch_only"]
         watch_root = QTreeWidgetItem([f"Watch only ({len(watch_accts)})"])
+        watch_root.setIcon(0, self.act_add_watch.icon())
         # Top-level group: not draggable, not a drop target — same
         # treatment as the Ledger root.
         watch_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)

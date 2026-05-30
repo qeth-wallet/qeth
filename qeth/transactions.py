@@ -62,6 +62,16 @@ class Transaction:
     # PendingTxWatcher once the receipt arrives, alongside filling in
     # block_number / gas_used / gas_price_wei / success.
     pending: bool = False
+    # Local-only terminal state: the nonce was consumed by a *different*
+    # tx (replacement / the user re-sent), so this hash will never
+    # confirm. Distinct from a reverted tx (success=False) — a dropped
+    # tx never made it on-chain at all. Set by PendingTxWatcher.
+    dropped: bool = False
+    # Local-only: hex of the signed transaction, kept only while pending
+    # so PendingTxWatcher can re-broadcast it if the RPC silently drops
+    # it (DRPC sometimes acks a tx it never propagates). Public data (no
+    # key material); cleared once the tx confirms or is dropped.
+    raw_signed: Optional[str] = None
 
     def direction(self, viewer: str) -> TxDirection:
         v = viewer.lower()

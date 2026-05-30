@@ -341,8 +341,8 @@ class SignAndBroadcastWorker(QThread):
     user confirms on the device; the worker keeps the UI responsive
     in the meantime."""
 
-    broadcast = Signal(str)   # tx hash, 0x-prefixed
-    failed = Signal(str)      # human-readable reason
+    broadcast = Signal(str, object)   # (tx hash 0x-prefixed, raw signed hex)
+    failed = Signal(str)              # human-readable reason
 
     def __init__(self, signer: Signer, req: SigningRequest, chain,
                  parent=None):
@@ -371,7 +371,14 @@ class SignAndBroadcastWorker(QThread):
             log.exception("broadcast failed")
             self.failed.emit(f"Broadcast failed: {explain_rpc_error(e)}")
             return
-        self.broadcast.emit(tx_hash)
+        # Keep the raw signed bytes so the pending-tx watcher can
+        # re-broadcast if the RPC silently drops the tx. Normalise to a
+        # 0x-hex string for storage.
+        if isinstance(raw, str):
+            raw_hex = raw if raw.startswith("0x") else "0x" + raw
+        else:
+            raw_hex = "0x" + bytes(raw).hex()
+        self.broadcast.emit(tx_hash, raw_hex)
 
 
 class SignMessageWorker(QThread):

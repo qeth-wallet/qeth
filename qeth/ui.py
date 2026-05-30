@@ -627,9 +627,9 @@ class MainWindow(QMainWindow):
 
         worker = SignAndBroadcastWorker(signer, finalised, chain)
         worker.broadcast.connect(
-            lambda h, d=dialog, p=progress, r=finalised, c=chain,
+            lambda h, raw, d=dialog, p=progress, r=finalised, c=chain,
                    ob=on_broadcast:
-                self._on_tx_broadcast(h, d, p, r, c, ob)
+                self._on_tx_broadcast(h, raw, d, p, r, c, ob)
         )
         worker.failed.connect(
             lambda msg, d=dialog, p=progress, of=on_fail:
@@ -811,8 +811,8 @@ class MainWindow(QMainWindow):
         progress.close()
         warn(self, "Signing failed", msg)
 
-    def _on_tx_broadcast(self, tx_hash, dialog, progress, req, chain,
-                          on_broadcast) -> None:
+    def _on_tx_broadcast(self, tx_hash, raw_signed, dialog, progress, req,
+                          chain, on_broadcast) -> None:
         progress.close()
         dialog.accept()
         # Snapshot the just-sent tx into the transactions list as a
@@ -821,7 +821,9 @@ class MainWindow(QMainWindow):
         # seconds). The plugin's PendingTxWatcher polls the receipt
         # and flips the row to confirmed when the tx mines.
         try:
-            self.transactions_plugin.add_pending(tx_hash, req, chain)
+            self.transactions_plugin.add_pending(
+                tx_hash, req, chain, raw_signed=raw_signed,
+            )
         except Exception:
             import logging
             logging.getLogger("qeth.ui").exception("add_pending failed")

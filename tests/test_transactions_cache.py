@@ -42,6 +42,20 @@ def test_save_load_round_trip(tmp_qeth):
     assert [t.block_number for t in loaded] == [t.block_number for t in original]
 
 
+def test_pending_dropped_and_raw_signed_round_trip(tmp_qeth):
+    # The local-only fields (pending / dropped / raw_signed) must
+    # survive the disk round-trip so the watcher keeps its state across
+    # restarts (a pending tx can re-broadcast; a dropped one stays dead).
+    cache = TransactionCache()
+    cache.save(1, ADDR, [
+        _tx("ab", pending=True, raw_signed="0xdeadbeef"),
+        _tx("cd", dropped=True, success=True, pending=False),
+    ])
+    loaded = cache.load(1, ADDR)
+    assert any(t.pending and t.raw_signed == "0xdeadbeef" for t in loaded)
+    assert any(t.dropped and not t.pending for t in loaded)
+
+
 def test_load_returns_none_when_no_file(tmp_qeth):
     cache = TransactionCache()
     assert cache.load(1, "0x0000000000000000000000000000000000000000") is None

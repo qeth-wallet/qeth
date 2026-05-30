@@ -873,6 +873,158 @@ class TestOnReceiptConfirmed:
         assert panel.table.item(0, 0).text() == "✓"
 
 
+class TestOnTxDropped:
+    """A pending tx whose nonce got consumed by a *different* tx must
+    flip to the terminal 'dropped' state — not stay pending forever and
+    not look like a revert."""
+
+    def _pending(self, **overrides) -> Transaction:
+        base = dict(
+            chain_id=1, hash="0x" + "ab" * 32, block_number=0,
+            timestamp=1700, nonce=5, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=2 * 10**9,
+            method_id="", input_data="0x", success=True, pending=True,
+            raw_signed="0xdeadbeef",
+        )
+        base.update(overrides)
+        return Transaction(**base)
+
+    def test_marks_dropped_and_clears_raw(self, qtbot, tmp_qeth):
+        plugin = TransactionsPlugin()
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [self._pending()]
+        plugin._disk_cache.save(*key, plugin._cache[key])
+
+        plugin._on_tx_dropped(ETH, plugin._cache[key][0].hash)
+
+        tx = plugin._cache[key][0]
+        assert tx.pending is False
+        assert tx.dropped is True
+        assert tx.success is True          # not a revert
+        assert tx.raw_signed is None       # no point re-broadcasting a dead nonce
+        # Disk round-trip preserves the dropped state.
+        assert plugin._disk_cache.load(*key)[0].dropped is True
+
+    def test_dropped_glyph_distinct_from_revert(self, qtbot, tmp_qeth):
+        plugin = TransactionsPlugin()
+        panel = plugin.widget()
+        qtbot.addWidget(panel)
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [self._pending()]
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions(plugin._cache[key])
+        plugin._rendered_for = key
+        assert panel.table.item(0, 0).text() == "⏳"
+
+        plugin._on_tx_dropped(ETH, plugin._cache[key][0].hash)
+        assert panel.table.item(0, 0).text() == "⊘"   # not ✗
+
+
+class TestPendingProbeWorker:
+    """Receipt → nonce → re-broadcast diagnosis. We drive run()
+    synchronously with a faked EthClient and capture the emitted
+    signal."""
+
+    HASH = "0x" + "ab" * 32
+
+    def _worker(self, monkeypatch, *, receipt, latest_nonce, nonce=5,
+                raw="0xraw", rebroadcast=True):
+        import qeth.plugins.transactions as txmod
+
+        sent: list = []
+
+        class _FakeClient:
+            def __init__(self, chain):
+                pass
+
+            def rpc(self, method, params):
+                assert method == "eth_getTransactionReceipt"
+                return receipt
+
+            def get_transaction_count(self, address, block="pending"):
+                assert block == "latest"
+                # web3.py rejects non-checksum addresses — mimic that so
+                # a regression (passing the lowercased from_addr straight
+                # through) fails here instead of silently never dropping.
+                from eth_utils import to_checksum_address
+                if address != to_checksum_address(address):
+                    raise ValueError("web3.py only accepts checksum addresses")
+                return latest_nonce
+
+            def send_raw_transaction(self, raw_tx):
+                sent.append(raw_tx)
+                return "0xresent"
+
+        monkeypatch.setattr(txmod, "EthClient", _FakeClient)
+        worker = txmod.PendingProbeWorker(
+            ETH, self.HASH, ADDR, nonce, raw, rebroadcast,
+        )
+        return worker, sent
+
+    def _capture(self, worker):
+        out = {}
+        worker.confirmed.connect(lambda c, h, r: out.update(kind="confirmed", r=r))
+        worker.dropped.connect(lambda c, h: out.update(kind="dropped"))
+        worker.still_pending.connect(lambda c, h: out.update(kind="pending"))
+        worker.failed.connect(lambda c, h, m: out.update(kind="failed", msg=m))
+        return out
+
+    def test_receipt_present_confirms(self, qtbot, monkeypatch):
+        worker, _ = self._worker(
+            monkeypatch, receipt={"status": "0x1"}, latest_nonce=99,
+        )
+        out = self._capture(worker)
+        worker.run()
+        assert out["kind"] == "confirmed"
+
+    def test_nonce_consumed_drops(self, qtbot, monkeypatch):
+        # No receipt, but the account's mined nonce is already past ours.
+        worker, sent = self._worker(
+            monkeypatch, receipt=None, latest_nonce=6, nonce=5,
+        )
+        out = self._capture(worker)
+        worker.run()
+        assert out["kind"] == "dropped"
+        assert sent == []          # never re-broadcast a dead nonce
+
+    def test_open_nonce_rebroadcasts_and_stays_pending(self, qtbot, monkeypatch):
+        worker, sent = self._worker(
+            monkeypatch, receipt=None, latest_nonce=5, nonce=5,
+            raw="0xRAW", rebroadcast=True,
+        )
+        out = self._capture(worker)
+        worker.run()
+        assert out["kind"] == "pending"
+        assert sent == ["0xRAW"]   # re-pushed the stored raw bytes
+
+    def test_rebroadcast_suppressed_when_not_requested(self, qtbot, monkeypatch):
+        worker, sent = self._worker(
+            monkeypatch, receipt=None, latest_nonce=5, nonce=5,
+            rebroadcast=False,
+        )
+        out = self._capture(worker)
+        worker.run()
+        assert out["kind"] == "pending"
+        assert sent == []          # capped / no raw → no re-send
+
+    def test_rebroadcast_error_is_swallowed(self, qtbot, monkeypatch):
+        import qeth.plugins.transactions as txmod
+
+        class _FakeClient:
+            def __init__(self, chain): pass
+            def rpc(self, m, p): return None
+            def get_transaction_count(self, a, block="pending"): return 5
+            def send_raw_transaction(self, raw):
+                raise Exception("already known")
+
+        monkeypatch.setattr(txmod, "EthClient", _FakeClient)
+        worker = txmod.PendingProbeWorker(ETH, self.HASH, ADDR, 5, "0xr", True)
+        out = self._capture(worker)
+        worker.run()
+        assert out["kind"] == "pending"   # "already known" must not fail it
+
+
 class TestTokensPlugin:
     def test_widget_returns_token_panel(self, tokens_plugin):
         from qeth.plugins.tokens import TokenListPanel

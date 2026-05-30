@@ -998,6 +998,15 @@ class TestAddPending:
         # method_id is the first 10 chars of data (selector)
         assert tx.method_id == "0xa9059cbb"
 
+    def test_pending_stores_raw_signed_for_rebroadcast(self, tmp_qeth):
+        from qeth.chains import DEFAULT_CHAINS
+        plugin = self._plugin(tmp_qeth)
+        plugin.add_pending(
+            "0xfeed", self._req(), DEFAULT_CHAINS[0], raw_signed="0xRAW",
+        )
+        tx = plugin._cache[(1, ADDR_LOWER)][0]
+        assert tx.raw_signed == "0xRAW"   # kept so the watcher can re-push
+
     def test_pending_eip1559_gas_price_uses_max_fee(self, tmp_qeth):
         """Until the receipt lands we don't know the effective rate
         yet, so the displayed gas_price_wei is the ceiling the user

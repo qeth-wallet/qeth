@@ -126,27 +126,45 @@ def _confirmed_from_receipt(old: Transaction, receipt: dict) -> Transaction:
         ),
         success=success,
         pending=False,
+        raw_signed=None,   # confirmed — no need to keep it for re-broadcast
     )
 
 
 # ---- pending-tx polling -------------------------------------------------
 
 
-class ReceiptWorker(QThread):
-    """Poll ``eth_getTransactionReceipt`` for one (chain, hash). The
-    receipt comes back ``null`` while the tx is still in the
-    mempool, so we report three outcomes: confirmed (receipt
-    present), still_pending (receipt absent, retry later), failed
-    (transient RPC error — also retried)."""
+class PendingProbeWorker(QThread):
+    """Diagnose one pending (qeth-broadcast) tx on a worker thread:
+
+      1. receipt present           → confirmed
+      2. else nonce already spent   → dropped (a *different* tx took this
+         (tx.nonce < latest mined)     nonce, so this hash can never
+                                       confirm — replacement / user re-sent)
+      3. else nonce still open      → still_pending; and, when asked,
+                                       re-broadcast the raw signed bytes
+                                       (RPCs like DRPC sometimes ack a tx
+                                       they never actually propagate).
+
+    The nonce check is the reliable death signal: mined-nonce is
+    consistent across a load-balanced RPC's backend nodes, unlike a
+    mempool query. Re-broadcast is idempotent — "already known" /
+    "nonce too low" are swallowed — so re-sending a still-open tx every
+    tick is safe."""
 
     confirmed = Signal(object, str, object)   # (chain, hash, receipt dict)
+    dropped = Signal(object, str)             # (chain, hash) nonce consumed
     still_pending = Signal(object, str)
     failed = Signal(object, str, str)
 
-    def __init__(self, chain, tx_hash: str, parent=None):
+    def __init__(self, chain, tx_hash: str, from_addr: str, nonce: int,
+                 raw_signed: Optional[str], rebroadcast: bool, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._tx_hash = tx_hash
+        self._from = from_addr
+        self._nonce = nonce
+        self._raw = raw_signed
+        self._rebroadcast = rebroadcast
 
     def run(self) -> None:
         try:
@@ -157,10 +175,33 @@ class ReceiptWorker(QThread):
         except Exception as e:
             self.failed.emit(self._chain, self._tx_hash, str(e))
             return
-        if receipt is None:
-            self.still_pending.emit(self._chain, self._tx_hash)
+        if receipt is not None:
+            self.confirmed.emit(self._chain, self._tx_hash, receipt)
             return
-        self.confirmed.emit(self._chain, self._tx_hash, receipt)
+        # No receipt yet — is the nonce already spent by another tx?
+        # from_addr is stored lowercased; web3.py rejects non-checksum
+        # addresses, so checksum it before the nonce lookup.
+        try:
+            latest = client.get_transaction_count(
+                to_checksum_address(self._from), "latest",
+            )
+        except Exception as e:
+            self.failed.emit(self._chain, self._tx_hash, str(e))
+            return
+        if self._nonce < latest:
+            self.dropped.emit(self._chain, self._tx_hash)
+            return
+        # Nonce still open: genuinely unconfirmed. Re-push the raw bytes
+        # in case the RPC silently dropped it.
+        if self._rebroadcast and self._raw:
+            try:
+                client.send_raw_transaction(self._raw)
+            except Exception as e:
+                # "already known" / "nonce too low" / "known transaction"
+                # are expected and harmless — it's already in a mempool
+                # or just got mined. Don't surface them.
+                log.debug("re-broadcast of %s: %s", self._tx_hash, e)
+        self.still_pending.emit(self._chain, self._tx_hash)
 
 
 class PendingTxWatcher(QObject):
@@ -171,6 +212,12 @@ class PendingTxWatcher(QObject):
     next launch picks them up on the first tick."""
 
     POLL_INTERVAL_MS = 10_000
+    # Keep re-broadcasting a still-open pending tx for up to this many
+    # ticks (~5 min at 10s), then stop re-sending (but keep watching for
+    # a receipt or a nonce-consumed drop). Past this it's almost
+    # certainly stuck for a reason re-broadcasting won't fix (e.g. gas
+    # too low), surfaced via a one-time warning.
+    REBROADCAST_MAX_ATTEMPTS = 30
 
     def __init__(self, plugin, parent=None):
         super().__init__(parent)
@@ -181,6 +228,10 @@ class PendingTxWatcher(QObject):
         # overlapping ticks — receipt fetches can take longer than
         # the interval on a slow RPC endpoint.
         self._in_flight_hashes: set[str] = set()
+        # Per-hash re-broadcast attempt counter (capped) + a one-time
+        # "gave up re-broadcasting" warning guard.
+        self._rebroadcast_attempts: dict[str, int] = {}
+        self._capped_warned: set[str] = set()
 
     def start(self) -> None:
         if self._timer.isActive():
@@ -207,26 +258,52 @@ class PendingTxWatcher(QObject):
             for tx in txs:
                 if not tx.pending or tx.hash in self._in_flight_hashes:
                     continue
-                self._spawn_worker(chain, tx.hash)
+                self._spawn_worker(chain, tx)
 
-    def _spawn_worker(self, chain, tx_hash: str) -> None:
-        worker = ReceiptWorker(chain, tx_hash)
-        self._in_flight_hashes.add(tx_hash)
+    def _spawn_worker(self, chain, tx) -> None:
+        attempts = self._rebroadcast_attempts.get(tx.hash, 0)
+        has_raw = tx.raw_signed is not None
+        do_rebroadcast = has_raw and attempts < self.REBROADCAST_MAX_ATTEMPTS
+        if (has_raw and not do_rebroadcast
+                and tx.hash not in self._capped_warned):
+            self._capped_warned.add(tx.hash)
+            log.warning(
+                "tx %s still pending after %d re-broadcasts — giving up on "
+                "re-broadcast (likely stuck on gas); still watching.",
+                tx.hash, self.REBROADCAST_MAX_ATTEMPTS,
+            )
+        worker = PendingProbeWorker(
+            chain, tx.hash, tx.from_addr, tx.nonce, tx.raw_signed,
+            do_rebroadcast,
+        )
+        self._in_flight_hashes.add(tx.hash)
+        if do_rebroadcast:
+            self._rebroadcast_attempts[tx.hash] = attempts + 1
         worker.confirmed.connect(self._on_confirmed)
+        worker.dropped.connect(self._on_dropped)
         worker.still_pending.connect(self._on_still_pending)
         worker.failed.connect(self._on_failed)
         self._plugin.host.start_worker(worker)
 
-    def _on_confirmed(self, chain, tx_hash: str, receipt) -> None:
+    def _forget(self, tx_hash: str) -> None:
         self._in_flight_hashes.discard(tx_hash)
+        self._rebroadcast_attempts.pop(tx_hash, None)
+        self._capped_warned.discard(tx_hash)
+
+    def _on_confirmed(self, chain, tx_hash: str, receipt) -> None:
+        self._forget(tx_hash)
         self._plugin._on_receipt_confirmed(chain, tx_hash, receipt)
+
+    def _on_dropped(self, chain, tx_hash: str) -> None:
+        self._forget(tx_hash)
+        self._plugin._on_tx_dropped(chain, tx_hash)
 
     def _on_still_pending(self, _chain, tx_hash: str) -> None:
         self._in_flight_hashes.discard(tx_hash)
 
     def _on_failed(self, _chain, tx_hash: str, msg: str) -> None:
         self._in_flight_hashes.discard(tx_hash)
-        log.warning("ReceiptWorker for %s failed: %s", tx_hash, msg)
+        log.warning("PendingProbeWorker for %s failed: %s", tx_hash, msg)
 
 
 log = logging.getLogger("qeth.plugin.transactions")
@@ -644,7 +721,8 @@ class TransactionsPlugin(Plugin):
 
     # --- pending-tx integration ---------------------------------------------
 
-    def add_pending(self, tx_hash: str, req: SigningRequest, chain) -> None:
+    def add_pending(self, tx_hash: str, req: SigningRequest, chain,
+                    raw_signed: Optional[str] = None) -> None:
         """Called by MainWindow right after a successful broadcast.
         Synthesises a ``Transaction(pending=True)`` from the finalised
         request + broadcast hash, prepends it to the cache for
@@ -673,6 +751,7 @@ class TransactionsPlugin(Plugin):
             input_data=req.data or "0x",
             success=True,            # placeholder until the receipt lands
             pending=True,
+            raw_signed=raw_signed,
         )
         # Hydrate the in-memory cache from disk if this is the first
         # time we touch this view this session — otherwise we'd
@@ -737,6 +816,34 @@ class TransactionsPlugin(Plugin):
                 # yet revealed), there's nothing on screen to
                 # update — the next reveal will paint the new
                 # state from the cache.
+                if self._panel is not None and self._rendered_for == key:
+                    self._panel.update_tx_by_hash(txs[i])
+                return
+
+    def _on_tx_dropped(self, chain, tx_hash: str) -> None:
+        """PendingProbeWorker → here. The tx's nonce was consumed by a
+        different tx, so this hash will never confirm. Flip the cached
+        entry to the terminal ``dropped`` state (no longer pending, not
+        a revert), drop the stored raw bytes, persist, and repaint the
+        one row if it's on screen."""
+        from dataclasses import replace
+        chain_id = chain.chain_id
+        for key, txs in list(self._cache.items()):
+            if key[0] != chain_id:
+                continue
+            for i, t in enumerate(txs):
+                if t.hash != tx_hash:
+                    continue
+                if not t.pending:
+                    return
+                txs[i] = replace(
+                    t, pending=False, dropped=True, raw_signed=None,
+                )
+                self._disk_cache.save(chain_id, key[1], txs)
+                log.info(
+                    "tx %s dropped — nonce %d already consumed by another tx",
+                    tx_hash, t.nonce,
+                )
                 if self._panel is not None and self._rendered_for == key:
                     self._panel.update_tx_by_hash(txs[i])
                 return
@@ -1336,6 +1443,10 @@ class TransactionListPanel(QWidget):
         so handlers (explorer, details dialog) can recover it."""
         if tx.pending:
             status_glyph, status_tip = "⏳", "Pending"
+        elif getattr(tx, "dropped", False):
+            status_glyph, status_tip = (
+                "⊘", "Dropped — replaced by another tx at this nonce"
+            )
         elif tx.success:
             status_glyph, status_tip = "✓", "Success"
         else:
@@ -1521,6 +1632,8 @@ class TransactionDetailsDialog(QDialog):
 
         if tx.pending:
             status_text = "⏳ Pending"
+        elif getattr(tx, "dropped", False):
+            status_text = "⊘ Dropped (replaced at this nonce)"
         elif tx.success:
             status_text = "✓ Success"
         else:

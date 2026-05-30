@@ -155,6 +155,9 @@ class ChainRpcDialog(QDialog):
 
         self.status_lbl = QLabel("Loading from chainlist.org…")
         self.status_lbl.setStyleSheet("color: gray;")
+        # Wrap rather than widen the dialog: a long status line must not
+        # dictate the window width.
+        self.status_lbl.setWordWrap(True)
         outer.addWidget(self.status_lbl)
 
         # Etherscan v2 key: optional, global. Lives below the
@@ -326,12 +329,12 @@ class ChainRpcDialog(QDialog):
                 "Enter a URL manually above."
             )
         else:
-            extra = (f" ⚡ marks the {n_sim} that support eth_simulateV1 "
+            line2 = (f"\n⚡ marks the {n_sim} supporting eth_simulateV1 "
                      f"(fast tx-event previews)." if n_sim else "")
             self.status_lbl.setText(
                 f"{len(survivors)} reachable endpoint(s), simulateV1 first "
-                f"then by latency. Click one to fill the URL field above."
-                + extra
+                f"then by latency — click one to fill the URL field."
+                + line2
             )
 
     def _on_chainlist_failed(self, msg: str) -> None:

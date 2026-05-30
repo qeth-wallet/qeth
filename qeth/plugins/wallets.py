@@ -403,8 +403,13 @@ class WalletsPlugin(Plugin):
         ))
         self.act_add_hot.triggered.connect(self._add_hot_wallet)
         self.act_add_watch = QAction("&Watch-only Address…", self)
+        # An eye for "watch only". Theme names vary: Breeze ships
+        # view-visible, Adwaita (and SE98's fallback) ships the show-
+        # password eye as view-reveal-symbolic — try both before the
+        # generic QStyle fallback.
         self.act_add_watch.setIcon(_icon(
-            "view-visible", "eye", QStyle.SP_FileDialogContentsView,
+            "view-visible", "view-reveal-symbolic", "eye", "eye-symbolic",
+            QStyle.SP_FileDialogContentsView,
         ))
         self.act_add_watch.triggered.connect(self._add_watch_only)
         # Import-from-other-wallet actions live below a separator

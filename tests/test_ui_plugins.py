@@ -2299,24 +2299,45 @@ class TestEventPreviewTab:
         dlg._on_sim_ready(("old",), [])       # superseded → ignored
         assert "simulating" in dlg._events.events_view.toPlainText()
 
-    def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth):
+    def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
         dlg._on_sim_ready(("k",), None)
         assert "revert" in dlg._events.events_view.toPlainText()
 
-    def test_pyrevm_absent_shows_install_hint(
+    def test_no_route_shows_unavailable_hint(
             self, qtbot, tmp_qeth, monkeypatch):
+        # No pyrevm AND this endpoint already learned to lack simulateV1
+        # → neither route can run, so show the 'no simulation' note.
         import qeth.simulate as sim
         monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        monkeypatch.setitem(sim._SIMV1_SUPPORT, ETH.rpc_url, False)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)
         dlg.amount_edit.setText("5")
         dlg._maybe_simulate()
-        assert "pyrevm" in dlg._events.events_view.toPlainText()
+        text = dlg._events.events_view.toPlainText()
+        assert "eth_simulateV1" in text and "pyrevm" in text
         assert not workers                    # no worker kicked
+
+    def test_simv1_endpoint_simulates_without_pyrevm(
+            self, qtbot, tmp_qeth, monkeypatch):
+        # No pyrevm but the endpoint's simulateV1 support is unprobed →
+        # still kick the worker (it'll try the fast path).
+        import qeth.simulate as sim
+        from qeth.plugins.transactions import SimulateWorker
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        sim._SIMV1_SUPPORT.pop(ETH.rpc_url, None)
+        workers, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg.recipient_edit.setText("0x" + "bb" * 20)
+        dlg.amount_edit.setText("5")
+        dlg._maybe_simulate()
+        assert len(workers) == 1 and isinstance(workers[0], SimulateWorker)
 
     def test_sign_simulates_fixed_request_once(
             self, qtbot, tmp_qeth, monkeypatch):

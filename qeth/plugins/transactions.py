@@ -1896,12 +1896,9 @@ class _EventPreviewMixin:
         if params == self._sim_key:
             return   # already simulated (or in flight) for this exact tx
         self._sim_key = params
-        from ..simulate import pyrevm_available
-        if not pyrevm_available():
-            self._events.set_placeholder(
-                "(local simulation needs the optional 'pyrevm' package — "
-                "install qeth with the 'simulate' extra to preview events)"
-            )
+        from ..simulate import simulation_available
+        if not simulation_available(self.chain):
+            self._events.set_placeholder(self._no_simulation_text())
             return
         self._events.set_placeholder("(simulating…)")
         worker = SimulateWorker(self.chain, *params)
@@ -1910,14 +1907,25 @@ class _EventPreviewMixin:
         )
         self._start_worker(worker)
 
+    def _no_simulation_text(self) -> str:
+        return ("(no simulation available — this RPC has no eth_simulateV1 "
+                "and the optional 'pyrevm' package isn't installed)")
+
     def _on_sim_ready(self, key, logs) -> None:
         if key != self._sim_key:
             return   # a newer simulation superseded this one
         if logs is None:
-            self._events.set_placeholder(
-                "(simulation failed — the transaction would likely revert "
-                "on-chain)"
-            )
+            # The worker may have just *learned* this endpoint can't
+            # simulate (no eth_simulateV1, no pyrevm) — distinguish that
+            # from a genuine revert so the note is accurate.
+            from ..simulate import simulation_available
+            if not simulation_available(self.chain):
+                self._events.set_placeholder(self._no_simulation_text())
+            else:
+                self._events.set_placeholder(
+                    "(simulation failed — the transaction would likely "
+                    "revert on-chain)"
+                )
             return
         self._events.set_logs(logs)
 

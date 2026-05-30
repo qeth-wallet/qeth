@@ -1,33 +1,40 @@
-"""Local transaction simulation via revm (pyrevm).
+"""Local transaction simulation for the event preview.
 
-Run a not-yet-broadcast transaction against the chain's *forked* latest
-state and return the event logs it would emit — so the Send / dapp-Sign
-dialogs can preview "what will happen" the same way the confirmed-tx
-details view shows past events.
+Run a not-yet-broadcast transaction and return the event logs it would
+emit — so the Send / dapp-Sign dialogs can preview "what will happen" the
+same way the confirmed-tx details view shows past events.
 
-Forking only uses standard state-read RPC methods
-(``eth_getStorageAt`` / ``eth_getCode`` / ``eth_getBalance`` …), which
-every endpoint supports — unlike ``debug_traceCall`` / ``eth_simulateV1``
-which many public RPCs don't expose.
+Two routes, picked per-endpoint (``simulate_logs`` orchestrates):
 
-**Block environment.** pyrevm forks *state* at the latest block but
-leaves the block environment zeroed (``block.timestamp == 1``,
-``number == 0``, ``basefee == 0``). Any contract that does time math —
-oracle staleness checks, swap/permit deadlines, TWAP windows — then
-reverts (``block.timestamp - storedTimestamp`` underflows under Solidity
-0.8 checked math). So we fetch the real latest block and set the block
-env from it before the call; without this, perfectly valid txs simulate
-as reverting. See the ``_latest_block`` / block-env wiring below.
+1. **Fast path — ``eth_simulateV1``.** One RPC request: the node runs the
+   call against latest state and returns the logs directly. No per-slot
+   round-trips, no rate-limit burst, no block-env gotcha. Supported by
+   DRPC (most chains), mevblocker, publicnode, … but *not* universal —
+   e.g. cloudflare-eth.com rejects it with ``-32601``. So support is
+   probed by *using* it and cached per RPC URL (``_SIMV1_SUPPORT``).
 
-``pyrevm`` is an **optional** dependency: when it isn't installed (or the
-simulation errors) the helpers return ``None`` and callers simply skip
-the preview. The simulation is slow-ish — each cold storage slot is an
-RPC round-trip — so callers should run it off the main thread.
+2. **Fallback — local revm fork (``pyrevm``).** Universal: forking only
+   uses standard state reads (``getStorageAt`` / ``getCode`` / …) that
+   every endpoint exposes. The cost is one request per cold storage slot,
+   fetched serially on demand, so it's slow and can trip a throttled
+   endpoint's rate limit — hence it's the fallback, not the default. Also
+   needs the block-env fix below.
+
+   **Block environment.** pyrevm forks *state* at latest but leaves the
+   block env zeroed (``timestamp == 1``, ``number == 0``). Contracts that
+   do time math (oracle staleness, deadlines, TWAP) then revert on a
+   checked-math underflow, so a valid tx simulates as reverting. We fetch
+   the real latest block and ``set_block_env`` from it before the call.
+
+``pyrevm`` is an **optional** dependency and ``eth_simulateV1`` isn't
+everywhere, so simulation may be unavailable; ``simulation_available``
+reports whether *either* route can work, and the helpers return ``None``
+when neither can (or the tx reverts) — callers then skip the preview.
+Simulation is slow-ish, so callers run it off the main thread.
 """
 
 import logging
 import re
-import time
 
 from eth_utils import to_checksum_address
 
@@ -40,6 +47,17 @@ _PANIC_SELECTOR = "4e487b71"
 # reverting call; pull the output payload back out to decode the reason.
 _REVERT_OUTPUT_RE = re.compile(r"output:\s*(0x[0-9a-fA-F]*)")
 
+# Per-RPC-URL eth_simulateV1 capability, learned by using it: True =
+# supported, False = the endpoint returned method-not-found (skip it
+# next time), absent = not yet probed (try it). In-memory for the
+# session — re-probing costs one request per endpoint per run.
+_SIMV1_SUPPORT: dict = {}
+
+
+class _SimV1Unsupported(Exception):
+    """The endpoint doesn't implement ``eth_simulateV1`` — fall back to
+    the local fork."""
+
 
 def pyrevm_available() -> bool:
     """True if the optional ``pyrevm`` dependency can be imported."""
@@ -50,9 +68,151 @@ def pyrevm_available() -> bool:
         return False
 
 
+def simulation_available(chain) -> bool:
+    """True if *some* route can simulate on ``chain``'s current RPC: the
+    local fork (pyrevm installed), or ``eth_simulateV1`` unless we've
+    already learned this endpoint lacks it. Lets the UI show an accurate
+    'no preview available' note only when nothing can work."""
+    if pyrevm_available():
+        return True
+    return _SIMV1_SUPPORT.get(chain.rpc_url) is not False
+
+
+# --- revert-reason decoding --------------------------------------------------
+
+def _decode_revert_output(out_hex: str) -> str:
+    """Human reason from raw revert output bytes: the standard
+    ``Error(string)`` / ``Panic(uint256)`` envelopes, else the selector."""
+    out = out_hex[2:] if out_hex[:2] in ("0x", "0X") else out_hex
+    if not out:
+        return "reverted without a reason string"
+    selector, payload = out[:8], out[8:]
+    if selector == _ERROR_SELECTOR:
+        try:
+            from eth_abi import decode
+            (reason,) = decode(["string"], bytes.fromhex(payload))
+            return reason
+        except Exception:
+            pass
+    elif selector == _PANIC_SELECTOR:
+        try:
+            return f"panic 0x{int(payload, 16):02x}"
+        except Exception:
+            pass
+    return f"reverted (selector 0x{selector})"
+
+
+def _decode_revert(msg: str) -> str:
+    """Reason from pyrevm's RuntimeError text, which embeds ``output: 0x..``."""
+    m = _REVERT_OUTPUT_RE.search(msg)
+    if not m:
+        return msg.strip()
+    return _decode_revert_output(m.group(1))
+
+
+def _is_rate_limited(e) -> bool:
+    """True when an exception looks like an RPC rate-limit response (DRPC
+    free tier: ``code 15 "Too many request"`` / HTTP 429). Transient —
+    worth a backoff + retry, unlike a genuine revert or a missing method."""
+    s = str(e).lower()
+    return ("too many request" in s or "code: 15" in s
+            or "429" in s or "rate limit" in s)
+
+
+def _is_method_unsupported(e) -> bool:
+    """True when the endpoint doesn't implement the method: a JSON-RPC
+    ``-32601`` or an HTTP 400/404 from a gateway that doesn't route it."""
+    if getattr(e, "code", None) == -32601:
+        return True
+    s = str(e).lower()
+    return ("-32601" in s or "method not found" in s or "not supported" in s
+            or "not available" in s or "unsupported" in s
+            or "does not exist" in s or "http error 404" in s
+            or "http error 400" in s or "bad request" in s)
+
+
+# --- fast path: eth_simulateV1 ----------------------------------------------
+
+def _normalize_rpc_log(lg) -> dict:
+    """One JSON-RPC log → the ``decode_event``-ready dict shape (matches
+    LogsFetchWorker), tolerating HexBytes or plain hex strings."""
+    return {
+        "address": lg.get("address"),
+        "topics": [t.hex() if hasattr(t, "hex") else t
+                   for t in (lg.get("topics") or [])],
+        "data": (lg.get("data").hex() if hasattr(lg.get("data"), "hex")
+                 else lg.get("data")) or "0x",
+    }
+
+
+def _logs_from_simv1(res):
+    """Pull logs out of an ``eth_simulateV1`` result. Returns ``None`` (and
+    logs the reason) if any call reverted — a definitive answer, not a
+    reason to fall back to the fork."""
+    out = []
+    for blk in res or []:
+        for c in (blk.get("calls") or []):
+            status = c.get("status")
+            if status not in ("0x1", "0x01", 1):
+                log.warning("eth_simulateV1 call reverted (status %s): %s",
+                            status, _decode_simv1_revert(c))
+                return None
+            for lg in (c.get("logs") or []):
+                out.append(_normalize_rpc_log(lg))
+    return out
+
+
+def _decode_simv1_revert(call) -> str:
+    err = call.get("error") if hasattr(call, "get") else None
+    data = None
+    if hasattr(err, "get"):
+        data = err.get("data")
+    data = data or (call.get("returnData") if hasattr(call, "get") else None)
+    if isinstance(data, str) and data[:2] in ("0x", "0X"):
+        return _decode_revert_output(data)
+    if hasattr(err, "get") and err.get("message"):
+        return err["message"]
+    return "reverted"
+
+
+def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
+                      *, retries=4, sleep=None):
+    """Run the tx through ``eth_simulateV1`` (one request) and return its
+    logs. Raises ``_SimV1Unsupported`` if the endpoint lacks the method;
+    retries transient rate-limits with backoff (cheap — it's one call)."""
+    import time as _time
+    sleep = sleep or _time.sleep
+    from .chain import EthClient
+    call = {"from": to_checksum_address(from_addr),
+            "to": to_checksum_address(to_addr)}
+    if data and data not in ("0x", "0X"):
+        call["data"] = data
+    if value:
+        call["value"] = hex(int(value))
+    params = [{
+        "blockStateCalls": [{"calls": [call]}],
+        # Only real contract logs (consistent with the fork path); don't
+        # synthesise ETH-movement Transfer logs.
+        "traceTransfers": False,
+        "validation": False,
+    }, "latest"]
+    for attempt in range(retries):
+        try:
+            res = EthClient(chain).rpc("eth_simulateV1", params)
+        except Exception as e:
+            if _is_method_unsupported(e):
+                raise _SimV1Unsupported() from e
+            if _is_rate_limited(e) and attempt < retries - 1:
+                sleep(min(0.75 * (2 ** attempt), 4.0))
+                continue
+            raise
+        return _logs_from_simv1(res)
+    return None
+
+
+# --- fallback: local revm fork ----------------------------------------------
+
 def _hexint(v):
-    """JSON-RPC quantities come back as ``0x``-hex strings (raw) or, if a
-    web3 result formatter ran, as plain ints. Accept either."""
     if v is None:
         return None
     if isinstance(v, int):
@@ -60,24 +220,11 @@ def _hexint(v):
     return int(v, 16)
 
 
-def _is_rate_limited(e) -> bool:
-    """True when an exception looks like an RPC rate-limit response.
-    Forking issues one request per cold storage slot; on a throttled
-    public endpoint (DRPC free tier: ``code 15 "Too many request"`` /
-    HTTP 429) the burst can trip the limit, especially while the app is
-    also polling. These are transient — worth a backoff + retry, unlike a
-    genuine revert."""
-    s = str(e).lower()
-    return ("too many request" in s or "code: 15" in s
-            or "429" in s or "rate limit" in s)
-
-
 def _latest_block(chain):
-    """Fetch the latest block's env-relevant fields (as ints / address
-    string) so the simulation runs in a realistic block context. Raises
-    on RPC failure — the retry loop in ``simulate_logs`` handles transient
-    rate-limits; other errors abort the preview (no env-less fork, which
-    would reintroduce the zeroed-timestamp false reverts)."""
+    """Latest block's env-relevant fields (ints / address) so the fork
+    runs in a realistic block context. Raises on RPC failure — the retry
+    loop handles transient rate-limits; other errors abort the preview
+    (an env-less fork reintroduces zeroed-timestamp false reverts)."""
     from .chain import EthClient
     blk = EthClient(chain).rpc("eth_getBlockByNumber", ["latest", False])
     if not blk:
@@ -105,40 +252,12 @@ def _apply_block_env(evm, block) -> None:
     evm.set_block_env(BlockEnv(**kwargs))
 
 
-def _decode_revert(msg: str) -> str:
-    """Best-effort human revert reason from pyrevm's RuntimeError text,
-    which embeds the call's ``output:`` bytes. Decodes the standard
-    ``Error(string)`` / ``Panic(uint256)`` envelopes; falls back to the
-    raw selector (or the original message) when it's something else."""
-    m = _REVERT_OUTPUT_RE.search(msg)
-    if not m:
-        return msg.strip()
-    out = m.group(1)[2:]
-    if not out:
-        return "reverted without a reason string"
-    selector, payload = out[:8], out[8:]
-    if selector == _ERROR_SELECTOR:
-        try:
-            from eth_abi import decode
-            (reason,) = decode(["string"], bytes.fromhex(payload))
-            return reason
-        except Exception:
-            pass
-    elif selector == _PANIC_SELECTOR:
-        try:
-            return f"panic 0x{int(payload, 16):02x}"
-        except Exception:
-            pass
-    return f"reverted (selector 0x{selector})"
-
-
-def _run_simulation(EVM, chain, from_addr, to_addr, data, value, block):
-    """Fork, set the block env, run the call, and return its logs. Any
-    rate-limit / revert surfaces as an exception to ``simulate_logs``."""
+def _run_fork(EVM, chain, from_addr, to_addr, data, value, block):
+    """Fork, set the block env, run the call, return its logs."""
     if block is not None:
         evm = EVM(fork_url=chain.rpc_url, fork_block=hex(block["number"]))
         _apply_block_env(evm, block)
-        log.debug("simulating at fork block %s (ts=%s)",
+        log.debug("forking at block %s (ts=%s)",
                   block["number"], block["timestamp"])
     else:
         evm = EVM(fork_url=chain.rpc_url)
@@ -165,27 +284,13 @@ def _run_simulation(EVM, chain, from_addr, to_addr, data, value, block):
     return out
 
 
-def simulate_logs(chain, from_addr: str, to_addr, data, value,
-                  *, evm_cls=None, retries=4, sleep=time.sleep):
-    """Simulate the tx against ``chain``'s forked latest state and return
-    its event logs as ``decode_event``-ready dicts::
-
-        [{"address": "0x…", "topics": ["0x…", …], "data": "0x…"}, …]
-
-    Returns ``None`` when pyrevm is unavailable, the tx is a contract
-    creation (no ``to``), or the simulation reverts/errors — the caller
-    then shows no preview rather than a wrong one; the revert reason and
-    fork block are logged.
-
-    Forking issues one RPC request per cold storage slot, so on a
-    throttled endpoint the burst can hit a rate-limit even though a lone
-    simulation succeeds. Those are retried with exponential backoff
-    (``retries`` attempts) to catch a quieter window; a genuine revert is
-    *not* retried. ``evm_cls`` is an injection seam for tests; when set we
-    skip the (networked) block-env fetch so tests stay hermetic. ``sleep``
-    is injectable so retry tests don't actually wait."""
-    if not to_addr:
-        return None   # contract creation — not previewed
+def _simulate_via_fork(chain, from_addr, to_addr, data, value,
+                       *, evm_cls=None, retries=4, sleep=None):
+    """Local revm fork. ``evm_cls`` is a test seam; when set we skip the
+    (networked) block-env fetch so tests stay hermetic. Retries transient
+    rate-limits with backoff; a genuine revert fails fast (logged)."""
+    import time as _time
+    sleep = sleep or _time.sleep
     injected = evm_cls is not None
     EVM = evm_cls
     if EVM is None:
@@ -196,18 +301,47 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
     fork_no = None
     for attempt in range(retries):
         try:
-            # Real block context (production only); injected tests fork-free.
             block = None if injected else _latest_block(chain)
             fork_no = block["number"] if block else None
-            return _run_simulation(
-                EVM, chain, from_addr, to_addr, data, value, block)
+            return _run_fork(EVM, chain, from_addr, to_addr, data, value, block)
         except Exception as e:
             if _is_rate_limited(e) and attempt < retries - 1:
                 delay = min(0.75 * (2 ** attempt), 4.0)
-                log.info("simulation rate-limited by RPC; retry %d/%d in "
-                         "%.1fs", attempt + 1, retries - 1, delay)
+                log.info("fork rate-limited by RPC; retry %d/%d in %.1fs",
+                         attempt + 1, retries - 1, delay)
                 sleep(delay)
                 continue
-            log.warning("simulation failed (fork block %s): %s",
+            log.warning("fork simulation failed (block %s): %s",
                         fork_no, _decode_revert(str(e)))
             return None
+
+
+# --- orchestrator ------------------------------------------------------------
+
+def simulate_logs(chain, from_addr: str, to_addr, data, value,
+                  *, evm_cls=None, retries=4, sleep=None):
+    """Simulate the tx and return its event logs as ``decode_event``-ready
+    dicts ``[{"address", "topics", "data"}, …]``, or ``None`` (logged) when
+    it's a contract creation, the tx reverts, or no route can run it.
+
+    Prefers ``eth_simulateV1`` (one request) and remembers per RPC URL
+    whether the endpoint supports it; falls back to a local pyrevm fork
+    otherwise. ``evm_cls`` (a test seam) forces the fork path. ``sleep`` is
+    injectable so retry tests don't actually wait."""
+    if not to_addr:
+        return None   # contract creation — not previewed
+    if evm_cls is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
+        try:
+            logs = _simulate_via_rpc(chain, from_addr, to_addr, data, value,
+                                     retries=retries, sleep=sleep)
+            _SIMV1_SUPPORT[chain.rpc_url] = True
+            return logs   # list (success) or None (definitive revert)
+        except _SimV1Unsupported:
+            _SIMV1_SUPPORT[chain.rpc_url] = False
+            log.info("eth_simulateV1 not on %s; using local fork",
+                     chain.rpc_url)
+        except Exception as e:
+            log.warning("eth_simulateV1 failed on %s (%s); trying local fork",
+                        chain.rpc_url, e)
+    return _simulate_via_fork(chain, from_addr, to_addr, data, value,
+                              evm_cls=evm_cls, retries=retries, sleep=sleep)

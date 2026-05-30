@@ -273,3 +273,31 @@ def test_simulation_available(monkeypatch):
     sim._SIMV1_SUPPORT[CHAIN.rpc_url] = True
     assert simulation_available(CHAIN)                 # simulateV1 works
     sim._SIMV1_SUPPORT.clear()
+
+
+def test_fork_deadline_stops_retries():
+    # A rate-limited fork past its deadline must not start another attempt.
+    import time as _t
+    class _Limited:
+        n = 0
+        def __init__(self, fork_url=None): pass
+        def message_call(self, **kw):
+            _Limited.n += 1
+            raise RuntimeError('JsonRpcError { code: 15, message: "Too many request" }')
+    out = sim._simulate_via_fork(
+        CHAIN, FROM, USDC, "0x", 0, evm_cls=_Limited,
+        deadline=_t.monotonic() - 1, sleep=lambda d: None,
+    )
+    assert out is None and _Limited.n == 1   # no retry past the deadline
+
+
+def test_budget_threads_a_deadline_into_the_fork(monkeypatch):
+    seen = {}
+    def fake_fork(*a, **k):
+        seen["deadline"] = k.get("deadline")
+        return ["ok"]
+    monkeypatch.setattr(sim, "_simulate_via_fork", fake_fork)
+    sim._SIMV1_SUPPORT[CHAIN.rpc_url] = False   # force fork
+    simulate_logs(CHAIN, FROM, USDC, "0x", 0, budget_s=12.0)
+    assert seen["deadline"] is not None        # a concrete monotonic deadline
+    sim._SIMV1_SUPPORT.clear()

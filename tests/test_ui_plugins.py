@@ -2286,6 +2286,7 @@ class TestEventPreviewTab:
                  "topics": [_TRANSFER_TOPIC, ta(ADDR), ta("0x" + "bb" * 20)],
                  "data": "0x" + f"{100:064x}"}]
         dlg._sim_key = ("k",)                 # pretend this sim is active
+        dlg._sim_done = False                  # …and in flight
         dlg._on_sim_ready(("k",), logs)
         text = dlg._events.events_view.toPlainText()
         assert "Transfer(" in text
@@ -2305,6 +2306,7 @@ class TestEventPreviewTab:
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
+        dlg._sim_done = False
         dlg._on_sim_ready(("k",), None)
         assert "revert" in dlg._events.events_view.toPlainText()
 
@@ -2355,3 +2357,46 @@ class TestEventPreviewTab:
         dlg = self._sign(qtbot, started, to_addr=None, data="0x60806040")
         dlg._maybe_simulate()
         assert "contract creation" in dlg._events.events_view.toPlainText()
+
+    def test_timeout_resolves_tab_and_ignores_late_result(
+            self, qtbot, tmp_qeth, monkeypatch):
+        # A slow fork (Arbitrum-style) must not spin the tab forever: the
+        # timeout resolves it, and a late worker result is ignored.
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg.recipient_edit.setText("0x" + "bb" * 20)
+        dlg.amount_edit.setText("5")
+        dlg._maybe_simulate()
+        assert not dlg._sim_done                 # in flight, timer running
+        key = dlg._sim_key
+        dlg._on_sim_timeout()
+        assert dlg._sim_done
+        assert "timed out" in dlg._events.events_view.toPlainText()
+        # The worker eventually returns — must be ignored, not re-rendered.
+        dlg._on_sim_ready(key, [{"address": "0x" + "a0" * 20,
+                                 "topics": [], "data": "0x"}])
+        assert "timed out" in dlg._events.events_view.toPlainText()
+
+    def test_close_detaches_in_flight_worker(
+            self, qtbot, tmp_qeth, monkeypatch):
+        # The dialogs are non-modal; a worker can outlive a closed dialog.
+        # Closing must disconnect it so a late `ready` can't reach the
+        # (deleted) dialog.
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg.recipient_edit.setText("0x" + "bb" * 20)
+        dlg.amount_edit.setText("5")
+        dlg._maybe_simulate()
+        w = dlg._sim_worker
+        assert w is not None
+        dlg.reject()                             # emits finished → _detach_sim
+        assert dlg._sim_worker is None
+        # Late emit on the detached worker is now a no-op (no slot), so the
+        # placeholder is untouched and nothing raises.
+        before = dlg._events.events_view.toPlainText()
+        w.ready.emit([{"address": "0x" + "a0" * 20, "topics": [], "data": "0x"}])
+        assert dlg._events.events_view.toPlainText() == before

@@ -1858,9 +1858,20 @@ class _EventPreviewMixin:
     Requires the host to have ``chain``, ``_token_info``, ``_icon_cache``,
     ``_abi_source``, ``_abi_cache`` and ``_start_worker`` already set."""
 
+    # How long the UI waits for a simulation before giving up. The fast
+    # path (eth_simulateV1) returns in well under this; the local fork
+    # can take far longer on a slow / rate-limited endpoint (e.g. Arbitrum
+    # on DRPC, which has no simulateV1), and a single fork attempt can't
+    # be interrupted — so we stop *waiting* and let the worker finish in
+    # the background (it releases the GIL; the UI stays responsive) and
+    # self-evict via the host's worker set.
+    SIM_TIMEOUT_MS = 35_000
+
     def _init_event_preview(self, tabs, *, known_addresses) -> None:
         self._sim_tabs = tabs
         self._sim_key = None
+        self._sim_worker = None
+        self._sim_done = True   # no sim in flight
         self._events = _EventsView(
             chain=self.chain, known_addresses=known_addresses,
             token_info=self._token_info, icon_cache=self._icon_cache,
@@ -1876,6 +1887,15 @@ class _EventPreviewMixin:
         lay.addWidget(self._events, 1)
         tabs.addTab(self._events_page, "&Events")
         tabs.currentChanged.connect(self._on_sim_tab_changed)
+        # Parented to the dialog so it can't fire after the dialog dies.
+        self._sim_timer = QTimer(self)
+        self._sim_timer.setSingleShot(True)
+        self._sim_timer.timeout.connect(self._on_sim_timeout)
+        # The simulation worker is tracked by the host, not this dialog, so
+        # it outlives a closed dialog (these dialogs are non-modal). Detach
+        # its signal on close so a late `ready` can't call into a deleted
+        # dialog.
+        self.finished.connect(self._detach_sim)
 
     def _on_sim_tab_changed(self, idx: int) -> None:
         if self._sim_tabs.widget(idx) is self._events_page:
@@ -1901,19 +1921,49 @@ class _EventPreviewMixin:
             self._events.set_placeholder(self._no_simulation_text())
             return
         self._events.set_placeholder("(simulating…)")
+        self._sim_done = False
+        self._detach_sim()                 # drop any prior in-flight worker
         worker = SimulateWorker(self.chain, *params)
+        self._sim_worker = worker
         worker.ready.connect(
             lambda logs, k=params: self._on_sim_ready(k, logs)
         )
         self._start_worker(worker)
+        self._sim_timer.start(self.SIM_TIMEOUT_MS)
 
     def _no_simulation_text(self) -> str:
         return ("(no simulation available — this RPC has no eth_simulateV1 "
                 "and the optional 'pyrevm' package isn't installed)")
 
+    def _detach_sim(self, *_args) -> None:
+        """Stop waiting on the current worker (it keeps running in the
+        background and self-evicts). Called on a new sim, on resolve, and
+        on dialog close — the last is what keeps a late `ready` from
+        reaching a deleted dialog."""
+        self._sim_timer.stop()
+        w = self._sim_worker
+        self._sim_worker = None
+        if w is not None:
+            try:
+                w.ready.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
+    def _on_sim_timeout(self) -> None:
+        if self._sim_done:
+            return
+        self._sim_done = True
+        self._detach_sim()
+        self._events.set_placeholder(
+            "(simulation timed out — this RPC is too slow to fork and "
+            "doesn't support eth_simulateV1; previews need a faster RPC)"
+        )
+
     def _on_sim_ready(self, key, logs) -> None:
-        if key != self._sim_key:
-            return   # a newer simulation superseded this one
+        if key != self._sim_key or self._sim_done:
+            return   # superseded by a newer sim, or already timed out
+        self._sim_done = True
+        self._detach_sim()
         if logs is None:
             # The worker may have just *learned* this endpoint can't
             # simulate (no eth_simulateV1, no pyrevm) — distinguish that

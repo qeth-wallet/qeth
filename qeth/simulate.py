@@ -175,11 +175,17 @@ def _decode_simv1_revert(call) -> str:
     return "reverted"
 
 
+def _past(deadline) -> bool:
+    import time as _time
+    return deadline is not None and _time.monotonic() >= deadline
+
+
 def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
-                      *, retries=4, sleep=None):
+                      *, retries=4, sleep=None, deadline=None):
     """Run the tx through ``eth_simulateV1`` (one request) and return its
     logs. Raises ``_SimV1Unsupported`` if the endpoint lacks the method;
-    retries transient rate-limits with backoff (cheap — it's one call)."""
+    retries transient rate-limits with backoff (cheap — it's one call)
+    until ``deadline`` (monotonic seconds), then gives up."""
     import time as _time
     sleep = sleep or _time.sleep
     from .chain import EthClient
@@ -202,7 +208,8 @@ def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
         except Exception as e:
             if _is_method_unsupported(e):
                 raise _SimV1Unsupported() from e
-            if _is_rate_limited(e) and attempt < retries - 1:
+            if (_is_rate_limited(e) and attempt < retries - 1
+                    and not _past(deadline)):
                 sleep(min(0.75 * (2 ** attempt), 4.0))
                 continue
             raise
@@ -285,10 +292,17 @@ def _run_fork(EVM, chain, from_addr, to_addr, data, value, block):
 
 
 def _simulate_via_fork(chain, from_addr, to_addr, data, value,
-                       *, evm_cls=None, retries=4, sleep=None):
+                       *, evm_cls=None, retries=4, sleep=None, deadline=None):
     """Local revm fork. ``evm_cls`` is a test seam; when set we skip the
     (networked) block-env fetch so tests stay hermetic. Retries transient
-    rate-limits with backoff; a genuine revert fails fast (logged)."""
+    rate-limits with backoff up to ``deadline`` then gives up; a genuine
+    revert fails fast (logged).
+
+    A single ``message_call`` can't be interrupted (pyrevm fetches cold
+    slots one-by-one through its own HTTP client, with no callback), so on
+    a slow/throttled endpoint *one* attempt can still take tens of seconds
+    — the deadline only stops the retry loop from compounding that. The UI
+    caps how long it *waits* separately (see ``_EventPreviewMixin``)."""
     import time as _time
     sleep = sleep or _time.sleep
     injected = evm_cls is not None
@@ -305,7 +319,8 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
             fork_no = block["number"] if block else None
             return _run_fork(EVM, chain, from_addr, to_addr, data, value, block)
         except Exception as e:
-            if _is_rate_limited(e) and attempt < retries - 1:
+            if (_is_rate_limited(e) and attempt < retries - 1
+                    and not _past(deadline)):
                 delay = min(0.75 * (2 ** attempt), 4.0)
                 log.info("fork rate-limited by RPC; retry %d/%d in %.1fs",
                          attempt + 1, retries - 1, delay)
@@ -318,22 +333,32 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
 
 # --- orchestrator ------------------------------------------------------------
 
+# Wall-clock budget for the retry loops (one slow fork attempt can still
+# overrun it — see _simulate_via_fork — but the loop won't start another).
+_TIME_BUDGET_S = 40.0
+
+
 def simulate_logs(chain, from_addr: str, to_addr, data, value,
-                  *, evm_cls=None, retries=4, sleep=None):
+                  *, evm_cls=None, retries=4, sleep=None, budget_s=_TIME_BUDGET_S):
     """Simulate the tx and return its event logs as ``decode_event``-ready
     dicts ``[{"address", "topics", "data"}, …]``, or ``None`` (logged) when
     it's a contract creation, the tx reverts, or no route can run it.
 
     Prefers ``eth_simulateV1`` (one request) and remembers per RPC URL
     whether the endpoint supports it; falls back to a local pyrevm fork
-    otherwise. ``evm_cls`` (a test seam) forces the fork path. ``sleep`` is
-    injectable so retry tests don't actually wait."""
+    otherwise. ``budget_s`` bounds the retry loops so a thrashing,
+    rate-limited fork can't run for minutes (``None`` = unbounded).
+    ``evm_cls`` (a test seam) forces the fork path. ``sleep`` is injectable
+    so retry tests don't actually wait."""
     if not to_addr:
         return None   # contract creation — not previewed
+    import time as _time
+    deadline = _time.monotonic() + budget_s if budget_s else None
     if evm_cls is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
         try:
             logs = _simulate_via_rpc(chain, from_addr, to_addr, data, value,
-                                     retries=retries, sleep=sleep)
+                                     retries=retries, sleep=sleep,
+                                     deadline=deadline)
             _SIMV1_SUPPORT[chain.rpc_url] = True
             return logs   # list (success) or None (definitive revert)
         except _SimV1Unsupported:
@@ -344,4 +369,5 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
             log.warning("eth_simulateV1 failed on %s (%s); trying local fork",
                         chain.rpc_url, e)
     return _simulate_via_fork(chain, from_addr, to_addr, data, value,
-                              evm_cls=evm_cls, retries=retries, sleep=sleep)
+                              evm_cls=evm_cls, retries=retries, sleep=sleep,
+                              deadline=deadline)

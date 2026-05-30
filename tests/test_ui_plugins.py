@@ -2097,7 +2097,7 @@ class TestDetailsEventsView:
         tabs = dlg.findChild(QTabWidget)
         assert tabs is not None
         assert [tabs.tabText(i) for i in range(tabs.count())] == [
-            "Details", "Events"]
+            "&Details", "&Events"]
 
     def test_default_filters_to_our_transfers(self, qtbot, tmp_qeth):
         dlg = self._dialog(qtbot)
@@ -2172,3 +2172,165 @@ class TestDetailsEventsView:
         dlg = self._dialog(qtbot, token_info=token_info)
         dlg._events.set_logs(self._logs())
         assert "USDC" in dlg._events.events_view.toPlainText()
+
+
+class _SimList:
+    """Live filtered view over a worker list, exposing only the entries
+    of ``cls`` (the dialogs also start AbiFetch / GasSuggestion workers on
+    construction; tests want to count just the simulation ones)."""
+
+    def __init__(self, backing, cls):
+        self._backing = backing
+        self._cls = cls
+
+    def _items(self):
+        return [w for w in self._backing if isinstance(w, self._cls)]
+
+    def __len__(self):
+        return len(self._items())
+
+    def __iter__(self):
+        return iter(self._items())
+
+    def __getitem__(self, i):
+        return self._items()[i]
+
+    def __bool__(self):
+        return bool(self._items())
+
+
+class TestEventPreviewTab:
+    """Send / dapp-Sign dialogs gain an 'Events' tab that previews the
+    tx's logs via local revm simulation — lazy on tab-open, cached until
+    the tx params change, and graceful when pyrevm is absent."""
+
+    def _started(self):
+        # The dialogs also kick AbiFetch / GasSuggestion workers on
+        # construction; the helper returns only the simulation workers.
+        from qeth.plugins.transactions import SimulateWorker
+        all_workers: list = []
+        sims = _SimList(all_workers, SimulateWorker)
+        return sims, all_workers.append
+
+    def _send(self, qtbot, started):
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import SendTokenDialog
+        abi_cache = MagicMock()
+        abi_cache.load.return_value = None
+        asset = {"symbol": "USDC", "decimals": 6, "is_native": False,
+                 "contract": "0x" + "a0" * 20, "balance_raw": 10 ** 12}
+        dlg = SendTokenDialog(
+            asset, ETH, ADDR, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=started, token_info=lambda c, a: None,
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+        )
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def _sign(self, qtbot, started, *, to_addr="0x" + "22" * 20,
+              data="0xa9059cbb"):
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import SignTransactionDialog
+        from qeth.signing import SigningRequest
+        abi_cache = MagicMock()
+        abi_cache.load.return_value = None
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr=to_addr,
+                             value_wei=0, data=data)
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=started, token_info=lambda c, a: None,
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+        )
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def test_both_dialogs_have_an_events_tab(self, qtbot, tmp_qeth):
+        _, started = self._started()
+        for dlg in (self._send(qtbot, started), self._sign(qtbot, started)):
+            assert [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())] \
+                == ["&Details", "&Events"]
+
+    def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        workers, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._maybe_simulate()                 # no recipient/amount yet
+        assert "valid recipient" in dlg._events.events_view.toPlainText()
+        assert not workers                    # nothing simulated
+
+    def test_send_simulates_and_caches_until_inputs_change(
+            self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.simulate as sim
+        from qeth.plugins.transactions import SimulateWorker
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        workers, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg.recipient_edit.setText("0x" + "bb" * 20)
+        dlg.amount_edit.setText("5")
+        dlg._maybe_simulate()
+        assert len(workers) == 1 and isinstance(workers[0], SimulateWorker)
+        dlg._maybe_simulate()                 # re-open, unchanged → cached
+        assert len(workers) == 1
+        dlg.amount_edit.setText("6")          # params change → re-simulate
+        dlg._maybe_simulate()
+        assert len(workers) == 2
+
+    def test_send_ready_renders_simulated_transfer(self, qtbot, tmp_qeth):
+        from qeth.abi import _TRANSFER_TOPIC
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        def ta(a): return "0x" + "00" * 12 + a[2:]
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        logs = [{"address": usdc,
+                 "topics": [_TRANSFER_TOPIC, ta(ADDR), ta("0x" + "bb" * 20)],
+                 "data": "0x" + f"{100:064x}"}]
+        dlg._sim_key = ("k",)                 # pretend this sim is active
+        dlg._on_sim_ready(("k",), logs)
+        text = dlg._events.events_view.toPlainText()
+        assert "Transfer(" in text
+        assert ADDR.lower() in text.lower()   # our wallet (sender) shown
+
+    def test_sim_ready_ignores_stale_result(self, qtbot, tmp_qeth):
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._events.set_placeholder("(simulating…)")
+        dlg._sim_key = ("current",)
+        dlg._on_sim_ready(("old",), [])       # superseded → ignored
+        assert "simulating" in dlg._events.events_view.toPlainText()
+
+    def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth):
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._sim_key = ("k",)
+        dlg._on_sim_ready(("k",), None)
+        assert "revert" in dlg._events.events_view.toPlainText()
+
+    def test_pyrevm_absent_shows_install_hint(
+            self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        workers, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg.recipient_edit.setText("0x" + "bb" * 20)
+        dlg.amount_edit.setText("5")
+        dlg._maybe_simulate()
+        assert "pyrevm" in dlg._events.events_view.toPlainText()
+        assert not workers                    # no worker kicked
+
+    def test_sign_simulates_fixed_request_once(
+            self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.simulate as sim
+        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        workers, started = self._started()
+        dlg = self._sign(qtbot, started)
+        dlg._maybe_simulate()
+        assert len(workers) == 1
+        dlg._maybe_simulate()                 # fixed tx → cached
+        assert len(workers) == 1
+
+    def test_sign_contract_creation_blocked(self, qtbot, tmp_qeth):
+        _, started = self._started()
+        dlg = self._sign(qtbot, started, to_addr=None, data="0x60806040")
+        dlg._maybe_simulate()
+        assert "contract creation" in dlg._events.events_view.toPlainText()

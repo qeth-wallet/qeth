@@ -1637,6 +1637,24 @@ class LogsFetchWorker(QThread):
         self.ready.emit(out)
 
 
+class SimulateWorker(QThread):
+    """Run a not-yet-broadcast tx through local revm simulation off the
+    main thread and emit the event logs it would produce — the same
+    ``{address, topics, data}`` shape ``LogsFetchWorker`` emits, so the
+    two feed ``_EventsView`` interchangeably. ``ready(None)`` when pyrevm
+    is absent or the simulation fails (the pane shows a placeholder)."""
+
+    ready = Signal(object)   # list of log dicts, or None
+
+    def __init__(self, chain, from_addr, to_addr, data, value, parent=None):
+        super().__init__(parent)
+        self._args = (chain, from_addr, to_addr, data, value)
+
+    def run(self) -> None:
+        from ..simulate import simulate_logs
+        self.ready.emit(simulate_logs(*self._args))
+
+
 class _EventsView(QWidget):
     """Reusable events pane: decode logs (from a receipt or a local
     simulation) and render them Python-style — default view keeps
@@ -1824,6 +1842,86 @@ class _EventsView(QWidget):
         return {"symbol": entry.symbol, "decimals": decimals}
 
 
+class _EventPreviewMixin:
+    """Adds an 'Events' tab — backed by local revm simulation — to a
+    signing dialog (Send / dapp-Sign). The dialog wraps its existing
+    widgets in a 'Details' tab, then calls ``_init_event_preview(tabs)``
+    to append the Events tab.
+
+    Simulation is lazy and cached: it runs the first time the Events tab
+    is shown and re-runs only when the tx params change (so the Send
+    dialog re-simulates after the user edits recipient/amount, but
+    toggling tabs without edits doesn't refork the chain). Subclasses
+    provide ``_sim_params()`` → ``(from, to, data, value)`` (or raise
+    ``SignerError`` / return None when the inputs aren't a valid tx yet).
+
+    Requires the host to have ``chain``, ``_token_info``, ``_icon_cache``,
+    ``_abi_source``, ``_abi_cache`` and ``_start_worker`` already set."""
+
+    def _init_event_preview(self, tabs, *, known_addresses) -> None:
+        self._sim_tabs = tabs
+        self._sim_key = None
+        self._events = _EventsView(
+            chain=self.chain, known_addresses=known_addresses,
+            token_info=self._token_info, icon_cache=self._icon_cache,
+            abi_source=self._abi_source, abi_cache=self._abi_cache,
+            start_worker=self._start_worker,
+        )
+        self._events.set_placeholder(
+            "(switch to this tab to simulate the transaction locally)"
+        )
+        self._events_page = QWidget()
+        lay = QVBoxLayout(self._events_page)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.addWidget(self._events, 1)
+        tabs.addTab(self._events_page, "&Events")
+        tabs.currentChanged.connect(self._on_sim_tab_changed)
+
+    def _on_sim_tab_changed(self, idx: int) -> None:
+        if self._sim_tabs.widget(idx) is self._events_page:
+            self._maybe_simulate()
+
+    def _sim_blocked_text(self) -> str:
+        return "(enter a valid recipient and amount to preview events)"
+
+    def _maybe_simulate(self) -> None:
+        try:
+            params = self._sim_params()
+        except SignerError:
+            params = None
+        if params is None or not params[1]:   # no/invalid `to` address
+            self._events.set_placeholder(self._sim_blocked_text())
+            self._sim_key = None
+            return
+        if params == self._sim_key:
+            return   # already simulated (or in flight) for this exact tx
+        self._sim_key = params
+        from ..simulate import pyrevm_available
+        if not pyrevm_available():
+            self._events.set_placeholder(
+                "(local simulation needs the optional 'pyrevm' package — "
+                "install qeth with the 'simulate' extra to preview events)"
+            )
+            return
+        self._events.set_placeholder("(simulating…)")
+        worker = SimulateWorker(self.chain, *params)
+        worker.ready.connect(
+            lambda logs, k=params: self._on_sim_ready(k, logs)
+        )
+        self._start_worker(worker)
+
+    def _on_sim_ready(self, key, logs) -> None:
+        if key != self._sim_key:
+            return   # a newer simulation superseded this one
+        if logs is None:
+            self._events.set_placeholder(
+                "(simulation failed — the transaction would likely revert "
+                "on-chain)"
+            )
+            return
+        self._events.set_logs(logs)
+
+
 class TransactionDetailsDialog(QDialog):
     """Modal-ish dialog showing the full tx record.
 
@@ -1891,8 +1989,8 @@ class TransactionDetailsDialog(QDialog):
         events_layout = QVBoxLayout(events_page)
         events_layout.setContentsMargins(0, 8, 0, 0)
         events_layout.setSpacing(6)
-        tabs.addTab(details_page, "Details")
-        tabs.addTab(events_page, "Events")
+        tabs.addTab(details_page, "&Details")
+        tabs.addTab(events_page, "&Events")
         outer.addWidget(tabs, 1)
 
         # Header fields go in a QFormLayout — labels left-aligned, the
@@ -2454,7 +2552,7 @@ class _CollapsibleSection(QWidget):
         return self._toggle.isChecked()
 
 
-class SignTransactionDialog(QDialog):
+class SignTransactionDialog(_EventPreviewMixin, QDialog):
     """Confirmation dialog for an incoming ``eth_sendTransaction``
     from the Frame RPC. Reuses the decoded-call renderer used by the
     history details dialog, and exposes editable gas / fee fields
@@ -2522,9 +2620,20 @@ class SignTransactionDialog(QDialog):
         self.resize(720, 640)
         self._link_color = self.palette().color(QPalette.WindowText).name()
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 20, 20, 16)
+        # Tabbed shell: the existing detail widgets live on a "Details"
+        # page; the mixin appends an "Events" page that previews the tx's
+        # logs via local simulation. Buttons sit below the tabs, on the
+        # dialog's own (root) layout, so they're shared across tabs.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(8)
+        self._tabs = QTabWidget()
+        root.addWidget(self._tabs, 1)
+        _details_page = QWidget()
+        outer = QVBoxLayout(_details_page)
+        outer.setContentsMargins(0, 6, 0, 0)
         outer.setSpacing(8)
+        self._tabs.addTab(_details_page, "&Details")
 
         # --- header block (Network / From / To / Value) -----------------
         header = QFormLayout()
@@ -2677,7 +2786,11 @@ class SignTransactionDialog(QDialog):
         # dialog state. The host calls dialog.accept() only on
         # successful broadcast.
         self.confirm_btn.clicked.connect(self.sign_requested.emit)
-        outer.addWidget(self.buttons)
+
+        # --- events preview tab (lazy local simulation) --------------
+        self._init_event_preview(self._tabs, known_addresses=known_addresses)
+
+        root.addWidget(self.buttons)
 
         # --- decode calldata in the background ----------------------
         if req.data and req.data not in ("0x", "0X") and req.to_addr:
@@ -2709,6 +2822,15 @@ class SignTransactionDialog(QDialog):
                 sp.valueChanged.connect(self._update_max_total)
 
     # --- callbacks ---------------------------------------------------
+
+    def _sim_params(self):
+        """Tx params for the events preview — fixed, straight from the
+        dapp's request (the user can't edit recipient/value here)."""
+        return (self.req.from_addr, self.req.to_addr,
+                self.req.data or "0x", int(self.req.value_wei or 0))
+
+    def _sim_blocked_text(self) -> str:
+        return "(contract creation — no events to preview)"
 
     def _on_abi_ready(self, abi) -> None:
         if abi is False:
@@ -2994,7 +3116,7 @@ def _erc20_transfer_calldata(recipient: str, amount_raw: int) -> str:
     return "0x" + (selector + encoded).hex()
 
 
-class SendTokenDialog(QDialog):
+class SendTokenDialog(_EventPreviewMixin, QDialog):
     """User-driven counterpart to ``SignTransactionDialog``. Same
     overall shape (gas controls, expected fee, signing flow) but
     the recipient + amount are *editable*: the user types them
@@ -3042,9 +3164,19 @@ class SendTokenDialog(QDialog):
         self.resize(720, 640)
         self._link_color = self.palette().color(QPalette.WindowText).name()
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 20, 20, 16)
+        # Tabbed shell (see SignTransactionDialog): existing widgets on a
+        # "Details" page, an "Events" page that previews the tx via local
+        # simulation, buttons shared below on the root layout.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(8)
+        self._tabs = QTabWidget()
+        root.addWidget(self._tabs, 1)
+        _details_page = QWidget()
+        outer = QVBoxLayout(_details_page)
+        outer.setContentsMargins(0, 6, 0, 0)
         outer.setSpacing(8)
+        self._tabs.addTab(_details_page, "&Details")
 
         header = QFormLayout()
         header.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -3219,7 +3351,11 @@ class SendTokenDialog(QDialog):
         self.confirm_btn.setEnabled(False)
         self.buttons.rejected.connect(self.reject)
         self.confirm_btn.clicked.connect(self.sign_requested.emit)
-        outer.addWidget(self.buttons)
+
+        # --- events preview tab (lazy local simulation) --------------
+        self._init_event_preview(self._tabs, known_addresses=known_addresses)
+
+        root.addWidget(self.buttons)
 
         # Wire live updates: recipient/amount changes re-evaluate the
         # Confirm button enable state and (for native) the Total line.
@@ -3655,6 +3791,14 @@ class SendTokenDialog(QDialog):
             self.spin_gas_price.setEnabled(not busy and self._gas_ready)
 
     # --- request construction --------------------------------------
+
+    def _sim_params(self):
+        """Tx params for the events preview, derived from the live
+        recipient/amount. Raises SignerError (caught by the mixin) until
+        both are valid, so the preview shows a 'fill these in' note."""
+        req = self._build_request()
+        return (req.from_addr, req.to_addr, req.data or "0x",
+                int(req.value_wei or 0))
 
     def _build_request(self) -> SigningRequest:
         """Construct the SigningRequest from the current widget

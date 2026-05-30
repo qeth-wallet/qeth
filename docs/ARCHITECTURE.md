@@ -229,6 +229,13 @@ entries win on selector collision). `decode_call` produces a tree (function →
 args → nested tuples/arrays) that the Transactions plugin renders. Transient
 HTTP errors raise rather than negative-caching a blip.
 
+`decode_event(log, abi=None)` is the log-side counterpart used by the events
+view (§10.5). The Transfer / Approval / ApprovalForAll family decodes from
+their canonical signatures **without any ABI** (so the common case needs no
+fetch); ERC-20 vs ERC-721 Transfer is told apart by topic count (3 vs 4). Any
+other event is named only when its contract's ABI is supplied — fetched lazily
+(§10.5) — otherwise it renders as a raw "unknown event".
+
 ### 4.6 Transaction history — `transactions.py`
 
 `TransactionSource.list_transactions(chain, address, page, limit)`. Blockscout
@@ -275,7 +282,13 @@ Pure, Qt-free display helpers: `format_balance` (6 sig figs, `e-9` →
 - **Navigation:** Tab / Shift+Tab cycle wallet-tree ↔ active right table;
   Left/Right switch Tokens↔Transactions. A focus-aware delegate paints the
   selected row solid when focused, outline-only when not (Norton-Commander
-  style), with a `_FocusRepainter` forcing the swap to be immediate.
+  style), with a `_FocusRepainter` forcing the swap to be immediate. The
+  delegate **never paints the per-cell focus rectangle** (it strips
+  `State_HasFocus` on every branch): the view's *current* index — set by a row
+  insert, a rebuild, or the broadcast auto-switch moving focus to the
+  Transactions tab — would otherwise draw a stray dotted box on an unselected
+  cell (visibly, beside a freshly-prepended pending row's status icon).
+  Selection, not the current cell, is what the UI surfaces.
 
 ### 5.2 Chain combo & live chain addition — `ui.py`
 
@@ -704,7 +717,11 @@ Status column renders themed icons with Unicode-glyph fallback (§5.3 pattern):
 `_render_decoded` shows the called function as an annotated tree (bold name,
 blue types, green values) using the ABI from `abi.py`; for curated tokens it
 annotates `uint` args on transfer/approve-family functions as `X SYMBOL`, with
-the `2²⁵⁶−1` sentinel shown as "unlimited".
+the `2²⁵⁶−1` sentinel shown as "unlimited". `address` args that are **one of the
+user's own wallets** (`known_addresses`) render **bold+italic** so the user can
+see at a glance when a call touches their own accounts. A bold-capable monospace
+family is picked explicitly (`_pick_mono_font`) — the generic `monospace` alias
+is Regular-only on Linux and would drop the bold.
 
 **`apply_gas_policy`** (transactions.py:1809+) deliberately diverges from the
 traditional "match the dapp" approach:
@@ -744,6 +761,70 @@ pair so it reads in any palette:
 - Cleared otherwise. The hint only restyles on an actual state transition (not
   every keystroke).
 
+Both this dialog and the dapp `SignTransactionDialog` are **tabbed
+(Details | Events)**: the editable form + decoded call + gas controls live on
+Details, and an **Events** tab previews the logs the tx would emit *before
+broadcast* via simulation (§10.5, §10.6).
+
+### 10.5 Events view — `_EventsView`
+
+`_EventsView` is a reusable pane (fed by `set_logs()` / `set_placeholder()`)
+that renders a decoded list of event logs Python-style — `*USDS(0xdC03…)
+.Transfer(from=…, to=…, value=… # 5000 USDC)`. It is used in three places off
+one implementation:
+
+- **Confirmed-tx details** (its own "Events" tab) — logs come from the receipt
+  (`LogsFetchWorker` → `eth_getTransactionReceipt`).
+- **Send & dapp-Sign dialogs** ("Events" tab) — logs come from simulation
+  (§10.6), so it's a *pre-broadcast* preview.
+
+Behaviour:
+
+- **Default filter:** only Transfer / Approval-family events that **touch one of
+  our wallets** (`known_addresses`); a **"Show all events"** toggle reveals
+  every log.
+- **Naming:** the Transfer/Approval family decodes with no ABI (§4.5); other
+  events are named only under "show all", which triggers a **lazy per-contract
+  ABI fetch** (`AbiCache` first, then Blockscout) and re-renders as ABIs land.
+- **Token context:** a contract that's a known token is prefixed with its
+  **logo + symbol** (icon embedded as a `QTextDocument` image resource), and
+  fungible amounts get the human-readable `# 5000 USDC` / `# unlimited USDC`
+  comment — same treatment as the decoded call (§10.3), including the
+  bold+italic own-address highlight and the bold-capable mono font.
+
+### 10.6 Transaction simulation — `simulate.py`
+
+`simulate_logs(chain, from, to, data, value)` returns the event logs a
+not-yet-broadcast tx would emit (the `decode_event`-ready
+`{address, topics, data}` shape), or `None` for a contract creation, a revert,
+or when no route can run it. Two routes, picked **per RPC URL**:
+
+1. **Fast path — `eth_simulateV1`.** One request: the node runs the call against
+   latest state and returns the logs. No per-slot round-trips, no rate-limit
+   burst. Support isn't universal (DRPC/mevblocker/publicnode yes;
+   cloudflare-eth `-32601`; Arbitrum-on-DRPC `400`), so it's **probed by using
+   it** and the result cached in `_SIMV1_SUPPORT` (probe-don't-hardcode).
+2. **Fallback — local revm fork (`pyrevm`, optional dep).** Universal: forking
+   uses only standard state reads every endpoint exposes. Two non-obvious
+   fixes baked in:
+   - **Block env** — pyrevm forks *state* at latest but leaves the block env
+     zeroed (`timestamp == 1`), so contracts doing time math (oracle staleness,
+     deadlines, TWAP) falsely revert; we fetch the real latest block and
+     `set_block_env` before the call.
+   - **Rate-limit retry** — the per-slot read burst can trip a throttled
+     endpoint; transient `code 15` / `429` are retried with backoff, a genuine
+     revert fails fast (with the decoded `Error(string)` / `Panic` reason
+     logged).
+
+`simulation_available(chain)` reports whether *either* route can run (so the UI
+shows a "no preview" note only when neither can). The preview runs **off-thread**
+(`SimulateWorker`), **lazily** on Events-tab open, and is **cached per tx-params**
+— the Send dialog re-simulates only after recipient/amount change; toggling tabs
+doesn't refork. A definitive `simulateV1` revert is *not* retried via the fork.
+The whole feature degrades to "no preview" when neither route is available
+(`pyrevm` is an optional `[simulate]` extra). Wired into the dialogs by
+`_EventPreviewMixin`.
+
 ---
 
 ## 11. End-to-end flows (quick reference)
@@ -756,6 +837,12 @@ tx cache as `pending` → UI flips to the tx's chain/account → `PendingTxWatch
 (≤10s) confirms → row updates + `note_receipt_logs` credits/forces the new
 tokens → tokens appear (instantly if curated, after a discovery cycle if brand
 new).
+
+**Preview a tx's events before sending** → open the **Events** tab in the Send
+or dapp-Sign dialog → `simulate_logs` runs off-thread (`eth_simulateV1` if the
+RPC supports it, else a local pyrevm fork) → predicted logs decode through
+`_EventsView` (§10.5) — the same pane the confirmed-tx details use — so the user
+sees the Transfers/Approvals the tx *will* emit. Cached until inputs change.
 
 **Dapp connects & switches chain** → JSON-RPC over `:1248` →
 `wallet_switchEthereumChain` pins **only that origin** (§6.2) and emits a scoped

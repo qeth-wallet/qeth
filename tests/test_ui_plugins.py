@@ -2141,6 +2141,28 @@ class TestDetailsEventsView:
         assert "Deposit(" in text and "dst" in text and "wad" in text
         assert "unknown event" not in text
 
+    def test_event_amounts_get_human_readable_comment(self, qtbot, tmp_qeth):
+        from types import SimpleNamespace
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        token_info = lambda cid, a: (
+            SimpleNamespace(symbol="USDC", decimals=6)
+            if a.lower() == usdc else None
+        )
+        dlg = self._dialog(qtbot, token_info=token_info)
+        from qeth.abi import _TRANSFER_TOPIC, _APPROVAL_TOPIC
+        def ta(a): return "0x" + "00" * 12 + a[2:]
+        max_uint = (1 << 256) - 1
+        dlg._on_logs_ready([
+            {"address": usdc, "topics": [_TRANSFER_TOPIC, ta("0x" + "bb" * 20),
+                                          ta(ADDR)], "data": "0x" + f"{5_000_000:064x}"},
+            {"address": usdc, "topics": [_APPROVAL_TOPIC, ta(ADDR),
+                                          ta("0x" + "cc" * 20)],
+             "data": "0x" + f"{max_uint:064x}"},
+        ])
+        text = dlg.events_view.toPlainText()
+        assert "# 5 USDC" in text                 # transfer amount
+        assert "# unlimited USDC" in text          # max approval
+
     def test_known_token_gets_symbol_prefix(self, qtbot, tmp_qeth):
         from types import SimpleNamespace
         usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"

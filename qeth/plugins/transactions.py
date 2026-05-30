@@ -1988,12 +1988,31 @@ class TransactionDetailsDialog(QDialog):
             )
         head = f"{prefix}{contract_span}.<b>{_escape_html(decoded['event'])}</b>(\n"
         args = decoded.get("args") or []
+        # Annotate the fungible amount with its human-readable form
+        # (`# 5000 USDC`, `# unlimited USDC`) — same as the calldata view.
+        # Only for Transfer/Approval whose amount arg is named "value"
+        # (an ERC-721 "tokenId" is an id, not an amount) and when the
+        # emitting contract is a known token with decimals.
+        token_context = self._event_token_context(contract, decoded)
         body = "".join(
             _arg_html(a, indent=1, last=(j == len(args) - 1),
+                       token_context=token_context,
                        known_addresses=self._known_addresses)
             for j, a in enumerate(args)
         )
         return head + body + ")\n"
+
+    def _event_token_context(self, contract: str, decoded: dict):
+        if (self._token_info is None
+                or decoded.get("event") not in ("Transfer", "Approval")):
+            return None
+        if not any(a.get("name") == "value" for a in decoded.get("args") or []):
+            return None   # ERC-721 (tokenId) — not an amount
+        entry = self._token_info(self.chain.chain_id, contract)
+        decimals = getattr(entry, "decimals", None) if entry else None
+        if decimals is None:
+            return None
+        return {"symbol": entry.symbol, "decimals": decimals}
 
     def _on_abi_ready(self, abi) -> None:
         if abi is False:

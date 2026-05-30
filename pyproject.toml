@@ -23,6 +23,11 @@ dependencies = [
 
 [project.optional-dependencies]
 bundled = ["PySide6>=6.6"]
+# Local transaction simulation (event preview before broadcast). revm
+# (Rust) via PyO3 — one compiled wheel, ~no Python dep tree; the app
+# degrades gracefully to "no preview" when it's absent. Install with:
+#   uv pip install -e '.[simulate]'
+simulate = ["pyrevm>=0.3"]
 
 [dependency-groups]
 dev = [

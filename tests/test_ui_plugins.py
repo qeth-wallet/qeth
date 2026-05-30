@@ -2048,3 +2048,80 @@ class TestWalletsPlugin:
         # Restore is best-effort and doesn't raise on garbage.
         wallets_plugin.restore_splitter_state("not-valid-hex")
         wallets_plugin.restore_splitter_state(hex_state)
+
+
+class TestDetailsEventsView:
+    """The transaction-details events list: decode receipt logs, default
+    to Transfer/Approval events touching our wallets, toggle to show all,
+    prefix known tokens with their symbol."""
+
+    def _dialog(self, qtbot, *, token_info=None):
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import TransactionDetailsDialog
+        tx = Transaction(
+            chain_id=1, hash="0x" + "aa" * 32, block_number=1, timestamp=1700,
+            nonce=1, from_addr=ADDR, to_addr="0x" + "22" * 20, value_wei=0,
+            gas_used=21000, gas_price_wei=10**9, method_id="", input_data="0x",
+            success=True,
+        )
+        dlg = TransactionDetailsDialog(
+            tx, ETH, abi_source=MagicMock(), abi_cache=MagicMock(),
+            start_worker=lambda w: None,
+            token_info=token_info or (lambda cid, a: None),
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+        )
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def _logs(self):
+        from qeth.abi import _TRANSFER_TOPIC, _APPROVAL_TOPIC
+        def ta(a): return "0x" + "00" * 12 + a[2:]
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        return [
+            # Transfer TO us — should pass the default filter.
+            {"address": usdc, "topics": [_TRANSFER_TOPIC, ta("0x" + "bb" * 20),
+                                          ta(ADDR)], "data": "0x" + f"{100:064x}"},
+            # Approval between two strangers — filtered out by default.
+            {"address": usdc, "topics": [_APPROVAL_TOPIC, ta("0x" + "cc" * 20),
+                                          ta("0x" + "dd" * 20)],
+             "data": "0x" + f"{5:064x}"},
+            # Unknown event — only shown under "show all", rendered raw.
+            {"address": "0x" + "ee" * 20, "topics": ["0x" + "de" * 32], "data": "0x"},
+        ]
+
+    def test_events_live_in_their_own_tab(self, qtbot, tmp_qeth):
+        from PySide6.QtWidgets import QTabWidget
+        dlg = self._dialog(qtbot)
+        tabs = dlg.findChild(QTabWidget)
+        assert tabs is not None
+        assert [tabs.tabText(i) for i in range(tabs.count())] == [
+            "Details", "Events"]
+
+    def test_default_filters_to_our_transfers(self, qtbot, tmp_qeth):
+        dlg = self._dialog(qtbot)
+        dlg._on_logs_ready(self._logs())
+        text = dlg.events_view.toPlainText()
+        assert "Transfer(" in text
+        assert ADDR.lower() in text.lower()
+        assert "Approval(" not in text          # stranger approval hidden
+        assert "unknown event" not in text       # unknown hidden by default
+        assert dlg.show_all_events_btn.isEnabled()
+
+    def test_show_all_reveals_every_event(self, qtbot, tmp_qeth):
+        dlg = self._dialog(qtbot)
+        dlg._on_logs_ready(self._logs())
+        dlg._on_show_all_events(True)
+        text = dlg.events_view.toPlainText()
+        assert "Transfer(" in text
+        assert "Approval(" in text               # now visible
+        assert "unknown event" in text           # raw fallback
+
+    def test_known_token_gets_symbol_prefix(self, qtbot, tmp_qeth):
+        from types import SimpleNamespace
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        token_info = lambda cid, a: (
+            SimpleNamespace(symbol="USDC") if a.lower() == usdc else None
+        )
+        dlg = self._dialog(qtbot, token_info=token_info)
+        dlg._on_logs_ready(self._logs())
+        assert "USDC" in dlg.events_view.toPlainText()

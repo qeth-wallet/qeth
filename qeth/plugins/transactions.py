@@ -32,17 +32,19 @@ def _escape_html(text: str) -> str:
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence,
-    QPalette, QTextOption,
+    QPalette, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
-    QTableWidget, QTableWidgetItem, QTextEdit, QToolButton, QVBoxLayout,
-    QWidget,
+    QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
-from ..abi import BlockscoutAbiSource, decode_call
+from ..abi import (
+    KNOWN_EVENT_NAMES, BlockscoutAbiSource, decode_call, decode_event,
+)
 from ..abi_cache import AbiCache
 from ..chain import EthClient, wei_to_ether
 from ..signing import SignerError, SigningRequest
@@ -1596,6 +1598,45 @@ class AbiFetchWorker(QThread):
         self.ready.emit(abi)
 
 
+class LogsFetchWorker(QThread):
+    """Fetch a confirmed tx's receipt and emit its event logs (the raw
+    list of {address, topics, data} dicts). ``ready([])`` on any error
+    or a still-pending receipt — the events section just stays empty."""
+
+    ready = Signal(object)   # list of log dicts
+
+    def __init__(self, chain, tx_hash: str, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._tx_hash = tx_hash
+
+    def run(self) -> None:
+        try:
+            receipt = EthClient(self._chain).rpc(
+                "eth_getTransactionReceipt", [self._tx_hash],
+            )
+        except Exception as e:
+            log.warning("logs fetch failed for %s: %s", self._tx_hash, e)
+            self.ready.emit([])
+            return
+        logs = (receipt or {}).get("logs") or []
+        # Normalise each log to plain dicts/strings so decode_event (and
+        # the worker→main-thread signal) don't carry web3 AttributeDicts.
+        out = []
+        for lg in logs:
+            out.append({
+                "address": lg.get("address"),
+                "topics": [
+                    t.hex() if hasattr(t, "hex") else t
+                    for t in (lg.get("topics") or [])
+                ],
+                "data": (lg.get("data").hex()
+                          if hasattr(lg.get("data"), "hex")
+                          else lg.get("data")) or "0x",
+            })
+        self.ready.emit(out)
+
+
 class TransactionDetailsDialog(QDialog):
     """Modal-ish dialog showing the full tx record.
 
@@ -1634,7 +1675,7 @@ class TransactionDetailsDialog(QDialog):
         self._to_addr_lower: Optional[str] = None
 
         self.setWindowTitle(f"Transaction {tx.hash[:10]}…")
-        self.resize(720, 560)
+        self.resize(720, 660)
 
         # Use the regular text colour for links rather than
         # QPalette.Link — that role inherits a low-contrast cyan in a
@@ -1651,6 +1692,22 @@ class TransactionDetailsDialog(QDialog):
         outer.setContentsMargins(20, 20, 20, 16)
         outer.setSpacing(8)
 
+        # Two tabs: "Details" (record + decoded call) and "Events" (the
+        # receipt's logs), so the events list gets a full pane of space
+        # instead of being squeezed under the decoded call.
+        tabs = QTabWidget()
+        details_page = QWidget()
+        details_layout = QVBoxLayout(details_page)
+        details_layout.setContentsMargins(0, 8, 0, 0)
+        details_layout.setSpacing(8)
+        events_page = QWidget()
+        events_layout = QVBoxLayout(events_page)
+        events_layout.setContentsMargins(0, 8, 0, 0)
+        events_layout.setSpacing(6)
+        tabs.addTab(details_page, "Details")
+        tabs.addTab(events_page, "Events")
+        outer.addWidget(tabs, 1)
+
         # Header fields go in a QFormLayout — labels left-aligned, the
         # value column starts at the widest label's width so values
         # line up cleanly underneath each other.
@@ -1659,7 +1716,7 @@ class TransactionDetailsDialog(QDialog):
         form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(6)
-        outer.addLayout(form)
+        details_layout.addLayout(form)
 
         mono = QFont("monospace")
         self._mono_font = mono
@@ -1724,8 +1781,7 @@ class TransactionDetailsDialog(QDialog):
         # then the QTextEdit (read-only, with the call rendered as
         # HTML via setHtml) underneath claiming leftover vertical
         # space.
-        outer.addSpacing(4)
-        outer.addWidget(QLabel("Decoded call:"))
+        details_layout.addWidget(QLabel("Decoded call:"))
         self.decoded_view = QTextEdit()
         self.decoded_view.setReadOnly(True)
         self.decoded_view.setFont(mono)
@@ -1739,7 +1795,31 @@ class TransactionDetailsDialog(QDialog):
         self.decoded_view.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding,
         )
-        outer.addWidget(self.decoded_view, 1)
+        details_layout.addWidget(self.decoded_view, 1)
+
+        # Events tab — the receipt's logs, decoded. Default view is
+        # Transfer/Approval events touching one of the user's wallets;
+        # the toggle reveals everything else.
+        self._logs: list = []
+        self._show_all_events = False
+        ev_header = QHBoxLayout()
+        ev_header.addWidget(QLabel("Events:"))
+        ev_header.addStretch(1)
+        self.show_all_events_btn = QPushButton("Show &all events")
+        self.show_all_events_btn.setCheckable(True)
+        self.show_all_events_btn.setEnabled(False)
+        self.show_all_events_btn.toggled.connect(self._on_show_all_events)
+        ev_header.addWidget(self.show_all_events_btn)
+        events_layout.addLayout(ev_header)
+        self.events_view = QTextEdit()
+        self.events_view.setReadOnly(True)
+        self.events_view.setFont(mono)
+        self.events_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.events_view.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.events_view.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding,
+        )
+        events_layout.addWidget(self.events_view, 1)
 
         # Buttons row: Explorer + Close.
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -1772,6 +1852,108 @@ class TransactionDetailsDialog(QDialog):
             self.decoded_view.setPlainText("(contract creation — no method call)")
         else:
             self.decoded_view.setPlainText("(plain value transfer — no calldata)")
+
+        # Events only exist on a mined tx — pending/dropped have no
+        # receipt yet, so skip the fetch for those.
+        if tx.pending or getattr(tx, "dropped", False):
+            self.events_view.setPlainText("(no events — transaction not mined)")
+        else:
+            self.events_view.setPlainText("(loading events…)")
+            logs_worker = LogsFetchWorker(chain, tx.hash)
+            logs_worker.ready.connect(self._on_logs_ready)
+            self._start_worker(logs_worker)
+
+    def _on_logs_ready(self, logs) -> None:
+        self._logs = logs or []
+        self.show_all_events_btn.setEnabled(bool(self._logs))
+        self._render_events_view()
+
+    def _on_show_all_events(self, checked: bool) -> None:
+        self._show_all_events = checked
+        self._render_events_view()
+
+    def _event_touches_ours(self, decoded: dict) -> bool:
+        for a in decoded.get("args") or []:
+            if (a.get("type") == "address"
+                    and str(a.get("value", "")).lower() in self._known_addresses):
+                return True
+        return False
+
+    def _token_prefix_html(self, doc, contract: str) -> str:
+        """``[logo] SYMBOL `` prefix when the emitting contract is a
+        known token — empty otherwise. The logo is registered as a
+        document image resource and referenced inline."""
+        if self._token_info is None or not contract:
+            return ""
+        entry = self._token_info(self.chain.chain_id, contract)
+        if entry is None:
+            return ""
+        img = ""
+        if self._icon_cache is not None:
+            pix = self._icon_cache.get(self.chain.chain_id, contract)
+            if pix is not None and not pix.isNull():
+                url = f"tok:{contract.lower()}"
+                doc.addResource(QTextDocument.ImageResource, QUrl(url), pix)
+                img = f'<img src="{url}" width="14" height="14"> '
+        return f'{img}<b>{_escape_html(entry.symbol)}</b> '
+
+    def _render_events_view(self) -> None:
+        # Decode each log; default view keeps only Transfer/Approval-
+        # family events that touch one of our wallets, the toggle shows
+        # everything (decodable events rendered, the rest raw).
+        rendered: list[tuple] = []   # (decoded_or_None, raw_log)
+        for lg in self._logs:
+            decoded = decode_event(lg)
+            if self._show_all_events:
+                rendered.append((decoded, lg))
+            elif (decoded is not None
+                    and decoded["event"] in KNOWN_EVENT_NAMES
+                    and self._event_touches_ours(decoded)):
+                rendered.append((decoded, lg))
+        if not rendered:
+            self.events_view.setPlainText(
+                "(no events) — showing all may reveal more"
+                if not self._show_all_events else "(no events in this transaction)"
+            )
+            return
+        doc = self.events_view.document()
+        # Use a monospace family that actually ships a Bold style, so the
+        # <b> on event names / own addresses renders bold rather than
+        # the faux/no-bold the generic "monospace" alias gives on Linux.
+        mono = _pick_mono_font()
+        self.events_view.setFont(mono)
+        parts = [
+            f'<div style="white-space: pre-wrap; word-break: break-all; '
+            f"font-family: '{mono.family()}', monospace;\">"
+        ]
+        for i, (decoded, lg) in enumerate(rendered):
+            parts.append(self._event_html(decoded, lg, doc))
+            if i != len(rendered) - 1:
+                parts.append("\n")
+        parts.append("</div>")
+        self.events_view.setHtml("".join(parts))
+
+    def _event_html(self, decoded, lg, doc) -> str:
+        contract = (decoded or lg).get("contract") or lg.get("address") or "?"
+        contract_span = (
+            f'<span style="color:{_TYPE_COLOR};">{_escape_html(contract)}</span>'
+        )
+        prefix = self._token_prefix_html(doc, contract)
+        if decoded is None:
+            # Undecodable (no known signature, no ABI) — show it raw.
+            topic0 = (lg.get("topics") or ["?"])[0]
+            return (
+                f"{prefix}{contract_span}.<b>(unknown event)</b>("
+                f"topic0 = {_escape_html(str(topic0))}\n)\n"
+            )
+        head = f"{prefix}{contract_span}.<b>{_escape_html(decoded['event'])}</b>(\n"
+        args = decoded.get("args") or []
+        body = "".join(
+            _arg_html(a, indent=1, last=(j == len(args) - 1),
+                       known_addresses=self._known_addresses)
+            for j, a in enumerate(args)
+        )
+        return head + body + ")\n"
 
     def _on_abi_ready(self, abi) -> None:
         if abi is False:

@@ -502,12 +502,12 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
     value = arg.get("value")
     value_text = "" if value is None else str(value)
     inner = _escape_html(value_text)
-    # Bold + underline an address argument that belongs to one of the
+    # Bold + italic an address argument that belongs to one of the
     # user's own wallets — so a self-send / approval-to-self stands out
     # in the decoded call.
     if (type_ == "address" and known_addresses
             and value_text.lower() in known_addresses):
-        inner = f"<b><u>{inner}</u></b>"
+        inner = f"<b><i>{inner}</i></b>"
     value_span = (
         f'<span style="color:{_VALUE_COLOR};">'
         f"{inner}</span>"

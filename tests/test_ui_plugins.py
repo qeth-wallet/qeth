@@ -418,7 +418,7 @@ class TestTransactionsPlugin:
 
     def test_render_decoded_highlights_own_addresses(self, qtbot, tmp_qeth):
         """An address argument that's one of the user's own wallets
-        renders bold + underlined; a stranger address does not."""
+        renders bold + italic; a stranger address does not."""
         from PySide6.QtGui import QFont
         from PySide6.QtWidgets import QTextEdit
         from qeth.plugins.transactions import _render_decoded
@@ -435,9 +435,9 @@ class TestTransactionsPlugin:
             ],
         }, None, known_addresses={mine})
 
-        # Collect every text run with its (bold, underline) — the args
-        # land in blocks after the first, so walk the whole document.
-        bold_ul_runs: list[str] = []
+        # Collect every text run with bold+italic — the args land in
+        # blocks after the first, so walk the whole document.
+        bold_italic_runs: list[str] = []
         block = edit.document().firstBlock()
         while block.isValid():
             it = block.begin()
@@ -445,13 +445,13 @@ class TestTransactionsPlugin:
                 frag = it.fragment()
                 if frag.isValid():
                     cf = frag.charFormat()
-                    if cf.fontWeight() >= QFont.Bold and cf.fontUnderline():
-                        bold_ul_runs.append(frag.text())
+                    if cf.fontWeight() >= QFont.Bold and cf.fontItalic():
+                        bold_italic_runs.append(frag.text())
                 it += 1
             block = block.next()
-        # Our address is bold+underlined; the stranger isn't.
-        assert any(mine in r for r in bold_ul_runs)
-        assert not any("dead" in r.lower() for r in bold_ul_runs)
+        # Our address is bold+italic; the stranger isn't.
+        assert any(mine in r for r in bold_italic_runs)
+        assert not any("dead" in r.lower() for r in bold_italic_runs)
 
     def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
         """The function name in the decoded-call view stays bold only

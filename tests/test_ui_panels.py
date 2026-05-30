@@ -233,7 +233,7 @@ class TestTransactionListPanel:
         panel.set_context(ETH, ADDR)
         tx = _tx(nonce=42, to_addr="0xbeef", success=True)
         panel.show_transactions([tx])
-        assert panel.table.item(0, 0).text() == "✓"
+        assert panel.table.item(0, 0).toolTip() == "Success"
         assert panel.table.item(0, 1).text() == "42"
         # Time cell is locale-formatted — just assert non-empty rather
         # than locking in a specific format string.
@@ -258,8 +258,31 @@ class TestTransactionListPanel:
             _tx(to_addr="0xbeef00000000000000000000000000000000beef", success=True),
             _tx(to_addr="0xbeef00000000000000000000000000000000beef", success=False),
         ])
-        assert panel.table.item(0, 0).text() == "✓"
-        assert panel.table.item(1, 0).text() == "✗"
+        assert panel.table.item(0, 0).toolTip() == "Success"
+        assert panel.table.item(1, 0).toolTip() == "Reverted"
+
+    def test_status_falls_back_to_glyph_without_icon_theme(
+        self, qtbot, tmp_qeth, monkeypatch,
+    ):
+        """The status column uses a themed icon when available, but must
+        never render blank — a missing icon falls back to the Unicode
+        glyph. Force fromTheme to return a null icon and check the
+        glyph text is used."""
+        import qeth.plugins.transactions as txmod
+        from PySide6.QtGui import QIcon
+        monkeypatch.setattr(txmod.QIcon, "fromTheme",
+                            staticmethod(lambda *_a, **_k: QIcon()))
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        panel.set_context(ETH, ADDR)
+        panel.show_transactions([
+            _tx(to_addr="0xbeef", success=True, pending=True),
+            _tx(to_addr="0xbeef", success=True),
+            _tx(to_addr="0xbeef", success=False),
+        ])
+        assert panel.table.item(0, 0).text() == "⏳"
+        assert panel.table.item(1, 0).text() == "✓"
+        assert panel.table.item(2, 0).text() == "✗"
 
 
     def test_clear_resets_panel(self, qtbot, tmp_qeth):
@@ -277,7 +300,7 @@ class TestTransactionListPanel:
         qtbot.addWidget(panel)
         panel.set_context(ETH, ADDR)
         panel.show_transactions([_tx(to_addr="0xbeef", pending=True)])
-        assert panel.table.item(0, 0).text() == "⏳"
+        assert panel.table.item(0, 0).toolTip() == "Pending"
         assert panel.table.item(0, 0).toolTip() == "Pending"
 
     def test_bulk_populate_temporarily_disables_autosize(

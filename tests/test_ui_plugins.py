@@ -866,11 +866,11 @@ class TestOnReceiptConfirmed:
         panel.set_context(ETH, ADDR)
         panel.show_transactions(plugin._cache[key])
         plugin._rendered_for = key
-        assert panel.table.item(0, 0).text() == "⏳"
+        assert panel.table.item(0, 0).toolTip() == "Pending"
 
         plugin._on_receipt_confirmed(ETH, plugin._cache[key][0].hash,
                                       self._confirmed_receipt())
-        assert panel.table.item(0, 0).text() == "✓"
+        assert panel.table.item(0, 0).toolTip() == "Success"
 
 
 class TestOnTxDropped:
@@ -915,10 +915,10 @@ class TestOnTxDropped:
         panel.set_context(ETH, ADDR)
         panel.show_transactions(plugin._cache[key])
         plugin._rendered_for = key
-        assert panel.table.item(0, 0).text() == "⏳"
+        assert panel.table.item(0, 0).toolTip() == "Pending"
 
         plugin._on_tx_dropped(ETH, plugin._cache[key][0].hash)
-        assert panel.table.item(0, 0).text() == "⊘"   # not ✗
+        assert panel.table.item(0, 0).toolTip().startswith("Dropped")   # not ✗
 
 
 class TestPendingProbeWorker:

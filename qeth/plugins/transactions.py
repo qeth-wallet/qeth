@@ -1165,6 +1165,8 @@ class TransactionListPanel(QWidget):
         # "Status" lets the column be tight against the left edge.
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["", "Nonce", "Time", "Hash"])
+        # Status column shows a themed icon (glyph fallback) — keep it small.
+        self.table.setIconSize(QSize(16, 16))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1441,19 +1443,28 @@ class TransactionListPanel(QWidget):
         prepend so the cell shape stays consistent across paths.
         The full Transaction is stored on the Hash cell's UserRole
         so handlers (explorer, details dialog) can recover it."""
+        # (themed icon name, Unicode glyph fallback, tooltip). The glyph
+        # is used only when the icon theme lacks the named icon, so a
+        # status cell never renders blank.
         if tx.pending:
-            status_glyph, status_tip = "⏳", "Pending"
+            icon_name, glyph, tip = "content-loading", "⏳", "Pending"
         elif getattr(tx, "dropped", False):
-            status_glyph, status_tip = (
-                "⊘", "Dropped — replaced by another tx at this nonce"
+            icon_name, glyph, tip = (
+                "user-trash", "⊘",
+                "Dropped — replaced by another tx at this nonce",
             )
         elif tx.success:
-            status_glyph, status_tip = "✓", "Success"
+            icon_name, glyph, tip = "dialog-ok", "✓", "Success"
         else:
-            status_glyph, status_tip = "✗", "Reverted"
-        status = QTableWidgetItem(status_glyph)
+            icon_name, glyph, tip = "dialog-error", "✗", "Reverted"
+        status = QTableWidgetItem()
+        icon = QIcon.fromTheme(icon_name)
+        if icon.isNull():
+            status.setText(glyph)
+        else:
+            status.setIcon(icon)
         status.setTextAlignment(Qt.AlignCenter)
-        status.setToolTip(status_tip)
+        status.setToolTip(tip)
 
         nonce = QTableWidgetItem(str(tx.nonce))
         nonce.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)

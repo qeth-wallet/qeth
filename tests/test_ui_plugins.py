@@ -2064,8 +2064,10 @@ class TestDetailsEventsView:
             gas_used=21000, gas_price_wei=10**9, method_id="", input_data="0x",
             success=True,
         )
+        abi_cache = MagicMock()
+        abi_cache.load.return_value = None   # nothing cached → fetch path
         dlg = TransactionDetailsDialog(
-            tx, ETH, abi_source=MagicMock(), abi_cache=MagicMock(),
+            tx, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
             start_worker=lambda w: None,
             token_info=token_info or (lambda cid, a: None),
             icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
@@ -2115,6 +2117,29 @@ class TestDetailsEventsView:
         assert "Transfer(" in text
         assert "Approval(" in text               # now visible
         assert "unknown event" in text           # raw fallback
+
+    def test_show_all_names_unknown_event_once_abi_arrives(self, qtbot, tmp_qeth):
+        from qeth.abi import _event_topic0
+        dlg = self._dialog(qtbot)
+        contract = "0x" + "ee" * 20
+        topic = _event_topic0("Deposit(address,uint256)")
+        log = {"address": contract,
+               "topics": [topic, "0x" + "00" * 12 + ADDR[2:]],
+               "data": "0x" + f"{42:064x}"}
+        dlg._on_logs_ready([log])
+        dlg._on_show_all_events(True)
+        # Not cached → renders raw and a fetch is kicked for the contract.
+        assert "unknown event" in dlg.events_view.toPlainText()
+        assert contract in dlg._abi_inflight
+        # Simulate the ABI landing → the event is named + decoded.
+        abi = [{"type": "event", "name": "Deposit", "anonymous": False,
+                "inputs": [
+                    {"name": "dst", "type": "address", "indexed": True},
+                    {"name": "wad", "type": "uint256", "indexed": False}]}]
+        dlg._on_event_abi_ready(contract, abi)
+        text = dlg.events_view.toPlainText()
+        assert "Deposit(" in text and "dst" in text and "wad" in text
+        assert "unknown event" not in text
 
     def test_known_token_gets_symbol_prefix(self, qtbot, tmp_qeth):
         from types import SimpleNamespace

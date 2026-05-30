@@ -1802,6 +1802,11 @@ class TransactionDetailsDialog(QDialog):
         # the toggle reveals everything else.
         self._logs: list = []
         self._show_all_events = False
+        # Per-emitting-contract ABIs for naming non-Transfer/Approval
+        # events, fetched lazily on "Show all". None = unverified / no
+        # ABI (so the event renders raw). _abi_inflight dedupes fetches.
+        self._event_abis: dict = {}
+        self._abi_inflight: set = set()
         ev_header = QHBoxLayout()
         ev_header.addWidget(QLabel("Events:"))
         ev_header.addStretch(1)
@@ -1870,7 +1875,41 @@ class TransactionDetailsDialog(QDialog):
 
     def _on_show_all_events(self, checked: bool) -> None:
         self._show_all_events = checked
+        if checked:
+            self._ensure_event_abis()
         self._render_events_view()
+
+    def _ensure_event_abis(self) -> None:
+        """For each contract whose event we couldn't name from a known
+        signature, grab its ABI — from the local cache if present, else
+        a lazy Blockscout fetch. Events re-render as ABIs land."""
+        for lg in self._logs:
+            if decode_event(lg) is not None:
+                continue   # Transfer/Approval-family — no ABI needed
+            addr = (lg.get("address") or "").lower()
+            if (not addr or addr in self._event_abis
+                    or addr in self._abi_inflight):
+                continue
+            cached = self._abi_cache.load(self.chain.chain_id, addr)
+            if cached is not None:
+                # Verified ABI list, or the False "unverified" sentinel
+                # → store the ABI (or None so we don't re-fetch).
+                self._event_abis[addr] = cached if cached else None
+                continue
+            self._abi_inflight.add(addr)
+            worker = AbiFetchWorker(
+                self._abi_source, self._abi_cache, self.chain.chain_id, addr,
+            )
+            worker.ready.connect(
+                lambda abi, a=addr: self._on_event_abi_ready(a, abi)
+            )
+            self._start_worker(worker)
+
+    def _on_event_abi_ready(self, addr: str, abi) -> None:
+        self._abi_inflight.discard(addr)
+        self._event_abis[addr] = abi if abi else None
+        if self._show_all_events:
+            self._render_events_view()
 
     def _event_touches_ours(self, decoded: dict) -> bool:
         for a in decoded.get("args") or []:
@@ -1903,7 +1942,8 @@ class TransactionDetailsDialog(QDialog):
         # everything (decodable events rendered, the rest raw).
         rendered: list[tuple] = []   # (decoded_or_None, raw_log)
         for lg in self._logs:
-            decoded = decode_event(lg)
+            abi = self._event_abis.get((lg.get("address") or "").lower())
+            decoded = decode_event(lg, abi)
             if self._show_all_events:
                 rendered.append((decoded, lg))
             elif (decoded is not None

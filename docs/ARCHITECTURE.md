@@ -661,17 +661,38 @@ single row (used for pending→confirmed) instead of rebuilding the table.
 **Keyboard:** `Ctrl+C` copies the selected transaction's hash (table-scoped,
 reusing the Copy-Tx-Hash handler).
 
-### 10.2 Pending → confirmed
+### 10.2 Pending → confirmed / dropped, and re-broadcast
 
 `PendingTxWatcher` sweeps the cache for `pending=True` entries **every 10s**
 (`POLL_INTERVAL_MS`), with an immediate tick on start (so app-restart pending
 txs are checked at once). `_in_flight_hashes` dedupes overlapping ticks. Each
-pending tx gets a `ReceiptWorker` →
-`eth_getTransactionReceipt` with three outcomes: confirmed / still-pending /
-failed. On confirmation, `_confirmed_from_receipt` merges block number, gas used,
-effective gas price and success (from `receipt.status`) into the cached tx, flips
-`pending=False`, repaints the row, and **forwards the receipt to the Tokens
-plugin** (§9.3).
+pending tx gets a `PendingProbeWorker` that does a three-way diagnosis (not just
+a receipt poll), which matters because load-balanced RPCs like DRPC sometimes
+**ack a tx they never propagate** — it would otherwise show "forever pending":
+
+1. **Receipt present** → confirmed. `_confirmed_from_receipt` merges block
+   number, gas used, effective gas price and success (from `receipt.status`)
+   into the cached tx, flips `pending=False`, repaints the row, and **forwards
+   the receipt to the Tokens plugin** (§9.3).
+2. **No receipt, but `tx.nonce < getTransactionCount(from, "latest")`** → the
+   nonce was already mined by a *different* tx (replacement / the user re-sent),
+   so this hash can never confirm → **`dropped`** (a terminal state, distinct
+   from a reverted tx). The nonce check is the reliable death signal: mined-nonce
+   is consistent across a load-balanced RPC's backends, unlike a mempool query.
+   `from_addr` is stored lowercased, so it's **checksummed before the lookup**
+   (web3.py rejects non-checksum addresses — the trap that otherwise made the
+   probe fail silently).
+3. **No receipt, nonce still open** → genuinely unconfirmed → **re-broadcast** the
+   stored raw signed tx (`Transaction.raw_signed`, persisted at `add_pending`
+   time, threaded out of `SignAndBroadcastWorker`). No re-sign needed — same
+   bytes, same hash; idempotent ("already known" / "nonce too low" swallowed).
+   Capped at ~30 ticks (`REBROADCAST_MAX_ATTEMPTS`), then a one-time "giving up"
+   warning. `raw_signed` is public data (no key material), cleared on
+   confirm/drop.
+
+Status column renders themed icons with Unicode-glyph fallback (§5.3 pattern):
+`content-loading`/⏳ pending, `dialog-ok`/✓ success, `dialog-error`/✗ reverted,
+`user-trash`/⊘ dropped — never blank, tooltip carries the meaning.
 
 > The lag between a tx mining and its tokens appearing is dominated by this 10s
 > poll — qeth learns of confirmation on the next tick, then surfaces tokens

@@ -157,6 +157,7 @@ class CoinGeckoPerChain(TokenListSource):
         137:   "polygon-pos",
         42161: "arbitrum-one",
         8453:  "base",
+        43114: "avalanche",
     }
 
     def fetch_entries(self, cache_dir, ttl, timeout):
@@ -184,6 +185,7 @@ class Curve(TokenListSource):
         137:   "polygon",
         42161: "arbitrum",
         8453:  "base",
+        43114: "avalanche",
     }
 
     def fetch_entries(self, cache_dir, ttl, timeout):
@@ -227,7 +229,7 @@ class OneInch(TokenListSource):
     """
 
     name = "1inch"
-    CHAINS: list[int] = [1, 10, 137, 42161, 8453]
+    CHAINS: list[int] = [1, 10, 137, 42161, 8453, 43114]
 
     def fetch_entries(self, cache_dir, ttl, timeout):
         for cid in self.CHAINS:

@@ -41,6 +41,7 @@ DEFILLAMA_CHAIN_SLUGS: dict[int, str] = {
     137:   "polygon",
     8453:  "base",
     42161: "arbitrum",
+    43114: "avax",
 }
 
 

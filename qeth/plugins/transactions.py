@@ -43,7 +43,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..abi import (
-    KNOWN_EVENT_NAMES, BlockscoutAbiSource, decode_call, decode_event,
+    KNOWN_EVENT_NAMES, BlockscoutAbiSource, EtherscanV2AbiSource,
+    RoutedAbiSource, decode_call, decode_event,
 )
 from ..abi_cache import AbiCache
 from ..chain import EthClient, wei_to_ether
@@ -686,7 +687,19 @@ class TransactionsPlugin(Plugin):
         self._disk_cache = disk_cache if disk_cache is not None else TransactionCache()
         # ABI machinery for the details dialog. Lazy fetch + disk-
         # cache so each contract address is looked up at most once.
-        self._abi_source = abi_source if abi_source is not None else BlockscoutAbiSource()
+        # Prefer Etherscan v2 (reliable, proxy-aware) when the store has a
+        # key, fall back to Blockscout — mirrors the tx-source routing and
+        # fixes Polygon, whose Blockscout instance is flaky.
+        if abi_source is None:
+            blockscout_abi = BlockscoutAbiSource()
+            if store is not None:
+                abi_source = RoutedAbiSource(
+                    EtherscanV2AbiSource(lambda: store.etherscan_api_key),
+                    blockscout_abi,
+                )
+            else:
+                abi_source = blockscout_abi
+        self._abi_source = abi_source
         self._abi_cache = abi_cache if abi_cache is not None else AbiCache()
         # In-memory cache, keyed by (chain_id, address_lower). Hydrated
         # lazily from the disk cache on first ``on_account_changed`` for
@@ -741,6 +754,25 @@ class TransactionsPlugin(Plugin):
         self._nonce_timer.setInterval(self.NONCE_POLL_INTERVAL_MS)
         self._nonce_timer.timeout.connect(self._poll_external_nonce)
         self._nonce_timer.start()
+        # Let the ABI source resolve proxy implementations from the chain
+        # when Blockscout v2 is down (notably polygon.blockscout.com, which
+        # 500s — so proxy contracts like USDC otherwise decode as a bare
+        # stub). Shared with the Send/Sign dialogs (same source instance).
+        if hasattr(self._abi_source, "set_storage_reader"):
+            self._abi_source.set_storage_reader(self._abi_read_storage)
+
+    def _abi_read_storage(self, chain_id: int, address: str, slot: str):
+        """``eth_getStorageAt`` for the ABI source's proxy-slot probing.
+        Runs in the AbiFetchWorker thread, off the UI thread."""
+        host = self.host
+        lookup = getattr(host, "chain_by_id", None) if host else None
+        chain = lookup(chain_id) if lookup else None
+        if chain is None:
+            return None
+        return EthClient(chain).rpc(
+            "eth_getStorageAt",
+            [to_checksum_address(address), slot, "latest"],
+        )
 
     def widget(self) -> QWidget:
         if self._panel is None:

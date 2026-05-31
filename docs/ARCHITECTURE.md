@@ -223,11 +223,28 @@ contracts are ever checked.
 
 ### 4.5 ABIs & decoding — `abi.py`
 
-`BlockscoutAbiSource` resolves verified ABIs via Blockscout v2 (falls back to
-v1), **recursively merging proxy implementation ABIs** (max depth 4, proxy's own
-entries win on selector collision). `decode_call` produces a tree (function →
-args → nested tuples/arrays) that the Transactions plugin renders. Transient
-HTTP errors raise rather than negative-caching a blip.
+ABI fetching is routed (`RoutedAbiSource`): **Etherscan v2** (`getabi`) when the
+store has a key, falling back to **Blockscout** on an unverified result or an
+error — same routing as the tx source, and the fix for Polygon, whose
+Blockscout instance 500s. `decode_call` produces a tree (function → args →
+nested tuples/arrays) that the Transactions plugin renders. Transient HTTP
+errors raise rather than negative-caching a blip.
+
+**Proxy resolution** merges the implementation's ABI onto the proxy's
+(max depth 4, proxy's own entries win on selector collision). Blockscout v2
+reports implementations directly; but when it's down — and for Etherscan, whose
+`getabi` returns only the proxy's own ABI — the implementation is found
+**chain-natively**: read the well-known impl storage slots via `eth_getStorageAt`
+— EIP-1967, the legacy zeppelinos slot (Circle's USDC `FiatTokenProxy`),
+EIP-1822, and the **Polygon PoS slot** `keccak256("matic.network.proxy.
+implementation")` used by every bridged PoS token (USDT, WETH, …). The
+`storage_reader` is wired in by the Transactions plugin (`attach`), so the ABI
+sources stay network-free in tests.
+
+The disk cache (`AbiCache`, §2.7) treats a **proxy-stub ABI** as a miss so it
+refetches via the proxy-aware path: an ABI with no real method surface — only
+proxy-admin functions, *or* none at all and just a `fallback` (a pure delegator
+like `TransparentUpgradeableProxy`) — returns `None` from `load()`.
 
 `decode_event(log, abi=None)` is the log-side counterpart used by the events
 view (§10.5). The Transfer / Approval / ApprovalForAll family decodes from

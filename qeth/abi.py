@@ -25,7 +25,9 @@ import urllib.request
 from typing import Optional, Union
 
 from . import USER_AGENT
-from .tokens import BLOCKSCOUT_INSTANCES   # reuse the per-chain map
+from .tokens import (   # reuse the per-chain maps + Etherscan v2 endpoint
+    BLOCKSCOUT_INSTANCES, ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS,
+)
 
 
 log = logging.getLogger("qeth.abi")
@@ -37,15 +39,64 @@ class AbiSourceError(Exception):
     pass
 
 
+# Well-known storage slots holding a proxy's implementation address.
+# Probed (in order) via the chain RPC when Blockscout's v2 endpoint —
+# the only one that reports implementations — is unavailable, so proxy
+# contracts still resolve to their implementation ABI:
+#   - EIP-1967
+#   - legacy OpenZeppelin/zeppelinos (Circle's FiatTokenProxy, e.g. USDC)
+#   - EIP-1822 / UUPS
+#   - Polygon PoS UpgradableProxy, keccak256("matic.network.proxy.
+#     implementation") — used by every bridged PoS token (USDT, WETH, …)
+_PROXY_IMPL_SLOTS = (
+    "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
+    "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3",
+    "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7",
+    "0xbaab7dbf64751104133af04abc7d9979f0fda3b059a322a8333f533d3f32bf7f",
+)
+
+
+def _impl_from_storage(storage_reader, chain_id: int,
+                       address: str) -> Optional[str]:
+    """Probe the well-known proxy implementation slots via
+    ``storage_reader`` (callable ``(chain_id, address, slot) -> 0x-hex``);
+    return the first non-zero implementation address, or None. Shared by
+    every ABI source so proxy resolution works regardless of explorer."""
+    if storage_reader is None:
+        return None
+    for slot in _PROXY_IMPL_SLOTS:
+        try:
+            raw = storage_reader(chain_id, address, slot)
+        except Exception as e:
+            log.warning("proxy-slot read failed: %s", e)
+            return None
+        if not raw:
+            continue
+        try:
+            val = int(raw, 16) if isinstance(raw, str) else int(raw)
+        except (TypeError, ValueError):
+            continue
+        if val:
+            # Low 20 bytes are the implementation address.
+            return "0x" + format(val & ((1 << 160) - 1), "040x")
+    return None
+
+
 class BlockscoutAbiSource:
     """Blockscout v2 ``/api/v2/smart-contracts/{address}`` with proxy
     resolution. Falls back to the v1 ``getabi`` endpoint for
     instances or contracts where v2 doesn't have what we need."""
 
     def __init__(self, instances=None, timeout: float = 20.0,
-                 transport=None, max_proxy_depth: int = 4):
+                 transport=None, max_proxy_depth: int = 4,
+                 storage_reader=None):
         self.instances = instances if instances is not None else BLOCKSCOUT_INSTANCES
         self.timeout = timeout
+        # Optional callable (chain_id, address, slot_hex) -> 0x-hex value,
+        # used to read proxy implementation slots from the chain when
+        # Blockscout v2 is down. Wired by the host (so the source can stay
+        # network-free in tests). None → no RPC proxy resolution.
+        self.storage_reader = storage_reader
         # Same injection seam used elsewhere — callable (url, timeout)
         # → bytes so tests can return canned JSON without HTTP.
         self._transport = transport or _urllib_transport
@@ -73,9 +124,13 @@ class BlockscoutAbiSource:
 
         v2 = self._fetch_v2(chain_id, address)
         if v2 is None:
-            # Endpoint unavailable / older Blockscout — try v1.
+            # v2 unavailable (older Blockscout, or e.g. polygon.blockscout
+            # .com 500ing). v1 has no proxy info, so detect a proxy from
+            # the chain (well-known impl slots) and merge the
+            # implementation's ABI — without this, every proxy contract
+            # decodes as just its bare proxy stub.
             v1 = self._fetch_v1(chain_id, address)
-            return v1
+            return self._merge_rpc_proxy(chain_id, address, v1, depth, seen)
         own_abi = v2.get("own_abi") or []
         impls = v2.get("implementations") or []
         verified = v2.get("is_verified")
@@ -98,6 +153,32 @@ class BlockscoutAbiSource:
             # is unverified" from transient failure: v2 returning a
             # well-formed payload with is_verified=False is reliable.
             return False if verified is False else False
+        return _dedup_by_selector(merged)
+
+    # --- chain-native proxy resolution (v2-unavailable fallback) ---------
+
+    def set_storage_reader(self, reader) -> None:
+        self.storage_reader = reader
+
+    def _read_proxy_impl(self, chain_id: int, address: str) -> Optional[str]:
+        return _impl_from_storage(self.storage_reader, chain_id, address)
+
+    def _merge_rpc_proxy(self, chain_id: int, address: str, own,
+                         depth: int, seen: set[str]) -> Union[Abi, bool]:
+        """If ``address`` is a proxy (per the chain's impl slots), fetch +
+        merge the implementation's ABI onto ``own`` (the proxy's own ABI,
+        which may be ``False`` for an unverified proxy)."""
+        if depth >= self.max_proxy_depth:
+            return own
+        impl = self._read_proxy_impl(chain_id, address)
+        if not impl or impl.lower() in seen:
+            return own
+        impl_abi = self._fetch_recursive(chain_id, impl, depth + 1, seen)
+        merged: Abi = list(own) if isinstance(own, list) else []
+        if isinstance(impl_abi, list):
+            merged.extend(impl_abi)
+        if not merged:
+            return own
         return _dedup_by_selector(merged)
 
     # --- HTTP layers -----------------------------------------------------
@@ -161,6 +242,116 @@ class BlockscoutAbiSource:
         except json.JSONDecodeError:
             raise AbiSourceError("ABI payload was not valid JSON")
         return abi if isinstance(abi, list) else False
+
+
+class EtherscanV2AbiSource:
+    """ABI via the Etherscan v2 multichain ``getabi`` endpoint — reliable
+    where a Blockscout instance is flaky (notably polygon.blockscout.com,
+    which 500s). Etherscan ``getabi`` returns a proxy's *own* ABI, so we
+    do the same chain-native proxy resolution as Blockscout (impl slots
+    read via ``storage_reader``) and merge the implementation's ABI."""
+
+    def __init__(self, get_api_key, timeout: float = 20.0, transport=None,
+                 storage_reader=None, max_proxy_depth: int = 4,
+                 supported_chains=None):
+        self._get_api_key = get_api_key
+        self.timeout = timeout
+        self._transport = transport or _urllib_transport
+        self.storage_reader = storage_reader
+        self.max_proxy_depth = max_proxy_depth
+        self._supported = (
+            supported_chains if supported_chains is not None
+            else ETHERSCAN_V2_CHAINS
+        )
+
+    def set_storage_reader(self, reader) -> None:
+        self.storage_reader = reader
+
+    def supports(self, chain_id: int) -> bool:
+        return chain_id in self._supported and bool(self._get_api_key())
+
+    def fetch(self, chain_id: int, address: str) -> Union[Abi, bool]:
+        return self._fetch_recursive(chain_id, address, depth=0, seen=set())
+
+    def _fetch_recursive(self, chain_id, address, depth, seen):
+        addr_l = address.lower()
+        if addr_l in seen or depth >= self.max_proxy_depth:
+            return False
+        seen.add(addr_l)
+        own = self._getabi(chain_id, address)
+        # Resolve + merge a proxy implementation from the chain.
+        impl = _impl_from_storage(self.storage_reader, chain_id, address)
+        if impl and impl.lower() not in seen:
+            impl_abi = self._fetch_recursive(chain_id, impl, depth + 1, seen)
+            merged: Abi = list(own) if isinstance(own, list) else []
+            if isinstance(impl_abi, list):
+                merged.extend(impl_abi)
+            if merged:
+                return _dedup_by_selector(merged)
+        return own
+
+    def _getabi(self, chain_id: int, address: str) -> Union[Abi, bool]:
+        key = self._get_api_key()
+        if not key:
+            raise AbiSourceError("No Etherscan API key configured")
+        params = urllib.parse.urlencode([
+            ("chainid", str(chain_id)),
+            ("module", "contract"),
+            ("action", "getabi"),
+            ("address", address),
+            ("apikey", key),
+        ])
+        try:
+            raw = self._transport(f"{ETHERSCAN_V2_BASE}?{params}", self.timeout)
+            data = json.loads(raw)
+        except Exception as e:
+            raise AbiSourceError(f"etherscan getabi failed: {e}")
+        if data.get("status") != "1":
+            msg = (data.get("result") or data.get("message") or "").lower()
+            if "not verified" in msg or "no abi" in msg:
+                return False
+            raise AbiSourceError(data.get("result") or "etherscan abi error")
+        abi_str = data.get("result")
+        if not abi_str or not isinstance(abi_str, str):
+            return False
+        try:
+            abi = json.loads(abi_str)
+        except json.JSONDecodeError:
+            raise AbiSourceError("etherscan ABI payload was not valid JSON")
+        return abi if isinstance(abi, list) else False
+
+
+class RoutedAbiSource:
+    """Prefer ``primary`` (Etherscan v2) where it supports the chain, fall
+    back to ``secondary`` (Blockscout) on an unusable result or an error —
+    so a flaky explorer on one side doesn't kill decoding."""
+
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+
+    def set_storage_reader(self, reader) -> None:
+        for s in (self._primary, self._secondary):
+            if hasattr(s, "set_storage_reader"):
+                s.set_storage_reader(reader)
+
+    def supports(self, chain_id: int) -> bool:
+        return self._primary.supports(chain_id) or self._secondary.supports(chain_id)
+
+    def fetch(self, chain_id: int, address: str) -> Union[Abi, bool]:
+        secondary_ok = self._secondary.supports(chain_id)
+        if self._primary.supports(chain_id):
+            try:
+                res = self._primary.fetch(chain_id, address)
+                if isinstance(res, list) or not secondary_ok:
+                    return res
+            except Exception as e:
+                if not secondary_ok:
+                    raise
+                log.warning("primary ABI source failed (%s); trying fallback", e)
+        if secondary_ok:
+            return self._secondary.fetch(chain_id, address)
+        raise AbiSourceError(f"No ABI source supports chain {chain_id}")
 
 
 def _dedup_by_selector(abi: Abi) -> Abi:

@@ -38,22 +38,33 @@ _PROXY_FUNCTION_MARKERS = frozenset({
 
 
 def _is_proxy_stub_abi(abi) -> bool:
-    """True when ``abi`` looks like a proxy's own admin surface with
-    no implementation methods merged in. Lets the cache decide to
-    refetch entries written before proxy resolution landed — without
-    a hard version bump that would also discard fully-resolved
-    non-proxy ABIs."""
+    """True when ``abi`` looks like a proxy's own surface with no
+    implementation methods merged in. Lets the cache decide to refetch
+    entries written before proxy resolution landed — without a hard
+    version bump that would also discard fully-resolved non-proxy ABIs.
+
+    Two stub shapes, both lacking any *real* callable surface:
+      - only proxy-admin functions (``admin``/``upgradeTo``/…), or
+      - **no functions at all, just a ``fallback``** — a pure delegator
+        (e.g. a TransparentUpgradeableProxy that exposes nothing and
+        forwards every call), which is what slips past a "has functions"
+        check and serves an undecodable, empty ABI."""
     if not isinstance(abi, list):
         return False
+    has_fallback = False
     fn_total = 0
     fn_non_proxy = 0
     for entry in abi:
-        if entry.get("type") != "function":
-            continue
-        fn_total += 1
-        if entry.get("name") not in _PROXY_FUNCTION_MARKERS:
-            fn_non_proxy += 1
-    return fn_total > 0 and fn_non_proxy == 0
+        t = entry.get("type")
+        if t == "fallback":
+            has_fallback = True
+        elif t == "function":
+            fn_total += 1
+            if entry.get("name") not in _PROXY_FUNCTION_MARKERS:
+                fn_non_proxy += 1
+    if fn_non_proxy > 0:
+        return False   # has a real method surface → trust it
+    return has_fallback or fn_total > 0
 
 
 class AbiCache:

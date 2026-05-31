@@ -86,6 +86,24 @@ def test_proxy_stub_cached_entry_is_refetched(tmp_qeth):
     assert cache.load(1, ADDR) is None
 
 
+def test_fallback_only_proxy_stub_is_refetched(tmp_qeth):
+    """A pure-delegator proxy (TransparentUpgradeableProxy) exposes *no*
+    functions — only a fallback — so it slips past a 'has functions'
+    check and serves an undecodable, empty ABI. load() must return None
+    so it refetches with proxy resolution."""
+    cache = AbiCache()
+    stub = [
+        {"type": "constructor", "inputs": [
+            {"name": "_logic", "type": "address"},
+            {"name": "_data", "type": "bytes"}]},
+        {"type": "event", "name": "Upgraded", "inputs": []},
+        {"type": "fallback", "stateMutability": "payable"},
+        {"type": "receive", "stateMutability": "payable"},
+    ]
+    cache.save(1, ADDR, stub)
+    assert cache.load(1, ADDR) is None
+
+
 def test_merged_proxy_abi_is_trusted(tmp_qeth):
     """After proxy resolution lands, the cached ABI has both the
     proxy's admin methods AND the implementation's surface — that

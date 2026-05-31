@@ -175,6 +175,101 @@ class TestBlockscoutAbiSource:
         with pytest.raises(AbiSourceError):
             src.fetch(fake.chain_id, "0xabc")
 
+    def test_v1_fallback_resolves_proxy_via_rpc(self):
+        """When v2 is down, a proxy still resolves: read the impl slot from
+        the chain (storage_reader) and merge the implementation's ABI."""
+        IMPL = "0x" + "11" * 20
+
+        def route(url, timeout):
+            if "/api/v2/smart-contracts/" in url:
+                return b'{"message":"Server Error"}'   # v2 down (no is_verified)
+            if "getabi" in url and IMPL[2:] in url.lower():
+                return json.dumps({"status": "1",
+                                   "result": json.dumps(ERC20_ABI)}).encode()
+            if "getabi" in url:                          # the proxy's own ABI
+                return json.dumps({"status": "1",
+                                   "result": json.dumps(PROXY_ADMIN_ABI)}).encode()
+            raise RuntimeError(f"unrouted: {url}")
+
+        # storage_reader returns the impl in the legacy (zeppelinos) slot.
+        ZEPP = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
+        def reader(cid, addr, slot):
+            return "0x" + "00" * 12 + "11" * 20 if slot == ZEPP else "0x" + "00" * 32
+
+        src = BlockscoutAbiSource(transport=route, storage_reader=reader)
+        abi = src.fetch(ETH.chain_id, "0xproxy")
+        names = {e["name"] for e in abi if e.get("type") == "function"}
+        assert "approve" in names and "admin" in names   # impl + proxy merged
+
+
+class TestEtherscanV2AbiSource:
+    def test_getabi_with_proxy_merge(self):
+        from qeth.abi import EtherscanV2AbiSource
+        IMPL = "11" * 20
+
+        def route(url, timeout):
+            assert "chainid=137" in url and "module=contract&action=getabi" in url
+            if IMPL in url.lower():
+                return json.dumps({"status": "1",
+                                   "result": json.dumps(ERC20_ABI)}).encode()
+            return json.dumps({"status": "1",
+                               "result": json.dumps(PROXY_ADMIN_ABI)}).encode()
+
+        EIP1967 = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+        reader = lambda cid, addr, slot: (
+            "0x" + "00" * 12 + IMPL if slot == EIP1967 else "0x" + "00" * 32)
+        src = EtherscanV2AbiSource(lambda: "KEY", transport=route,
+                                   storage_reader=reader)
+        assert src.supports(137)
+        abi = src.fetch(137, "0xproxy")
+        names = {e["name"] for e in abi if e.get("type") == "function"}
+        assert "approve" in names and "admin" in names
+
+    def test_no_key_not_supported(self):
+        from qeth.abi import EtherscanV2AbiSource
+        assert not EtherscanV2AbiSource(lambda: "").supports(137)
+
+    def test_unverified_returns_false(self):
+        from qeth.abi import EtherscanV2AbiSource
+        route = lambda url, t: json.dumps(
+            {"status": "0", "result": "Contract source code not verified"}).encode()
+        src = EtherscanV2AbiSource(lambda: "KEY", transport=route)
+        assert src.fetch(137, "0xabc") is False
+
+
+class TestRoutedAbiSource:
+    def _blockscout(self, abi_or_false):
+        src = BlockscoutAbiSource(transport=lambda u, t: json.dumps(
+            {"is_verified": True, "abi": abi_or_false} if abi_or_false
+            else {"is_verified": False}).encode())
+        return src
+
+    def test_prefers_primary_when_it_returns_abi(self):
+        from qeth.abi import RoutedAbiSource, EtherscanV2AbiSource
+        primary = EtherscanV2AbiSource(lambda: "KEY", transport=lambda u, t:
+            json.dumps({"status": "1", "result": json.dumps(ERC20_ABI)}).encode())
+        secondary_hits = []
+        secondary = BlockscoutAbiSource(transport=lambda u, t:
+            secondary_hits.append(u) or b'{"is_verified": false}')
+        out = RoutedAbiSource(primary, secondary).fetch(137, "0xabc")
+        assert isinstance(out, list) and not secondary_hits   # never hit fallback
+
+    def test_falls_back_on_primary_error(self):
+        from qeth.abi import RoutedAbiSource, EtherscanV2AbiSource
+        def boom(url, t):
+            raise AbiSourceError("etherscan 500")
+        primary = EtherscanV2AbiSource(lambda: "KEY", transport=boom)
+        secondary = self._blockscout(ERC20_ABI)
+        out = RoutedAbiSource(primary, secondary).fetch(137, "0xabc")
+        assert isinstance(out, list)   # Blockscout served it
+
+    def test_set_storage_reader_propagates(self):
+        from qeth.abi import RoutedAbiSource, EtherscanV2AbiSource
+        p = EtherscanV2AbiSource(lambda: "KEY")
+        s = BlockscoutAbiSource()
+        RoutedAbiSource(p, s).set_storage_reader("READER")
+        assert p.storage_reader == "READER" and s.storage_reader == "READER"
+
 
 # --- _dedup_by_selector ---------------------------------------------------
 

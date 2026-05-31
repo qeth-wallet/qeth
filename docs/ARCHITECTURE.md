@@ -351,6 +351,11 @@ first render.** Two rules enforce this:
   first loader finishes" gap.
 - Heavy libraries (web3, eth_abi) are **lazy-imported** at first `EthClient`
   use, not at module import (§3), keeping import-time cost off startup.
+- On Linux, `QT_X11_NO_MITSHM=1` is set (`setdefault`) **before** `QApplication`
+  (`_harden_x11_backing_store`). Qt's shared-memory X11 backing store otherwise
+  stops repainting the window after many hours of uptime — only a hide/show
+  (minimise to tray and back) recreates the surface. xcb-only, so it's a no-op
+  on Wayland/macOS/Windows; an explicit user override is respected.
 
 ### 5.8 Dialog conventions (GNOME HIG)
 

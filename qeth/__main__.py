@@ -1,5 +1,6 @@
 import locale
 import logging
+import os
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -12,7 +13,24 @@ from .tray import install_tray
 from .ui import MainWindow
 
 
+def _harden_x11_backing_store(environ, platform) -> None:
+    """Disable Qt's MIT-SHM (shared-memory) X11 backing store. Left on,
+    the window stops repainting after many hours of uptime — the
+    SHM-backed surface gets into a bad state and only a hide/show
+    (minimise to tray and back) recreates it. Turning SHM off trades a
+    touch of paint latency for a window that stays drawable indefinitely.
+
+    xcb-only, so it's a harmless no-op on Wayland/macOS/Windows (we still
+    gate on Linux for tidiness). ``setdefault`` leaves an explicit user
+    override (``QT_X11_NO_MITSHM=0``) alone. Must run *before*
+    QApplication — Qt's xcb plugin reads the var at init."""
+    if platform.startswith("linux"):
+        environ.setdefault("QT_X11_NO_MITSHM", "1")
+
+
 def main() -> int:
+    _harden_x11_backing_store(os.environ, sys.platform)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",

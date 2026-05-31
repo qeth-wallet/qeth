@@ -21,3 +21,28 @@ def test_mainwindow_builds(mainwindow):
     whole widget tree, signals, splitter restore and timer setup
     all initialize without raising."""
     assert mainwindow.windowTitle() == "qeth — Ethereum wallet"
+
+
+class TestX11BackingStoreHardening:
+    """QT_X11_NO_MITSHM is set before QApplication so the window doesn't
+    stop repainting after many hours of X11 uptime (MIT-SHM surface goes
+    bad; only hide/show recovers it)."""
+
+    def test_sets_on_linux_when_unset(self):
+        from qeth.__main__ import _harden_x11_backing_store
+        env = {}
+        _harden_x11_backing_store(env, "linux")
+        assert env["QT_X11_NO_MITSHM"] == "1"
+
+    def test_respects_explicit_override(self):
+        from qeth.__main__ import _harden_x11_backing_store
+        env = {"QT_X11_NO_MITSHM": "0"}
+        _harden_x11_backing_store(env, "linux")
+        assert env["QT_X11_NO_MITSHM"] == "0"   # user choice left alone
+
+    def test_noop_off_linux(self):
+        from qeth.__main__ import _harden_x11_backing_store
+        for plat in ("darwin", "win32"):
+            env = {}
+            _harden_x11_backing_store(env, plat)
+            assert "QT_X11_NO_MITSHM" not in env

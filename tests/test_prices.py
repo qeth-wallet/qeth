@@ -31,3 +31,36 @@ def test_avalanche_in_curated_tokenlist_sources():
     assert 43114 in CoinGeckoPerChain.SLUGS
     assert 43114 in Curve.SLUGS
     assert 43114 in OneInch.CHAINS
+
+
+class TestNativeCoingeckoId:
+    def _chain(self, symbol, coingecko_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(chain_id=1, symbol=symbol,
+                               coingecko_id=coingecko_id)
+
+    def test_symbol_overrides_wrong_config_default(self):
+        from qeth.prices import native_coingecko_id
+        # Picker-added Avalanche: coingecko_id left at the "ethereum"
+        # default, but AVAX must resolve to avalanche-2 (not ETH's price).
+        assert native_coingecko_id(self._chain("AVAX", "ethereum")) == "avalanche-2"
+
+    def test_eth_chain_resolves_to_ethereum(self):
+        from qeth.prices import native_coingecko_id
+        assert native_coingecko_id(self._chain("ETH", "ethereum")) == "ethereum"
+
+    def test_unknown_symbol_with_ethereum_default_is_none(self):
+        from qeth.prices import native_coingecko_id
+        # Footgun guard: unknown native + the suspicious "ethereum"
+        # default → no native price rather than a wrong one.
+        assert native_coingecko_id(self._chain("FOO", "ethereum")) is None
+
+    def test_explicit_id_for_unknown_symbol_is_used(self):
+        from qeth.prices import native_coingecko_id
+        assert native_coingecko_id(self._chain("FOO", "foo-token")) == "foo-token"
+
+    def test_default_chains_all_resolve(self):
+        from qeth.prices import native_coingecko_id
+        from qeth.chains import DEFAULT_CHAINS
+        for c in DEFAULT_CHAINS:
+            assert native_coingecko_id(c), f"{c.name} has no native id"

@@ -17,7 +17,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Iterable
+from typing import Iterable, Optional
 
 from . import USER_AGENT
 from .chains import Chain
@@ -43,6 +43,39 @@ DEFILLAMA_CHAIN_SLUGS: dict[int, str] = {
     42161: "arbitrum",
     43114: "avax",
 }
+
+
+# Native-asset symbol → CoinGecko id, for the native-balance USD value.
+# A chain added via the picker / wallet_addEthereumChain keeps Chain's
+# unsafe ``coingecko_id = "ethereum"`` default, so without resolving by
+# symbol a non-ETH native (AVAX, BNB, …) gets valued at ETH's price.
+NATIVE_COINGECKO_IDS: dict[str, str] = {
+    "ETH":   "ethereum",
+    "WETH":  "ethereum",
+    "AVAX":  "avalanche-2",
+    "BNB":   "binancecoin",
+    "POL":   "polygon-ecosystem-token",
+    "MATIC": "polygon-ecosystem-token",   # MATIC rebranded to POL
+    "XDAI":  "xdai",
+    "S":     "sonic-3",
+    "FTM":   "fantom",
+}
+
+
+def native_coingecko_id(chain) -> Optional[str]:
+    """CoinGecko id for a chain's *native* asset, resolved by symbol first
+    so a picker-added chain (whose ``coingecko_id`` is the unsafe
+    "ethereum" default) doesn't price AVAX/BNB/… as ETH. Falls back to the
+    chain's own id, but never the bare "ethereum" default on a non-ETH
+    chain — better no native value than a wildly wrong one."""
+    sym = (getattr(chain, "symbol", "") or "").upper()
+    mapped = NATIVE_COINGECKO_IDS.get(sym)
+    if mapped:
+        return mapped
+    cid = getattr(chain, "coingecko_id", "") or ""
+    if cid == "ethereum" and sym != "ETH":
+        return None
+    return cid or None
 
 
 @dataclass(frozen=True)
@@ -86,8 +119,10 @@ class DefiLlamaPrices(PriceSource):
     def fetch(self, chain, contracts, include_native=False):
         slug = DEFILLAMA_CHAIN_SLUGS.get(chain.chain_id)
         keys: list[str] = []
-        if include_native and chain.coingecko_id:
-            keys.append(f"coingecko:{chain.coingecko_id}")
+        if include_native:
+            native_id = native_coingecko_id(chain)
+            if native_id:
+                keys.append(f"coingecko:{native_id}")
         if slug:
             for c in contracts:
                 c = c.lower()

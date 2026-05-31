@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 import urllib.request
 from typing import Optional, Union
@@ -395,6 +396,104 @@ def _urllib_transport(url: str, timeout: float) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+# --- 4-byte signature fallback (Etherscan-style) -----------------------------
+# When no contract ABI decodes a call — an unverified contract, or a proxy
+# whose implementation isn't verified — recover the function from its 4-byte
+# selector via 4byte.directory, exactly as block explorers do. Parameter
+# names are unavailable (the signature is name + types only), so args are
+# positional arg0/arg1/…
+
+_FOURBYTE_URL = "https://www.4byte.directory/api/v1/signatures/?hex_signature="
+
+
+def _split_top_level(s: str) -> list[str]:
+    """Split a comma list at the top level only — parens (tuple types)
+    keep their commas. ``address,(uint256,bytes),uint8`` → 3 parts."""
+    out: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in s:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur)
+    return [t.strip() for t in out if t.strip()]
+
+
+def _sig_type_to_input(name: str, type_str: str) -> dict:
+    """One signature type string → an ABI input spec, recursing into
+    tuple ``(...)`` components (with array suffixes preserved)."""
+    type_str = type_str.strip()
+    base, suffix = type_str, ""
+    while base.endswith("]"):
+        i = base.rindex("[")
+        suffix = base[i:] + suffix
+        base = base[:i]
+    if base.startswith("(") and base.endswith(")"):
+        comps = _split_top_level(base[1:-1])
+        return {
+            "name": name, "type": "tuple" + suffix,
+            "components": [_sig_type_to_input(f"f{i}", c)
+                           for i, c in enumerate(comps)],
+        }
+    return {"name": name, "type": type_str}
+
+
+def decode_with_signature(signature: str,
+                          input_data: str) -> Optional[dict]:
+    """Decode ``input_data`` from a ``name(t1,t2,…)`` signature string,
+    reusing ``decode_call`` so the tree shape is identical (args named
+    positionally). Adds ``via_signature: True``. None if it doesn't fit."""
+    m = re.match(r"^([A-Za-z0-9_$]+)\s*\((.*)\)\s*$", signature.strip())
+    if not m:
+        return None
+    name, types_str = m.group(1), m.group(2)
+    inputs = [_sig_type_to_input(f"arg{i}", t)
+              for i, t in enumerate(_split_top_level(types_str))]
+    frag = [{"type": "function", "name": name,
+             "stateMutability": "nonpayable", "inputs": inputs, "outputs": []}]
+    decoded = decode_call(frag, input_data)
+    if decoded is not None:
+        decoded["via_signature"] = True
+    return decoded
+
+
+def fetch_signatures(selector: str, *, transport=None,
+                     timeout: float = 8.0) -> list[str]:
+    """Candidate function signatures for a 4-byte selector from
+    4byte.directory, oldest first (the canonical one usually leads).
+    [] on miss/error — multiple results means hash collisions."""
+    sel = (selector if selector.startswith("0x") else "0x" + selector)[:10]
+    try:
+        raw = (transport or _urllib_transport)(_FOURBYTE_URL + sel, timeout)
+        data = json.loads(raw)
+    except Exception as e:
+        log.warning("4byte lookup failed for %s: %s", sel, e)
+        return []
+    return [r["text_signature"] for r in (data.get("results") or [])
+            if isinstance(r, dict) and r.get("text_signature")]
+
+
+def decode_via_4byte(input_data: str, *, transport=None) -> Optional[dict]:
+    """Last-resort decode when no ABI matched: look the selector up in
+    the 4-byte database and try each candidate signature, returning the
+    first that decodes cleanly."""
+    if not input_data or len(input_data) < 10:
+        return None
+    for sig in fetch_signatures(input_data[:10], transport=transport):
+        decoded = decode_with_signature(sig, input_data)
+        if decoded is not None:
+            return decoded
+    return None
 
 
 def decode_call(abi: Optional[Abi], input_data: str,

@@ -508,3 +508,58 @@ class TestDecodeEvent:
                "data": HexBytes(_u256_data(1))}
         ev = decode_event(log)
         assert ev["event"] == "Transfer" and ev["args"][2]["value"] == "1"
+
+
+class TestFourByteFallback:
+    def test_decode_with_signature_flat(self):
+        from qeth.abi import decode_with_signature
+        from eth_utils import to_checksum_address
+        spender = to_checksum_address("0x" + "ab" * 20)
+        data = "0xa9059cbb" + spender[2:].rjust(64, "0") + format(5000, "064x")
+        dec = decode_with_signature("transfer(address,uint256)", data)
+        assert dec["function"] == "transfer" and dec["via_signature"] is True
+        assert [a["type"] for a in dec["args"]] == ["address", "uint256"]
+        assert dec["args"][0]["name"] == "arg0"          # positional
+        assert dec["args"][1]["value"] == "5000"
+
+    def test_decode_with_signature_wrong_selector_is_none(self):
+        from qeth.abi import decode_with_signature
+        # calldata for transfer, but ask to decode as approve → selector
+        # mismatch → web3 rejects → None.
+        data = "0xa9059cbb" + "00" * 64
+        assert decode_with_signature("approve(address,uint256)", data) is None
+
+    def test_split_top_level_respects_tuples(self):
+        from qeth.abi import _split_top_level
+        assert _split_top_level("address,(uint256,bytes),uint8") == [
+            "address", "(uint256,bytes)", "uint8"]
+
+    def test_sig_type_to_input_tuple(self):
+        from qeth.abi import _sig_type_to_input
+        spec = _sig_type_to_input("arg0", "(address,uint256)[]")
+        assert spec["type"] == "tuple[]"
+        assert [c["type"] for c in spec["components"]] == ["address", "uint256"]
+
+    def test_fetch_signatures_parses_4byte(self):
+        from qeth.abi import fetch_signatures
+        import json as _json
+        payload = _json.dumps({"count": 1, "results": [
+            {"id": 1, "text_signature": "transfer(address,uint256)"},
+            {"id": 2, "text_signature": "spam_collision(bytes)"},
+        ]}).encode()
+        sigs = fetch_signatures("0xa9059cbb", transport=lambda u, t: payload)
+        assert sigs == ["transfer(address,uint256)", "spam_collision(bytes)"]
+
+    def test_fetch_signatures_error_returns_empty(self):
+        from qeth.abi import fetch_signatures
+        def boom(u, t): raise OSError("net down")
+        assert fetch_signatures("0xa9059cbb", transport=boom) == []
+
+    def test_decode_via_4byte_end_to_end(self):
+        from qeth.abi import decode_via_4byte
+        import json as _json
+        data = "0xa9059cbb" + "00" * 12 + "cd" * 20 + format(42, "064x")
+        payload = _json.dumps({"results": [
+            {"text_signature": "transfer(address,uint256)"}]}).encode()
+        dec = decode_via_4byte(data, transport=lambda u, t: payload)
+        assert dec["function"] == "transfer" and dec["via_signature"] is True

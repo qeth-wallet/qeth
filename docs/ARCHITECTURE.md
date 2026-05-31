@@ -246,6 +246,16 @@ refetches via the proxy-aware path: an ABI with no real method surface — only
 proxy-admin functions, *or* none at all and just a `fallback` (a pure delegator
 like `TransparentUpgradeableProxy`) — returns `None` from `load()`.
 
+**4-byte fallback.** When no contract ABI decodes a call (unverified contract,
+or a proxy whose implementation isn't verified — the case explorers handle but
+`getabi` can't), `decode_via_4byte` looks the call's selector up in
+4byte.directory and decodes the calldata straight from the signature, exactly as
+a block explorer does. Parameter names are unavailable (signature = name +
+types), so args are positional and the decoded tree is flagged
+`via_signature` — `_render_decoded` prints a "decoded via the 4-byte signature
+database" note. The Sign/Details dialogs fall back to this (off-thread,
+`SignatureFetchWorker`) whenever the ABI path comes up empty.
+
 `decode_event(log, abi=None)` is the log-side counterpart used by the events
 view (§10.5). The Transfer / Approval / ApprovalForAll family decodes from
 their canonical signatures **without any ABI** (so the common case needs no

@@ -446,8 +446,19 @@ def _render_decoded(text_edit, decoded: dict,
     # so the dialog never grows a horizontal scrollbar.
     # ``word-break: break-all`` extends that to wrap inside hex
     # strings (which have no spaces and would otherwise overflow).
+    # Decoded from the 4-byte signature DB (no contract ABI) — flag it,
+    # since parameter names are positional and the signature could be a
+    # hash collision.
+    note_html = ""
+    if decoded.get("via_signature"):
+        note_html = (
+            '<div style="color:gray; font-style:italic;">'
+            "# decoded via the 4-byte signature database — parameter "
+            "names unavailable</div>"
+        )
     parts = [
-        f'<div style="white-space: pre-wrap; word-break: break-all; '
+        note_html
+        + f'<div style="white-space: pre-wrap; word-break: break-all; '
         f"font-family: '{mono.family()}', monospace;\">"
         f"<b>{_escape_html(fn_name)}</b>(\n"
     ]
@@ -1722,6 +1733,26 @@ class AbiFetchWorker(QThread):
         self.ready.emit(abi)
 
 
+class SignatureFetchWorker(QThread):
+    """Last-resort decode when no contract ABI matched: look the call's
+    4-byte selector up in 4byte.directory and decode the calldata from
+    the signature, like a block explorer. Emits ``ready(decoded|None)``."""
+
+    ready = Signal(object)
+
+    def __init__(self, input_data: str, parent=None):
+        super().__init__(parent)
+        self._input_data = input_data
+
+    def run(self) -> None:
+        from ..abi import decode_via_4byte
+        try:
+            self.ready.emit(decode_via_4byte(self._input_data))
+        except Exception as e:
+            log.warning("4byte decode failed: %s", e)
+            self.ready.emit(None)
+
+
 class LogsFetchWorker(QThread):
     """Fetch a confirmed tx's receipt and emit its event logs (the raw
     list of {address, topics, data} dicts). ``ready([])`` on any error
@@ -2318,24 +2349,40 @@ class TransactionDetailsDialog(QDialog):
             self._start_worker(logs_worker)
 
     def _on_abi_ready(self, abi) -> None:
+        decoded = None
+        if isinstance(abi, list):
+            decoded = decode_call(
+                abi, self.tx.input_data, address=self.tx.to_addr,
+            )
+        if decoded is not None:
+            self._render_decoded_call(decoded)
+            return
+        # No contract ABI decoded the call (unverified contract, a proxy
+        # whose impl isn't verified, or a fallback). Fall back to the
+        # 4-byte signature DB like an explorer.
+        self._abi_state = abi
+        self.decoded_view.setPlainText("(decoding via signature database…)")
+        worker = SignatureFetchWorker(self.tx.input_data)
+        worker.ready.connect(self._on_signature_ready)
+        self._start_worker(worker)
+
+    def _on_signature_ready(self, decoded) -> None:
+        if decoded is not None:
+            self._render_decoded_call(decoded)
+            return
+        abi = getattr(self, "_abi_state", None)
         if abi is False:
-            self.decoded_view.setPlainText(
-                "(contract source is not verified on Blockscout — "
-                "no ABI available for decoding)"
-            )
-            return
-        if abi is None:
-            self.decoded_view.setPlainText(
-                "(failed to fetch ABI from Blockscout — try again later)"
-            )
-            return
-        decoded = decode_call(abi, self.tx.input_data, address=self.tx.to_addr)
-        if decoded is None:
-            self.decoded_view.setPlainText(
-                "(ABI available but this calldata didn't match any "
-                "function in it — possibly a fallback or proxy call)"
-            )
-            return
+            msg = ("(contract source is not verified, and the call's "
+                   "selector isn't in the 4-byte database)")
+        elif abi is None:
+            msg = "(failed to fetch ABI — try again later)"
+        else:
+            msg = ("(this calldata didn't match the contract's ABI, and "
+                   "its selector isn't in the 4-byte database — possibly "
+                   "a fallback or proxy call)")
+        self.decoded_view.setPlainText(msg)
+
+    def _render_decoded_call(self, decoded) -> None:
         # If the called contract is on the curated whitelist, pass
         # its (symbol, decimals) so the renderer can annotate token-
         # amount uints with the human-readable "# 5000 crvUSD" form.
@@ -3036,24 +3083,36 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         return "(contract creation — no events to preview)"
 
     def _on_abi_ready(self, abi) -> None:
+        decoded = None
+        if isinstance(abi, list):
+            decoded = decode_call(abi, self.req.data, address=self.req.to_addr)
+        if decoded is not None:
+            self._render_decoded_call(decoded)
+            return
+        # No contract ABI decoded it — fall back to the 4-byte signature DB
+        # (unverified contract / proxy / fallback), like an explorer.
+        self._abi_state = abi
+        self.decoded_view.setPlainText("(decoding via signature database…)")
+        worker = SignatureFetchWorker(self.req.data)
+        worker.ready.connect(self._on_signature_ready)
+        self._start_worker(worker)
+
+    def _on_signature_ready(self, decoded) -> None:
+        if decoded is not None:
+            self._render_decoded_call(decoded)
+            return
+        abi = getattr(self, "_abi_state", None)
         if abi is False:
-            self.decoded_view.setPlainText(
-                "(contract source is not verified on Blockscout — "
-                "no ABI available for decoding)"
-            )
-            return
-        if abi is None:
-            self.decoded_view.setPlainText(
-                "(failed to fetch ABI from Blockscout — try again later)"
-            )
-            return
-        decoded = decode_call(abi, self.req.data, address=self.req.to_addr)
-        if decoded is None:
-            self.decoded_view.setPlainText(
-                "(ABI available but this calldata didn't match any "
-                "function in it — possibly a fallback or proxy call)"
-            )
-            return
+            msg = ("(contract source is not verified, and the call's "
+                   "selector isn't in the 4-byte database)")
+        elif abi is None:
+            msg = "(failed to fetch ABI — try again later)"
+        else:
+            msg = ("(this calldata didn't match the contract's ABI, and "
+                   "its selector isn't in the 4-byte database)")
+        self.decoded_view.setPlainText(msg)
+
+    def _render_decoded_call(self, decoded) -> None:
         token_context = None
         if self._token_info is not None and self.req.to_addr:
             entry = self._token_info(self.chain.chain_id, self.req.to_addr)

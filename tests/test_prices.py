@@ -7,6 +7,10 @@ worked. These guard against that gap. (Live fetches are in
 test_network_prices.py.)
 """
 
+import json
+
+import pytest
+
 from qeth.prices import DEFILLAMA_CHAIN_SLUGS
 from qeth.chains import DEFAULT_CHAINS
 
@@ -64,3 +68,46 @@ class TestNativeCoingeckoId:
         from qeth.chains import DEFAULT_CHAINS
         for c in DEFAULT_CHAINS:
             assert native_coingecko_id(c), f"{c.name} has no native id"
+
+
+class TestNativeIdDiscovery:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        import qeth.prices as prices
+        orig = prices._DISCOVERED_NATIVE_IDS
+        yield
+        prices._DISCOVERED_NATIVE_IDS = orig   # don't leak into other tests
+
+    def test_discovered_map_takes_priority(self, monkeypatch):
+        import qeth.prices as prices
+        from types import SimpleNamespace
+        monkeypatch.setattr(prices, "_DISCOVERED_NATIVE_IDS", {239: "tac"})
+        # TAC: not in the symbol map, config left at the "ethereum" default;
+        # discovery supplies the right id where a hardcoded map can't.
+        ch = SimpleNamespace(chain_id=239, symbol="TAC", coingecko_id="ethereum")
+        assert prices.native_coingecko_id(ch) == "tac"
+
+    def test_load_parses_asset_platforms(self, tmp_path, monkeypatch):
+        import qeth.prices as prices
+        payload = json.dumps([
+            {"id": "avalanche", "chain_identifier": 43114,
+             "native_coin_id": "avalanche-2"},
+            {"id": "tac", "chain_identifier": 239, "native_coin_id": "tac"},
+            {"id": "no-chain", "chain_identifier": None, "native_coin_id": "x"},
+        ]).encode()
+
+        class R:
+            def read(self): return payload
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        monkeypatch.setattr(prices.urllib.request, "urlopen",
+                            lambda req, timeout=None: R())
+        m = prices.load_native_coin_ids(cache_dir=tmp_path, force=True)
+        assert m == {43114: "avalanche-2", 239: "tac"}   # null chain_id dropped
+
+    def test_load_falls_back_on_error(self, tmp_path, monkeypatch):
+        import qeth.prices as prices
+        def boom(req, timeout=None):
+            raise OSError("network down")
+        monkeypatch.setattr(prices.urllib.request, "urlopen", boom)
+        assert prices.load_native_coin_ids(cache_dir=tmp_path, force=True) == {}

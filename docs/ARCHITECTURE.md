@@ -213,6 +213,16 @@ the panel's `NATIVE_CONTRACT`); ERC-20 keys are lowercase addresses. Chains not
 in `DEFILLAMA_CHAIN_SLUGS` are silently skipped. One failed batch is skipped;
 others proceed.
 
+The **native** asset's CoinGecko id is **discovered**, not hand-mapped:
+`load_native_coin_ids` pulls CoinGecko's `asset_platforms` list (chain_id →
+`native_coin_id`, 250+ chains, disk-cached ~7 days) — the same "ask the upstream
+that already knows" approach as chain-icon discovery. This matters because a
+chain added via the picker keeps `Chain.coingecko_id`'s unsafe `"ethereum"`
+default, which would value AVAX/BNB/TAC/… at ETH's price. `native_coingecko_id`
+resolves discovery → offline symbol map (`NATIVE_COINGECKO_IDS`) → the chain's
+own id, but **never the `"ethereum"` default on a non-ETH chain** (no native
+value beats a wildly wrong one).
+
 ### 4.4 Risk — `risk.py`
 
 `GoPlusRisk` → `api.gopluslabs.io` (~30 req/min, no key). `RiskReport` carries

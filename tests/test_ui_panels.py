@@ -435,3 +435,55 @@ class TestFocusAwareDelegate:
 
         assert "state" in captured            # fell through to super().paint
         assert not (captured["state"] & QStyle.State_HasFocus)   # rect suppressed
+
+    def test_strips_hover_on_unselected_cell(self, qtbot, tmp_qeth, monkeypatch):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+        panel, delegate = self._delegate(qtbot)
+        index = panel.table.model().index(0, 0)
+
+        captured = {}
+        monkeypatch.setattr(QStyledItemDelegate, "paint",
+                            lambda self, p, opt, i: captured.__setitem__("state", opt.state))
+        option = QStyleOptionViewItem()
+        delegate.initStyleOption(option, index)
+        option.state |= QStyle.State_MouseOver
+        option.state &= ~QStyle.State_Selected
+
+        pm = QPixmap(80, 20)
+        painter = QPainter(pm)
+        try:
+            delegate.paint(painter, option, index)
+        finally:
+            painter.end()
+        assert not (captured["state"] & QStyle.State_MouseOver)   # hover suppressed
+
+    def test_wallet_tree_drawrow_strips_hover(self, qtbot, tmp_qeth):
+        """The wallet tree row paint must drop State_MouseOver so it
+        doesn't highlight on hover when the right-hand tables don't."""
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import (
+            QStyle, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+        )
+        from qeth.plugins.wallets import _ReorderTree
+        tree = _ReorderTree()
+        qtbot.addWidget(tree)
+        tree.addTopLevelItem(QTreeWidgetItem(["Ledger"]))
+
+        captured = {}
+        orig = QTreeWidget.drawRow
+        def spy(self, painter, option, index):
+            captured["mouseover"] = bool(option.state & QStyle.State_MouseOver)
+        QTreeWidget.drawRow = spy
+        try:
+            opt = QStyleOptionViewItem()
+            opt.state |= QStyle.State_MouseOver
+            pm = QPixmap(120, 20)
+            painter = QPainter(pm)
+            try:
+                tree.drawRow(painter, opt, tree.model().index(0, 0))
+            finally:
+                painter.end()
+        finally:
+            QTreeWidget.drawRow = orig
+        assert captured["mouseover"] is False

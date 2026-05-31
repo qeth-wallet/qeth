@@ -1172,8 +1172,13 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         # e.g. the narrow status-icon cell of a freshly-prepended
         # pending row, where it reads as a box in the empty space beside
         # the icon. Selection, not the current cell, is what we surface.
+        # Also strip hover (State_MouseOver) so the wallet tree doesn't
+        # tint hovered rows when the token/tx tables (which kill hover via
+        # stylesheet) don't — keeping hover behaviour consistent across
+        # all three delegate-painted views.
         opt = QStyleOptionViewItem(option)
         opt.state &= ~QStyle.State_HasFocus
+        opt.state &= ~QStyle.State_MouseOver
         super().paint(painter, opt, index)
 
 

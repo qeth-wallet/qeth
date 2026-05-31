@@ -91,6 +91,15 @@ class _ReorderTree(QTreeWidget):
     # (same as double-clicking the address). Carries the address.
     enter_pressed = Signal(str)
 
+    def drawRow(self, painter, option, index):  # noqa: N802 — Qt method
+        # Suppress the row hover tint. The token/tx tables disable hover
+        # via stylesheet; without this the left wallet tree would be the
+        # only panel that highlights on hover — an inconsistency between
+        # the left and right columns. Strip State_MouseOver at the row
+        # level (the delegate strips it per-item); selection still paints.
+        option.state &= ~QStyle.State_MouseOver
+        super().drawRow(painter, option, index)
+
     def keyPressEvent(self, event):  # noqa: N802 — Qt method name
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             current = self.currentItem()

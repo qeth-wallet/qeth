@@ -7,9 +7,9 @@ the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
 from PySide6.QtCore import (
-    QByteArray, QEvent, QObject, QSize, Qt, QThread,
+    QByteArray, QEvent, QObject, QRect, QSize, Qt, QThread,
 )
-from PySide6.QtGui import QIcon, QKeyEvent, QPalette, QPen
+from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QLabel, QMainWindow, QSplitter, QStatusBar,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
@@ -22,7 +22,20 @@ from .plugins.tokens import TokensPlugin
 from .plugins.transactions import (
     SignTransactionDialog, TransactionsPlugin,
 )
-from .plugins.wallets import WalletsPlugin
+from .plugins.wallets import ACCOUNT_LABEL_ROLE, WalletsPlugin
+
+# Sticky-note colours for the wallet-label pill: a self-consistent (bg, fg)
+# pair (pale yellow / dark brown) that reads on any palette because the pill
+# carries its own background — same self-consistent-pair approach as the
+# Send-dialog recipient tints (feedback_theme_safe_colors).
+_STICKY_BG = "#fcefa1"
+_STICKY_FG = "#43360a"
+# Pill geometry: horizontal/vertical text padding, gap from the address,
+# and right margin inside the row.
+_STICKY_PAD_H = 6
+_STICKY_PAD_V = 1
+_STICKY_GAP = 8
+_STICKY_MARGIN = 4
 from .alerts import warn
 from .signing import SignAndBroadcastWorker, SignerBridge, SignerError
 
@@ -1096,10 +1109,47 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
     over-paint our hand-drawn fill regardless of option.state.
     """
 
+    def _sticky_pill_rect(self, option, label):
+        """Right-aligned pill rect for a wallet label."""
+        fm = option.fontMetrics
+        w = fm.horizontalAdvance(label) + 2 * _STICKY_PAD_H
+        h = min(option.rect.height() - 2, fm.height() + 2 * _STICKY_PAD_V)
+        x = option.rect.right() - w - _STICKY_MARGIN
+        y = option.rect.top() + (option.rect.height() - h) // 2
+        return QRect(x, y, w, h)
+
+    def _draw_sticky_pill(self, painter, pill, label, font):
+        if pill is None:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # A 1px outline a few shades darker than the fill gives the pill a
+        # defined sticky-note edge. Shrink by the pen width so the stroke
+        # stays inside the reserved rect.
+        pen = QPen(QColor(_STICKY_BG).darker(150))
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.setBrush(QColor(_STICKY_BG))
+        painter.drawRoundedRect(pill.adjusted(0, 0, -1, -1), 4, 4)
+        painter.setPen(QColor(_STICKY_FG))
+        painter.setFont(font)
+        painter.drawText(pill, Qt.AlignCenter, label)
+        painter.restore()
+
     def paint(self, painter, option, index):
         view = self.parent()
         is_selected = bool(option.state & QStyle.State_Selected)
         is_focused = view is not None and view.hasFocus()
+
+        # A labeled wallet row draws the label as a sticky-note pill on the
+        # right; reserve its width so the address text (which the tree
+        # elides) shrinks to make room, leaving only the label tinted.
+        label = index.data(ACCOUNT_LABEL_ROLE)
+        pill = self._sticky_pill_rect(option, label) if label else None
+        text_rect = (
+            option.rect.adjusted(0, 0, -(pill.width() + _STICKY_GAP), 0)
+            if pill else option.rect
+        )
 
         if is_selected and is_focused:
             # Fill the cell with the highlight colour first.
@@ -1114,6 +1164,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             # highlighted-text role so it reads on the highlight
             # background.
             opt = QStyleOptionViewItem(option)
+            opt.rect = text_rect
             opt.state &= ~QStyle.State_Selected
             opt.state &= ~QStyle.State_HasFocus
             opt.palette.setColor(
@@ -1130,13 +1181,16 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             opt.palette.setColor(QPalette.Base, highlight)
             opt.palette.setColor(QPalette.AlternateBase, highlight)
             super().paint(painter, opt, index)
+            self._draw_sticky_pill(painter, pill, label, option.font)
             return
 
         if is_selected and not is_focused:
             opt = QStyleOptionViewItem(option)
+            opt.rect = text_rect
             opt.state &= ~QStyle.State_Selected
             opt.state &= ~QStyle.State_HasFocus
             super().paint(painter, opt, index)
+            self._draw_sticky_pill(painter, pill, label, option.font)
             painter.save()
             try:
                 color = option.palette.color(QPalette.Highlight)
@@ -1177,9 +1231,11 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         # stylesheet) don't — keeping hover behaviour consistent across
         # all three delegate-painted views.
         opt = QStyleOptionViewItem(option)
+        opt.rect = text_rect
         opt.state &= ~QStyle.State_HasFocus
         opt.state &= ~QStyle.State_MouseOver
         super().paint(painter, opt, index)
+        self._draw_sticky_pill(painter, pill, label, option.font)
 
 
 from PySide6.QtCore import QPoint as _QPoint   # noqa: E402

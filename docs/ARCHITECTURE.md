@@ -288,7 +288,13 @@ Pure, Qt-free display helpers: `format_balance` (6 sig figs, `e-9` →
   insert, a rebuild, or the broadcast auto-switch moving focus to the
   Transactions tab — would otherwise draw a stray dotted box on an unselected
   cell (visibly, beside a freshly-prepended pending row's status icon).
-  Selection, not the current cell, is what the UI surfaces.
+  Selection, not the current cell, is what the UI surfaces. The same
+  delegate paints a wallet's **label as a sticky-note pill** (pale yellow /
+  dark fg, a self-consistent pair per `feedback_theme_safe_colors`) on the
+  right of the row: the wallet tree sets `ACCOUNT_LABEL_ROLE` (the label is
+  kept out of the row text), and the delegate reserves the pill's width so
+  the address elides to make room — only the label is tinted, not the whole
+  row. Tables never set the role, so they're unaffected.
 
 ### 5.2 Chain combo & live chain addition — `ui.py`
 

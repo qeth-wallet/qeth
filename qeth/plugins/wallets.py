@@ -49,6 +49,11 @@ from ..alerts import confirm, error, info, warn
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
 
+# Item data role carrying an account's user label. Present only on labeled
+# account rows; the shared selection delegate (ui.py) reads it to paint
+# those rows with a sticky-note background. UserRole holds the address.
+ACCOUNT_LABEL_ROLE = Qt.UserRole + 1
+
 
 def _palette_aware_error_color(palette) -> str:
     """Pick a "this is an error" red that contrasts against the
@@ -543,10 +548,10 @@ class WalletsPlugin(Plugin):
             )
             display = f"[{addr}]" if is_default else f" {addr} "
             label_text = a.get("label") or ""
-            if label_text:
-                display = f"{display}   {label_text}"
             it = QTreeWidgetItem([display])
             it.setData(0, Qt.UserRole, addr)
+            if label_text:
+                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
             # Address leaf: selectable + draggable, NOT a drop target
             # (so an address can't be dropped onto another address —
@@ -576,10 +581,10 @@ class WalletsPlugin(Plugin):
             )
             label_text = a.get("label") or ""
             display = f"[{addr}]" if is_default else f" {addr} "
-            if label_text:
-                display = f"{display}   {label_text}"
             it = QTreeWidgetItem([display])
             it.setData(0, Qt.UserRole, addr)
+            if label_text:
+                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
@@ -606,10 +611,10 @@ class WalletsPlugin(Plugin):
             )
             label_text = a.get("label") or ""
             display = f"[{addr}]" if is_default else f" {addr} "
-            if label_text:
-                display = f"{display}   {label_text}"
             it = QTreeWidgetItem([display])
             it.setData(0, Qt.UserRole, addr)
+            if label_text:
+                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled

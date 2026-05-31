@@ -487,3 +487,44 @@ class TestFocusAwareDelegate:
         finally:
             QTreeWidget.drawRow = orig
         assert captured["mouseover"] is False
+
+    def test_labeled_wallet_label_paints_sticky_pill(self, qtbot, tmp_qeth):
+        """A wallet label renders as a sticky-note pill on the right; the
+        address area is *not* tinted (only the label), and an unlabeled
+        row has no pill at all."""
+        from PySide6.QtGui import QImage, QPainter, QColor
+        from PySide6.QtWidgets import (
+            QStyle, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+        )
+        from PySide6.QtCore import QRect, Qt
+        from qeth.ui import _FocusAwareSelectionDelegate, _STICKY_BG
+        from qeth.plugins.wallets import ACCOUNT_LABEL_ROLE
+        tree = QTreeWidget()
+        qtbot.addWidget(tree)
+        tree.setTextElideMode(Qt.ElideMiddle)
+        delegate = _FocusAwareSelectionDelegate(tree)
+        tree.setItemDelegate(delegate)
+        tree.addTopLevelItem(QTreeWidgetItem([" 0x" + "a" * 40 + " "]))  # labeled
+        tree.addTopLevelItem(QTreeWidgetItem([" 0x" + "b" * 40 + " "]))  # plain
+        tree.topLevelItem(0).setData(0, ACCOUNT_LABEL_ROLE, "sig")
+
+        def render(row):
+            idx = tree.model().index(row, 0)
+            opt = QStyleOptionViewItem()
+            delegate.initStyleOption(opt, idx)
+            opt.state &= ~QStyle.State_Selected
+            opt.rect = QRect(0, 0, 300, 22)
+            img = QImage(300, 22, QImage.Format_RGB32)
+            img.fill(QColor("#202020"))
+            painter = QPainter(img)
+            try:
+                delegate.paint(painter, opt, idx)
+            finally:
+                painter.end()
+            return img
+
+        labeled = render(0)
+        assert labeled.pixelColor(285, 11).name() == _STICKY_BG   # pill (right)
+        assert labeled.pixelColor(40, 11).name() != _STICKY_BG    # address area
+        plain = render(1)
+        assert plain.pixelColor(285, 11).name() != _STICKY_BG     # no pill

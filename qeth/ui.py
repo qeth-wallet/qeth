@@ -180,6 +180,17 @@ class MainWindow(QMainWindow):
         combo.currentIndexChanged.connect(self._on_chain_changed)
         return combo
 
+    def chain_icon(self, chain_id: int):
+        """The chain logo pixmap (circular), or None if not yet fetched —
+        in which case a background fetch is kicked. Used by the Tokens
+        panel as the native-asset icon for chains whose native symbol has
+        no bundled icon (AVAX, BNB, XDAI, …): the native asset's logo is
+        the chain's own logo."""
+        pix = self._chain_icon_cache.get(chain_id)
+        if pix is None:
+            self._chain_icon_cache.request(chain_id)
+        return pix
+
     def _on_chain_icon_ready(self, chain_id: int) -> None:
         pix = self._chain_icon_cache.get(chain_id)
         if pix is None:
@@ -188,6 +199,9 @@ class MainWindow(QMainWindow):
             if self.chain_combo.itemData(i) == chain_id:
                 self.chain_combo.setItemIcon(i, QIcon(pix))
                 break
+        # Let the Tokens panel fill the native-asset row's icon (AVAX/BNB/…
+        # use the chain logo, fetched async).
+        self.tokens_plugin.on_chain_icon_ready(chain_id, pix)
 
     def _on_chain_added(self, chain_id: int) -> None:
         """A dapp called ``wallet_addEthereumChain``. Append the

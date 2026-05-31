@@ -81,7 +81,7 @@ BLOCKSCOUT_INSTANCES: dict[int, str] = {
 # logic doesn't claim support for chains we haven't actually
 # checked. Extend as new defaults land.
 ETHERSCAN_V2_CHAINS: frozenset[int] = frozenset({
-    1, 10, 56, 100, 137, 8453, 42161,
+    1, 10, 56, 100, 137, 8453, 42161, 43114,
 })
 ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 

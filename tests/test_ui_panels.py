@@ -147,6 +147,52 @@ class TestTokenListPanel:
         assert sym.data(Qt.UserRole) == (ETH.chain_id, "")
         assert token_panel.table.item(0, 1).text() == "1"
 
+    def test_native_row_falls_back_to_chain_icon(self, qtbot, tmp_qeth):
+        """A native symbol with no bundled icon (AVAX/BNB/XDAI) uses the
+        chain logo via the getter; bundled ones (ETH) don't call it."""
+        from types import SimpleNamespace
+        from PySide6.QtGui import QPixmap
+        from qeth.store import Store
+        from qeth.icons import IconCache
+        from qeth.plugins.tokens import TokenListPanel
+        pix = QPixmap(8, 8); pix.fill()
+        calls = []
+        getter = lambda cid: (calls.append(cid), pix)[1]
+        panel = TokenListPanel(IconCache(), Store.load(), chain_icon_getter=getter)
+        qtbot.addWidget(panel)
+
+        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche")
+        panel.show_balances(avax, native_wei=10**18, tokens=[], list_entries={})
+        assert calls == [43114]                                   # fallback used
+        assert not panel.table.item(0, 0).icon().isNull()         # icon set
+
+        # ETH is bundled → getter not consulted.
+        calls.clear()
+        panel.show_balances(ETH, native_wei=10**18, tokens=[], list_entries={})
+        assert calls == []
+
+    def test_native_icon_filled_async_on_chain_icon_ready(self, qtbot, tmp_qeth):
+        """When the chain logo wasn't cached at render time, a later
+        chain-icon-ready fills the native row's icon."""
+        from types import SimpleNamespace
+        from PySide6.QtGui import QPixmap
+        from qeth.store import Store
+        from qeth.icons import IconCache
+        from qeth.plugins.tokens import TokenListPanel
+        panel = TokenListPanel(IconCache(), Store.load(),
+                               chain_icon_getter=lambda cid: None)  # miss
+        qtbot.addWidget(panel)
+        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche")
+        panel.show_balances(avax, native_wei=10**18, tokens=[], list_entries={})
+        assert panel.table.item(0, 0).icon().isNull()        # blank at first
+        pix = QPixmap(8, 8); pix.fill()
+        panel.update_native_icon(43114, pix)                 # logo arrives
+        assert not panel.table.item(0, 0).icon().isNull()
+        # Wrong chain id is ignored.
+        panel.show_balances(avax, native_wei=10**18, tokens=[], list_entries={})
+        panel.update_native_icon(999, pix)
+        assert panel.table.item(0, 0).icon().isNull()
+
     def test_erc20_rows_follow_native(self, token_panel):
         tokens = [
             TokenBalance(

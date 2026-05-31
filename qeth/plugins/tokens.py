@@ -275,9 +275,24 @@ class TokensPlugin(Plugin):
     def icon_cache(self) -> IconCache:
         return self._icon_cache
 
+    def _native_chain_icon(self, chain_id: int):
+        """Chain logo for the native-asset row, via the host's chain-icon
+        cache (kicks a fetch on miss). None until attached / fetched."""
+        getter = getattr(self.host, "chain_icon", None) if self.host else None
+        return getter(chain_id) if getter else None
+
+    def on_chain_icon_ready(self, chain_id: int, pix) -> None:
+        """Host calls this when a chain logo finishes fetching, so the
+        native-asset row can fill its (async) icon."""
+        if self._panel is not None:
+            self._panel.update_native_icon(chain_id, pix)
+
     def widget(self) -> QWidget:
         if self._panel is None:
-            self._panel = TokenListPanel(self._icon_cache, self._store)
+            self._panel = TokenListPanel(
+                self._icon_cache, self._store,
+                chain_icon_getter=self._native_chain_icon,
+            )
             self._panel.hide_requested.connect(self._on_hide_token)
             self._panel.pin_requested.connect(self._on_pin_token)
             self._panel.add_custom_requested.connect(self._on_add_custom_token)
@@ -1224,11 +1239,15 @@ class TokenListPanel(QWidget):
 
     DUST_USD_THRESHOLD = Decimal("0.01")
 
-    def __init__(self, icon_cache: IconCache, store, parent=None):
+    def __init__(self, icon_cache: IconCache, store, parent=None,
+                 chain_icon_getter=None):
         super().__init__(parent)
         self._icons = icon_cache
         self._icons.icon_ready.connect(self._on_icon_ready)
         self._store = store
+        # Callable chain_id -> QPixmap|None; the native-row falls back to
+        # the chain logo when the native symbol has no bundled icon.
+        self._chain_icon_getter = chain_icon_getter
 
         v = QVBoxLayout(self)
         # No top margin so the table header aligns with the tree header on
@@ -1476,11 +1495,22 @@ class TokenListPanel(QWidget):
         # --- native row ---------------------------------------------------
         native_balance = wei_to_ether(native_wei)
         self._balances[(chain.chain_id, self.NATIVE_CONTRACT)] = native_balance
+        # Remembered so a chain-icon-ready signal can fill the native row's
+        # icon later (the cache fetch is async).
+        self._native_chain_id = chain.chain_id
+        self._native_symbol = chain.symbol
         sym = QTableWidgetItem(chain.symbol)
         sym.setData(Qt.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
         sym.setToolTip(f"Native {chain.symbol} on {chain.name}")
         bf = sym.font(); bf.setBold(True); sym.setFont(bf)
         native_pix = bundled_native_icon(chain.symbol)
+        if native_pix is None and self._chain_icon_getter is not None:
+            # No bundled icon for this native (AVAX/BNB/XDAI/…): the native
+            # asset's logo is the chain's own logo, which the chain-icon
+            # cache fetches from Curve/TrustWallet. If it isn't cached yet
+            # the getter kicks the fetch and returns None; update_native_icon
+            # fills it in when chain-icon-ready fires.
+            native_pix = self._chain_icon_getter(chain.chain_id)
         if native_pix is not None:
             sym.setIcon(QIcon(native_pix))
         bal = _NumericItem(_format_balance(native_balance), native_balance)
@@ -1536,6 +1566,24 @@ class TokenListPanel(QWidget):
             self.table.setItem(row, 3, name)
 
         self.table.setSortingEnabled(True)
+
+    def update_native_icon(self, chain_id: int, pix) -> None:
+        """Fill the native row's icon when its chain logo finishes fetching
+        (async). No-op if a different chain is shown, the native symbol has
+        a bundled icon, or the row isn't present. Found by UserRole, not
+        row index — the user may have sorted the native row off the top."""
+        if pix is None or pix.isNull():
+            return
+        if chain_id != getattr(self, "_native_chain_id", None):
+            return
+        if bundled_native_icon(getattr(self, "_native_symbol", "") or ""):
+            return   # bundled icon already set; don't override
+        target = (chain_id, self.NATIVE_CONTRACT)
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None and it.data(Qt.UserRole) == target:
+                it.setIcon(QIcon(pix))
+                return
 
     def render_full(self, chain, native_wei: int, tokens: list[TokenBalance],
                     entries: dict, prices: dict,

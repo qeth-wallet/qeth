@@ -1134,6 +1134,42 @@ class TestPendingProbeWorker:
         worker.run()
         assert out["kind"] == "pending"   # "already known" must not fail it
 
+    def test_rebroadcasts_even_when_receipt_check_times_out(self, qtbot, monkeypatch):
+        """The probe RPC itself failing (e.g. DRPC 408) is exactly when a
+        dropped tx needs re-pushing — the re-broadcast must still fire,
+        not be suppressed by the failed receipt lookup."""
+        import qeth.plugins.transactions as txmod
+        sent: list = []
+
+        class _FlakyClient:
+            def __init__(self, chain): pass
+            def rpc(self, m, p):
+                raise Exception("408 Client Error: Request Timeout")
+            def send_raw_transaction(self, raw):
+                sent.append(raw); return "0xresent"
+
+        monkeypatch.setattr(txmod, "EthClient", _FlakyClient)
+        worker = txmod.PendingProbeWorker(ETH, self.HASH, ADDR, 5, "0xRAW", True)
+        out = self._capture(worker)
+        worker.run()
+        assert sent == ["0xRAW"]          # re-broadcast fired despite the timeout
+        assert out["kind"] == "failed"    # …and the RPC trouble is still surfaced
+
+    def test_no_rebroadcast_on_timeout_when_capped(self, qtbot, monkeypatch):
+        import qeth.plugins.transactions as txmod
+        sent: list = []
+
+        class _FlakyClient:
+            def __init__(self, chain): pass
+            def rpc(self, m, p): raise Exception("timeout")
+            def send_raw_transaction(self, raw): sent.append(raw)
+
+        monkeypatch.setattr(txmod, "EthClient", _FlakyClient)
+        # rebroadcast=False (cap reached / no raw) → don't re-push on failure.
+        worker = txmod.PendingProbeWorker(ETH, self.HASH, ADDR, 5, "0xr", False)
+        worker.run()
+        assert sent == []
+
 
 class TestTokensPlugin:
     def test_widget_returns_token_panel(self, tokens_plugin):

@@ -749,7 +749,10 @@ a receipt poll), which matters because load-balanced RPCs like DRPC sometimes
    bytes, same hash; idempotent ("already known" / "nonce too low" swallowed).
    Capped at ~30 ticks (`REBROADCAST_MAX_ATTEMPTS`), then a one-time "giving up"
    warning. `raw_signed` is public data (no key material), cleared on
-   confirm/drop.
+   confirm/drop. The re-broadcast also fires when the **probe RPC itself fails**
+   (e.g. DRPC `408` timeouts) — that's exactly when a silently-dropped tx needs
+   re-pushing, and re-broadcast is idempotent, so it isn't gated on the receipt
+   lookup succeeding; the RPC failure is still surfaced.
 
 **Txs sent from another client** are caught by a second poll
 (`NonceCheckWorker`, `NONCE_POLL_INTERVAL_MS` = 30s): it reads the displayed

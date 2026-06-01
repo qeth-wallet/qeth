@@ -170,12 +170,19 @@ class PendingProbeWorker(QThread):
         self._rebroadcast = rebroadcast
 
     def run(self) -> None:
+        client = EthClient(self._chain)
         try:
-            client = EthClient(self._chain)
             receipt = client.rpc(
                 "eth_getTransactionReceipt", [self._tx_hash],
             )
         except Exception as e:
+            # The probe RPC itself is flaky (e.g. DRPC 408 timeouts — the
+            # exact condition a dropped tx ends up in). Don't give up
+            # without re-broadcasting: that's the whole point of the
+            # watcher, and re-broadcast is idempotent + safe (a spent or
+            # already-known tx is rejected harmlessly). Then surface the
+            # failure so the user knows the RPC is struggling.
+            self._try_rebroadcast(client)
             self.failed.emit(self._chain, self._tx_hash, str(e))
             return
         if receipt is not None:
@@ -189,6 +196,7 @@ class PendingProbeWorker(QThread):
                 to_checksum_address(self._from), "latest",
             )
         except Exception as e:
+            self._try_rebroadcast(client)
             self.failed.emit(self._chain, self._tx_hash, str(e))
             return
         if self._nonce < latest:
@@ -196,15 +204,20 @@ class PendingProbeWorker(QThread):
             return
         # Nonce still open: genuinely unconfirmed. Re-push the raw bytes
         # in case the RPC silently dropped it.
-        if self._rebroadcast and self._raw:
-            try:
-                client.send_raw_transaction(self._raw)
-            except Exception as e:
-                # "already known" / "nonce too low" / "known transaction"
-                # are expected and harmless — it's already in a mempool
-                # or just got mined. Don't surface them.
-                log.debug("re-broadcast of %s: %s", self._tx_hash, e)
+        self._try_rebroadcast(client)
         self.still_pending.emit(self._chain, self._tx_hash)
+
+    def _try_rebroadcast(self, client) -> None:
+        if not (self._rebroadcast and self._raw):
+            return
+        try:
+            client.send_raw_transaction(self._raw)
+        except Exception as e:
+            # "already known" / "nonce too low" / "known transaction" are
+            # expected and harmless — already in a mempool or just mined.
+            # A network error here just means this push didn't land; the
+            # next tick tries again.
+            log.debug("re-broadcast of %s: %s", self._tx_hash, e)
 
 
 class PendingTxWatcher(QObject):

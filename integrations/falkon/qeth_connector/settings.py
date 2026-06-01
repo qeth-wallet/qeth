@@ -15,6 +15,7 @@
 # ============================================================
 
 import json
+import os
 
 from PySide6.QtCore import Qt, QByteArray, QUrl
 from PySide6.QtGui import QIcon
@@ -27,6 +28,20 @@ from PySide6.QtWidgets import (
 )
 
 _ENDPOINT = "http://127.0.0.1:1248/"
+_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _connector_version():
+    """Plugin version, read from metadata.desktop (the single source of
+    truth Falkon also reads). Empty string if unreadable."""
+    try:
+        with open(os.path.join(_DIR, "metadata.desktop"), encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("X-Falkon-Version="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 # Friendly names for the chains qeth ships with; anything else falls
 # back to "Chain <id>". Purely cosmetic for the status line.
@@ -90,7 +105,20 @@ class StatusDialog(QDialog):
         self._recheck = buttons.addButton("Recheck", QDialogButtonBox.ActionRole)
         self._recheck.clicked.connect(self._probe)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+
+        # Bottom row: muted version on the left, buttons on the right.
+        bottom = QHBoxLayout()
+        version = _connector_version()
+        if version:
+            vlabel = QLabel(f"qeth connector {version}")
+            vf = vlabel.font()
+            vf.setPointSizeF(max(7.0, vf.pointSizeF() * 0.85))
+            vlabel.setFont(vf)
+            vlabel.setEnabled(False)   # theme-safe muting via disabled text colour
+            bottom.addWidget(vlabel)
+        bottom.addStretch(1)
+        bottom.addWidget(buttons)
+        outer.addLayout(bottom)
 
         self._probe()
 

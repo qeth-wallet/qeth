@@ -39,6 +39,16 @@ async def _cors(request: web.Request, handler):
     resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "*"
     resp.headers["Access-Control-Allow-Credentials"] = "true"
+    # Private Network Access (Chromium): a page served over public
+    # HTTPS (any dapp) that fetches this loopback server triggers a
+    # CORS preflight carrying ``Access-Control-Request-Private-Network``;
+    # the browser blocks the request unless the response grants it.
+    # Frame's own extension sidesteps this by talking from an
+    # extension context, but our Falkon connector injects the
+    # provider into the page's main world, so its fetch / WebSocket
+    # comes straight from the dapp origin and is subject to PNA.
+    # See integrations/falkon/.
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "qeth"
-version = "0.9.2"
+version = "0.9.3"
 description = "Qt-based Ethereum wallet with Ledger support, Frame-compatible JSON-RPC"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"

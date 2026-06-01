@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=qeth
+Comment=Connect dapps to a running qeth wallet (EIP-1193 / EIP-6963 provider)
+Icon=qeth-icon.svg
+Type=Service
+X-Falkon-Type=Extension/Python
+
+X-Falkon-Author=qeth
+X-Falkon-Email=michwill@yieldbasis.com
+X-Falkon-Version=0.1.0
+X-Falkon-Settings=false

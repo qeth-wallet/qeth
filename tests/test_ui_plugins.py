@@ -1767,6 +1767,46 @@ def wallets_plugin(qtbot, tmp_qeth):
     return plugin
 
 
+class TestWalletsTreeExpansion:
+    """Switching the default account rebuilds the tree; the user's
+    collapse/expand state must survive the rebuild (it used to be reset
+    to all-expanded every time)."""
+
+    def _plugin(self, qtbot, default):
+        from qeth.store import Store
+        from qeth.plugins.wallets import WalletsPlugin
+        a1 = "0x" + "11" * 20
+        a2 = "0x" + "22" * 20
+        store = Store.load()
+        store.accounts = [
+            {"address": a1, "source": "ledger", "scheme": "Ledger Live", "label": ""},
+            {"address": a2, "source": "ledger", "scheme": "Ledger Live", "label": ""},
+        ]
+        store.default_account = a1 if default == 1 else a2
+        plugin = WalletsPlugin(store)
+        qtbot.addWidget(plugin.widget())
+        plugin._rebuild_tree()
+        return plugin, store, a1, a2
+
+    def test_collapsed_group_survives_default_switch(self, qtbot, tmp_qeth):
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)
+        tree = plugin._tree
+        ledger_root = tree.topLevelItem(0)
+        assert ledger_root.isExpanded()          # default: expanded on first build
+        ledger_root.setExpanded(False)           # user collapses it
+        # switching the default account triggers a rebuild
+        store.default_account = a2
+        plugin._rebuild_tree()
+        assert tree.topLevelItem(0).isExpanded() is False   # stays collapsed
+
+    def test_expanded_group_still_expands(self, qtbot, tmp_qeth):
+        # the inverse: an expanded group stays expanded across rebuild
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)
+        store.default_account = a2
+        plugin._rebuild_tree()
+        assert plugin._tree.topLevelItem(0).isExpanded() is True
+
+
 class TestTokensStartupNonBlocking:
     """Pin the no-wait-for-token-lists startup behaviour: when the
     wallet cache holds tokens for the selected view, the panel must

@@ -53,6 +53,10 @@ from ..plugin import Plugin
 # account rows; the shared selection delegate (ui.py) reads it to paint
 # those rows with a sticky-note background. UserRole holds the address.
 ACCOUNT_LABEL_ROLE = Qt.UserRole + 1
+# Stable key on collapsible group/root rows so _rebuild_tree can carry
+# the user's expand/collapse state across a rebuild (e.g. when switching
+# the default account) instead of force-expanding everything each time.
+EXPAND_KEY_ROLE = Qt.UserRole + 2
 
 
 def _palette_aware_error_color(palette) -> str:
@@ -515,9 +519,35 @@ class WalletsPlugin(Plugin):
 
     # --- tree population ----------------------------------------------------
 
+    def _capture_expansion(self) -> dict:
+        """Snapshot which keyed group/root rows are expanded, so a rebuild
+        can preserve the user's collapse state instead of resetting it."""
+        out: dict = {}
+        if self._tree is None:
+            return out
+
+        def walk(item: QTreeWidgetItem) -> None:
+            key = item.data(0, EXPAND_KEY_ROLE)
+            if key:
+                out[key] = item.isExpanded()
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            walk(self._tree.topLevelItem(i))
+        return out
+
+    def _restore_expand(self, item: QTreeWidgetItem, key: str,
+                        snapshot: dict) -> None:
+        """Tag a collapsible row with its stable key and restore its
+        expanded state (rows not seen before default to expanded)."""
+        item.setData(0, EXPAND_KEY_ROLE, key)
+        item.setExpanded(snapshot.get(key, True))
+
     def _rebuild_tree(self) -> None:
         if self._tree is None:
             return
+        expanded = self._capture_expansion()
         self._tree.clear()
         ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
         ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
@@ -563,9 +593,9 @@ class WalletsPlugin(Plugin):
             grp.addChild(it)
             if is_default:
                 default_item = it
-        ledger_root.setExpanded(True)
-        for g in groups.values():
-            g.setExpanded(True)
+        self._restore_expand(ledger_root, "ledger", expanded)
+        for scheme, g in groups.items():
+            self._restore_expand(g, f"ledger/{scheme}", expanded)
 
         hot_accts = [a for a in self._store.accounts
                       if a.get("source") == "hot"]
@@ -592,8 +622,7 @@ class WalletsPlugin(Plugin):
             hot_root.addChild(it)
             if is_default:
                 default_item = it
-        if hot_accts:
-            hot_root.setExpanded(True)
+        self._restore_expand(hot_root, "hot", expanded)
 
         watch_accts = [a for a in self._store.accounts
                         if a.get("source") == "watch_only"]
@@ -622,8 +651,7 @@ class WalletsPlugin(Plugin):
             watch_root.addChild(it)
             if is_default:
                 default_item = it
-        if watch_accts:
-            watch_root.setExpanded(True)
+        self._restore_expand(watch_root, "watch", expanded)
 
         if default_item is not None:
             self._tree.setCurrentItem(default_item)

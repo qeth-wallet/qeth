@@ -344,6 +344,9 @@ class TokensPlugin(Plugin):
                 "decimals": entry.decimals,
                 "balance_raw": entry.balance_raw,
                 "logo_uri": tl.logo_uri if tl is not None else None,
+                # USD price from the wallet cache (str or None) so the send
+                # dialog can show the live value of the typed amount.
+                "price_usd": entry.price_usd,
             }
         opener = getattr(self.host, "open_send_dialog", None)
         if callable(opener):

@@ -444,3 +444,40 @@ class TestAddressLinkCopyMenu:
         # The From row is built via _link_label with an explorer URL.
         lbl = dlg._link_label("0x" + "11" * 20, "https://etherscan.io/address/x")
         assert lbl.contextMenuPolicy() == Qt.CustomContextMenu
+
+
+class TestLiveUsdValue:
+    """Typing an amount shows its USD value live, for both ERC-20 sends
+    (using the token's cached price) and native sends (using the host's
+    native price). No price → no value (rather than a misleading $0)."""
+
+    def test_token_amount_shows_usd(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg._asset["price_usd"] = "0.9998"          # USDC ~ $1
+        dlg.amount_edit.setText("100")
+        assert "USD" in dlg._value_usd_lbl.text()
+        assert dlg._value_usd_lbl.text().startswith("≈")
+        # 100 * 0.9998 = 99.98
+        assert "99.98" in dlg._value_usd_lbl.text()
+
+    def test_native_amount_uses_host_native_price(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        dlg._native_price_usd = Decimal("2500")
+        dlg.amount_edit.setText("2")
+        assert "5000" in dlg._value_usd_lbl.text()    # 2 ETH * 2500
+
+    def test_no_price_shows_no_value(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        # price_usd absent on the asset; native price is None.
+        dlg.amount_edit.setText("100")
+        assert dlg._value_usd_lbl.text() == ""
+
+    def test_invalid_or_empty_amount_clears_value(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10_000_000)
+        dlg._asset["price_usd"] = "1.0"
+        dlg.amount_edit.setText("100")
+        assert dlg._value_usd_lbl.text() != ""
+        dlg.amount_edit.setText("")                   # cleared
+        assert dlg._value_usd_lbl.text() == ""
+        dlg.amount_edit.setText("abc")                # garbage
+        assert dlg._value_usd_lbl.text() == ""

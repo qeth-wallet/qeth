@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime
 import html as _html
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from eth_utils import to_checksum_address
@@ -3522,6 +3522,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         )
         header.addRow("Balance:", self.balance_lbl)
 
+        # Live USD value of the typed amount (token or native). Updated on
+        # every keystroke; blank when there's no price or no valid amount.
+        self._value_usd_lbl = self._value_label("")
+        header.addRow("Value:", self._value_usd_lbl)
+
         # Decoded preview of the call about to be signed. Live-updated
         # as the user types recipient + amount. Set to Expanding so it
         # absorbs vertical space (otherwise the form layouts above and
@@ -3638,6 +3643,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.recipient_edit.textChanged.connect(self._update_state)
         self.recipient_edit.textChanged.connect(self._update_recipient_hint)
         self.amount_edit.textChanged.connect(self._update_state)
+        self.amount_edit.textChanged.connect(self._update_usd_value)
         for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
             if sp is not None:
                 sp.valueChanged.connect(self._update_max_total)
@@ -3774,6 +3780,39 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         return None
 
     # --- input handling --------------------------------------------
+
+    def _asset_price_usd(self) -> Optional[Decimal]:
+        """USD price for the asset being sent: the native price the host
+        passed in for native sends, or the token's cached price for ERC-20s.
+        ``None`` when no price is known (we then show no value rather than
+        a misleading $0)."""
+        if self._asset.get("is_native"):
+            return self._native_price_usd
+        p = self._asset.get("price_usd")
+        if not p:
+            return None
+        try:
+            return Decimal(str(p))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def _update_usd_value(self) -> None:
+        """Show ``≈ <usd>`` for the amount currently typed. Blank when the
+        amount is empty/invalid or no price is available."""
+        price = self._asset_price_usd()
+        text = self.amount_edit.text().strip().replace(",", "")
+        if price is None or not text:
+            self._value_usd_lbl.setText("")
+            return
+        try:
+            amount = Decimal(text)
+        except (InvalidOperation, ValueError):
+            self._value_usd_lbl.setText("")
+            return
+        if amount < 0:
+            self._value_usd_lbl.setText("")
+            return
+        self._value_usd_lbl.setText("≈ " + _format_usd(amount * price))
 
     def _on_max_clicked(self) -> None:
         """For ERC-20s the full balance is sendable — gas is paid

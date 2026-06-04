@@ -297,6 +297,7 @@ class LedgerSigner(Signer):
                 )
             kwargs["gas_price"] = req.gas_price
 
+        self._verify_device_holds(req.from_addr, path)
         try:
             signed = create_transaction(**kwargs)
         except Exception as e:
@@ -348,6 +349,7 @@ class LedgerSigner(Signer):
         to review the message (truncated on screen) and confirm —
         same UX as MetaMask's "Sign" popup."""
         path = self._require_path(req.from_addr)
+        self._verify_device_holds(req.from_addr, path)
         try:
             from ledgereth.messages import sign_message
         except ImportError as e:
@@ -366,6 +368,7 @@ class LedgerSigner(Signer):
         else falls back to a "blind sign" prompt the user must
         enable in the device settings."""
         path = self._require_path(req.from_addr)
+        self._verify_device_holds(req.from_addr, path)
         try:
             from ledgereth.messages import sign_typed_data_draft
         except ImportError as e:
@@ -418,6 +421,37 @@ class LedgerSigner(Signer):
                 f"Account {address} has no derivation path on file"
             )
         return path
+
+    def _verify_device_holds(self, address: str, path: str) -> None:
+        """Refuse to sign unless the *connected* Ledger actually derives
+        ``address`` at ``path``.
+
+        qeth records Ledger accounts by address + path with no device or
+        seed identifier, so if a *different* Ledger is plugged in it would
+        otherwise sign at this path as a DIFFERENT address — producing a
+        valid signature for the wrong account (which then fails at
+        broadcast, or in a nonce/balance coincidence sends an unintended
+        tx). Re-derive the path on whatever device is connected and bail
+        out with a clear message if it doesn't match. ``get_account_by_path``
+        is a silent getAddress read — no on-device confirmation prompt."""
+        try:
+            from ledgereth.accounts import get_account_by_path
+            from ledgereth.comms import init_dongle
+        except ImportError as e:
+            raise SignerError(f"ledgereth not installed: {e}") from e
+        try:
+            dongle = init_dongle()
+            derived = get_account_by_path(path, dongle=dongle).address
+        except Exception as e:
+            raise SignerError(_explain_ledger_error(e)) from e
+        finally:
+            _clear_dongle_cache()
+        if derived.lower() != address.lower():
+            raise SignerError(
+                f"This Ledger doesn't hold {address} — it derives "
+                f"{derived} at {path}. Connect the device/seed that owns "
+                f"{address} and try again."
+            )
 
 
 def _clear_dongle_cache() -> None:

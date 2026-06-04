@@ -562,6 +562,61 @@ class TestLedgerSignerLookup:
         with pytest.raises(SignerError, match="derivation path"):
             signer.sign(req, DEFAULT_CHAINS[0])
 
+    def test_sign_refuses_when_connected_device_derives_different_address(
+            self, monkeypatch):
+        """Wrong Ledger plugged in: the path derives a different address,
+        so signing must bail out instead of signing for the wrong account."""
+        import ledgereth.accounts as _acc
+        import ledgereth.comms as _comms
+        from qeth.ledger import LedgerSigner
+        from qeth.chains import DEFAULT_CHAINS
+        monkeypatch.setattr(_comms, "init_dongle", lambda *a, **k: object())
+
+        class _Acct:
+            address = "0x" + "ab" * 20      # NOT ADDR_CHECKSUM
+
+        monkeypatch.setattr(_acc, "get_account_by_path", lambda *a, **k: _Acct())
+        signer = LedgerSigner(self._store([
+            {"address": ADDR_CHECKSUM, "source": "ledger",
+             "path": "44'/60'/0'/0/0"},
+        ]))
+        req = SigningRequest(
+            chain_id=1, from_addr=ADDR_CHECKSUM, to_addr=TOKEN_CHECKSUM,
+            gas=21000, nonce=0,
+            max_fee_per_gas=10**9, max_priority_fee_per_gas=10**8,
+        )
+        with pytest.raises(SignerError, match="doesn't hold"):
+            signer.sign(req, DEFAULT_CHAINS[0])
+
+    def test_sign_proceeds_when_connected_device_matches(self, monkeypatch):
+        """Correct device: the path derives the stored address, so the
+        guard passes and we reach the real device sign."""
+        import ledgereth.accounts as _acc
+        import ledgereth.comms as _comms
+        import ledgereth.transactions as _txs
+        from qeth.ledger import LedgerSigner
+        from qeth.chains import DEFAULT_CHAINS
+        monkeypatch.setattr(_comms, "init_dongle", lambda *a, **k: object())
+
+        class _Acct:
+            address = ADDR_CHECKSUM
+
+        class _Signed:
+            rawTransaction = "0x" + "cd" * 4
+
+        monkeypatch.setattr(_acc, "get_account_by_path", lambda *a, **k: _Acct())
+        monkeypatch.setattr(_txs, "create_transaction", lambda **k: _Signed())
+        signer = LedgerSigner(self._store([
+            {"address": ADDR_CHECKSUM, "source": "ledger",
+             "path": "44'/60'/0'/0/0"},
+        ]))
+        req = SigningRequest(
+            chain_id=1, from_addr=ADDR_CHECKSUM, to_addr=TOKEN_CHECKSUM,
+            gas=21000, nonce=0,
+            max_fee_per_gas=10**9, max_priority_fee_per_gas=10**8,
+        )
+        assert signer.sign(req, DEFAULT_CHAINS[0]) == bytes.fromhex("cd" * 4)
+
     def test_sign_for_unknown_address_raises(self):
         from qeth.ledger import LedgerSigner
         from qeth.chains import DEFAULT_CHAINS
@@ -770,6 +825,7 @@ class TestLedgerDongleCache:
         """Plant a fake dongle in ledgereth's cache and a stub
         create_transaction so the test never touches USB. Returns
         the fake dongle + a record dict the test can inspect."""
+        from ledgereth import accounts as _accts
         from ledgereth import comms as _comms
         from ledgereth import transactions as _txns
 
@@ -782,6 +838,9 @@ class TestLedgerDongleCache:
         class _FakeSigned:
             rawTransaction = "0x02f8"
 
+        class _FakeAcct:
+            address = ADDR_CHECKSUM      # the device "holds" the stored addr
+
         def fake_create_transaction(**kwargs):
             record["create_called"] = True
             return _FakeSigned()
@@ -789,6 +848,11 @@ class TestLedgerDongleCache:
         fake = _FakeDongle()
         monkeypatch.setattr(_comms, "DONGLE_CACHE", fake)
         monkeypatch.setattr(_comms, "DONGLE_CONFIG_CACHE", object())
+        # The verify-before-sign guard re-derives the path on the
+        # connected device; make that return the stored address so the
+        # guard passes and we exercise the real sign + cache cleanup.
+        monkeypatch.setattr(_comms, "init_dongle", lambda *a, **k: fake)
+        monkeypatch.setattr(_accts, "get_account_by_path", lambda *a, **k: _FakeAcct())
         monkeypatch.setattr(_txns, "create_transaction", fake_create_transaction)
         return fake, record
 

@@ -277,11 +277,14 @@ class IdentityBadge:
 def describe_identity(identity: ContractIdentity, *,
                       my_addresses, deployer_count: int = 0,
                       interaction_count: Optional[int] = None,
+                      context: str = "interact",
                       now_ts: float) -> IdentityBadge:
     """Render a contract identity as a human badge. ``deployer_count`` is
     how many of *your* cached contracts share this deployer (including
-    this one); ``interaction_count`` is how many times you've sent to this
-    address in your cached history (None = don't show it); ``now_ts`` is
+    this one); ``interaction_count`` is your prior usage of this address in
+    the cached history (None = don't show it); ``context`` picks the verb —
+    ``"interact"`` ("you've interacted N×", for a contract you call) vs
+    ``"send"`` ("sent here N×", for a transfer destination). ``now_ts`` is
     the current unix time (passed in for testability)."""
     mine = {a.lower() for a in my_addresses}
     if not identity.is_contract:
@@ -340,9 +343,12 @@ def describe_identity(identity: ContractIdentity, *,
     # one is reassuring.
     if interaction_count is not None:
         if interaction_count >= 1:
-            lines.append(f"you've interacted {interaction_count:,}×")
+            lines.append(f"sent here {interaction_count:,}× before"
+                         if context == "send"
+                         else f"you've interacted {interaction_count:,}×")
         else:
-            lines.append("⚠ first interaction")
+            lines.append("⚠ first time sending here" if context == "send"
+                         else "⚠ first interaction")
             if level == "ok":
                 level = "caution"
 

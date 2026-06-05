@@ -1783,7 +1783,7 @@ class ContractIdentityWorker(QThread):
     def __init__(self, source: Optional[ContractIdentitySource],
                  cache: ContractIdentityCache, chain_id: int, address: str,
                  my_addresses, tx_cache: Optional[TransactionCache] = None,
-                 parent=None):
+                 mode: str = "interact", parent=None):
         super().__init__(parent)
         self._source = source
         self._cache = cache
@@ -1791,6 +1791,10 @@ class ContractIdentityWorker(QThread):
         self._address = address
         self._my = list(my_addresses or [])
         self._tx_cache = tx_cache
+        # "interact" = times you've *called* this contract (tx.to == it);
+        # "send" = times you've *sent value here* (native OR token transfer
+        # whose recipient is this address — the Send dialog's case).
+        self._mode = mode
 
     def run(self) -> None:
         idy = self._cache.load(self._chain_id, self._address)
@@ -1808,12 +1812,17 @@ class ContractIdentityWorker(QThread):
         count = (self._cache.deployer_contract_count(self._chain_id, idy.deployer)
                  if idy.deployer else 0)
         # Familiarity count from the local tx-history cache (no network).
-        interactions = (
-            self._tx_cache.interaction_count(self._chain_id, self._address, self._my)
-            if self._tx_cache is not None else None)
+        interactions = None
+        if self._tx_cache is not None:
+            if self._mode == "send":
+                interactions = self._tx_cache.sent_to_count(
+                    self._chain_id, self._address, self._my)
+            else:
+                interactions = self._tx_cache.interaction_count(
+                    self._chain_id, self._address, self._my)
         badge = describe_identity(
             idy, my_addresses=self._my, deployer_count=count,
-            interaction_count=interactions, now_ts=time.time())
+            interaction_count=interactions, context=self._mode, now_ts=time.time())
         self.ready.emit(badge)
 
 
@@ -4028,7 +4037,8 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         label.setStyleSheet("")
         worker = ContractIdentityWorker(
             self._identity_source, self._identity_cache, self.chain.chain_id,
-            addr, self._known_addresses_list, tx_cache=self._tx_cache)
+            addr, self._known_addresses_list, tx_cache=self._tx_cache,
+            mode="send")
         worker.ready.connect(
             lambda badge, a=addr: self._on_identity_ready(a, badge))
         self._start_worker(worker)

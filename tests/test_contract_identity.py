@@ -177,14 +177,19 @@ def test_describe_eoa_is_info():
 
 # --- interaction count (familiarity) -------------------------------------
 
-def _tx(from_addr, to_addr, h):
+def _tx(from_addr, to_addr, h, input_data="0x"):
     from qeth.transactions import Transaction
     return Transaction(
         chain_id=1, hash=h, block_number=1, timestamp=0, nonce=0,
         from_addr=from_addr.lower(),
         to_addr=to_addr.lower() if to_addr else None,
         value_wei=0, gas_used=0, gas_price_wei=0,
-        method_id="0x", input_data="0x", success=True)
+        method_id=input_data[:10], input_data=input_data, success=True)
+
+
+def _transfer_calldata(to):
+    # transfer(address,uint256): selector + 32B-padded addr + 32B amount
+    return "0xa9059cbb" + "00" * 12 + to[2:].lower() + "0" * 64
 
 
 def test_cache_interaction_count(tmp_path):
@@ -199,6 +204,29 @@ def test_cache_interaction_count(tmp_path):
     assert cache.interaction_count(1, contract, [me1]) == 2
     assert cache.interaction_count(1, other, [me1, me2]) == 1
     assert cache.interaction_count(1, "0x" + "00" * 20, [me1, me2]) == 0
+
+
+def test_sent_to_count_includes_token_transfers(tmp_path):
+    # The Send-dialog case: a token send's on-chain `to` is the token
+    # contract, and the destination is in the transfer calldata.
+    from qeth.transactions_cache import TransactionCache
+    cache = TransactionCache(root=tmp_path)
+    me = "0x" + "11" * 20
+    token = "0x" + "dd" * 20       # e.g. USDT
+    recip = "0x" + "cc" * 20
+    cache.save(1, me, [
+        _tx(me, token, "0xt1", _transfer_calldata(recip)),   # token send → recip
+        _tx(me, token, "0xt2", _transfer_calldata(recip)),   # another
+        _tx(me, recip, "0xd1"),                              # native send → recip
+        _tx(me, token, "0xt3", _transfer_calldata("0x" + "ee" * 20)),  # elsewhere
+    ])
+    # Direct-only count sees just the native send — the old, wrong answer
+    # for token sends.
+    assert cache.interaction_count(1, recip, [me]) == 1
+    # sent_to_count adds the two token transfers → 3.
+    assert cache.sent_to_count(1, recip, [me]) == 3
+    # Interacting with the token contract itself = the 3 transfer calls.
+    assert cache.interaction_count(1, token, [me]) == 3
 
 
 def test_cache_interaction_count_dedups_by_hash(tmp_path):
@@ -272,3 +300,17 @@ def test_describe_labeled_eoa():
     eoa = ContractIdentity(ADDR, False, name_tag="Binance: Hot Wallet")
     b = describe_identity(eoa, my_addresses=[], interaction_count=5, now_ts=NOW)
     assert b.text.startswith("Binance: Hot Wallet") and b.level == "ok"
+
+
+def test_describe_context_verb():
+    idy = ContractIdentity(ADDR, True, name="Pool", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD)
+    sent = describe_identity(idy, my_addresses=[], interaction_count=5,
+                             context="send", now_ts=NOW)
+    assert "sent here 5× before" in sent.text
+    first = describe_identity(idy, my_addresses=[], interaction_count=0,
+                              context="send", now_ts=NOW)
+    assert "first time sending here" in first.text and first.level == "caution"
+    inter = describe_identity(idy, my_addresses=[], interaction_count=5,
+                              context="interact", now_ts=NOW)
+    assert "you've interacted 5×" in inter.text

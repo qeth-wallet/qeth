@@ -18,7 +18,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Optional, Protocol
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QStackedWidget, QTabBar, QVBoxLayout, QWidget,
 )
@@ -45,7 +45,7 @@ class Host(Protocol):
         watcher which polls receipts on whatever chain a tx was sent
         on, not necessarily the user's current view."""
 
-    def start_worker(self, worker) -> None:
+    def start_worker(self, worker: QThread) -> QThread:
         """Register a QThread so the host keeps it alive while running."""
 
     def status_message(self, text: str, timeout_ms: int = 3000) -> None:
@@ -238,6 +238,7 @@ class Slot(QWidget):
         the right of the stretch) are untouched."""
         while self._plugin_actions.count():
             item = self._plugin_actions.takeAt(0)
+            assert item is not None  # count() > 0 guarantees an item
             w = item.widget()
             if w is not None:
                 # Reparent away so the layout no longer manages it; the

@@ -328,6 +328,7 @@ class ComposeMessageDialog(QDialog):
     def _emit_request(self) -> None:
         text = self.body_edit.toPlainText()
         stripped = text.strip()
+        req: MessageSigningRequest | TypedDataSigningRequest
         if self._looks_like_typed_data(stripped):
             try:
                 typed = json.loads(stripped)

@@ -46,6 +46,11 @@ from ..abi import (
     KNOWN_EVENT_NAMES, BlockscoutAbiSource, EtherscanV2AbiSource,
     RoutedAbiSource, decode_call, decode_event,
 )
+
+# The three ABI sources are duck-typed (no common base class); this Union
+# is their shared static type for the params/attrs that hold whichever one
+# the caller wired up — or the RoutedAbiSource built internally below.
+AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource
 from ..abi_cache import AbiCache
 from ..chain import EthClient, wei_to_ether
 from ..signing import SignerError, SigningRequest
@@ -686,7 +691,7 @@ class TransactionsPlugin(Plugin):
         self,
         source: Optional[TransactionSource] = None,
         disk_cache: Optional[TransactionCache] = None,
-        abi_source: Optional[BlockscoutAbiSource] = None,
+        abi_source: Optional[AnyAbiSource] = None,
         abi_cache: Optional[AbiCache] = None,
         store=None,
     ):
@@ -755,7 +760,7 @@ class TransactionsPlugin(Plugin):
         self._rendered_for: Optional[tuple[int, str]] = None
         # The widget is built lazily so the plugin can be instantiated
         # outside a Qt event loop (useful in pure-Python imports).
-        self._panel = None
+        self._panel: Optional[TransactionListPanel] = None
         # Wired in attach(); polls for receipts of broadcast txs whose
         # hashes are sitting in cache with pending=True.
         self._pending_watcher: Optional[PendingTxWatcher] = None
@@ -782,7 +787,8 @@ class TransactionsPlugin(Plugin):
         # when Blockscout v2 is down (notably polygon.blockscout.com, which
         # 500s — so proxy contracts like USDC otherwise decode as a bare
         # stub). Shared with the Send/Sign dialogs (same source instance).
-        if hasattr(self._abi_source, "set_storage_reader"):
+        if self._abi_source is not None and hasattr(
+                self._abi_source, "set_storage_reader"):
             self._abi_source.set_storage_reader(self._abi_read_storage)
 
     def _abi_read_storage(self, chain_id: int, address: str, slot: str):
@@ -1216,6 +1222,8 @@ class TransactionsPlugin(Plugin):
         cheap refresh-newest path."""
         key = (chain_id, address_lower)
         self._in_flight.discard(key)
+        if self._panel is None:
+            return
         existing = self._cache.get(key) or []
         existing_hashes = {t.hash for t in existing}
         merged = merge_txs(page, existing)
@@ -1497,7 +1505,7 @@ class TransactionListPanel(QWidget):
         order, and any sort indicator. MainWindow persists this on close
         and restores on startup."""
         return bytes(
-            self.table.horizontalHeader().saveState().toHex()
+            self.table.horizontalHeader().saveState().toHex().data()
         ).decode()
 
     def restore_header_state(self, state_hex: str) -> None:
@@ -1720,7 +1728,7 @@ class AbiFetchWorker(QThread):
 
     ready = Signal(object)
 
-    def __init__(self, source: BlockscoutAbiSource, cache: AbiCache,
+    def __init__(self, source: AnyAbiSource, cache: AbiCache,
                  chain_id: int, address: str, parent=None):
         super().__init__(parent)
         self.source = source
@@ -2038,7 +2046,7 @@ class _EventPreviewMixin:
     def _init_event_preview(self, tabs, *, known_addresses) -> None:
         self._sim_tabs = tabs
         self._sim_key = None
-        self._sim_worker = None
+        self._sim_worker: Optional[SimulateWorker] = None
         self._sim_done = True   # no sim in flight
         self._events = _EventsView(
             chain=self.chain, known_addresses=known_addresses,
@@ -2056,7 +2064,7 @@ class _EventPreviewMixin:
         tabs.addTab(self._events_page, "&Events")
         tabs.currentChanged.connect(self._on_sim_tab_changed)
         # Parented to the dialog so it can't fire after the dialog dies.
-        self._sim_timer = QTimer(self)
+        self._sim_timer = QTimer(self)  # type: ignore[arg-type]  # mixin is always mixed into a QDialog (a QObject)
         self._sim_timer.setSingleShot(True)
         self._sim_timer.timeout.connect(self._on_sim_timeout)
         # The simulation worker is tracked by the host, not this dialog, so
@@ -2158,7 +2166,7 @@ class TransactionDetailsDialog(QDialog):
     """
 
     def __init__(self, tx: Transaction, chain, *,
-                 abi_source: BlockscoutAbiSource,
+                 abi_source: Optional[AnyAbiSource],
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
@@ -2337,8 +2345,9 @@ class TransactionDetailsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
-        # Start ABI fetch + decode (only when there's calldata).
-        if tx.input_data and tx.input_data not in ("0x", "0X") and tx.to_addr:
+        # Start ABI fetch + decode (only when there's calldata + an ABI source).
+        if (tx.input_data and tx.input_data not in ("0x", "0X") and tx.to_addr
+                and self._abi_source is not None):
             self.decoded_view.setPlainText("(decoding…)")
             worker = AbiFetchWorker(
                 self._abi_source, self._abi_cache,
@@ -2833,7 +2842,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
     sign_requested = Signal()
 
     def __init__(self, req: SigningRequest, chain, *,
-                 abi_source: BlockscoutAbiSource,
+                 abi_source: Optional[AnyAbiSource],
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
@@ -2978,6 +2987,10 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         self.spin_gas.setEnabled(False)
         gas_form.addRow("Gas limit:", self.spin_gas)
 
+        # Exactly one fee mode is populated; the other three stay None.
+        self.spin_max_fee: Optional[QDoubleSpinBox]
+        self.spin_priority: Optional[QDoubleSpinBox]
+        self.spin_gas_price: Optional[QDoubleSpinBox]
         if chain.eip1559:
             self.spin_max_fee = QDoubleSpinBox()
             self.spin_max_fee.setRange(0.0, _GWEI_MAX)
@@ -2996,6 +3009,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             gas_form.addRow("Max priority / gas:", self.spin_priority)
             self.spin_gas_price = None
         else:
+            assert self.spin_gas_price is not None
             self.spin_max_fee = None
             self.spin_priority = None
             self.spin_gas_price = QDoubleSpinBox()
@@ -3056,7 +3070,8 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         root.addWidget(self.buttons)
 
         # --- decode calldata in the background ----------------------
-        if req.data and req.data not in ("0x", "0X") and req.to_addr:
+        if (req.data and req.data not in ("0x", "0X") and req.to_addr
+                and self._abi_source is not None):
             self.decoded_view.setPlainText("(decoding…)")
             worker = AbiFetchWorker(
                 self._abi_source, self._abi_cache,
@@ -3145,6 +3160,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         self.spin_gas.setValue(info["gas"])
         self.spin_gas.setEnabled(True)
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             self.spin_max_fee.setValue(_wei_to_gwei(info["max_fee_per_gas"]))
             self.spin_max_fee.setEnabled(True)
             self.spin_priority.setValue(
@@ -3152,6 +3168,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             )
             self.spin_priority.setEnabled(True)
         else:
+            assert self.spin_gas_price is not None
             self.spin_gas_price.setValue(_wei_to_gwei(info["gas_price"]))
             self.spin_gas_price.setEnabled(True)
         self.base_fee_lbl.setText(
@@ -3182,9 +3199,11 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                 btn.setEnabled(not busy)
         self.spin_gas.setEnabled(not busy and self._gas_ready)
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             self.spin_max_fee.setEnabled(not busy and self._gas_ready)
             self.spin_priority.setEnabled(not busy and self._gas_ready)
         else:
+            assert self.spin_gas_price is not None
             self.spin_gas_price.setEnabled(not busy and self._gas_ready)
 
     def _update_max_total(self) -> None:
@@ -3212,10 +3231,12 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         gas = min(self._estimated_gas or self.spin_gas.value(),
                   self.spin_gas.value())
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             effective_per_gas_wei = (
                 self._base_fee_wei + _gwei_to_wei(self.spin_priority.value())
             )
         else:
+            assert self.spin_gas_price is not None
             effective_per_gas_wei = _gwei_to_wei(self.spin_gas_price.value())
         fee_wei = gas * effective_per_gas_wei
         text = f"≈ {wei_to_ether(fee_wei)} {self.chain.symbol}"
@@ -3369,12 +3390,14 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             "nonce": self._suggested_nonce,
         }
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             kwargs["max_fee_per_gas"] = _gwei_to_wei(self.spin_max_fee.value())
             kwargs["max_priority_fee_per_gas"] = _gwei_to_wei(
                 self.spin_priority.value()
             )
             kwargs["gas_price"] = None
         else:
+            assert self.spin_gas_price is not None
             kwargs["gas_price"] = _gwei_to_wei(self.spin_gas_price.value())
             kwargs["max_fee_per_gas"] = None
             kwargs["max_priority_fee_per_gas"] = None
@@ -3403,7 +3426,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
     sign_requested = Signal()
 
     def __init__(self, asset: dict, chain, from_addr: str, *,
-                 abi_source: BlockscoutAbiSource,
+                 abi_source: Optional[AnyAbiSource],
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
@@ -3562,6 +3585,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.spin_gas.setEnabled(False)
         gas_form.addRow("Gas limit:", self.spin_gas)
 
+        # Exactly one fee mode is populated; the other three stay None.
+        self.spin_max_fee: Optional[QDoubleSpinBox]
+        self.spin_priority: Optional[QDoubleSpinBox]
+        self.spin_gas_price: Optional[QDoubleSpinBox]
         if chain.eip1559:
             self.spin_max_fee = QDoubleSpinBox()
             self.spin_max_fee.setRange(0.0, _GWEI_MAX)
@@ -3580,6 +3607,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             gas_form.addRow("Max priority / gas:", self.spin_priority)
             self.spin_gas_price = None
         else:
+            assert self.spin_gas_price is not None
             self.spin_max_fee = None
             self.spin_priority = None
             self.spin_gas_price = QDoubleSpinBox()
@@ -3605,6 +3633,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         # too — so a "Total leaving wallet" line that combines fee +
         # value is genuinely useful. For ERC-20s it'd just duplicate
         # the Amount field, so we only show it for native sends.
+        self.total_lbl: Optional[QLabel]
         if asset["is_native"]:
             self.total_lbl = self._value_label("—")
             summary.addRow("Total to send:", self.total_lbl)
@@ -3836,8 +3865,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                 self.spin_gas.value(),
             )
             if self.chain.eip1559:
+                assert self.spin_max_fee is not None and self.spin_priority is not None
                 ceiling = _gwei_to_wei(self.spin_max_fee.value())
             else:
+                assert self.spin_gas_price is not None
                 ceiling = _gwei_to_wei(self.spin_gas_price.value())
             gas_cost = (gas * ceiling * 3) // 2
             raw = max(0, raw - gas_cost)
@@ -3997,6 +4028,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.spin_gas.setValue(info["gas"])
         self.spin_gas.setEnabled(True)
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             self.spin_max_fee.setValue(_wei_to_gwei(info["max_fee_per_gas"]))
             self.spin_max_fee.setEnabled(True)
             self.spin_priority.setValue(
@@ -4004,6 +4036,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             )
             self.spin_priority.setEnabled(True)
         else:
+            assert self.spin_gas_price is not None
             self.spin_gas_price.setValue(_wei_to_gwei(info["gas_price"]))
             self.spin_gas_price.setEnabled(True)
         self.base_fee_lbl.setText(
@@ -4063,10 +4096,12 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         gas = min(self._estimated_gas or self.spin_gas.value(),
                   self.spin_gas.value())
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             effective = (
                 self._base_fee_wei + _gwei_to_wei(self.spin_priority.value())
             )
         else:
+            assert self.spin_gas_price is not None
             effective = _gwei_to_wei(self.spin_gas_price.value())
         fee_wei = gas * effective
         fee_text = f"≈ {wei_to_ether(fee_wei)} {self.chain.symbol}"
@@ -4099,9 +4134,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.max_btn.setEnabled(not busy)
         self.spin_gas.setEnabled(not busy and self._gas_ready)
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             self.spin_max_fee.setEnabled(not busy and self._gas_ready)
             self.spin_priority.setEnabled(not busy and self._gas_ready)
         else:
+            assert self.spin_gas_price is not None
             self.spin_gas_price.setEnabled(not busy and self._gas_ready)
 
     # --- request construction --------------------------------------
@@ -4149,12 +4186,14 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             "nonce": self._suggested_nonce,
         }
         if self.chain.eip1559:
+            assert self.spin_max_fee is not None and self.spin_priority is not None
             kwargs["max_fee_per_gas"] = _gwei_to_wei(self.spin_max_fee.value())
             kwargs["max_priority_fee_per_gas"] = _gwei_to_wei(
                 self.spin_priority.value()
             )
             kwargs["gas_price"] = None
         else:
+            assert self.spin_gas_price is not None
             kwargs["gas_price"] = _gwei_to_wei(self.spin_gas_price.value())
             kwargs["max_fee_per_gas"] = None
             kwargs["max_priority_fee_per_gas"] = None

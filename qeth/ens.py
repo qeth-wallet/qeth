@@ -51,7 +51,7 @@ def lookup_ens_name(rpc_url: str, address: str) -> Optional[str]:
                 "timeout": 15,
             },
         ))
-        name = w3.ens.name(addr)
+        name = w3.ens.name(addr)  # type: ignore[union-attr]  # .ens is set (we built w3 with a provider), never the Empty sentinel
     except Exception as e:
         log.debug("ENS reverse lookup failed for %s: %s", addr, e)
         return None
@@ -62,7 +62,7 @@ def lookup_ens_name(rpc_url: str, address: str) -> Optional[str]:
     # drift — the cost of a forged "vitalik.eth" claim on a random
     # address is high.
     try:
-        forward = w3.ens.address(name)
+        forward = w3.ens.address(name)  # type: ignore[union-attr]  # see above
     except Exception:
         return None
     if not forward or forward.lower() != addr.lower():

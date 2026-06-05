@@ -222,6 +222,7 @@ class LedgerWorker(QThread):
         mempool from another client could otherwise tip a fresh
         address into looking used."""
         try:
+            assert self.client is not None  # only called once a chain is set
             return self.client.get_transaction_count(address, "latest")
         except Exception:
             return 0

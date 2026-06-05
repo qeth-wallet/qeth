@@ -53,14 +53,19 @@ qt_api = "pyside6"
 
 [tool.mypy]
 python_version = "3.10"
-# Enforced scope: the Qt-free core only. The PySide6 UI layer (ui.py,
-# plugins/*, icons, tray, ledger, signing, …) is deliberately NOT listed —
-# PySide6's type stubs are incomplete (nested Qt enums like
-# QItemSelectionModel.ClearAndSelect, Signal/Slot), producing ~300
-# unfixable false positives. Run `uv run mypy` (no args) to type-check
-# the enforced set; tests/test_typing.py gates it. Tighten later by
-# adding disallow_untyped_defs once the core is fully annotated.
+# Enforced scope. Two tiers:
+#  - The Qt-free core: fully checked.
+#  - The PySide6 UI layer: checked with `attr-defined` disabled (see the
+#    override below). PySide6's stubs only expose Qt enums in their
+#    *scoped* form (Qt.AlignmentFlag.AlignLeft); our code still uses the
+#    deprecated flat aliases (Qt.AlignLeft), which trips ~230
+#    `attr-defined` false positives. Disabling that one code lets the
+#    *real* errors (None-safety, bad args) through. The flat→scoped enum
+#    migration (which lets us re-enable attr-defined) is the follow-up.
+# Run `uv run mypy` (no args) to check the enforced set; tests/test_typing.py
+# gates it.
 files = [
+    # --- Qt-free core (fully checked) ---
     "qeth/__init__.py",
     "qeth/chain.py",
     "qeth/chains.py",
@@ -80,11 +85,49 @@ files = [
     "qeth/import_sources.py",
     "qeth/chainlist.py",
     "qeth/rpc.py",
+    # --- PySide6 UI layer (checked, attr-defined disabled) ---
+    "qeth/__main__.py",
+    "qeth/ui.py",
+    "qeth/plugin.py",
+    "qeth/plugins/wallets.py",
+    "qeth/plugins/tokens.py",
+    "qeth/plugins/transactions.py",
+    "qeth/plugins/sign_message.py",
+    "qeth/icons.py",
+    "qeth/tray.py",
+    "qeth/ledger.py",
+    "qeth/signing.py",
+    "qeth/alerts.py",
+    "qeth/branding.py",
+    "qeth/formatting.py",
+    "qeth/ens.py",
+    "qeth/chain_rpc_dialog.py",
 ]
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 check_untyped_defs = true
+
+# PySide6 UI layer: suppress the deprecated-flat-enum noise (~230
+# `attr-defined`) so the real bugs surface. Remove this once the code
+# is migrated to scoped enum access (Qt.AlignmentFlag.AlignLeft).
+[[tool.mypy.overrides]]
+module = [
+    "qeth.__main__",
+    "qeth.ui",
+    "qeth.plugin",
+    "qeth.plugins.*",
+    "qeth.icons",
+    "qeth.tray",
+    "qeth.ledger",
+    "qeth.signing",
+    "qeth.alerts",
+    "qeth.branding",
+    "qeth.formatting",
+    "qeth.ens",
+    "qeth.chain_rpc_dialog",
+]
+disable_error_code = ["attr-defined"]
 
 # Third-party packages without (complete) type stubs. Suppress
 # "missing import" noise so the check stays focused on our own code.

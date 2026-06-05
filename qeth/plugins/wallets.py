@@ -228,6 +228,7 @@ class WalletsPlugin(Plugin):
         if self._container is None:
             self._build()
             self._rebuild_tree()
+        assert self._container is not None  # _build() sets it
         return self._container
 
     def action_widgets(self):
@@ -288,7 +289,7 @@ class WalletsPlugin(Plugin):
     def splitter_state(self) -> str:
         if self._splitter is None:
             return ""
-        return bytes(self._splitter.saveState().toHex()).decode()
+        return bytes(self._splitter.saveState().toHex().data()).decode()
 
     def restore_splitter_state(self, state_hex: str) -> None:
         if self._splitter is None or not state_hex:
@@ -362,6 +363,8 @@ class WalletsPlugin(Plugin):
         )
         # Make Ctrl+C / Del work while the accounts tree has focus
         # (the actions carry the shortcuts; the tree is their context).
+        # _build_account_actions() above created these.
+        assert self.act_copy is not None and self.act_remove is not None
         self._tree.addAction(self.act_copy)
         self._tree.addAction(self.act_remove)
         self._splitter.addWidget(self._tree)
@@ -526,7 +529,9 @@ class WalletsPlugin(Plugin):
         if self._tree is None:
             return out
 
-        def walk(item: QTreeWidgetItem) -> None:
+        def walk(item: Optional[QTreeWidgetItem]) -> None:
+            if item is None:
+                return
             key = item.data(0, EXPAND_KEY_ROLE)
             if key:
                 out[key] = item.isExpanded()
@@ -663,8 +668,12 @@ class WalletsPlugin(Plugin):
         current display order, then persist that order via the Store.
         Triggered after _ReorderTree commits an internal move."""
         ordered: list[str] = []
+        if self._tree is None:
+            return
 
-        def walk(item: QTreeWidgetItem) -> None:
+        def walk(item: Optional[QTreeWidgetItem]) -> None:
+            if item is None:
+                return
             addr = item.data(0, Qt.UserRole)
             if isinstance(addr, str) and addr:
                 ordered.append(addr)
@@ -697,6 +706,8 @@ class WalletsPlugin(Plugin):
         self._set_default(address)
 
     def _on_tree_selection(self) -> None:
+        assert (self.act_copy is not None and self.act_remove is not None
+                and self._details is not None)  # built before signals connect
         addrs = self.selected_addresses()
         # Copy only makes sense for a single address; Remove handles many.
         self.act_copy.setEnabled(len(addrs) == 1)
@@ -721,6 +732,9 @@ class WalletsPlugin(Plugin):
         button row and exposes Set-as-default — which the details
         pane below already offers, but having it on the row's right-
         click means the user doesn't have to navigate down."""
+        assert (self.act_add is not None and self.act_copy is not None
+                and self.act_remove is not None and self._details is not None
+                and self._tree is not None)  # built before signals connect
         addrs = self.selected_addresses()
         menu = QMenu(self._tree)
         menu.addAction(self.act_add)
@@ -1173,7 +1187,8 @@ class DetailsPanel(QWidget):
         self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.set_default_btn.setMinimumHeight(self.set_default_btn.sizeHint().height())
         self.set_default_btn.clicked.connect(
-            lambda: self._current and self.set_default_requested.emit(self._current)
+            lambda: (self.set_default_requested.emit(self._current)
+                     if self._current else None)
         )
 
         # "Sign message…" — opens the compose dialog for the
@@ -1201,9 +1216,8 @@ class DetailsPanel(QWidget):
             self.sign_message_btn.sizeHint().height()
         )
         self.sign_message_btn.clicked.connect(
-            lambda: self._current and self.sign_message_requested.emit(
-                self._current
-            )
+            lambda: (self.sign_message_requested.emit(self._current)
+                     if self._current else None)
         )
 
         # Stretch pushes the buttons to the very bottom of the panel.
@@ -1264,7 +1278,7 @@ class DetailsPanel(QWidget):
         # ethereum: URI per EIP-681 so wallets recognize it as a send intent
         segno.make(f"ethereum:{address}", error="m").save(buf, kind="png", scale=6, border=2)
         pix = QPixmap()
-        pix.loadFromData(buf.getvalue(), "PNG")
+        pix.loadFromData(buf.getvalue())  # format auto-detected from the PNG header
         self.qr_lbl.setPixmap(pix.scaled(
             self.qr_lbl.size(), Qt.KeepAspectRatio, Qt.FastTransformation
         ))
@@ -2100,7 +2114,7 @@ class _ImportSourcePanel(QWidget):
         if self.src_pass_edit is not None:
             if not self.src_pass_edit.text():
                 return False
-        if self.dst_pass1_edit is not None:
+        if self.dst_pass1_edit is not None and self.dst_pass2_edit is not None:
             p1 = self.dst_pass1_edit.text()
             p2 = self.dst_pass2_edit.text()
             if not p1 or p1 != p2 or len(p1) < 8:

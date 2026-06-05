@@ -46,6 +46,7 @@ from ..token_metadata import TokenMetadataCache
 from ..tokenlists import TokenListEntry, TokenLists
 from ..tokens import (
     BlockscoutSource, EtherscanV2Source, RoutedTokenSource, TokenBalance,
+    TokenSource,
 )
 from ..wallet_cache import CachedToken, CachedWallet, WalletCache
 
@@ -87,7 +88,7 @@ class TokenListWorker(QThread):
     fetched = Signal(object, list)
     failed = Signal(str)
 
-    def __init__(self, chain, address: str, source: BlockscoutSource,
+    def __init__(self, chain, address: str, source: TokenSource,
                  lists: TokenLists, store, show_all: bool = False, parent=None):
         super().__init__(parent)
         self.chain = chain
@@ -608,6 +609,9 @@ class TokensPlugin(Plugin):
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
             return
+        # Captured non-None aliases for the nested worker closures below;
+        # mypy doesn't carry the guard's narrowing into inner scopes.
+        host, panel = self.host, self._panel
         chain = self.host.current_chain()
         view_key = (chain.chain_id, address.lower())
         is_new_view = self._displayed_view != view_key
@@ -752,7 +756,7 @@ class TokensPlugin(Plugin):
                 pw.prices_ready.connect(
                     lambda c, p: self._on_combined_ready(pv, c, p)
                 )
-                self.host.start_worker(pw)
+                host.start_worker(pw)
 
             def kick_risk_then_prices() -> None:
                 """GoPlus first for any uncached non-whitelisted contracts,
@@ -779,7 +783,7 @@ class TokensPlugin(Plugin):
                 rw = RiskWorker(self._risk_source, chain.chain_id, needed_risk)
                 rw.fetched.connect(on_risk)
                 rw.failed.connect(on_risk_fail)
-                self.host.start_worker(rw)
+                host.start_worker(rw)
 
             def on_balances(cid: int, mc_native, mc_balances: dict) -> None:
                 pv["native_wei"] = int(mc_native)
@@ -800,7 +804,7 @@ class TokensPlugin(Plugin):
                 bw = BalanceWorker(chain, address, contracts)
                 bw.refreshed.connect(on_balances)
                 bw.failed.connect(on_balances_fail)
-                self.host.start_worker(bw)
+                host.start_worker(bw)
 
             missing_meta = self._token_metadata.missing(chain.chain_id, contracts)
             if not missing_meta:
@@ -819,7 +823,7 @@ class TokensPlugin(Plugin):
             mw = MetadataWorker(chain, missing_meta)
             mw.fetched.connect(on_meta)
             mw.failed.connect(on_meta_fail)
-            self.host.start_worker(mw)
+            host.start_worker(mw)
 
         def on_failed(msg: str) -> None:
             self._discovery_in_flight.discard(view_key)
@@ -831,7 +835,7 @@ class TokensPlugin(Plugin):
             # whether they just have no tokens or something
             # actually broke.
             if self._displayed_view == view_key:
-                self._panel.show_error(msg)
+                panel.show_error(msg)
             log.warning("token discovery failed for %s: %s", address, msg)
 
         worker = TokenListWorker(
@@ -849,6 +853,8 @@ class TokensPlugin(Plugin):
         """TokenListWorker + PricesWorker both done. Apply visibility +
         sort once, then update the panel. Single visible update."""
         self._discovery_in_flight.discard(pv["view_key"])
+        if self._panel is None:
+            return
         chain = pv["chain"]
         if chain.chain_id != chain_id:
             return
@@ -1444,7 +1450,7 @@ class TokenListPanel(QWidget):
         """Hex-encoded QHeaderView.saveState() — captures column widths,
         order, and the active sort indicator. Persisted by MainWindow."""
         return bytes(
-            self.table.horizontalHeader().saveState().toHex()
+            self.table.horizontalHeader().saveState().toHex().data()
         ).decode()
 
     def restore_header_state(self, state_hex: str) -> None:

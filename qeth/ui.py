@@ -37,7 +37,7 @@ _STICKY_PAD_V = 1
 _STICKY_GAP = 8
 _STICKY_MARGIN = 4
 from .alerts import warn
-from .signing import SignAndBroadcastWorker, SignerBridge, SignerError
+from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
 
 
 class MainWindow(QMainWindow):
@@ -147,9 +147,9 @@ class MainWindow(QMainWindow):
         }
 
     def closeEvent(self, event):
-        self.store.set_window_geometry(bytes(self.saveGeometry().toHex()).decode())
+        self.store.set_window_geometry(bytes(self.saveGeometry().toHex().data()).decode())
         self.store.set_splitter_states(
-            bytes(self._splitter_outer.saveState().toHex()).decode(),
+            bytes(self._splitter_outer.saveState().toHex().data()).decode(),
             self.wallets_plugin.splitter_state(),
         )
         for name, plugin in self._header_persisters().items():
@@ -377,7 +377,9 @@ class MainWindow(QMainWindow):
         # both so the solid/outline swap is immediate.
         self._focus_tab_stops = set(tab_stops)
         from PySide6.QtWidgets import QApplication
-        QApplication.instance().focusChanged.connect(
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)  # a QApplication exists by now
+        app.focusChanged.connect(
             self._on_app_focus_changed,
         )
         # Norton-Commander cursor style: focused list paints
@@ -614,6 +616,7 @@ class MainWindow(QMainWindow):
             None,
         )
         source = acct.get("source") if acct else None
+        signer: Signer
         if source == "ledger":
             from .ledger import LedgerSigner
             signer = LedgerSigner(self.store)
@@ -646,7 +649,7 @@ class MainWindow(QMainWindow):
 
         dialog.set_signing_in_progress(True)
         from PySide6.QtWidgets import QProgressDialog
-        progress = QProgressDialog(
+        progress = QProgressDialog(  # type: ignore[call-overload]  # None cancel-button is valid at runtime; PySide6 stub omits the overload
             progress_text,
             None,           # no cancel button
             0, 0,           # indeterminate spinner
@@ -756,7 +759,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        progress = QProgressDialog(
+        progress = QProgressDialog(  # type: ignore[call-overload]  # None cancel-button valid at runtime
             progress_text, None, 0, 0, dialog,
         )
         progress.setWindowTitle("Signing Message")
@@ -818,7 +821,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        progress = QProgressDialog(progress_text, None, 0, 0, self)
+        progress = QProgressDialog(progress_text, None, 0, 0, self)  # type: ignore[call-overload]  # None cancel-button valid at runtime
         progress.setWindowTitle("Signing Message")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)

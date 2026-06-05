@@ -76,21 +76,37 @@ previous worker; if it's still running, Qt's QThread destructor
 let them self-evict via the `finished` signal (`MainWindow._start_worker`
 in this codebase is the pattern).
 
-### Type checking: the Qt-free core stays mypy-clean
+### Type checking: mypy is enforced (whole package, two tiers)
 
 `tests/test_typing.py` runs `mypy` (config in `pyproject.toml`
-`[tool.mypy]`) and fails the suite on any type error, so the core's
-type hints are enforced, not decorative. Scope is the **Qt-free core
-only** — the `files = [...]` list in the config. The PySide6 UI layer
-(`ui.py`, `plugins/*`, `icons`, `tray`, `ledger`, `signing`) is
-deliberately excluded: incomplete Qt stubs (nested enums, `Signal`/
-`Slot`) throw ~300 unfixable false positives. `check_untyped_defs` is
-on, so even unannotated function bodies are checked. When adding a new
-core module, add it to `files`; run `uv run mypy` to check directly.
-`chain.py` is the typed↔untyped seam — it `cast()`s our plain
-`str`/`dict` to web3's `ChecksumAddress`/`TxParams`/`BlockIdentifier`
-at the call boundary, and declares the lazy `_ensure_heavy_imports`
-names under `if TYPE_CHECKING:` so mypy resolves them.
+`[tool.mypy]`) and fails the suite on any type error, so type hints are
+enforced, not decorative. The `files = [...]` list covers **both** the
+Qt-free core and the PySide6 UI layer. `check_untyped_defs` is on, so
+even unannotated function bodies are checked. When adding a module, add
+it to `files`; run `uv run mypy` to check directly.
+
+Two tiers, because of PySide6's stubs:
+- **Core** (chain, store, tokens, …) — fully checked. `chain.py` is the
+  typed↔untyped seam: it `cast()`s our plain `str`/`dict` to web3's
+  `ChecksumAddress`/`TxParams`/`BlockIdentifier` at the call boundary,
+  and declares the lazy `_ensure_heavy_imports` names under
+  `if TYPE_CHECKING:` so mypy resolves them.
+- **UI layer** (`ui.py`, `plugins/*`, icons, tray, ledger, signing) —
+  checked with **`attr-defined` disabled** (the override block). Our
+  code uses the deprecated flat Qt enum aliases (`Qt.AlignLeft`); the
+  stubs only expose the scoped form (`Qt.AlignmentFlag.AlignLeft`),
+  tripping ~230 false `attr-defined`. Disabling that one code lets the
+  real errors (None-safety, bad args) through. **TODO (migration C):**
+  move to scoped enum access, then drop the override to re-enable
+  `attr-defined`. Until then, a genuine missing-attribute typo in the UI
+  layer won't be caught — keep that in mind.
+
+Qt gotchas the enforced check surfaces: widgets/actions built lazily in
+a `_build()` method are `Optional[...]` — guard or `assert ... is not
+None` (capture a local first inside nested closures, which don't inherit
+the guard's narrowing). `QByteArray` → `bytes(qba.data())`, not
+`bytes(qba)`. `QProgressDialog(text, None, …)` (no cancel button) and a
+mixin-as-QObject parent need a targeted `# type: ignore`.
 
 ### Use the chain abstraction, don't reinvent JSON-RPC
 

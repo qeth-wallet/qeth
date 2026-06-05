@@ -112,6 +112,89 @@ def parse_send_transaction_params(
     )
 
 
+# --- replacing a pending tx (speed up / cancel) --------------------------
+#
+# A node accepts a same-nonce replacement only when both fees are clearly
+# higher (geth requires +10%). We floor the new fees at the originals ×
+# 1.125; the dialog then raises them further to current network conditions
+# and lets the user adjust. 9/8 with ceil division stays strictly above
+# the +10% threshold even for small values.
+_BUMP_NUM, _BUMP_DEN = 9, 8
+
+
+def _bumped(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return -(-value * _BUMP_NUM // _BUMP_DEN)   # ceil(value × 9/8)
+
+
+@dataclass
+class OriginalFees:
+    """Fee fields decoded from a signed raw tx."""
+    max_fee_per_gas: Optional[int] = None
+    max_priority_fee_per_gas: Optional[int] = None
+    gas_price: Optional[int] = None
+    gas: Optional[int] = None
+    nonce: Optional[int] = None
+
+
+def decode_tx_fees(raw_signed: str) -> OriginalFees:
+    """Recover the fee/gas/nonce fields from a signed raw tx hex, so a
+    replacement can be priced strictly above them. Handles typed
+    (0x02 dynamic-fee, 0x01 access-list) and legacy txs."""
+    from hexbytes import HexBytes
+    raw = HexBytes(raw_signed)
+    if raw and raw[0] in (1, 2):
+        from eth_account.typed_transactions import TypedTransaction
+        d = TypedTransaction.from_bytes(raw).as_dict()
+        return OriginalFees(
+            max_fee_per_gas=d.get("maxFeePerGas"),
+            max_priority_fee_per_gas=d.get("maxPriorityFeePerGas"),
+            gas_price=d.get("gasPrice"),
+            gas=d.get("gas"), nonce=d.get("nonce"))
+    import rlp
+    from eth_account._utils.legacy_transactions import (
+        Transaction as _LegacyTx,
+    )
+    d = rlp.decode(bytes(raw), _LegacyTx).as_dict()
+    return OriginalFees(
+        gas_price=d.get("gasPrice"), gas=d.get("gas"), nonce=d.get("nonce"))
+
+
+@dataclass
+class ReplacementFloor:
+    """Minimum fees the replacement must beat (originals × 1.125). The
+    dialog clamps the suggested fees up to these."""
+    max_fee_per_gas: Optional[int] = None
+    max_priority_fee_per_gas: Optional[int] = None
+    gas_price: Optional[int] = None
+
+
+def build_replacement_request(
+    *, from_addr: str, to_addr: Optional[str], value_wei: int, data: str,
+    nonce: int, raw_signed: str, chain_id: int, cancel: bool = False,
+) -> tuple["SigningRequest", ReplacementFloor]:
+    """A SigningRequest replacing a pending tx at the SAME nonce, plus the
+    fee floor the dialog must enforce. ``cancel`` → a 0-value self-send
+    (21 000 gas), so the original tx never lands. The request's fees start
+    at the floor; the dialog raises them to current conditions."""
+    orig = decode_tx_fees(raw_signed)
+    gas = orig.gas or 21_000
+    if cancel:
+        to_addr, value_wei, data, gas = from_addr, 0, "0x", 21_000
+    floor = ReplacementFloor(
+        max_fee_per_gas=_bumped(orig.max_fee_per_gas),
+        max_priority_fee_per_gas=_bumped(orig.max_priority_fee_per_gas),
+        gas_price=_bumped(orig.gas_price))
+    req = SigningRequest(
+        chain_id=chain_id, from_addr=from_addr, to_addr=to_addr,
+        value_wei=value_wei, data=data or "0x", gas=gas, nonce=nonce,
+        max_fee_per_gas=floor.max_fee_per_gas,
+        max_priority_fee_per_gas=floor.max_priority_fee_per_gas,
+        gas_price=floor.gas_price)
+    return req, floor
+
+
 @dataclass
 class MessageSigningRequest:
     """``personal_sign`` request — sign a human-readable text or

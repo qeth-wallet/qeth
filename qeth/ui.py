@@ -598,6 +598,59 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def open_replace_tx(self, tx, cancel: bool) -> None:
+        """Speed up (or cancel) a pending tx by re-signing the SAME nonce
+        with bumped fees. ``cancel`` swaps the tx for a 0-value self-send
+        so the original never lands. Routed through the normal
+        sign+broadcast flow (which add_pending()s the replacement; the
+        pending sweep then flips the original to 'dropped')."""
+        from eth_utils import to_checksum_address
+
+        from .plugins.transactions import SignTransactionDialog
+        from .signing import build_replacement_request
+        if not getattr(tx, "raw_signed", None):
+            self.status_message(
+                "Can't replace — the original signed tx isn't available", 6000)
+            return
+        chain = next((c for c in self.store.chains
+                      if c.chain_id == tx.chain_id), None)
+        if chain is None:
+            chain = self.store.current_chain()
+        try:
+            req, floor = build_replacement_request(
+                from_addr=to_checksum_address(tx.from_addr),
+                to_addr=to_checksum_address(tx.to_addr) if tx.to_addr else None,
+                value_wei=tx.value_wei, data=tx.input_data or "0x",
+                nonce=tx.nonce, raw_signed=tx.raw_signed,
+                chain_id=chain.chain_id, cancel=cancel)
+        except Exception as e:
+            self.status_message(f"Couldn't build replacement: {e}", 6000)
+            return
+        verb = "Cancel" if cancel else "Speed-up"
+        dialog = SignTransactionDialog(
+            req, chain,
+            abi_source=self.transactions_plugin._abi_source,
+            abi_cache=self.transactions_plugin._abi_cache,
+            identity_source=self.transactions_plugin._identity_source,
+            identity_cache=self.transactions_plugin._identity_cache,
+            tx_cache=self.transactions_plugin._disk_cache,
+            start_worker=self.start_worker,
+            token_info=self.token_info,
+            icon_cache=self.icon_cache(),
+            native_price_usd=self.native_price_usd(chain.chain_id, tx.from_addr),
+            known_addresses=self.account_addresses(),
+            fixed_nonce=tx.nonce, fee_floor=floor,
+            replace_label=f"{verb} Transaction",
+            parent=self,
+        )
+        self._launch_sign_flow(
+            dialog, chain,
+            on_broadcast=lambda h: self.status_message(f"{verb} {h}", 6000),
+            on_cancel=lambda: None,
+            on_fail=lambda msg: self.status_message(
+                f"{verb} failed: {msg}", 6000),
+        )
+
     def _begin_sign(self, dialog, chain, on_broadcast, on_fail) -> None:
         """Start one sign-and-broadcast attempt. Called every time
         the user clicks Confirm — including retries after a

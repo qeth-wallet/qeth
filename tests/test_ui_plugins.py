@@ -2386,6 +2386,45 @@ class TestEventPreviewTab:
         qtbot.addWidget(dlg)
         return dlg
 
+    def test_replace_mode_locks_nonce_and_floors_fees(self, qtbot, tmp_qeth):
+        """Speed up / cancel re-uses SignTransactionDialog in replace mode:
+        the nonce is locked to the pending tx's and the suggested fees are
+        clamped UP to the bump floor (even when the network has since
+        dipped below it)."""
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import SignTransactionDialog
+        from qeth.signing import ReplacementFloor, SigningRequest
+        _, started = self._started()
+        floor = ReplacementFloor(max_fee_per_gas=60_000_000_000,
+                                 max_priority_fee_per_gas=3_000_000_000)
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr="0x" + "22" * 20,
+                             value_wei=0, data="0x", nonce=7,
+                             max_fee_per_gas=60_000_000_000,
+                             max_priority_fee_per_gas=3_000_000_000)
+        abi_cache = MagicMock()
+        abi_cache.load.return_value = None
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=started, token_info=lambda c, a: None,
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+            fixed_nonce=7, fee_floor=floor,
+            replace_label="Speed Up Transaction",
+        )
+        qtbot.addWidget(dlg)
+        assert dlg.windowTitle() == "Speed Up Transaction"
+        # Network suggestion comes back BELOW the floor + a different nonce.
+        dlg._on_gas_suggested({
+            "base_fee": 20_000_000_000, "estimated_gas": 21000, "gas": 21000,
+            "max_fee_per_gas": 25_000_000_000,
+            "max_priority_fee_per_gas": 1_000_000_000,
+            "nonce": 99,
+        })
+        assert dlg.spin_max_fee.value() == 60.0      # clamped up to floor (gwei)
+        assert dlg.spin_priority.value() == 3.0
+        fin = dlg.finalised_request()
+        assert fin.nonce == 7                        # fixed, not the suggested 99
+        assert fin.max_fee_per_gas == 60_000_000_000
+
     def test_both_dialogs_have_an_events_tab(self, qtbot, tmp_qeth):
         _, started = self._started()
         for dlg in (self._send(qtbot, started), self._sign(qtbot, started)):

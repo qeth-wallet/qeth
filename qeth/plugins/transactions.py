@@ -57,7 +57,7 @@ from ..contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
 from ..chain import EthClient, wei_to_ether
-from ..signing import SignerError, SigningRequest
+from ..signing import ReplacementFloor, SignerError, SigningRequest
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
 from ..transactions import (
@@ -823,6 +823,7 @@ class TransactionsPlugin(Plugin):
             self._panel = TransactionListPanel()
             self._panel.scrolled_to_bottom.connect(self._on_scroll_bottom)
             self._panel.tx_details_requested.connect(self._show_tx_details)
+            self._panel.replace_requested.connect(self._on_replace_requested)
         return self._panel
 
     def _show_tx_details(self, tx: Transaction) -> None:
@@ -856,7 +857,16 @@ class TransactionsPlugin(Plugin):
             known_addresses=known_addresses,
             parent=self._panel,
         )
+        dialog.replace_requested.connect(self._on_replace_requested)
         dialog.show()
+
+    def _on_replace_requested(self, tx: Transaction, cancel: bool) -> None:
+        """Speed up / Cancel was picked (from the details dialog or a row
+        right-click). Hand off to the host, which opens the replace dialog
+        through the normal sign+broadcast flow."""
+        opener = getattr(self.host, "open_replace_tx", None)
+        if callable(opener):
+            opener(tx, cancel)
 
     def action_widgets(self):
         return self._panel.action_widgets() if self._panel is not None else []
@@ -1348,6 +1358,7 @@ class TransactionListPanel(QWidget):
 
     scrolled_to_bottom = Signal()
     tx_details_requested = Signal(object)   # Transaction instance
+    replace_requested = Signal(object, bool)  # (Transaction, cancel)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1728,6 +1739,12 @@ class TransactionListPanel(QWidget):
         act_open.setEnabled(bool(self._chain and self._chain.explorer))
         act_copy_hash = menu.addAction(
             self.btn_copy_hash.icon(), "Copy Tx Hash")
+        # Speed up / Cancel only for a still-pending tx we broadcast.
+        act_speedup = act_cancel = None
+        if tx.pending and tx.raw_signed:
+            menu.addSeparator()
+            act_speedup = menu.addAction("Speed up (bump gas)…")
+            act_cancel = menu.addAction("Cancel transaction…")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_details:
             self.tx_details_requested.emit(tx)
@@ -1735,6 +1752,10 @@ class TransactionListPanel(QWidget):
             self._open_in_explorer(tx)
         elif chosen is act_copy_hash:
             QApplication.clipboard().setText(tx.hash)
+        elif act_speedup is not None and chosen is act_speedup:
+            self.replace_requested.emit(tx, False)
+        elif act_cancel is not None and chosen is act_cancel:
+            self.replace_requested.emit(tx, True)
 
 
 # --- transaction details dialog + ABI fetch worker ------------------------
@@ -2319,6 +2340,10 @@ class TransactionDetailsDialog(QDialog):
     explorer link button is always available regardless of ABI state.
     """
 
+    # Emitted when the user picks Speed up / Cancel on a pending tx.
+    # (Transaction, cancel: bool) → the plugin routes it to the host.
+    replace_requested = Signal(object, bool)
+
     def __init__(self, tx: Transaction, chain, *,
                  abi_source: Optional[AnyAbiSource],
                  abi_cache: AbiCache,
@@ -2513,6 +2538,19 @@ class TransactionDetailsDialog(QDialog):
         explorer_btn.setEnabled(bool(chain.explorer))
         explorer_btn.clicked.connect(self._open_explorer)
         buttons.addButton(explorer_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        # Speed up / Cancel — only for a still-pending tx we broadcast (we
+        # need its signed bytes to recover the original fees).
+        if tx.pending and tx.raw_signed:
+            speedup_btn = QPushButton("&Speed up")
+            speedup_btn.setToolTip(
+                "Re-sign at the same nonce with higher gas to replace it")
+            speedup_btn.clicked.connect(lambda: self._emit_replace(False))
+            buttons.addButton(speedup_btn, QDialogButtonBox.ButtonRole.ActionRole)
+            cancel_btn = QPushButton("&Cancel tx")
+            cancel_btn.setToolTip(
+                "Replace with a 0-value self-send so the original never lands")
+            cancel_btn.clicked.connect(lambda: self._emit_replace(True))
+            buttons.addButton(cancel_btn, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
@@ -2591,6 +2629,10 @@ class TransactionDetailsDialog(QDialog):
             self.decoded_view, decoded, token_context,
             known_addresses=self._known_addresses,
         )
+
+    def _emit_replace(self, cancel: bool) -> None:
+        self.replace_requested.emit(self.tx, cancel)
+        self.accept()
 
     def _open_explorer(self) -> None:
         url = self._explorer_url("tx", self.tx.hash)
@@ -3023,6 +3065,9 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                  identity_source: Optional[ContractIdentitySource] = None,
                  identity_cache: Optional[ContractIdentityCache] = None,
                  tx_cache: Optional[TransactionCache] = None,
+                 fixed_nonce: Optional[int] = None,
+                 fee_floor: Optional["ReplacementFloor"] = None,
+                 replace_label: Optional[str] = None,
                  parent=None):
         super().__init__(parent)
         self.req = req
@@ -3066,8 +3111,14 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         # spinner if the user manually lowered it below the estimate)
         # for the live "Expected fee" line.
         self._estimated_gas = 0
+        # Replace-mode (speed up / cancel a pending tx): lock the nonce to
+        # the pending tx's, and clamp the suggested fees up to a floor so
+        # the node accepts the same-nonce replacement.
+        self._fixed_nonce = fixed_nonce
+        self._fee_floor = fee_floor
+        self._replace_label = replace_label
 
-        self.setWindowTitle("Sign Transaction")
+        self.setWindowTitle(replace_label or "Sign Transaction")
         self.resize(720, 640)
         self._link_color = self.palette().color(QPalette.ColorRole.WindowText).name()
 
@@ -3227,7 +3278,8 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             QDialogButtonBox.StandardButton.Cancel,
         )
         self.confirm_btn = self.buttons.addButton(
-            "&Confirm and Sign", QDialogButtonBox.ButtonRole.AcceptRole,
+            "&Replace and Sign" if replace_label else "&Confirm and Sign",
+            QDialogButtonBox.ButtonRole.AcceptRole,
         )
         # Checkmark icon — universal "approve". Distinguishes the
         # primary action visually from Cancel, which Qt themes
@@ -3347,22 +3399,35 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         self._estimated_gas = int(info.get("estimated_gas") or 0)
         self.spin_gas.setValue(info["gas"])
         self.spin_gas.setEnabled(True)
+        floor = self._fee_floor
         if self.chain.eip1559:
             assert self.spin_max_fee is not None and self.spin_priority is not None
-            self.spin_max_fee.setValue(_wei_to_gwei(info["max_fee_per_gas"]))
+            max_fee = info["max_fee_per_gas"]
+            prio = info["max_priority_fee_per_gas"]
+            if floor is not None:   # replace-mode: never price below the bump
+                if floor.max_fee_per_gas:
+                    max_fee = max(max_fee, floor.max_fee_per_gas)
+                if floor.max_priority_fee_per_gas:
+                    prio = max(prio, floor.max_priority_fee_per_gas)
+            self.spin_max_fee.setValue(_wei_to_gwei(max_fee))
             self.spin_max_fee.setEnabled(True)
-            self.spin_priority.setValue(
-                _wei_to_gwei(info["max_priority_fee_per_gas"])
-            )
+            self.spin_priority.setValue(_wei_to_gwei(prio))
             self.spin_priority.setEnabled(True)
         else:
             assert self.spin_gas_price is not None
-            self.spin_gas_price.setValue(_wei_to_gwei(info["gas_price"]))
+            gp = info["gas_price"]
+            if floor is not None and floor.gas_price:
+                gp = max(gp, floor.gas_price)
+            self.spin_gas_price.setValue(_wei_to_gwei(gp))
             self.spin_gas_price.setEnabled(True)
         self.base_fee_lbl.setText(
             f"{_wei_to_gwei(self._base_fee_wei):.4f} gwei"
         )
-        self._suggested_nonce = info.get("nonce")
+        # Replace-mode locks the nonce to the pending tx's; otherwise use
+        # the chain's next-nonce from the suggestion.
+        self._suggested_nonce = (
+            self._fixed_nonce if self._fixed_nonce is not None
+            else info.get("nonce"))
         self._gas_ready = True
         self.confirm_btn.setEnabled(True)
         self._update_max_total()

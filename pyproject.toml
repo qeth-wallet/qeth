@@ -120,6 +120,8 @@ module = [
     "eth_abi.*",
     "eth_utils.*",
     "hexbytes.*",
+    "rlp.*",
+    "eth_account.*",
 ]
 ignore_missing_imports = true
 

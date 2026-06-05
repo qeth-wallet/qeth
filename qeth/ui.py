@@ -446,6 +446,10 @@ class MainWindow(QMainWindow):
         "Switch networks with the chain selector in the toolbar.",
         "Right-click an address or hash to copy it or open it in the explorer.",
         "Connect dapps — qeth serves a Frame-compatible wallet on 127.0.0.1:1248.",
+        "Select a token to Hide it from this wallet, or pin ★ to keep it shown.",
+        "Toggle 'Show all' to reveal hidden tokens and dust-value balances.",
+        "Sign an arbitrary message from a wallet's details panel (Sign Message…).",
+        "Track any address read-only: Add → Watch-only Address.",
     )
 
     def _build_statusbar(self) -> None:

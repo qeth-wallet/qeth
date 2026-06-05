@@ -216,6 +216,20 @@ class TestBlockscoutSource:
         with pytest.raises(TransactionSourceError):
             src.list_transactions(ETH, ADDR)
 
+    def test_page_window_cap_is_end_not_error(self):
+        # The explorer's `page × offset ≤ 10000` cap: hitting it on a deep
+        # scroll is the end of pageable history, not a failure. The detail
+        # comes back in `result` (a string), message is just "NOTOK".
+        src = BlockscoutTransactionSource(
+            transport=_fake_transport(
+                {"status": "0", "message": "NOTOK",
+                 "result": "Result window is too large, PageNo x Offset "
+                           "size must be less than or equal to 10000"},
+                [],
+            ),
+        )
+        assert src.list_transactions(ETH, ADDR, page=300, limit=50) == []
+
     def test_unsupported_chain_raises(self):
         src = BlockscoutTransactionSource()
         fake = Chain(name="Fake", chain_id=999999, rpc_url="https://x")

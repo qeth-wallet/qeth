@@ -229,11 +229,20 @@ class EtherscanV2TransactionSource(TransactionSource):
         data = json.loads(raw)
 
         if data.get("status") != "1":
-            msg = (data.get("message") or "").lower()
-            if "no transactions" in msg or "not found" in msg:
+            # The detail is in `result` for Etherscan (message is just
+            # "NOTOK"); check both.
+            detail = (str(data.get("message") or "") + " "
+                      + str(data.get("result") or "")).lower()
+            if "no transactions" in detail or "not found" in detail:
+                return []
+            # Explorer page-window cap: `page × offset` must be ≤ 10000, so
+            # txlist can't page past ~10k rows. Treat hitting it as the end
+            # of available history rather than surfacing the raw error.
+            if ("result window is too large" in detail
+                    or "pageno x offset" in detail):
                 return []
             raise TransactionSourceError(
-                data.get("message") or "etherscan error"
+                data.get("result") or data.get("message") or "etherscan error"
             )
 
         out: list[Transaction] = []
@@ -316,11 +325,17 @@ class BlockscoutTransactionSource(TransactionSource):
         # Etherscan-compatible: status "0" with "No transactions found"
         # is a valid empty result, not an error.
         if data.get("status") != "1":
-            msg = (data.get("message") or "").lower()
-            if "no transactions" in msg or "not found" in msg:
+            detail = (str(data.get("message") or "") + " "
+                      + str(data.get("result") or "")).lower()
+            if "no transactions" in detail or "not found" in detail:
+                return []
+            # Explorer page-window cap (page × offset ≤ 10000): we've paged
+            # as deep as txlist allows — treat as the end of history.
+            if ("result window is too large" in detail
+                    or "pageno x offset" in detail):
                 return []
             raise TransactionSourceError(
-                data.get("message") or "blockscout error"
+                data.get("result") or data.get("message") or "blockscout error"
             )
 
         out: list[Transaction] = []

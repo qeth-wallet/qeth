@@ -6,8 +6,10 @@ and ``.plugins.wallets``. This module just orchestrates: instantiates
 the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
+import random
+
 from PySide6.QtCore import (
-    QByteArray, QEvent, QObject, QRect, QSize, Qt, QThread,
+    QByteArray, QEvent, QObject, QRect, QSize, Qt, QThread, QTimer,
 )
 from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
@@ -95,11 +97,9 @@ class MainWindow(QMainWindow):
         self.wallets_plugin.selected_address_changed.connect(
             self.right_slot.broadcast_account_changed
         )
-        self.wallets_plugin.default_account_changed.connect(self._refresh_status)
         self.wallets_plugin.default_account_changed.connect(
             self._push_accounts_changed
         )
-        self._refresh_status()
         # Replay the current selection. _build_central() above mounted
         # the plugins, which built their widgets, which rebuilt the
         # wallet tree and auto-selected the default account — emitting
@@ -420,26 +420,72 @@ class MainWindow(QMainWindow):
             out.append(xpanel.table)
         return out
 
+    # Idle hints rotated through the status bar — keyboard / navigation
+    # affordances that otherwise go undiscovered. (The RPC URL and the
+    # default-wallet/chain line that used to live here were dev noise /
+    # duplicated by the Wallets tree + chain selector.) A QStatusBar hides
+    # non-permanent widgets while a temporary status_message() shows and
+    # restores them after, so the hint sits *under* transient messages.
+    _STATUS_HINTS = (
+        "Hold Alt to reveal each button's underlined shortcut letter.",
+        "Tab / Shift+Tab move between fields; Enter confirms a dialog.",
+        "Ctrl+C copies the selected address, token, or tx hash.",
+        "Del removes the selected account.",
+        "Double-click an account to connect it to the browser (set as default).",
+        "Drag accounts in the tree to reorder them.",
+        "Right-click an account for Copy, Remove, and Connect-to-Browser.",
+        "Double-click a transaction to see its decoded details.",
+        "Right-click a pending transaction to Speed up or Cancel it.",
+        "Scroll to the bottom of the history to load older transactions.",
+        "The Contract row names who deployed a contract and how often you've "
+        "used it.",
+        "Double-click a token to open its transfers in the block explorer.",
+        "In Send, Max fills your full balance; the USD value updates as you type.",
+        "Switch networks with the chain selector in the toolbar.",
+        "Right-click an address or hash to copy it or open it in the explorer.",
+        "Connect dapps — qeth serves a Frame-compatible wallet on 127.0.0.1:1248.",
+    )
+
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
         self.setStatusBar(sb)
-        self.rpc_label = QLabel()
-        self.default_label = QLabel()
-        sb.addWidget(self.rpc_label, 1)
-        sb.addPermanentWidget(self.default_label)
+        # A single label we drive ourselves — NOT QStatusBar.showMessage(),
+        # which paints the message *over* a custom addWidget() widget rather
+        # than replacing it. A status_message() swaps the label text and
+        # schedules _restore_hint(); the rotating hint sits underneath.
+        self._hint_label = QLabel()
+        sb.addWidget(self._hint_label, 1)
+        # Random order, reshuffled each full pass — different sequence (and
+        # starting hint) every session, no immediate repeats.
+        self._hint_queue: list[int] = []
+        self._last_hint = -1
+        self._current_hint = ""
+        self._msg_timer: QTimer | None = None   # active transient message
+        self._show_next_hint()
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setInterval(15_000)
+        self._hint_timer.timeout.connect(self._show_next_hint)
+        self._hint_timer.start()
 
-    def _refresh_status(self) -> None:
-        err = self.rpc.error
-        if err:
-            self.rpc_label.setText(f"JSON-RPC: error — {err}")
-        else:
-            self.rpc_label.setText(
-                f"JSON-RPC: http://{self.rpc.host}:{self.rpc.port}   (ws on same port)"
-            )
-        addr = self.store.default_account or "none"
-        self.default_label.setText(
-            f"Default: {addr}   •   {self.store.current_chain().name}"
-        )
+    def _show_next_hint(self) -> None:
+        if not self._hint_queue:
+            order = list(range(len(self._STATUS_HINTS)))
+            random.shuffle(order)
+            # Don't repeat the last-shown hint across the reshuffle seam.
+            if len(order) > 1 and order[-1] == self._last_hint:
+                order[-1], order[0] = order[0], order[-1]
+            self._hint_queue = order
+        idx = self._hint_queue.pop()
+        self._last_hint = idx
+        self._current_hint = "💡 " + self._STATUS_HINTS[idx]
+        # Don't clobber a transient message that's currently on screen;
+        # _restore_hint will pick up the latest hint when it expires.
+        if self._msg_timer is None:
+            self._hint_label.setText(self._current_hint)
+
+    def _restore_hint(self) -> None:
+        self._msg_timer = None
+        self._hint_label.setText(self._current_hint)
 
     # --- Host protocol (consumed by plugins via plugin.attach) -----------
 
@@ -465,7 +511,20 @@ class MainWindow(QMainWindow):
         return worker
 
     def status_message(self, text: str, timeout_ms: int = 3000) -> None:
-        self.statusBar().showMessage(text, timeout_ms)
+        """Show a transient message in the status bar, replacing the idle
+        hint, then restore the hint after ``timeout_ms``."""
+        self._hint_label.setText(text)
+        if self._msg_timer is not None:
+            self._msg_timer.stop()
+        if timeout_ms > 0:
+            self._msg_timer = QTimer(self)
+            self._msg_timer.setSingleShot(True)
+            self._msg_timer.timeout.connect(self._restore_hint)
+            self._msg_timer.start(timeout_ms)
+        else:
+            # No timeout → message stays until the next status_message;
+            # mark active so hint rotation doesn't overwrite it.
+            self._msg_timer = QTimer(self)
 
     def token_info(self, chain_id: int, address: str):
         return self.tokens_plugin.token_lists.get(chain_id, address)
@@ -990,7 +1049,6 @@ class MainWindow(QMainWindow):
         cid = self.chain_combo.itemData(idx)
         if cid is not None:
             self.store.set_current_chain(int(cid))
-            self._refresh_status()
             self.right_slot.broadcast_chain_changed()
             # The UI chain is the user's preferred chain — also
             # update the dapp-facing RPC chain so connected dapps

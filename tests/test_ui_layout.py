@@ -237,6 +237,25 @@ def test_initial_selection_reaches_right_slot_plugins(qtbot, tmp_qeth,
     assert ("transactions", addr) in calls
 
 
+def test_status_bar_shows_rotating_hints_not_rpc_info(mainwindow):
+    win = mainwindow
+    # No more persistent RPC / default-wallet labels.
+    assert not hasattr(win, "rpc_label")
+    assert not hasattr(win, "default_label")
+    # An idle hint is shown (light-bulb prefix), and rotates.
+    first = win._hint_label.text()
+    assert first.startswith("💡 ")
+    win._show_next_hint()
+    assert win._hint_label.text() != first   # random order, no immediate repeat
+    # A transient status_message REPLACES the hint in the same label …
+    win.status_message("Broadcast 0xabc", 3000)
+    assert win._hint_label.text() == "Broadcast 0xabc"
+    # … and the hint is restored when the message expires.
+    win._restore_hint()
+    assert win._hint_label.text() == win._current_hint
+    assert win._hint_label.text().startswith("💡 ")
+
+
 def test_hide_pin_enabled_only_for_erc20_rows(mainwindow):
     chain = _fake_chain()
     tokens = [

@@ -1344,6 +1344,16 @@ class TransactionsPlugin(Plugin):
 # --- panel ----------------------------------------------------------------
 
 
+def _speedup_icon() -> QIcon:
+    """Fast-forward glyph for the Speed-up action (theme, with fallback)."""
+    return QIcon.fromTheme("media-seek-forward", QIcon.fromTheme("go-up"))
+
+
+def _cancel_tx_icon() -> QIcon:
+    """Stop glyph for the Cancel-transaction action."""
+    return QIcon.fromTheme("process-stop", QIcon.fromTheme("dialog-cancel"))
+
+
 class TransactionListPanel(QWidget):
     """Right pane / Transactions tab: top-level txs for the selected
     account, newest first.
@@ -1743,8 +1753,10 @@ class TransactionListPanel(QWidget):
         act_speedup = act_cancel = None
         if tx.pending and tx.raw_signed:
             menu.addSeparator()
-            act_speedup = menu.addAction("Speed up (bump gas)…")
-            act_cancel = menu.addAction("Cancel transaction…")
+            act_speedup = menu.addAction(
+                _speedup_icon(), "Speed up (bump gas)…")
+            act_cancel = menu.addAction(
+                _cancel_tx_icon(), "Cancel transaction…")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is act_details:
             self.tx_details_requested.emit(tx)
@@ -2542,11 +2554,13 @@ class TransactionDetailsDialog(QDialog):
         # need its signed bytes to recover the original fees).
         if tx.pending and tx.raw_signed:
             speedup_btn = QPushButton("&Speed up")
+            speedup_btn.setIcon(_speedup_icon())
             speedup_btn.setToolTip(
                 "Re-sign at the same nonce with higher gas to replace it")
             speedup_btn.clicked.connect(lambda: self._emit_replace(False))
             buttons.addButton(speedup_btn, QDialogButtonBox.ButtonRole.ActionRole)
             cancel_btn = QPushButton("&Cancel tx")
+            cancel_btn.setIcon(_cancel_tx_icon())
             cancel_btn.setToolTip(
                 "Replace with a 0-value self-send so the original never lands")
             cancel_btn.clicked.connect(lambda: self._emit_replace(True))

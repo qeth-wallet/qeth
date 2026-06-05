@@ -428,7 +428,9 @@ class MainWindow(QMainWindow):
     # restores them after, so the hint sits *under* transient messages.
     _STATUS_HINTS = (
         "Hold Alt to reveal each button's underlined shortcut letter.",
-        "Tab / Shift+Tab move between fields; Enter confirms a dialog.",
+        "Tab moves between the Wallets list and the right panel; "
+        "←/→ switch the Tokens ↔ Transactions tabs.",
+        "In a dialog, Tab / Shift+Tab move between fields; Enter confirms.",
         "Ctrl+C copies the selected address, token, or tx hash.",
         "Del removes the selected account.",
         "Double-click an account to connect it to the browser (set as default).",

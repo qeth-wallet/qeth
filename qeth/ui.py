@@ -649,13 +649,13 @@ class MainWindow(QMainWindow):
 
         dialog.set_signing_in_progress(True)
         from PySide6.QtWidgets import QProgressDialog
-        progress = QProgressDialog(  # type: ignore[call-overload]  # None cancel-button is valid at runtime; PySide6 stub omits the overload
-            progress_text,
-            None,           # no cancel button
-            0, 0,           # indeterminate spinner
-            dialog,         # parent on the sign dialog so the
-                            # progress sits on top of it.
+        progress = QProgressDialog(
+            labelText=progress_text,
+            minimum=0, maximum=0,     # indeterminate spinner
+            parent=dialog,            # parent on the sign dialog so the
+                                      # progress sits on top of it.
         )
+        progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Transaction")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -759,9 +759,10 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        progress = QProgressDialog(  # type: ignore[call-overload]  # None cancel-button valid at runtime
-            progress_text, None, 0, 0, dialog,
+        progress = QProgressDialog(
+            labelText=progress_text, minimum=0, maximum=0, parent=dialog,
         )
+        progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Message")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -821,7 +822,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        progress = QProgressDialog(progress_text, None, 0, 0, self)  # type: ignore[call-overload]  # None cancel-button valid at runtime
+        progress = QProgressDialog(
+            labelText=progress_text, minimum=0, maximum=0, parent=self,
+        )
+        progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Message")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)

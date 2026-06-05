@@ -260,7 +260,8 @@ class ChainRpcDialog(QDialog):
         # replaces it once the probe lands. URL is stored in
         # UserRole so we can find rows by URL on update.
         for r in http_rpcs:
-            item = QListWidgetItem(self._format_row(r.url, None, None))
+            item = QListWidgetItem(
+                self._format_row(r.url, ok=None, latency_ms=None))
             item.setData(Qt.UserRole, r.url)
             # Initially make probing rows non-selectable so the
             # user doesn't accidentally pick something we haven't
@@ -286,9 +287,9 @@ class ChainRpcDialog(QDialog):
             it = self.picker.item(i)
             if it.data(Qt.UserRole) == url:
                 it.setText(self._format_row(
-                    url, ok,
-                    float(latency_ms) if latency_ms is not None else None,
-                    simv1,
+                    url, ok=ok,
+                    latency_ms=float(latency_ms) if latency_ms is not None else None,
+                    simv1=simv1,
                 ))
                 if ok:
                     it.setFlags(
@@ -318,7 +319,8 @@ class ChainRpcDialog(QDialog):
         self.picker.clear()
         n_sim = 0
         for _rank, latency, url, simv1 in survivors:
-            item = QListWidgetItem(self._format_row(url, True, latency, simv1))
+            item = QListWidgetItem(
+                self._format_row(url, ok=True, latency_ms=latency, simv1=simv1))
             item.setData(Qt.UserRole, url)
             self.picker.addItem(item)
             if simv1 is True:

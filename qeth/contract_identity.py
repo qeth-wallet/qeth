@@ -35,6 +35,16 @@ from .tokens import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
 
 CACHE_DIR = Path.home() / ".qeth" / "contract_id"
 
+# Bump when the cached shape changes so older entries are re-fetched
+# rather than served stale. v2 added public name-tags (name_tag /
+# deployer_label).
+_SCHEMA_VERSION = 2
+
+# Blockscout's public metadata service — the Open Labels Initiative
+# dataset. Returns name-tags ("AladdinDAO: Deployer", "Binance: Hot
+# Wallet") for any address, free + keyless, where Etherscan paywalls them.
+LABELS_BASE = "https://metadata.services.blockscout.com/api/v1/metadata"
+
 # A contract younger than this reads as "new" — a soft caution flag.
 NEW_CONTRACT_DAYS = 30
 
@@ -52,6 +62,8 @@ class ContractIdentity:
     verified: bool = False
     deployer: Optional[str] = None      # creator address
     deployed_at: Optional[int] = None   # unix timestamp of the creation tx
+    name_tag: Optional[str] = None      # this address's public label (OLI)
+    deployer_label: Optional[str] = None  # the deployer's public label
 
     @property
     def deployed_date(self) -> Optional[str]:
@@ -68,6 +80,8 @@ class ContractIdentity:
             "verified": self.verified,
             "deployer": self.deployer.lower() if self.deployer else None,
             "deployed_at": self.deployed_at,
+            "name_tag": self.name_tag,
+            "deployer_label": self.deployer_label,
         }
 
     @classmethod
@@ -79,6 +93,8 @@ class ContractIdentity:
             verified=bool(d.get("verified")),
             deployer=d.get("deployer") or None,
             deployed_at=d.get("deployed_at"),
+            name_tag=d.get("name_tag") or None,
+            deployer_label=d.get("deployer_label") or None,
         )
 
 
@@ -104,6 +120,12 @@ class ContractIdentityCache:
             return None
         if not isinstance(data, dict):
             return None
+        # Schema-version gate: an entry written by an older qeth (e.g.
+        # before public name-tags existed) is treated as a miss so the
+        # next open re-fetches it with the current shape, rather than
+        # showing a permanently label-less identity from a stale file.
+        if data.get("v") != _SCHEMA_VERSION:
+            return None
         try:
             return ContractIdentity.from_dict(data)
         except (KeyError, TypeError):
@@ -112,7 +134,9 @@ class ContractIdentityCache:
     def save(self, chain_id: int, identity: ContractIdentity) -> None:
         p = self._path(chain_id, identity.address)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(identity.to_dict(), separators=(",", ":")))
+        payload = identity.to_dict()
+        payload["v"] = _SCHEMA_VERSION
+        p.write_text(json.dumps(payload, separators=(",", ":")))
 
     def deployer_contract_count(self, chain_id: int, deployer: str) -> int:
         """How many cached contracts on this chain were deployed by
@@ -157,6 +181,33 @@ class ContractIdentitySource:
         data = json.loads(raw)
         return data if isinstance(data, dict) else {}
 
+    def fetch_labels(self, chain_id: int, addresses) -> dict:
+        """Public name-tags for ``addresses`` from Blockscout's metadata
+        service (keyless). Returns ``{address_lower: "Label"}`` for those
+        that have a ``name``-type tag (highest ordinal wins); silent {} on
+        any error or an unsupported chain."""
+        addrs = [a for a in addresses if a]
+        if not addrs:
+            return {}
+        query = urllib.parse.urlencode(
+            {"addresses": ",".join(addrs), "chainId": str(chain_id)})
+        try:
+            raw = self._transport(f"{LABELS_BASE}?{query}", self.timeout)
+            data = json.loads(raw)
+        except Exception:
+            return {}
+        out: dict = {}
+        entries = data.get("addresses") if isinstance(data, dict) else None
+        for addr, info in (entries or {}).items():
+            best = None
+            for tag in (info.get("tags") or []):
+                if tag.get("tagType") == "name" and tag.get("name"):
+                    if best is None or (tag.get("ordinal") or 0) > (best.get("ordinal") or 0):
+                        best = tag
+            if best:
+                out[addr.lower()] = best["name"]
+        return out
+
     def fetch(self, chain_id: int, address: str) -> Optional[ContractIdentity]:
         """Returns the identity, or ``None`` on an unsupported chain /
         transient error (so the caller leaves the cache untouched and can
@@ -175,8 +226,12 @@ class ContractIdentitySource:
             return None
         res = cr.get("result")
         if not (isinstance(res, list) and res and isinstance(res[0], dict)):
-            # No creation record → an externally-owned account.
-            return ContractIdentity(address=address, is_contract=False)
+            # No creation record → an externally-owned account. Still worth
+            # a label lookup (e.g. "Binance: Hot Wallet" for a send target).
+            labels = self.fetch_labels(chain_id, [address])
+            return ContractIdentity(
+                address=address, is_contract=False,
+                name_tag=labels.get(address.lower()))
         row = res[0]
         deployer = row.get("contractCreator") or None
         ts = row.get("timestamp")
@@ -199,9 +254,14 @@ class ContractIdentitySource:
         except Exception:
             pass
 
+        # Public name-tags for the contract itself AND its deployer, batched.
+        to_label = [address] + ([deployer] if deployer else [])
+        labels = self.fetch_labels(chain_id, to_label)
         return ContractIdentity(
             address=address, is_contract=True, name=name, verified=verified,
-            deployer=deployer, deployed_at=deployed_at)
+            deployer=deployer, deployed_at=deployed_at,
+            name_tag=labels.get(address.lower()),
+            deployer_label=labels.get(deployer.lower()) if deployer else None)
 
 
 @dataclass
@@ -216,39 +276,74 @@ class IdentityBadge:
 
 def describe_identity(identity: ContractIdentity, *,
                       my_addresses, deployer_count: int = 0,
+                      interaction_count: Optional[int] = None,
                       now_ts: float) -> IdentityBadge:
     """Render a contract identity as a human badge. ``deployer_count`` is
     how many of *your* cached contracts share this deployer (including
-    this one); ``now_ts`` is the current unix time (passed in for
-    testability)."""
+    this one); ``interaction_count`` is how many times you've sent to this
+    address in your cached history (None = don't show it); ``now_ts`` is
+    the current unix time (passed in for testability)."""
     mine = {a.lower() for a in my_addresses}
     if not identity.is_contract:
-        return IdentityBadge("Regular account (not a contract)", "info")
+        who = identity.name_tag or "Regular account (not a contract)"
+        if interaction_count == 0:
+            return IdentityBadge(f"{who}\n⚠ first time sending here", "caution")
+        text = who
+        if interaction_count:
+            text += f"\nsent here {interaction_count:,}× before"
+        # A labeled EOA (a known exchange/entity) is reassuring; an
+        # unlabeled one is neutral.
+        return IdentityBadge(text, "ok" if identity.name_tag else "info")
 
-    parts: list[str] = []
-    if identity.verified and identity.name:
-        parts.append(identity.name)
+    # The badge is rendered over several lines (one fact-group per line)
+    # so a long identity stays scannable instead of one " · " run-on.
+    if identity.name_tag:
+        headline = identity.name_tag          # curated public label wins
+        level = "ok"
+    elif identity.verified and identity.name:
+        headline = identity.name
         level = "ok"
     else:
-        parts.append("⚠ Unverified contract")
+        headline = "⚠ Unverified contract"
         level = "warn"
 
+    # Provenance line: when + who deployed it.
+    provenance: list[str] = []
     if identity.deployed_at:
         label = f"deployed {identity.deployed_date}"
         if (now_ts - identity.deployed_at) / 86400 < NEW_CONTRACT_DAYS:
             label += " (new)"
             if level == "ok":
                 level = "caution"
-        parts.append(label)
-
+        provenance.append(label)
     deployer = identity.deployer
     if deployer and deployer.lower() in mine:
-        parts.append("deployed by you")
+        provenance.append("deployed by you")
+    elif identity.deployer_label:
+        seg = f"by {identity.deployer_label}"      # "by AladdinDAO: Deployer"
+        others = max(0, deployer_count - 1)
+        if others > 0:
+            seg += f" (+{others} of your contracts)"
+        provenance.append(seg)
     elif deployer:
         others = max(0, deployer_count - 1)
         if others > 0:
-            parts.append(f"same deployer as {others} of your contracts")
+            provenance.append(f"same deployer as {others} of your contracts")
         else:
-            parts.append(f"deployer {deployer[:8]}…{deployer[-4:]}")
+            provenance.append(f"deployer {deployer[:8]}…{deployer[-4:]}")
 
-    return IdentityBadge(" · ".join(parts), level)
+    lines = [headline]
+    if provenance:
+        lines.append(" · ".join(provenance))
+    # Familiarity: how often you've used it. A never-before-seen contract
+    # is a soft caution (pairs with "(new)" / unverified); a heavily-used
+    # one is reassuring.
+    if interaction_count is not None:
+        if interaction_count >= 1:
+            lines.append(f"you've interacted {interaction_count:,}×")
+        else:
+            lines.append("⚠ first interaction")
+            if level == "ok":
+                level = "caution"
+
+    return IdentityBadge("\n".join(lines), level)

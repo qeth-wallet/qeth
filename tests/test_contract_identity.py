@@ -47,6 +47,19 @@ def test_cache_corrupt_file_is_a_miss(tmp_path):
     assert c.load(1, ADDR) is None
 
 
+def test_cache_old_schema_is_a_miss(tmp_path):
+    # A pre-v2 entry (valid identity, but no version / no name-tags) must
+    # read as a miss so it gets re-fetched with the current shape.
+    c = ContractIdentityCache(root=tmp_path)
+    p = c._path(1, ADDR)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"address": ADDR, "is_contract": True, "name": "Old"}))
+    assert c.load(1, ADDR) is None
+    # And a freshly-saved entry round-trips (it carries the version).
+    c.save(1, ContractIdentity(ADDR, True, name="New"))
+    assert c.load(1, ADDR) is not None
+
+
 def test_deployer_contract_count(tmp_path):
     c = ContractIdentityCache(root=tmp_path)
     for k in range(3):
@@ -160,3 +173,102 @@ def test_describe_eoa_is_info():
     b = describe_identity(ContractIdentity(ADDR, False),
                           my_addresses=[], now_ts=NOW)
     assert b.level == "info" and "not a contract" in b.text.lower()
+
+
+# --- interaction count (familiarity) -------------------------------------
+
+def _tx(from_addr, to_addr, h):
+    from qeth.transactions import Transaction
+    return Transaction(
+        chain_id=1, hash=h, block_number=1, timestamp=0, nonce=0,
+        from_addr=from_addr.lower(),
+        to_addr=to_addr.lower() if to_addr else None,
+        value_wei=0, gas_used=0, gas_price_wei=0,
+        method_id="0x", input_data="0x", success=True)
+
+
+def test_cache_interaction_count(tmp_path):
+    from qeth.transactions_cache import TransactionCache
+    cache = TransactionCache(root=tmp_path)
+    me1, me2 = "0x" + "11" * 20, "0x" + "22" * 20
+    contract, other = "0x" + "cc" * 20, "0x" + "99" * 20
+    cache.save(1, me1, [_tx(me1, contract, "0xa"), _tx(me1, contract, "0xb"),
+                        _tx(me1, other, "0xc")])
+    cache.save(1, me2, [_tx(me2, contract, "0xd")])
+    assert cache.interaction_count(1, contract, [me1, me2]) == 3   # across accounts
+    assert cache.interaction_count(1, contract, [me1]) == 2
+    assert cache.interaction_count(1, other, [me1, me2]) == 1
+    assert cache.interaction_count(1, "0x" + "00" * 20, [me1, me2]) == 0
+
+
+def test_cache_interaction_count_dedups_by_hash(tmp_path):
+    from qeth.transactions_cache import TransactionCache
+    cache = TransactionCache(root=tmp_path)
+    me1, me2 = "0x" + "11" * 20, "0x" + "22" * 20
+    contract = "0x" + "cc" * 20
+    # Same tx cached under two of my accounts → counted once.
+    cache.save(1, me1, [_tx(me1, contract, "0xsame")])
+    cache.save(1, me2, [_tx(me1, contract, "0xsame")])
+    assert cache.interaction_count(1, contract, [me1, me2]) == 1
+
+
+def test_describe_interaction_familiar():
+    idy = ContractIdentity(ADDR, True, name="Router", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD)
+    b = describe_identity(idy, my_addresses=[], interaction_count=1213, now_ts=NOW)
+    assert "you've interacted 1,213×" in b.text and b.level == "ok"
+
+
+def test_describe_first_interaction_is_caution():
+    idy = ContractIdentity(ADDR, True, name="Router", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD)
+    b = describe_identity(idy, my_addresses=[], interaction_count=0, now_ts=NOW)
+    assert "first interaction" in b.text and b.level == "caution"
+
+
+def test_describe_eoa_interaction():
+    eoa = ContractIdentity(ADDR, False)
+    seen = describe_identity(eoa, my_addresses=[], interaction_count=5, now_ts=NOW)
+    assert "sent here 5× before" in seen.text
+    first = describe_identity(eoa, my_addresses=[], interaction_count=0, now_ts=NOW)
+    assert "first time sending here" in first.text and first.level == "caution"
+
+
+# --- public name-tags (Blockscout OLI metadata) --------------------------
+
+def test_fetch_labels_parses_name_tag():
+    # Service echoes a checksummed key; we lowercase it. "name" tags beat
+    # "generic" ones, highest ordinal wins.
+    checksummed = "0x07Da2d30E26802ED65a52859A50872cfA615bD0A"
+    payload = {"addresses": {checksummed: {"tags": [
+        {"tagType": "name", "name": "AladdinDAO: Deployer", "ordinal": 10},
+        {"tagType": "generic", "name": "Contract Deployer", "ordinal": 0},
+    ]}}}
+
+    def transport(url, timeout):
+        return json.dumps(payload).encode()
+    src = ContractIdentitySource(lambda: "KEY", transport=transport)
+    labels = src.fetch_labels(1, [checksummed.lower()])
+    assert labels[checksummed.lower()] == "AladdinDAO: Deployer"
+
+
+def test_describe_uses_deployer_label():
+    idy = ContractIdentity(ADDR, True, name="RewardClaimHelper", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD,
+                           deployer_label="AladdinDAO: Deployer")
+    b = describe_identity(idy, my_addresses=[], deployer_count=11, now_ts=NOW)
+    assert "by AladdinDAO: Deployer" in b.text and "+10 of your contracts" in b.text
+
+
+def test_describe_name_tag_is_headline():
+    idy = ContractIdentity(ADDR, True, name="Vyper_contract", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD,
+                           name_tag="Curve.fi: 3pool")
+    b = describe_identity(idy, my_addresses=[], now_ts=NOW)
+    assert b.text.startswith("Curve.fi: 3pool")
+
+
+def test_describe_labeled_eoa():
+    eoa = ContractIdentity(ADDR, False, name_tag="Binance: Hot Wallet")
+    b = describe_identity(eoa, my_addresses=[], interaction_count=5, now_ts=NOW)
+    assert b.text.startswith("Binance: Hot Wallet") and b.level == "ok"

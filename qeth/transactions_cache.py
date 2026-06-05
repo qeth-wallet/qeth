@@ -88,3 +88,22 @@ class TransactionCache:
         # No indent — these files can hold 50+ rows and the on-disk
         # bytes don't need to be human-readable.
         p.write_text(json.dumps(data, separators=(",", ":")))
+
+    def interaction_count(self, chain_id: int, contract: str,
+                          addresses) -> int:
+        """How many distinct txs that ``addresses`` *sent* to ``contract``
+        appear in the cached history — a familiarity signal for the
+        contract-identity row. Cache-only (no network), so it's a LOWER
+        BOUND: only as deep as the history that's been loaded. Deduplicated
+        by tx hash in case two of the user's accounts both cache the tx."""
+        target = (contract or "").lower()
+        if not target:
+            return 0
+        mine = {a.lower() for a in addresses}
+        seen: set[str] = set()
+        for addr in mine:
+            for t in self.load(chain_id, addr) or []:
+                if ((t.to_addr or "").lower() == target
+                        and t.from_addr.lower() in mine):
+                    seen.add(t.hash)
+        return len(seen)

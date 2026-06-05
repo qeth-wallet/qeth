@@ -847,6 +847,7 @@ class TransactionsPlugin(Plugin):
             abi_cache=self._abi_cache,
             identity_source=self._identity_source,
             identity_cache=self._identity_cache,
+            tx_cache=self._disk_cache,
             start_worker=self.host.start_worker,
             token_info=token_info,
             icon_cache=icon_cache,
@@ -1781,13 +1782,15 @@ class ContractIdentityWorker(QThread):
 
     def __init__(self, source: Optional[ContractIdentitySource],
                  cache: ContractIdentityCache, chain_id: int, address: str,
-                 my_addresses, parent=None):
+                 my_addresses, tx_cache: Optional[TransactionCache] = None,
+                 parent=None):
         super().__init__(parent)
         self._source = source
         self._cache = cache
         self._chain_id = chain_id
         self._address = address
         self._my = list(my_addresses or [])
+        self._tx_cache = tx_cache
 
     def run(self) -> None:
         idy = self._cache.load(self._chain_id, self._address)
@@ -1804,8 +1807,13 @@ class ContractIdentityWorker(QThread):
             return
         count = (self._cache.deployer_contract_count(self._chain_id, idy.deployer)
                  if idy.deployer else 0)
+        # Familiarity count from the local tx-history cache (no network).
+        interactions = (
+            self._tx_cache.interaction_count(self._chain_id, self._address, self._my)
+            if self._tx_cache is not None else None)
         badge = describe_identity(
-            idy, my_addresses=self._my, deployer_count=count, now_ts=time.time())
+            idy, my_addresses=self._my, deployer_count=count,
+            interaction_count=interactions, now_ts=time.time())
         self.ready.emit(badge)
 
 
@@ -2253,7 +2261,8 @@ def _style_identity_label(label: QLabel, badge) -> None:
 def _make_identity_row(*, to_addr: Optional[str], chain,
                        identity_source: Optional[ContractIdentitySource],
                        identity_cache: ContractIdentityCache,
-                       my_addresses, start_worker):
+                       my_addresses, start_worker,
+                       tx_cache: Optional[TransactionCache] = None):
     """Build the Contract:-row label and a ``kick()`` that fills it via a
     background ContractIdentityWorker. Returns ``(None, None)`` when there's
     no recipient to identify."""
@@ -2279,7 +2288,7 @@ def _make_identity_row(*, to_addr: Optional[str], chain,
             return
         worker = ContractIdentityWorker(
             identity_source, identity_cache, chain.chain_id, to_addr,
-            my_addresses)
+            my_addresses, tx_cache=tx_cache)
         worker.ready.connect(_apply)
         start_worker(worker)
 
@@ -2305,6 +2314,7 @@ class TransactionDetailsDialog(QDialog):
                  known_addresses=None,
                  identity_source: Optional[ContractIdentitySource] = None,
                  identity_cache: Optional[ContractIdentityCache] = None,
+                 tx_cache: Optional[TransactionCache] = None,
                  parent=None):
         super().__init__(parent)
         self.tx = tx
@@ -2315,6 +2325,7 @@ class TransactionDetailsDialog(QDialog):
         self._identity_cache = (
             identity_cache if identity_cache is not None
             else ContractIdentityCache())
+        self._tx_cache = tx_cache
         self._start_worker = start_worker
         self._known_addresses = {a.lower() for a in (known_addresses or ())}
         # Optional dependencies for ERC-20 annotation on the "To:" row.
@@ -2407,7 +2418,7 @@ class TransactionDetailsDialog(QDialog):
             identity_source=self._identity_source,
             identity_cache=self._identity_cache,
             my_addresses=known_addresses or [],
-            start_worker=self._start_worker)
+            start_worker=self._start_worker, tx_cache=self._tx_cache)
         if _id_label is not None and _id_kick is not None:
             form.addRow("Contract:", _id_label)
             _id_kick()
@@ -2996,6 +3007,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                  known_addresses=None,
                  identity_source: Optional[ContractIdentitySource] = None,
                  identity_cache: Optional[ContractIdentityCache] = None,
+                 tx_cache: Optional[TransactionCache] = None,
                  parent=None):
         super().__init__(parent)
         self.req = req
@@ -3006,6 +3018,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         self._identity_cache = (
             identity_cache if identity_cache is not None
             else ContractIdentityCache())
+        self._tx_cache = tx_cache
         self._start_worker = start_worker
         self._token_info = token_info
         self._known_addresses = {a.lower() for a in (known_addresses or ())}
@@ -3102,7 +3115,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             identity_source=self._identity_source,
             identity_cache=self._identity_cache,
             my_addresses=known_addresses or [],
-            start_worker=self._start_worker)
+            start_worker=self._start_worker, tx_cache=self._tx_cache)
         if _id_label is not None and _id_kick is not None:
             header.addRow("Contract:", _id_label)
             _id_kick()
@@ -3595,6 +3608,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                  known_addresses=None,
                  identity_source: Optional[ContractIdentitySource] = None,
                  identity_cache: Optional[ContractIdentityCache] = None,
+                 tx_cache: Optional[TransactionCache] = None,
                  parent=None):
         super().__init__(parent)
         self._asset = asset
@@ -3606,6 +3620,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._identity_cache = (
             identity_cache if identity_cache is not None
             else ContractIdentityCache())
+        self._tx_cache = tx_cache
         self._start_worker = start_worker
         self._token_info = token_info
         self._icon_cache = icon_cache
@@ -4013,7 +4028,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         label.setStyleSheet("")
         worker = ContractIdentityWorker(
             self._identity_source, self._identity_cache, self.chain.chain_id,
-            addr, self._known_addresses_list)
+            addr, self._known_addresses_list, tx_cache=self._tx_cache)
         worker.ready.connect(
             lambda badge, a=addr: self._on_identity_ready(a, badge))
         self._start_worker(worker)

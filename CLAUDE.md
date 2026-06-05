@@ -14,7 +14,7 @@ user's Qt theme applies.
 - `qeth/ledger.py` — Ledger account discovery via `ledgereth`, runs in a `QThread`
 - `qeth/tokens.py` — token discovery sources (currently Blockscout); `TokenSource` abstract base
 - `qeth/tokenlists.py` — curated token whitelists from Uniswap / CoinGecko / Curve / 1inch, merged + disk-cached at `~/.qeth/tokenlists/`
-- `qeth/contract_identity.py` — "what is this contract": name/verified (Etherscan v2 `getsourcecode`) + deployer/date (`getcontractcreation`), permanently disk-cached at `~/.qeth/contract_id/`. `describe_identity()` renders a badge (name · age · deployer-cluster / self-deployed; ⚠ for unverified, "(new)" for recent). Shown on the To:/Contract: row of the details + signing + send dialogs.
+- `qeth/contract_identity.py` — "what is this contract": name/verified (Etherscan v2 `getsourcecode`) + deployer/date (`getcontractcreation`) + public name-tags for the address and its deployer (Blockscout OLI metadata service — free; "AladdinDAO: Deployer", "Binance: Hot Wallet"), permanently disk-cached at `~/.qeth/contract_id/`. `describe_identity()` renders a multi-line badge: headline (name-tag › ContractName › ⚠ unverified) / provenance (deployed-date · deployer-label-or-cluster) / familiarity ("you've interacted N×" from the local tx cache, ⚠ on first). Shown on the Contract: row of the details + signing + send dialogs.
 - `qeth/icons.py` — disk+memory icon cache (`~/.qeth/icons/`) + `bundled_native_icon` / `bundled_chain_icon` lookups
 - `qeth/rpc.py` — aiohttp HTTP+WS JSON-RPC server on `127.0.0.1:1248` (Frame-compatible)
 - `qeth/assets/{native,chains}/*.png` — bundled logos; shipped via `pyproject.toml` `package-data`
@@ -149,6 +149,13 @@ restarts. UI changes persist; RPC chain switches are session-only.
   `optimism.blockscout.com`, etc.). Etherscan-compatible v1 API at
   `/api?module=account&action=tokenlist`; returns mixed ERC-20/721/1155
   so filter on `type`. Mainnet is slow for high-activity addresses.
+- **Blockscout metadata service** (`metadata.services.blockscout.com/api/v1/metadata?addresses=…&chainId=…`)
+  — the Open Labels Initiative dataset. Public address name-tags
+  ("AladdinDAO: Deployer", "Binance: Hot Wallet"), **free + keyless**,
+  batched, chain-aware. This is where qeth gets deployer/address labels —
+  Etherscan has the same data but paywalls it behind PRO
+  (`module=nametag` → "API Exclusive endpoint"). Response: `addresses[CHECKSUM].tags[]`,
+  each `{name, tagType, ordinal}`; use `tagType=="name"`, highest ordinal.
 - **Curve** — official domain is `curve.finance` (**not** `curve.fi`,
   which 404s on most paths I tried). API base
   `https://api.curve.finance/v1/`, OpenAPI spec at

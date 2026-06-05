@@ -109,7 +109,12 @@ class TransactionSource(ABC):
         address: str,
         page: int = 1,
         limit: int = 50,
+        before_block: Optional[int] = None,
     ) -> list[Transaction]:
+        """Newest-first. ``before_block`` (when set) caps results at that
+        block (explorer ``endblock``) — the block-cursor used to page
+        beyond the explorer's ``page × offset ≤ 10000`` window: keep
+        ``page=1`` and walk ``before_block`` down from the oldest row."""
         ...
 
     def supports(self, chain: Chain) -> bool:
@@ -210,6 +215,7 @@ class EtherscanV2TransactionSource(TransactionSource):
         address: str,
         page: int = 1,
         limit: int = 50,
+        before_block: Optional[int] = None,
     ) -> list[Transaction]:
         key = self._get_api_key()
         if not key:
@@ -224,6 +230,8 @@ class EtherscanV2TransactionSource(TransactionSource):
             ("offset", str(max(1, int(limit)))),
             ("apikey", key),
         ]
+        if before_block is not None:
+            params.append(("endblock", str(int(before_block))))
         url = f"{ETHERSCAN_V2_BASE}?" + urllib.parse.urlencode(params)
         raw = self._transport(url, self.timeout)
         data = json.loads(raw)
@@ -266,11 +274,14 @@ class RoutedTransactionSource(TransactionSource):
 
     def list_transactions(
         self, chain: Chain, address: str, page: int = 1, limit: int = 50,
+        before_block: Optional[int] = None,
     ) -> list[Transaction]:
         if self._primary.supports(chain):
-            return self._primary.list_transactions(chain, address, page, limit)
+            return self._primary.list_transactions(
+                chain, address, page, limit, before_block)
         if self._secondary.supports(chain):
-            return self._secondary.list_transactions(chain, address, page, limit)
+            return self._secondary.list_transactions(
+                chain, address, page, limit, before_block)
         raise UnsupportedChain(
             f"No transaction source supports chain {chain.chain_id}"
         )
@@ -304,6 +315,7 @@ class BlockscoutTransactionSource(TransactionSource):
         address: str,
         page: int = 1,
         limit: int = 50,
+        before_block: Optional[int] = None,
     ) -> list[Transaction]:
         base = self.instances.get(chain.chain_id)
         if not base:
@@ -318,6 +330,8 @@ class BlockscoutTransactionSource(TransactionSource):
             ("page", str(max(1, int(page)))),
             ("offset", str(max(1, int(limit)))),
         ]
+        if before_block is not None:
+            params.append(("endblock", str(int(before_block))))
         url = f"{base.rstrip('/')}/api?" + urllib.parse.urlencode(params)
         raw = self._transport(url, self.timeout)
         data = json.loads(raw)

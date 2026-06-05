@@ -216,6 +216,15 @@ class TestBlockscoutSource:
         with pytest.raises(TransactionSourceError):
             src.list_transactions(ETH, ADDR)
 
+    def test_before_block_adds_endblock_cursor(self):
+        urls = []
+        src = BlockscoutTransactionSource(
+            transport=_fake_transport({"status": "1", "result": []}, urls),
+        )
+        src.list_transactions(ETH, ADDR, before_block=15_000_000)
+        assert "endblock=15000000" in urls[0]
+        assert "page=1" in urls[0]              # cursor mode keeps page 1
+
     def test_page_window_cap_is_end_not_error(self):
         # The explorer's `page × offset ≤ 10000` cap: hitting it on a deep
         # scroll is the end of pageable history, not a failure. The detail

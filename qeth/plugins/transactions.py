@@ -642,7 +642,7 @@ class TransactionsWorker(QThread):
 
     def __init__(self, source: TransactionSource, chain, address: str,
                  page: int = 1, page_size: int = 100,
-                 sent_only: bool = True, parent=None):
+                 sent_only: bool = True, before_block=None, parent=None):
         super().__init__(parent)
         self.source = source
         self.chain = chain
@@ -650,6 +650,7 @@ class TransactionsWorker(QThread):
         self.page = page
         self.page_size = page_size
         self.sent_only = sent_only
+        self.before_block = before_block
 
     def run(self) -> None:
         viewer = self.address.lower()
@@ -657,6 +658,7 @@ class TransactionsWorker(QThread):
             raw = self.source.list_transactions(
                 self.chain, self.address,
                 page=self.page, limit=self.page_size,
+                before_block=self.before_block,
             )
             # A partial page means Blockscout has nothing more — used
             # by the plugin to flag the (chain, addr) as exhausted.
@@ -763,7 +765,6 @@ class TransactionsPlugin(Plugin):
         # scroll-driven appends keeps rendering O(visible), not
         # O(cache) — critical for accounts with thousands of cached
         # entries where rebuilding the whole table freezes the UI.
-        self._next_page: dict[tuple[int, str], int] = {}
         self._exhausted: set[tuple[int, str]] = set()
         self._displayed_count: dict[tuple[int, str], int] = {}
         # Which (chain, addr) the panel's table currently shows. Used
@@ -1110,15 +1111,9 @@ class TransactionsPlugin(Plugin):
                 disk = [t for t in disk if t.from_addr.lower() == addr_l]
                 self._cache[key] = disk
                 cached = disk
-                # Estimate where to resume Blockscout pagination based
-                # on cache size. Assumes ~50 sent txs per Blockscout
-                # page (i.e. sent_ratio = 1.0); if the actual ratio is
-                # lower the auto-advance walk picks up the slack. With
-                # a 1213-entry cache and page_size 50 we jump straight
-                # to page ~25, avoiding the ~5s walk through pages 2..24
-                # that all return entries we already have.
-                if key not in self._next_page and disk:
-                    self._next_page[key] = max(2, (len(disk) // 50) + 1)
+                # No page cursor to seed: "load older" resumes from the
+                # cache's oldest block (_oldest_block), so a big cache picks
+                # up exactly where it left off with no page-walk.
         # Re-render only when the panel currently shows a *different*
         # view. If it's the same (chain, addr) we already painted
         # (e.g. user just toggled away to Tokens and back), leaving
@@ -1167,8 +1162,16 @@ class TransactionsPlugin(Plugin):
         # since the last visit. Older pages come from scroll.
         self._fetch_page(key, address, page=1)
 
+    def _oldest_block(self, key) -> Optional[int]:
+        """Block of the oldest loaded tx for this view — the cursor for
+        paging older (explorer ``endblock``), which sidesteps the
+        ``page × offset ≤ 10000`` window."""
+        txs = self._cache.get(key) or []
+        return min((t.block_number for t in txs), default=None)
+
     def _fetch_page(self, key, address: str, page: int,
-                    walk_on_overlap: bool = False) -> None:
+                    walk_on_overlap: bool = False,
+                    before_block=None) -> None:
         """Kick a single-page fetch. No-op if a fetch for this key is
         already in flight or if the history is known to be exhausted.
 
@@ -1189,7 +1192,7 @@ class TransactionsPlugin(Plugin):
         chain = self.host.current_chain()
         self._in_flight.add(key)
         worker = TransactionsWorker(
-            self._source, chain, address, page=page,
+            self._source, chain, address, page=page, before_block=before_block,
         )
         worker.fetched.connect(
             lambda c, a, p, t, m, w=walk_on_overlap:
@@ -1223,8 +1226,9 @@ class TransactionsPlugin(Plugin):
             self._panel.append_transactions(more)
             self._displayed_count[key] = shown + len(more)
             return
-        next_page = self._next_page.get(key, 1)
-        self._fetch_page(key, addr, page=next_page, walk_on_overlap=True)
+        # Cache fully shown → page older via the block cursor (no 10k cap).
+        self._fetch_page(key, addr, page=1, walk_on_overlap=True,
+                         before_block=self._oldest_block(key))
 
     def _on_page_fetched(self, chain_id: int, address_lower: str,
                          page_idx: int, page: list, has_more: bool,
@@ -1242,35 +1246,37 @@ class TransactionsPlugin(Plugin):
             return
         existing = self._cache.get(key) or []
         existing_hashes = {t.hash for t in existing}
+        prev_oldest = min((t.block_number for t in existing), default=None)
         merged = merge_txs(page, existing)
         self._cache[key] = merged
         self._disk_cache.save(chain_id, address_lower, merged)
 
-        self._next_page[key] = max(
-            self._next_page.get(key, 1), page_idx + 1,
-        )
         new_rows = [t for t in page if t.hash not in existing_hashes]
+        oldest = min((t.block_number for t in merged), default=None)
+        # Did this fetch reach genuinely older ground? (Used to know when
+        # the block cursor has bottomed out.)
+        progressed = oldest is not None and (
+            prev_oldest is None or oldest < prev_oldest)
 
         if not has_more or _is_full_history(merged):
             self._exhausted.add(key)
-        elif len(new_rows) < self.INITIAL_BATCH:
-            # Two cases roll up here:
-            # 1. Scroll-driven fetch whose page was mostly cached
-            #    overlap — walk forward to find genuinely new
-            #    older data.
-            # 2. Initial fetch or scroll on a receive-heavy address
-            #    (e.g. an exchange wallet, or Vitalik's): the raw
-            #    page is mostly received txs that the sent-only
-            #    filter strips, yielding far fewer than the page
-            #    size. Walk to fill a batch.
-            # Stops when either has_more goes False (Blockscout is
-            # done) or _is_full_history confirms the cache covers
-            # every nonce; either branch sets _exhausted on the
-            # next fetch.
-            self._fetch_page(
-                key, address_lower, page=page_idx + 1,
-                walk_on_overlap=True,
-            )
+        elif walk_on_overlap:
+            # Paging older via the block cursor (endblock = oldest loaded
+            # block). Keep walking until a full INITIAL_BATCH of new older
+            # rows surfaces — but stop if the cursor stalled (no progress
+            # AND nothing new = end of history or the explorer's window).
+            if not progressed and not new_rows:
+                self._exhausted.add(key)
+            elif len(new_rows) < self.INITIAL_BATCH:
+                self._fetch_page(key, address_lower, page=1,
+                                 walk_on_overlap=True, before_block=oldest)
+        elif len(merged) < self.INITIAL_BATCH and progressed:
+            # Refresh of a fresh/sparse account (page 1 was mostly received
+            # txs the sent-only filter stripped): walk older to fill the
+            # initial view. A large already-cached account skips this — no
+            # more marching the whole history on every tab open.
+            self._fetch_page(key, address_lower, page=1,
+                             walk_on_overlap=True, before_block=oldest)
 
         # Only touch the panel if the user is still on this view.
         if (self.host is None

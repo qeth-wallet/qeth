@@ -247,7 +247,7 @@ class TestTransactionsPlugin:
             def supports(self, _c):
                 return True
 
-            def list_transactions(self, _c, _a, page=1, limit=50):
+            def list_transactions(self, _c, _a, page=1, limit=50, before_block=None):
                 return rows
 
         emitted: list[tuple] = []
@@ -283,7 +283,7 @@ class TestTransactionsPlugin:
             def supports(self, _c):
                 return True
 
-            def list_transactions(self, _c, _a, page=1, limit=50):
+            def list_transactions(self, _c, _a, page=1, limit=50, before_block=None):
                 return rows
 
         emitted = []
@@ -362,7 +362,7 @@ class TestTransactionsPlugin:
         # cause any. We monkey-patch _fetch_page on the instance.
         calls: list = []
 
-        def _fake_fetch(k, addr, page, walk_on_overlap=False):
+        def _fake_fetch(k, addr, page, walk_on_overlap=False, before_block=None):
             calls.append((k, addr, page))
         plugin._fetch_page = _fake_fetch
 
@@ -719,12 +719,10 @@ class TestTransactionsPlugin:
         plugin.on_activated()
         assert plugin.widget().table.rowCount() == first_count
 
-    def test_overlapping_fetch_auto_advances_to_new_data(self, qtbot, tmp_qeth):
-        """When a fetched page contains only entries we already have
-        (typical after a partial backfill from a prior session), the
-        plugin auto-advances to the next page so the load-on-scroll
-        UX doesn't dead-end silently. Stops once a page brings new
-        rows OR Blockscout reports has_more=False."""
+    def test_scroll_loads_older_via_block_cursor(self, qtbot, tmp_qeth):
+        """Older history loads on scroll via the endblock cursor (page
+        stays 1, no page × offset cap). The cursor walks down from the
+        oldest loaded block until it reaches the start of history."""
         from qeth.transactions_cache import TransactionCache
 
         def _mk(n: int) -> Transaction:
@@ -736,40 +734,30 @@ class TestTransactionsPlugin:
                 method_id="", input_data="0x", success=True,
             )
 
-        # Pre-cache nonces 100..199 — pages of overlap before the
-        # real new data. Sized to two full page_size=100 worker
-        # batches so the auto-advance walker has something to chew.
-        cached = [_mk(n) for n in range(199, 99, -1)]
-        TransactionCache().save(ETH.chain_id, ADDR, cached)
+        # Cache holds the newest 100 (blocks/nonces 199..100); the older
+        # half (99..0) is only on the wire, reachable via the cursor.
+        TransactionCache().save(
+            ETH.chain_id, ADDR, [_mk(n) for n in range(199, 99, -1)])
 
         class _Source:
             def __init__(self):
-                self.calls: list[int] = []
+                self.cursors: list = []
 
             def supports(self, _c):
                 return True
 
-            def list_transactions(self, _c, _a, page=1, limit=50):
-                # Honour ``limit`` — has_more (page is full) is
-                # what tells the plugin to keep walking. A hard-
-                # coded 50-row return would let the worker decide
-                # has_more=False on a 100-row limit and short-
-                # circuit the test we're trying to exercise.
-                self.calls.append(page)
-                if page == 1:
-                    return [_mk(n) for n in range(199, 199 - limit, -1)]
-                if page == 2:
-                    return [_mk(n) for n in range(99, 99 - limit, -1)
-                            if n >= 0]
-                return []
+            def list_transactions(self, _c, _a, page=1, limit=50,
+                                  before_block=None):
+                self.cursors.append(before_block)
+                top = 199 if before_block is None else before_block
+                return [_mk(n) for n in range(top, max(-1, top - limit), -1)
+                        if n >= 0]
 
         source = _Source()
         plugin = TransactionsPlugin(source=source)
         host = _StubHost(address=ADDR)
         plugin.attach(host)
         qtbot.addWidget(plugin.widget())
-        # Drive each kicked worker synchronously the moment it lands
-        # on the host so the auto-advance chain runs end to end.
         original_start = host.start_worker
 
         def _start(worker):
@@ -778,20 +766,23 @@ class TestTransactionsPlugin:
 
         host.start_worker = _start
 
-        plugin.on_activated()   # force_fetch=True path
-        # Page 1 is pure overlap with the disk cache → 0 new rows
-        # triggers the auto-advance. Page 2 returns the older
-        # nonces, which DO add a full batch of new rows → walker
-        # stops.
-        assert source.calls == [1, 2]
+        plugin.on_activated()                  # refresh: newest (cursor None)
         key = (ETH.chain_id, ADDR.lower())
-        merged = plugin._cache[key]
-        assert min(t.nonce for t in merged) == 0
+        # Reveal cached rows, then scroll → block-cursor fetches older,
+        # walking endblock down until the start of history (nonce 0).
+        for _ in range(60):
+            if min(t.nonce for t in plugin._cache[key]) == 0:
+                break
+            plugin._on_scroll_bottom()
+        assert min(t.nonce for t in plugin._cache[key]) == 0
+        assert None in source.cursors                      # the refresh-newest
+        assert any(c is not None for c in source.cursors)  # the cursor fetches
 
-    def test_scroll_bottom_advances_to_next_page(self, qtbot, tmp_qeth):
-        """The scrolled_to_bottom signal is what drives the
-        load-on-scroll UX: each emission should kick off one
-        single-page worker for the next unfetched page."""
+    def test_scroll_bottom_walks_block_cursor(self, qtbot, tmp_qeth):
+        """The scrolled_to_bottom signal drives load-on-scroll: once the
+        cache is shown, each emission kicks one worker that pages OLDER
+        via the block cursor (page stays 1; endblock = oldest loaded
+        block) — no page × offset ≤ 10000 cap."""
         plugin = TransactionsPlugin()
         host = _StubHost(address=ADDR)
         plugin.attach(host)
@@ -812,7 +803,9 @@ class TestTransactionsPlugin:
 
         plugin._on_scroll_bottom()
         assert len(host.started_workers) == 1
-        assert host.started_workers[0].page == 2
+        assert host.started_workers[0].page == 1
+        # endblock = oldest loaded block (the seed's lowest block is 1).
+        assert host.started_workers[0].before_block == 1
 
         # Once we record an exhausted history, further scrolls no-op.
         plugin._exhausted.add((ETH.chain_id, ADDR.lower()))
@@ -841,7 +834,7 @@ class TestTransactionsPlugin:
             def supports(self, _c):
                 return True
 
-            def list_transactions(self, _c, _a, page=1, limit=50):
+            def list_transactions(self, _c, _a, page=1, limit=50, before_block=None):
                 return [_mk("aa"), _mk("bb"), _mk("cc")]
 
         captured = []

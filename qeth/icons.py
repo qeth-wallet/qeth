@@ -81,17 +81,17 @@ def to_circular(src: QPixmap, size: int = CIRCULAR_RENDER_SIZE) -> QPixmap:
     if src.isNull() or size <= 0:
         return src
     out = QPixmap(size, size)
-    out.fill(Qt.transparent)
+    out.fill(Qt.GlobalColor.transparent)
     painter = QPainter(out)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     path = QPainterPath()
     path.addEllipse(0.0, 0.0, float(size), float(size))
     painter.setClipPath(path)
     scaled = src.scaled(
         size, size,
-        Qt.KeepAspectRatioByExpanding,
-        Qt.SmoothTransformation,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
     )
     x = (scaled.width() - size) // 2
     y = (scaled.height() - size) // 2

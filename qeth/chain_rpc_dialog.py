@@ -130,7 +130,7 @@ class ChainRpcDialog(QDialog):
         outer.setSpacing(10)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(8)
 
@@ -147,9 +147,9 @@ class ChainRpcDialog(QDialog):
         ))
         self.picker = QListWidget()
         self.picker.setFont(mono)
-        self.picker.setTextElideMode(Qt.ElideMiddle)
-        self.picker.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.picker.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.picker.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.picker.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.picker.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.picker.itemClicked.connect(self._on_pick)
         outer.addWidget(self.picker, 1)
 
@@ -166,7 +166,7 @@ class ChainRpcDialog(QDialog):
         # one key covers every supported chain so people don't
         # try to enter a different key per dialog open.
         key_form = QFormLayout()
-        key_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        key_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         key_form.setHorizontalSpacing(12)
         key_form.setVerticalSpacing(8)
         self.etherscan_edit = QLineEdit(self._initial_etherscan_key)
@@ -182,7 +182,7 @@ class ChainRpcDialog(QDialog):
         outer.addLayout(key_form)
 
         btns = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -262,12 +262,12 @@ class ChainRpcDialog(QDialog):
         for r in http_rpcs:
             item = QListWidgetItem(
                 self._format_row(r.url, ok=None, latency_ms=None))
-            item.setData(Qt.UserRole, r.url)
+            item.setData(Qt.ItemDataRole.UserRole, r.url)
             # Initially make probing rows non-selectable so the
             # user doesn't accidentally pick something we haven't
             # confirmed works. ``_on_probed`` flips selectable on
             # success.
-            item.setFlags(item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsEnabled)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
             self.picker.addItem(item)
         self.status_lbl.setText(
             f"Probing {self._total_to_probe} endpoint(s) for "
@@ -285,7 +285,7 @@ class ChainRpcDialog(QDialog):
         # selectability. Iterating is fine — at most ~20 rows.
         for i in range(self.picker.count()):
             it = self.picker.item(i)
-            if it.data(Qt.UserRole) == url:
+            if it.data(Qt.ItemDataRole.UserRole) == url:
                 it.setText(self._format_row(
                     url, ok=ok,
                     latency_ms=float(latency_ms) if latency_ms is not None else None,
@@ -294,8 +294,8 @@ class ChainRpcDialog(QDialog):
                 if ok:
                     it.setFlags(
                         it.flags()
-                        | Qt.ItemIsSelectable
-                        | Qt.ItemIsEnabled
+                        | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsEnabled
                     )
                 break
         if self._done_probing < self._total_to_probe:
@@ -321,7 +321,7 @@ class ChainRpcDialog(QDialog):
         for _rank, latency, url, simv1 in survivors:
             item = QListWidgetItem(
                 self._format_row(url, ok=True, latency_ms=latency, simv1=simv1))
-            item.setData(Qt.UserRole, url)
+            item.setData(Qt.ItemDataRole.UserRole, url)
             self.picker.addItem(item)
             if simv1 is True:
                 n_sim += 1
@@ -345,7 +345,7 @@ class ChainRpcDialog(QDialog):
     # --- picker behaviour -------------------------------------
 
     def _on_pick(self, item) -> None:
-        url = item.data(Qt.UserRole)
+        url = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(url, str):
             self.url_edit.setText(url)
 

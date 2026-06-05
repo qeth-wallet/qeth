@@ -33,7 +33,7 @@ def is_dark_palette(palette: QPalette) -> bool:
     """True when the palette's window background is dark enough
     that a reversed (light) glyph reads better on top of it.
     ITU-R BT.601 perceived luminance, threshold 0.5."""
-    c = palette.color(QPalette.Window)
+    c = palette.color(QPalette.ColorRole.Window)
     luminance = 0.299 * c.redF() + 0.587 * c.greenF() + 0.114 * c.blueF()
     return luminance < 0.5
 

@@ -21,7 +21,7 @@ import datetime
 import html as _html
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from eth_utils import to_checksum_address
 
@@ -86,7 +86,7 @@ def _install_copy_menu(label: "QLabel", value: str, url: "Optional[str]") -> Non
     verbatim, plus "Open in Browser" when there's a ``url``."""
     from PySide6.QtWidgets import QMenu
 
-    label.setContextMenuPolicy(Qt.CustomContextMenu)
+    label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     noun = _copy_noun(value)
     copy_icon = QIcon.fromTheme("edit-copy")
     open_icon = QIcon.fromTheme(
@@ -391,7 +391,7 @@ def _pick_mono_font() -> QFont:
     # not at all) depending on what the resolver picks, but the
     # rest of the dialog still looks fine.
     f = QFont("monospace")
-    f.setStyleHint(QFont.Monospace)
+    f.setStyleHint(QFont.StyleHint.Monospace)
     f.setFixedPitch(True)
     return f
 
@@ -1339,12 +1339,12 @@ class TransactionListPanel(QWidget):
         self.table.setHorizontalHeaderLabels(["", "Nonce", "Time", "Hash"])
         # Status column shows a themed icon (glyph fallback) — keep it small.
         self.table.setIconSize(QSize(16, 16))
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setShowGrid(False)
         # Padding + hover only — see TokenListPanel comment.
         self.table.setStyleSheet(
@@ -1354,7 +1354,7 @@ class TransactionListPanel(QWidget):
             "}"
             "QTableView::item:hover { background: transparent; }"
         )
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_double_click)
         # Enter / Return on the focused transactions table opens
@@ -1367,7 +1367,7 @@ class TransactionListPanel(QWidget):
         # rendered text grows as the user widens the column.
         # Short-text cells (Status/Nonce/Time, all ResizeToContents)
         # always fit, so this setting only ever takes effect on Hash.
-        self.table.setTextElideMode(Qt.ElideMiddle)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         # Scroll-to-bottom drives the load-more UX.
         self.table.verticalScrollBar().valueChanged.connect(
             self._on_scroll_change
@@ -1379,16 +1379,16 @@ class TransactionListPanel(QWidget):
         # 0x1234…abcd form, so the wider cell looks padded rather than
         # full-bleed. Stretch + ResizeToContents together also mean
         # there's no empty trailing space after Hash.
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Status
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Nonce
-        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Time
-        h.setSectionResizeMode(3, QHeaderView.Stretch)           # Hash
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Status
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Nonce
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Time
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)           # Hash
         v.addWidget(self.table, 1)
 
         # The empty-state / loading / error label sits stacked under the
         # table; we toggle visibility based on state.
         self.status_lbl = QLabel("")
-        self.status_lbl.setAlignment(Qt.AlignCenter)
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_lbl.setVisible(False)
         v.addWidget(self.status_lbl)
 
@@ -1400,7 +1400,7 @@ class TransactionListPanel(QWidget):
         self.btn_details = QPushButton()
         self.btn_details.setIcon(QIcon.fromTheme(
             "document-properties",
-            style.standardIcon(QStyle.SP_FileDialogDetailedView),
+            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
         ))
         self.btn_details.setToolTip("Show selected transaction's details")
         self.btn_details.setEnabled(False)
@@ -1424,7 +1424,7 @@ class TransactionListPanel(QWidget):
         self.btn_copy_hash = QPushButton()
         self.btn_copy_hash.setIcon(QIcon.fromTheme(
             "edit-copy",
-            style.standardIcon(QStyle.SP_DialogSaveButton),
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
         ))
         self.btn_copy_hash.setToolTip("Copy selected transaction's hash")
         self.btn_copy_hash.setEnabled(False)
@@ -1433,7 +1433,7 @@ class TransactionListPanel(QWidget):
             b.setFlat(True)
             b.setMaximumSize(28, 28)
             b.setIconSize(QSize(16, 16))
-            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         self.btn_details.clicked.connect(self._details_for_selected)
         self.btn_explorer.clicked.connect(self._explorer_for_selected)
@@ -1441,8 +1441,8 @@ class TransactionListPanel(QWidget):
         # Ctrl+C copies the selected transaction's hash, scoped to the
         # table so it only fires when this tab has focus.
         copy_act = QAction(self.table)
-        copy_act.setShortcut(QKeySequence.Copy)
-        copy_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        copy_act.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         copy_act.triggered.connect(self._copy_hash_for_selected)
         self.table.addAction(copy_act)
         self.table.itemSelectionChanged.connect(self._update_action_buttons)
@@ -1556,7 +1556,7 @@ class TransactionListPanel(QWidget):
         # cost stays O(1).
         prior_modes = [h.sectionResizeMode(i) for i in range(col_count)]
         for i in range(col_count):
-            h.setSectionResizeMode(i, QHeaderView.Fixed)
+            h.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
         # Same idea for signals: itemSelectionChanged fires on every
         # setItem at the selected row, and the slot walks the model
         # to read selected_tx — death by a thousand cuts on a big
@@ -1642,18 +1642,18 @@ class TransactionListPanel(QWidget):
             status.setText(glyph)
         else:
             status.setIcon(icon)
-        status.setTextAlignment(Qt.AlignCenter)
+        status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         status.setToolTip(tip)
 
         nonce = QTableWidgetItem(str(tx.nonce))
-        nonce.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        nonce.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         time_item = QTableWidgetItem(_format_datetime(tx.timestamp))
 
         hash_item = QTableWidgetItem(tx.hash)
         hash_item.setFont(QFont("monospace"))
         hash_item.setToolTip(tx.hash)
-        hash_item.setData(Qt.UserRole, tx)
+        hash_item.setData(Qt.ItemDataRole.UserRole, tx)
 
         self.table.setItem(row, 0, status)
         self.table.setItem(row, 1, nonce)
@@ -1664,7 +1664,7 @@ class TransactionListPanel(QWidget):
         item = self.table.item(row, 3)
         if item is None:
             return None
-        data = item.data(Qt.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole)
         return data if isinstance(data, Transaction) else None
 
     def _on_double_click(self, row: int, _col: int) -> None:
@@ -1675,8 +1675,8 @@ class TransactionListPanel(QWidget):
     def eventFilter(self, obj, event):  # noqa: N802 — Qt method name
         from PySide6.QtCore import QEvent
         if (obj is self.table
-                and event.type() == QEvent.KeyPress
-                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
             row = self.table.currentRow()
             tx = self._tx_at(row) if row >= 0 else None
             if tx is not None:
@@ -1872,10 +1872,10 @@ class _EventsView(QWidget):
         lay.addLayout(header)
         self.events_view = QTextEdit()
         self.events_view.setReadOnly(True)
-        self.events_view.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.events_view.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.events_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.events_view.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.events_view.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding,
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
         )
         lay.addWidget(self.events_view, 1)
 
@@ -1944,7 +1944,7 @@ class _EventsView(QWidget):
             pix = self._icon_cache.get(self.chain.chain_id, contract)
             if pix is not None and not pix.isNull():
                 url = f"tok:{contract.lower()}"
-                doc.addResource(QTextDocument.ImageResource, QUrl(url), pix)
+                doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), pix)
                 img = f'<img src="{url}" width="14" height="14"> '
         return f'{img}<b>{_escape_html(entry.symbol)}</b> '
 
@@ -2033,6 +2033,21 @@ class _EventPreviewMixin:
 
     Requires the host to have ``chain``, ``_token_info``, ``_icon_cache``,
     ``_abi_source``, ``_abi_cache`` and ``_start_worker`` already set."""
+
+    if TYPE_CHECKING:
+        # Members the concrete dialog (a QDialog) provides — this mixin is
+        # never instantiated standalone. Declared so the type checker
+        # resolves the references in the methods below.
+        from PySide6.QtCore import SignalInstance
+        chain: Any
+        finished: SignalInstance
+        _token_info: Any
+        _icon_cache: Any
+        _abi_source: Optional[AnyAbiSource]
+        _abi_cache: AbiCache
+        _start_worker: Any
+
+        def _sim_params(self) -> Any: ...
 
     # How long the UI waits for a simulation before giving up. The fast
     # path (eth_simulateV1) returns in well under this; the local fork
@@ -2197,13 +2212,13 @@ class TransactionDetailsDialog(QDialog):
         self.resize(720, 660)
 
         # Use the regular text colour for links rather than
-        # QPalette.Link — that role inherits a low-contrast cyan in a
+        # QPalette.ColorRole.Link — that role inherits a low-contrast cyan in a
         # lot of common themes (Breeze/Kvantum/qt6ct fallbacks pick
         # ``#2adfff``-ish), so links end up nearly invisible on the
         # dialog background. Black-on-white (or white-on-dark) plus
         # the underline carries the "this is a link" signal without
         # needing a colour that's guaranteed to contrast.
-        self._link_color = self.palette().color(QPalette.WindowText).name()
+        self._link_color = self.palette().color(QPalette.ColorRole.WindowText).name()
 
         # Outer layout: comfortable margins so the contents don't bump
         # against the window chrome.
@@ -2231,8 +2246,8 @@ class TransactionDetailsDialog(QDialog):
         # value column starts at the widest label's width so values
         # line up cleanly underneath each other.
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(6)
         details_layout.addLayout(form)
@@ -2307,12 +2322,12 @@ class TransactionDetailsDialog(QDialog):
         # No horizontal scroll — wrap to widget width, and break
         # inside long unbroken tokens too (decimal uint256 values
         # and hex blobs have no spaces and would otherwise overflow).
-        self.decoded_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.decoded_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.decoded_view.setWordWrapMode(
-            QTextOption.WrapAtWordBoundaryOrAnywhere
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
         )
         self.decoded_view.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding,
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
         )
         details_layout.addWidget(self.decoded_view, 1)
 
@@ -2328,7 +2343,7 @@ class TransactionDetailsDialog(QDialog):
         events_layout.addWidget(self._events, 1)
 
         # Buttons row: Explorer + Close.
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         explorer_btn = QPushButton("&Open in Block Explorer")
         # Same browser icon as the Transactions list's external-
         # link button so "go to the explorer" reads identically
@@ -2341,7 +2356,7 @@ class TransactionDetailsDialog(QDialog):
             explorer_btn.setIcon(_explorer_icon)
         explorer_btn.setEnabled(bool(chain.explorer))
         explorer_btn.clicked.connect(self._open_explorer)
-        buttons.addButton(explorer_btn, QDialogButtonBox.ActionRole)
+        buttons.addButton(explorer_btn, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
@@ -2428,7 +2443,7 @@ class TransactionDetailsDialog(QDialog):
 
     def _value_label(self, text: str, *, monospace: bool = False) -> QLabel:
         lbl = QLabel(text)
-        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if monospace:
             lbl.setFont(self._mono_font)
         # Wrap long values (full hashes etc.) so they don't push the
@@ -2451,10 +2466,10 @@ class TransactionDetailsDialog(QDialog):
             f"{_escape_html(text)}</a>"
         )
         lbl = QLabel(html)
-        lbl.setTextFormat(Qt.RichText)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setOpenExternalLinks(True)
         lbl.setTextInteractionFlags(
-            Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         lbl.setWordWrap(True)
         _install_copy_menu(lbl, text, url)
@@ -2499,7 +2514,7 @@ class TransactionDetailsDialog(QDialog):
 
         if not to_addr:
             label = QLabel("(contract creation)")
-            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setFont(mono)
             row.addWidget(label)
             row.addStretch(1)
@@ -2550,10 +2565,10 @@ class TransactionDetailsDialog(QDialog):
             label = QLabel(
                 f"{_escape_html(entry.symbol)} ({addr_html})"
             )
-            label.setTextFormat(Qt.RichText)
+            label.setTextFormat(Qt.TextFormat.RichText)
             label.setOpenExternalLinks(True)
             label.setTextInteractionFlags(
-                Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+                Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
             )
             _install_copy_menu(label, addr, token_url)
             row.addWidget(label, 1)
@@ -2802,8 +2817,8 @@ class _CollapsibleSection(QWidget):
         self._toggle.setCheckable(True)
         self._toggle.setChecked(False)
         self._toggle.setAutoRaise(True)
-        self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._toggle.setArrowType(Qt.RightArrow)
+        self._toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._toggle.setArrowType(Qt.ArrowType.RightArrow)
         self._toggle.toggled.connect(self._on_toggled)
         lay.addWidget(self._toggle)
         self._content = QWidget()
@@ -2814,7 +2829,7 @@ class _CollapsibleSection(QWidget):
         self._content.setLayout(layout)
 
     def _on_toggled(self, expanded: bool) -> None:
-        self._toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self._content.setVisible(expanded)
 
     def set_expanded(self, expanded: bool) -> None:
@@ -2890,7 +2905,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
 
         self.setWindowTitle("Sign Transaction")
         self.resize(720, 640)
-        self._link_color = self.palette().color(QPalette.WindowText).name()
+        self._link_color = self.palette().color(QPalette.ColorRole.WindowText).name()
 
         # Tabbed shell: the existing detail widgets live on a "Details"
         # page; the mixin appends an "Events" page that previews the tx's
@@ -2909,8 +2924,8 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
 
         # --- header block (Network / From / To / Value) -----------------
         header = QFormLayout()
-        header.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        header.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        header.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         header.setHorizontalSpacing(16)
         header.setVerticalSpacing(6)
         outer.addLayout(header)
@@ -2920,7 +2935,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
 
         def _lbl(text: str, *, monospace: bool = False) -> QLabel:
             q = QLabel(text)
-            q.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            q.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             if monospace:
                 q.setFont(mono)
             q.setWordWrap(True)
@@ -2961,12 +2976,12 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         self.decoded_view = QTextEdit()
         self.decoded_view.setReadOnly(True)
         self.decoded_view.setFont(mono)
-        self.decoded_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.decoded_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.decoded_view.setWordWrapMode(
-            QTextOption.WrapAtWordBoundaryOrAnywhere
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
         )
         self.decoded_view.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding,
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
         )
         outer.addWidget(self.decoded_view, 1)
 
@@ -2977,7 +2992,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         outer.addSpacing(4)
         self._gas_section = _CollapsibleSection("Gas settings")
         gas_form = QFormLayout()
-        gas_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        gas_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         gas_form.setHorizontalSpacing(16)
 
         self.spin_gas = QSpinBox()
@@ -3028,7 +3043,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         # Always-visible fee summary (the number the user actually
         # decides on; the editable knobs above are the detail).
         summary = QFormLayout()
-        summary.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        summary.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         summary.setHorizontalSpacing(16)
         self.max_total_lbl = _lbl("—")
         summary.addRow("Expected fee:", self.max_total_lbl)
@@ -3036,10 +3051,10 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
 
         # --- buttons -------------------------------------------------
         self.buttons = QDialogButtonBox(
-            QDialogButtonBox.Cancel,
+            QDialogButtonBox.StandardButton.Cancel,
         )
         self.confirm_btn = self.buttons.addButton(
-            "&Confirm and Sign", QDialogButtonBox.AcceptRole,
+            "&Confirm and Sign", QDialogButtonBox.ButtonRole.AcceptRole,
         )
         # Checkmark icon — universal "approve". Distinguishes the
         # primary action visually from Cancel, which Qt themes
@@ -3048,7 +3063,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             "emblem-ok",
             QIcon.fromTheme(
                 "dialog-ok-apply",
-                QApplication.style().standardIcon(QStyle.SP_DialogApplyButton),
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton),
             ),
         )
         if not _ok_icon.isNull() and _ok_icon.availableSizes():
@@ -3257,7 +3272,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                     monospace: bool = False) -> QLabel:
         if not url:
             lbl = QLabel(text)
-            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             if monospace:
                 lbl.setFont(self._mono_font)
             lbl.setWordWrap(True)
@@ -3270,10 +3285,10 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             f"{_escape_html(text)}</a>"
         )
         lbl = QLabel(html)
-        lbl.setTextFormat(Qt.RichText)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setOpenExternalLinks(True)
         lbl.setTextInteractionFlags(
-            Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         lbl.setWordWrap(True)
         _install_copy_menu(lbl, text, url)
@@ -3304,7 +3319,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
 
         if not to_addr:
             label = QLabel("(contract creation)")
-            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setFont(mono)
             row.addWidget(label)
             row.addStretch(1)
@@ -3341,10 +3356,10 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             label = QLabel(
                 f"{_escape_html(entry.symbol)} ({addr_html})"
             )
-            label.setTextFormat(Qt.RichText)
+            label.setTextFormat(Qt.TextFormat.RichText)
             label.setOpenExternalLinks(True)
             label.setTextInteractionFlags(
-                Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+                Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
             )
             _install_copy_menu(label, addr, token_url)
             row.addWidget(label, 1)
@@ -3460,7 +3475,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
 
         self.setWindowTitle(f"Send {asset['symbol']}")
         self.resize(720, 640)
-        self._link_color = self.palette().color(QPalette.WindowText).name()
+        self._link_color = self.palette().color(QPalette.ColorRole.WindowText).name()
 
         # Tabbed shell (see SignTransactionDialog): existing widgets on a
         # "Details" page, an "Events" page that previews the tx via local
@@ -3477,8 +3492,8 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._tabs.addTab(_details_page, "&Details")
 
         header = QFormLayout()
-        header.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        header.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        header.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         header.setHorizontalSpacing(16)
         header.setVerticalSpacing(6)
         outer.addLayout(header)
@@ -3560,12 +3575,12 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.decoded_view = QTextEdit()
         self.decoded_view.setReadOnly(True)
         self.decoded_view.setFont(mono)
-        self.decoded_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.decoded_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.decoded_view.setWordWrapMode(
-            QTextOption.WrapAtWordBoundaryOrAnywhere
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
         )
         self.decoded_view.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding,
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
         )
         outer.addWidget(self.decoded_view, 1)
 
@@ -3575,7 +3590,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         outer.addSpacing(4)
         self._gas_section = _CollapsibleSection("Gas settings")
         gas_form = QFormLayout()
-        gas_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        gas_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         gas_form.setHorizontalSpacing(16)
 
         self.spin_gas = QSpinBox()
@@ -3625,7 +3640,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
 
         # Always-visible fee summary.
         summary = QFormLayout()
-        summary.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        summary.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         summary.setHorizontalSpacing(16)
         self.max_total_lbl = self._value_label("—")
         summary.addRow("Expected fee:", self.max_total_lbl)
@@ -3641,9 +3656,9 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             self.total_lbl = None
         outer.addLayout(summary)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.confirm_btn = self.buttons.addButton(
-            "&Send", QDialogButtonBox.AcceptRole,
+            "&Send", QDialogButtonBox.ButtonRole.AcceptRole,
         )
         # Same mail-send icon as the toolbar Send button on the
         # tokens panel — same meaning across all the places the
@@ -3652,7 +3667,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             "mail-send",
             QIcon.fromTheme(
                 "document-send",
-                QApplication.style().standardIcon(QStyle.SP_ArrowUp),
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp),
             ),
         )
         if not _send_icon.isNull() and _send_icon.availableSizes():
@@ -3733,10 +3748,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                 f"{_escape_html(addr)}</span>"
             )
         label = QLabel(f"{_escape_html(asset['symbol'])} ({addr_html})")
-        label.setTextFormat(Qt.RichText)
+        label.setTextFormat(Qt.TextFormat.RichText)
         label.setOpenExternalLinks(True)
         label.setTextInteractionFlags(
-            Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         _install_copy_menu(label, addr, token_url)
         row.addWidget(label, 1)
@@ -3767,7 +3782,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
 
     def _value_label(self, text: str, *, monospace: bool = False) -> QLabel:
         lbl = QLabel(text)
-        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if monospace:
             lbl.setFont(self._mono_font)
         lbl.setWordWrap(True)
@@ -3785,10 +3800,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             f"{_escape_html(text)}</a>"
         )
         lbl = QLabel(html)
-        lbl.setTextFormat(Qt.RichText)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setOpenExternalLinks(True)
         lbl.setTextInteractionFlags(
-            Qt.LinksAccessibleByMouse | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         lbl.setWordWrap(True)
         _install_copy_menu(lbl, text, url)

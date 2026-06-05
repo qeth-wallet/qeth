@@ -13,7 +13,7 @@ from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QLabel, QMainWindow, QSplitter, QStatusBar,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QTreeWidget,
+    QTableWidget, QTreeWidget, QWidget,
 )
 
 from .icons import ChainIconCache, bundled_chain_icon
@@ -70,11 +70,11 @@ class MainWindow(QMainWindow):
         self.signer_bridge = SignerBridge(parent=self)
         self.signer_bridge.request_received.connect(
             self._on_signing_request,
-            type=Qt.QueuedConnection,
+            type=Qt.ConnectionType.QueuedConnection,
         )
         self.signer_bridge.chain_added.connect(
             self._on_chain_added,
-            type=Qt.QueuedConnection,
+            type=Qt.ConnectionType.QueuedConnection,
         )
         if self.rpc is not None:
             self.rpc.signer_bridge = self.signer_bridge
@@ -267,7 +267,7 @@ class MainWindow(QMainWindow):
             chain, parent=self,
             etherscan_api_key=self.store.etherscan_api_key or "",
         )
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         # Both the chain RPC URL and the (global) Etherscan key
         # come from the same dialog. Apply both; either may have
@@ -295,7 +295,7 @@ class MainWindow(QMainWindow):
             self.right_slot.broadcast_chain_changed()
 
     def _build_central(self) -> None:
-        self._splitter_outer = outer = QSplitter(Qt.Horizontal)
+        self._splitter_outer = outer = QSplitter(Qt.Orientation.Horizontal)
 
         # Left slot: Wallets only. Single-plugin → no tab bar visible.
         self.left_slot = Slot()
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         if central is not None:
             for w in central.findChildren(QWidget):
                 if w in tab_stops:
-                    w.setFocusPolicy(Qt.StrongFocus)
+                    w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                     continue
                 # Don't touch widgets that live INSIDE one of the
                 # tab-stop lists. QTreeWidget / QTableWidget use
@@ -358,7 +358,7 @@ class MainWindow(QMainWindow):
                 # undoing the StrongFocus we just set.
                 if any(w is t or _is_descendant(w, t) for t in tab_stops):
                     continue
-                w.setFocusPolicy(Qt.ClickFocus)
+                w.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         # Native tab-order chain (useful if focus arrives via
         # Qt-internal navigation, not just our filter).
         for prev, nxt in zip(tab_stops, tab_stops[1:]):
@@ -391,7 +391,7 @@ class MainWindow(QMainWindow):
             _apply_focus_aware_selection(w)
         # Initial focus on the wallet tree so arrow keys work
         # immediately.
-        tab_stops[0].setFocus(Qt.OtherFocusReason)
+        tab_stops[0].setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_app_focus_changed(self, old, new) -> None:
         """QApplication.focusChanged → if either side of the
@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         broadcast success / dialog cancel / signing failure so the
         same code path serves both the RPC-driven and the locally
         UI-driven signing flows."""
-        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.sign_requested.connect(
             lambda d=dialog, c=chain, ob=on_broadcast, of=on_fail:
                 self._begin_sign(d, c, ob, of)
@@ -626,7 +626,7 @@ class MainWindow(QMainWindow):
             passphrase, ok = QInputDialog.getText(
                 dialog, "Hot wallet",
                 f"Passphrase for {finalised.from_addr}:",
-                QLineEdit.Password, "",
+                QLineEdit.EchoMode.Password, "",
             )
             if not ok:
                 return
@@ -657,7 +657,7 @@ class MainWindow(QMainWindow):
         )
         progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Transaction")
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
 
@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
             passphrase, ok = QInputDialog.getText(
                 dialog, "Hot wallet",
                 f"Passphrase for {address}:",
-                QLineEdit.Password, "",
+                QLineEdit.EchoMode.Password, "",
             )
             if not ok:
                 return None, None
@@ -764,7 +764,7 @@ class MainWindow(QMainWindow):
         )
         progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Message")
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
 
@@ -827,7 +827,7 @@ class MainWindow(QMainWindow):
         )
         progress.setCancelButton(None)   # no cancel button
         progress.setWindowTitle("Signing Message")
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
 
@@ -984,15 +984,15 @@ class _TabCycleFilter(QObject):
         self._lists = lists
 
     def eventFilter(self, obj, event):
-        if event.type() != QEvent.KeyPress:
+        if event.type() != QEvent.Type.KeyPress:
             return False
         if not isinstance(event, QKeyEvent):
             return False
         key = event.key()
-        if key in (Qt.Key_Tab, Qt.Key_Backtab):
+        if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
             return self._handle_tab(obj)
-        if key in (Qt.Key_Left, Qt.Key_Right):
-            return self._handle_left_right(obj, key == Qt.Key_Right)
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            return self._handle_left_right(obj, key == Qt.Key.Key_Right)
         return False
 
     # --- Tab between wallet ↔ right-slot table ---------------------------
@@ -1006,7 +1006,7 @@ class _TabCycleFilter(QObject):
             old, new = wallet_tree, right_table
         else:
             old, new = obj, wallet_tree
-        new.setFocus(Qt.TabFocusReason)
+        new.setFocus(Qt.FocusReason.TabFocusReason)
         # Ensure the newly-focused list has a selected row (the
         # delegate paints solid only on selected rows; an empty
         # selection makes the focused panel look identical to
@@ -1036,7 +1036,7 @@ class _TabCycleFilter(QObject):
         self._mw.right_slot.set_active(nxt)
         new_table = self._table_for_plugin(nxt)
         if new_table is not None:
-            new_table.setFocus(Qt.OtherFocusReason)
+            new_table.setFocus(Qt.FocusReason.OtherFocusReason)
             # Same belt-and-braces as Tab: tab-switching between
             # Tokens and Transactions can skip the FocusIn delivery
             # that ``_FocusRepainter`` would otherwise use to
@@ -1143,7 +1143,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         if pill is None:
             return
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         # A 1px outline a few shades darker than the fill gives the pill a
         # defined sticky-note edge. Shrink by the pen width so the stroke
         # stays inside the reserved rect.
@@ -1154,13 +1154,13 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(pill.adjusted(0, 0, -1, -1), 4, 4)
         painter.setPen(QColor(_STICKY_FG))
         painter.setFont(font)
-        painter.drawText(pill, Qt.AlignCenter, label)
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
 
     def paint(self, painter, option, index):
         view = self.parent()
-        is_selected = bool(option.state & QStyle.State_Selected)
-        is_focused = view is not None and view.hasFocus()
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        is_focused = isinstance(view, QWidget) and view.hasFocus()
 
         # A labeled wallet row draws the label as a sticky-note pill on the
         # right; reserve its width so the address text (which the tree
@@ -1174,7 +1174,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
 
         if is_selected and is_focused:
             # Fill the cell with the highlight colour first.
-            highlight = option.palette.color(QPalette.Highlight)
+            highlight = option.palette.color(QPalette.ColorRole.Highlight)
             painter.fillRect(option.rect, highlight)
             # Now paint the cell contents (icon + text) on top,
             # without letting the style re-fill the background.
@@ -1186,21 +1186,21 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             # background.
             opt = QStyleOptionViewItem(option)
             opt.rect = text_rect
-            opt.state &= ~QStyle.State_Selected
-            opt.state &= ~QStyle.State_HasFocus
+            opt.state &= ~QStyle.StateFlag.State_Selected
+            opt.state &= ~QStyle.StateFlag.State_HasFocus
             opt.palette.setColor(
-                QPalette.Text,
-                option.palette.color(QPalette.HighlightedText),
+                QPalette.ColorRole.Text,
+                option.palette.color(QPalette.ColorRole.HighlightedText),
             )
             opt.palette.setColor(
-                QPalette.WindowText,
-                option.palette.color(QPalette.HighlightedText),
+                QPalette.ColorRole.WindowText,
+                option.palette.color(QPalette.ColorRole.HighlightedText),
             )
             # The default platform paint will fill the cell with
             # palette.Base; suppress by setting Base to highlight
             # too, so our underlying fillRect isn't overwritten.
-            opt.palette.setColor(QPalette.Base, highlight)
-            opt.palette.setColor(QPalette.AlternateBase, highlight)
+            opt.palette.setColor(QPalette.ColorRole.Base, highlight)
+            opt.palette.setColor(QPalette.ColorRole.AlternateBase, highlight)
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
             return
@@ -1208,13 +1208,13 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         if is_selected and not is_focused:
             opt = QStyleOptionViewItem(option)
             opt.rect = text_rect
-            opt.state &= ~QStyle.State_Selected
-            opt.state &= ~QStyle.State_HasFocus
+            opt.state &= ~QStyle.StateFlag.State_Selected
+            opt.state &= ~QStyle.StateFlag.State_HasFocus
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
             painter.save()
             try:
-                color = option.palette.color(QPalette.Highlight)
+                color = option.palette.color(QPalette.ColorRole.Highlight)
                 pen = QPen(color)
                 pen.setWidth(1)
                 painter.setPen(pen)
@@ -1253,8 +1253,8 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         # all three delegate-painted views.
         opt = QStyleOptionViewItem(option)
         opt.rect = text_rect
-        opt.state &= ~QStyle.State_HasFocus
-        opt.state &= ~QStyle.State_MouseOver
+        opt.state &= ~QStyle.StateFlag.State_HasFocus
+        opt.state &= ~QStyle.StateFlag.State_MouseOver
         super().paint(painter, opt, index)
         self._draw_sticky_pill(painter, pill, label, option.font)
 
@@ -1275,9 +1275,9 @@ class _FocusRepainter(QObject):
     never see the solid version."""
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.FocusIn:
+        if event.type() == QEvent.Type.FocusIn:
             self._ensure_selection(obj)
-        if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
             if hasattr(obj, "viewport"):
                 obj.viewport().repaint()
             else:
@@ -1311,7 +1311,7 @@ class _FocusRepainter(QObject):
         from PySide6.QtCore import QItemSelectionModel
         sm.select(
             idx,
-            QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
         )
 
 
@@ -1325,7 +1325,7 @@ def _first_selectable_index(view, model):
         for r in range(model.rowCount(parent_index)):
             child = model.index(r, 0, parent_index)
             from PySide6.QtCore import Qt as _Qt
-            data = model.data(child, _Qt.UserRole)
+            data = model.data(child, _Qt.ItemDataRole.UserRole)
             if data:
                 return child
             grand = walk(child)

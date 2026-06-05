@@ -62,8 +62,8 @@ class _JsonHighlighter(QSyntaxHighlighter):
 
     def __init__(self, document, palette):
         super().__init__(document)
-        text_color = palette.color(QPalette.Text)
-        window = palette.color(QPalette.Window)
+        text_color = palette.color(QPalette.ColorRole.Text)
+        window = palette.color(QPalette.ColorRole.Window)
         lum = (
             window.red() * 0.299
             + window.green() * 0.587
@@ -75,8 +75,8 @@ class _JsonHighlighter(QSyntaxHighlighter):
         # toward the accent — most themes ship this as a blueish
         # link colour.
         key_fmt = QTextCharFormat()
-        key_fmt.setForeground(palette.color(QPalette.Link))
-        key_fmt.setFontWeight(QFont.Bold)
+        key_fmt.setForeground(palette.color(QPalette.ColorRole.Link))
+        key_fmt.setFontWeight(QFont.Weight.Bold)
 
         # String VALUES: a muted green that works on both themes.
         string_fmt = QTextCharFormat()
@@ -88,13 +88,13 @@ class _JsonHighlighter(QSyntaxHighlighter):
 
         keyword_fmt = QTextCharFormat()
         keyword_fmt.setForeground(QColor("#ce93d8" if is_dark else "#7b1fa2"))
-        keyword_fmt.setFontWeight(QFont.Bold)
+        keyword_fmt.setFontWeight(QFont.Weight.Bold)
 
         # Section headers (=== ... === and --- ... ---) get a
         # palette text colour + bold so the eye finds them first.
         header_fmt = QTextCharFormat()
         header_fmt.setForeground(text_color)
-        header_fmt.setFontWeight(QFont.Bold)
+        header_fmt.setFontWeight(QFont.Weight.Bold)
 
         self._rules: list[tuple[QRegularExpression, QTextCharFormat]] = [
             # Key BEFORE value-colour rules so it wins.
@@ -111,10 +111,10 @@ class _JsonHighlighter(QSyntaxHighlighter):
              keyword_fmt),
             # Our own section headers ("=== Domain ===" etc.).
             (QRegularExpression(r'^={3,}.*={3,}$',
-                                QRegularExpression.MultilineOption),
+                                QRegularExpression.PatternOption.MultilineOption),
              header_fmt),
             (QRegularExpression(r'^-{3,}.*-{3,}$',
-                                QRegularExpression.MultilineOption),
+                                QRegularExpression.PatternOption.MultilineOption),
              header_fmt),
         ]
 
@@ -183,7 +183,7 @@ class SignMessageDialog(QDialog):
         outer.setSpacing(8)
 
         header = QFormLayout()
-        header.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setHorizontalSpacing(16)
         header.setVerticalSpacing(6)
         outer.addLayout(header)
@@ -191,13 +191,13 @@ class SignMessageDialog(QDialog):
         mono = QFont("monospace")
         from_lbl = QLabel(req.from_addr)
         from_lbl.setFont(mono)
-        from_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        from_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         header.addRow("Signer:", from_lbl)
 
         if getattr(req, "origin", None):
             origin_lbl = QLabel(req.origin)
             origin_lbl.setWordWrap(True)
-            origin_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            origin_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             header.addRow("Origin:", origin_lbl)
 
         if isinstance(req, MessageSigningRequest):
@@ -209,9 +209,9 @@ class SignMessageDialog(QDialog):
         outer.addWidget(self._build_message_view(req), 1)
 
         # Buttons.
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.confirm_btn = self.buttons.addButton(
-            "Sign", QDialogButtonBox.AcceptRole,
+            "Sign", QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self.confirm_btn.setEnabled(True)
         self.buttons.rejected.connect(self.reject)
@@ -222,8 +222,8 @@ class SignMessageDialog(QDialog):
         view = QTextEdit()
         view.setReadOnly(True)
         view.setFont(QFont("monospace"))
-        view.setLineWrapMode(QTextEdit.WidgetWidth)
-        view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if isinstance(req, MessageSigningRequest):
             text = _is_printable_utf8(req.raw)
             if text is not None:
@@ -275,7 +275,7 @@ class ComposeMessageDialog(QDialog):
             "object (signed via <b>eth_signTypedData_v4</b>). The "
             "wallet sniffs the shape automatically."
         )
-        intro.setTextFormat(Qt.RichText)
+        intro.setTextFormat(Qt.TextFormat.RichText)
         intro.setWordWrap(True)
         outer.addWidget(intro)
 
@@ -293,8 +293,8 @@ class ComposeMessageDialog(QDialog):
         self.kind_lbl.setStyleSheet("color: gray;")
         outer.addWidget(self.kind_lbl)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.sign_btn = buttons.addButton("&Sign", QDialogButtonBox.AcceptRole)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.sign_btn = buttons.addButton("&Sign", QDialogButtonBox.ButtonRole.AcceptRole)
         self.sign_btn.setEnabled(False)
         self.sign_btn.clicked.connect(self._emit_request)
         buttons.rejected.connect(self.reject)

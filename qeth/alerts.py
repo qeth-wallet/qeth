@@ -22,7 +22,7 @@ def _build(parent, primary: str, secondary: str, icon) -> QMessageBox:
     box.setText(primary)
     if secondary:
         box.setInformativeText(secondary)
-    box.setStandardButtons(QMessageBox.Ok)
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
     return box
 
 
@@ -36,12 +36,12 @@ def _build_confirm(parent, primary: str, secondary: str, action: str,
     (HIG: the affirmative button names the action it performs), Cancel
     as the safe default + Escape target, and a two-tier message."""
     box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Warning if destructive else QMessageBox.Question)
+    box.setIcon(QMessageBox.Icon.Warning if destructive else QMessageBox.Icon.Question)
     box.setText(primary)
     if secondary:
         box.setInformativeText(secondary)
-    accept = box.addButton(action, QMessageBox.AcceptRole)
-    cancel = box.addButton("&Cancel", QMessageBox.RejectRole)
+    accept = box.addButton(action, QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton("&Cancel", QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(cancel)
     box.setEscapeButton(cancel)
     return box, accept
@@ -60,12 +60,12 @@ def confirm(parent, primary: str, secondary: str = "", *,
 
 
 def warn(parent, primary: str, secondary: str = "") -> int:
-    return _alert(parent, primary, secondary, QMessageBox.Warning)
+    return _alert(parent, primary, secondary, QMessageBox.Icon.Warning)
 
 
 def error(parent, primary: str, secondary: str = "") -> int:
-    return _alert(parent, primary, secondary, QMessageBox.Critical)
+    return _alert(parent, primary, secondary, QMessageBox.Icon.Critical)
 
 
 def info(parent, primary: str, secondary: str = "") -> int:
-    return _alert(parent, primary, secondary, QMessageBox.Information)
+    return _alert(parent, primary, secondary, QMessageBox.Icon.Information)

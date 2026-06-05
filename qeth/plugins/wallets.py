@@ -52,11 +52,11 @@ from ..plugin import Plugin
 # Item data role carrying an account's user label. Present only on labeled
 # account rows; the shared selection delegate (ui.py) reads it to paint
 # those rows with a sticky-note background. UserRole holds the address.
-ACCOUNT_LABEL_ROLE = Qt.UserRole + 1
+ACCOUNT_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 # Stable key on collapsible group/root rows so _rebuild_tree can carry
 # the user's expand/collapse state across a rebuild (e.g. when switching
 # the default account) instead of force-expanding everything each time.
-EXPAND_KEY_ROLE = Qt.UserRole + 2
+EXPAND_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 def _palette_aware_error_color(palette) -> str:
@@ -69,7 +69,7 @@ def _palette_aware_error_color(palette) -> str:
 
     See also feedback_theme_safe_colors.md — same approach we
     take for link colours."""
-    window = palette.color(QPalette.Window)
+    window = palette.color(QPalette.ColorRole.Window)
     lum = window.red() * 0.299 + window.green() * 0.587 + window.blue() * 0.114
     # Dark window → light red (Material red 300);
     # light window → deep red (Material red 800).
@@ -79,7 +79,7 @@ def _palette_aware_error_color(palette) -> str:
 def _palette_aware_ok_color(palette) -> str:
     """Companion to ``_palette_aware_error_color`` — a green that
     reads as "ok / success" on the active theme."""
-    window = palette.color(QPalette.Window)
+    window = palette.color(QPalette.ColorRole.Window)
     lum = window.red() * 0.299 + window.green() * 0.587 + window.blue() * 0.114
     # Light green on dark, deep green on light.
     return "#81c784" if lum < 128 else "#2e7d32"
@@ -106,14 +106,14 @@ class _ReorderTree(QTreeWidget):
         # only panel that highlights on hover — an inconsistency between
         # the left and right columns. Strip State_MouseOver at the row
         # level (the delegate strips it per-item); selection still paints.
-        option.state &= ~QStyle.State_MouseOver
+        option.state &= ~QStyle.StateFlag.State_MouseOver
         super().drawRow(painter, option, index)
 
     def keyPressEvent(self, event):  # noqa: N802 — Qt method name
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             current = self.currentItem()
             if current is not None:
-                addr = current.data(0, Qt.UserRole)
+                addr = current.data(0, Qt.ItemDataRole.UserRole)
                 if isinstance(addr, str) and addr:
                     self.enter_pressed.emit(addr)
                     return
@@ -132,11 +132,11 @@ class _ReorderTree(QTreeWidget):
         # Compute the destination parent based on Qt's drop indicator.
         target = self.itemAt(event.position().toPoint())
         indicator = self.dropIndicatorPosition()
-        if indicator == QAbstractItemView.OnItem:
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnItem:
             dest_parent = target
         elif indicator in (
-            QAbstractItemView.AboveItem,
-            QAbstractItemView.BelowItem,
+            QAbstractItemView.DropIndicatorPosition.AboveItem,
+            QAbstractItemView.DropIndicatorPosition.BelowItem,
         ):
             dest_parent = target.parent() if target is not None else None
         else:  # OnViewport — would drop at top level; refuse.
@@ -155,7 +155,7 @@ class _ReorderTree(QTreeWidget):
         # repopulate, instead of being left with the mid-drop
         # ``None`` emission that empties the panels.
         dragged_addrs = [
-            it.data(0, Qt.UserRole) for it in source_items
+            it.data(0, Qt.ItemDataRole.UserRole) for it in source_items
         ]
         dragged_addrs = [a for a in dragged_addrs if isinstance(a, str)]
         super().dropEvent(event)
@@ -178,7 +178,7 @@ class _ReorderTree(QTreeWidget):
         were invalidated by Qt's row remove/insert."""
 
         def walk(item):
-            if item.data(0, Qt.UserRole) == addr:
+            if item.data(0, Qt.ItemDataRole.UserRole) == addr:
                 return item
             for i in range(item.childCount()):
                 r = walk(item.child(i))
@@ -252,7 +252,7 @@ class WalletsPlugin(Plugin):
             return []
         out = []
         for it in self._tree.selectedItems():
-            addr = it.data(0, Qt.UserRole)
+            addr = it.data(0, Qt.ItemDataRole.UserRole)
             if addr:
                 out.append(addr)
         return out
@@ -268,7 +268,7 @@ class WalletsPlugin(Plugin):
         wanted = address.lower()
 
         def walk(item):
-            addr = item.data(0, Qt.UserRole)
+            addr = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(addr, str) and addr.lower() == wanted:
                 return item
             for i in range(item.childCount()):
@@ -316,7 +316,7 @@ class WalletsPlugin(Plugin):
         v.addLayout(self._build_account_actions())
 
         # Middle: vertical splitter (tree on top, details on bottom).
-        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
 
         self._tree = _ReorderTree()
         self._tree.setHeaderLabels(["Accounts"])
@@ -324,7 +324,7 @@ class WalletsPlugin(Plugin):
         # Group roots carry themed icons; keep them small + aligned with
         # the toolbar/menu icons rather than the style's larger default.
         self._tree.setIconSize(QSize(16, 16))
-        self._tree.setTextElideMode(Qt.ElideMiddle)
+        self._tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         # Never show a horizontal scrollbar in the wallet tree —
         # addresses are 42 chars + label and the left pane gets
         # tight on smaller windows. Middle-elide handles the
@@ -333,8 +333,8 @@ class WalletsPlugin(Plugin):
         # recognise it). Scrollbars in this position are a UX
         # papercut: the user just wants to see addresses, not
         # work a scrollbar.
-        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # Drag now reorders the address rows instead of accumulating a
         # selection — multi-select is still available via Ctrl/Shift +
         # click for the Remove button's bulk-remove path. InternalMove
@@ -343,8 +343,8 @@ class WalletsPlugin(Plugin):
         self._tree.setDragEnabled(True)
         self._tree.setAcceptDrops(True)
         self._tree.setDropIndicatorShown(True)
-        self._tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self._tree.setDefaultDropAction(Qt.MoveAction)
+        self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._tree.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._tree.itemSelectionChanged.connect(self._on_tree_selection)
         self._tree.reorder_committed.connect(self._on_tree_reordered)
         # Double-click an address leaf = "Connect to browser". The
@@ -357,7 +357,7 @@ class WalletsPlugin(Plugin):
         # Right-click menu mirrors the top action row (Add / Copy /
         # Remove) plus Set-as-default — so every button has a menu
         # equivalent and every menu item has a button equivalent.
-        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(
             self._on_tree_context_menu
         )
@@ -374,7 +374,7 @@ class WalletsPlugin(Plugin):
         self._details.label_changed.connect(self._on_label_changed)
         self._details.sign_message_requested.connect(self._on_sign_message)
         details_wrap = QFrame()
-        details_wrap.setFrameShape(QFrame.StyledPanel)
+        details_wrap.setFrameShape(QFrame.Shape.StyledPanel)
         dlay = QVBoxLayout(details_wrap)
         dlay.setContentsMargins(12, 12, 12, 0)
         dlay.addWidget(self._details)
@@ -391,7 +391,7 @@ class WalletsPlugin(Plugin):
         style_proxy = QApplication.style()
         self.act_add = QAction(
             QIcon.fromTheme("document-new",
-                            style_proxy.standardIcon(QStyle.SP_FileIcon)),
+                            style_proxy.standardIcon(QStyle.StandardPixmap.SP_FileIcon)),
             "&Add Account",
         )
         self.act_add.setToolTip("Add a Ledger or watch-only account")
@@ -415,12 +415,12 @@ class WalletsPlugin(Plugin):
         self.act_add_ledger = QAction("&Ledger Account…", self)
         self.act_add_ledger.setIcon(_icon(
             "drive-removable-media-usb", "media-flash", "drive-harddisk",
-            QStyle.SP_DriveFDIcon,
+            QStyle.StandardPixmap.SP_DriveFDIcon,
         ))
         self.act_add_ledger.triggered.connect(self._add_ledger)
         self.act_add_hot = QAction("&Hot Wallet…", self)
         self.act_add_hot.setIcon(_icon(
-            "dialog-password", "security-high", QStyle.SP_FileIcon,
+            "dialog-password", "security-high", QStyle.StandardPixmap.SP_FileIcon,
         ))
         self.act_add_hot.triggered.connect(self._add_hot_wallet)
         self.act_add_watch = QAction("&Watch-only Address…", self)
@@ -430,7 +430,7 @@ class WalletsPlugin(Plugin):
         # generic QStyle fallback.
         self.act_add_watch.setIcon(_icon(
             "view-visible", "view-reveal-symbolic", "eye", "eye-symbolic",
-            QStyle.SP_FileDialogContentsView,
+            QStyle.StandardPixmap.SP_FileDialogContentsView,
         ))
         self.act_add_watch.triggered.connect(self._add_watch_only)
         # Import-from-other-wallet actions live below a separator
@@ -439,7 +439,7 @@ class WalletsPlugin(Plugin):
         # dialog so the per-source UX (passphrase fields, paths)
         # isn't muddled with tab switching.
         _import_icon = _icon(
-            "document-import", "document-open", QStyle.SP_DialogOpenButton,
+            "document-import", "document-open", QStyle.StandardPixmap.SP_DialogOpenButton,
         )
         self.act_import_brownie = QAction("Import from &Brownie…", self)
         self.act_import_brownie.setIcon(_import_icon)
@@ -453,20 +453,20 @@ class WalletsPlugin(Plugin):
 
         self.act_copy = QAction(
             QIcon.fromTheme("edit-copy",
-                            style_proxy.standardIcon(QStyle.SP_DialogSaveButton)),
+                            style_proxy.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)),
             "&Copy Address",
         )
         self.act_copy.setEnabled(False)
-        self.act_copy.setShortcut(QKeySequence.Copy)
+        self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
         self.act_copy.triggered.connect(self._copy_selected_address)
 
         self.act_remove = QAction(
             QIcon.fromTheme("list-remove",
-                            style_proxy.standardIcon(QStyle.SP_TrashIcon)),
+                            style_proxy.standardIcon(QStyle.StandardPixmap.SP_TrashIcon)),
             "&Remove Account",
         )
         self.act_remove.setEnabled(False)
-        self.act_remove.setShortcut(QKeySequence.Delete)
+        self.act_remove.setShortcut(QKeySequence.StandardKey.Delete)
         self.act_remove.triggered.connect(self._remove_selected_account)
 
         # Scope the shortcuts to the accounts tree: Ctrl+C / Del act on
@@ -474,7 +474,7 @@ class WalletsPlugin(Plugin):
         # don't shadow copy/delete in the token or transaction tables.
         # (The tree is added to these actions in _build, once it exists.)
         for act in (self.act_copy, self.act_remove):
-            act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         row = QHBoxLayout()
         row.setContentsMargins(4, 2, 4, 4)
@@ -486,7 +486,7 @@ class WalletsPlugin(Plugin):
         add_btn.setIcon(self.act_add.icon())
         add_btn.setText(self.act_add.text())
         add_btn.setToolTip(self.act_add.toolTip())
-        add_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        add_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         add_btn.setAutoRaise(True)
         add_btn.setIconSize(QSize(16, 16))
         self._add_menu = QMenu(add_btn)
@@ -497,14 +497,14 @@ class WalletsPlugin(Plugin):
         self._add_menu.addAction(self.act_import_brownie)
         self._add_menu.addAction(self.act_import_frame)
         add_btn.setMenu(self._add_menu)
-        add_btn.setPopupMode(QToolButton.InstantPopup)
+        add_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         row.addWidget(add_btn)
         self._account_buttons.append(add_btn)
 
         for act in (self.act_copy, self.act_remove):
             btn = QToolButton()
             btn.setDefaultAction(act)
-            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             btn.setAutoRaise(True)
             btn.setIconSize(QSize(16, 16))
             row.addWidget(btn)
@@ -561,7 +561,7 @@ class WalletsPlugin(Plugin):
         ledger_root.setIcon(0, self.act_add_ledger.icon())
         # Group containers: not draggable, not drop targets (we only
         # allow re-ordering inside scheme subgroups).
-        ledger_root.setFlags(Qt.ItemIsEnabled)
+        ledger_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self._tree.addTopLevelItem(ledger_root)
         groups: dict[str, QTreeWidgetItem] = {}
         default_item: Optional[QTreeWidgetItem] = None
@@ -573,7 +573,7 @@ class WalletsPlugin(Plugin):
                 # Scheme group: drop-enabled so children can be
                 # reordered between siblings via the parent, but not
                 # draggable itself.
-                grp.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+                grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
                 ledger_root.addChild(grp)
                 groups[scheme] = grp
             addr = a["address"]
@@ -584,7 +584,7 @@ class WalletsPlugin(Plugin):
             display = f"[{addr}]" if is_default else f" {addr} "
             label_text = a.get("label") or ""
             it = QTreeWidgetItem([display])
-            it.setData(0, Qt.UserRole, addr)
+            it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
@@ -593,7 +593,7 @@ class WalletsPlugin(Plugin):
             # only into the gap between siblings, which Qt resolves at
             # the parent group level).
             it.setFlags(
-                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
             )
             grp.addChild(it)
             if is_default:
@@ -606,7 +606,7 @@ class WalletsPlugin(Plugin):
                       if a.get("source") == "hot"]
         hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
         hot_root.setIcon(0, self.act_add_hot.icon())
-        hot_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+        hot_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
         self._tree.addTopLevelItem(hot_root)
         for a in hot_accts:
             addr = a["address"]
@@ -617,12 +617,12 @@ class WalletsPlugin(Plugin):
             label_text = a.get("label") or ""
             display = f"[{addr}]" if is_default else f" {addr} "
             it = QTreeWidgetItem([display])
-            it.setData(0, Qt.UserRole, addr)
+            it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
             it.setFlags(
-                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
             )
             hot_root.addChild(it)
             if is_default:
@@ -635,7 +635,7 @@ class WalletsPlugin(Plugin):
         watch_root.setIcon(0, self.act_add_watch.icon())
         # Top-level group: not draggable, not a drop target — same
         # treatment as the Ledger root.
-        watch_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+        watch_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
         self._tree.addTopLevelItem(watch_root)
         for a in watch_accts:
             addr = a["address"]
@@ -646,12 +646,12 @@ class WalletsPlugin(Plugin):
             label_text = a.get("label") or ""
             display = f"[{addr}]" if is_default else f" {addr} "
             it = QTreeWidgetItem([display])
-            it.setData(0, Qt.UserRole, addr)
+            it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             it.setFont(0, QFont("monospace"))
             it.setFlags(
-                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
             )
             watch_root.addChild(it)
             if is_default:
@@ -674,7 +674,7 @@ class WalletsPlugin(Plugin):
         def walk(item: Optional[QTreeWidgetItem]) -> None:
             if item is None:
                 return
-            addr = item.data(0, Qt.UserRole)
+            addr = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(addr, str) and addr:
                 ordered.append(addr)
             for i in range(item.childCount()):
@@ -689,7 +689,7 @@ class WalletsPlugin(Plugin):
         the browser (sets it as the default for eth_accounts).
         No-op for group rows (they have no UserRole address) and
         for an account that's already connected."""
-        addr = item.data(0, Qt.UserRole)
+        addr = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(addr, str) or not addr:
             return
         current = self._store.default_account
@@ -844,7 +844,7 @@ class WalletsPlugin(Plugin):
         if self.host is None:
             return
         dlg = AddLedgerDialog(self.host.current_chain(), self._container)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         scheme = dlg.scheme_combo.currentText()
         added_addrs: list[str] = []
@@ -879,7 +879,7 @@ class WalletsPlugin(Plugin):
         so this method never has the raw bytes in memory longer
         than the encrypt() call."""
         dlg = AddHotWalletDialog(self._container)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         from ..hot_wallet import encrypt_keystore, save_keystore
         try:
@@ -951,7 +951,7 @@ class WalletsPlugin(Plugin):
                                  for a in self._store.accounts},
             parent=self._container,
         )
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         imported, failed = [], []
         for result in dlg.imported:
@@ -1050,7 +1050,7 @@ class WalletsPlugin(Plugin):
         disabled when one is selected)."""
         existing = {a["address"] for a in self._store.accounts}
         dlg = AddWatchOnlyDialog(existing, self._container)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         if self._store.add_account(dlg.result_account()):
             self._rebuild_tree()
@@ -1133,10 +1133,10 @@ class DetailsPanel(QWidget):
         # (full 42-char address etc.) shouldn't pin the panel's minimum
         # width, otherwise the whole window can't be shrunk down.
         self.address_lbl = QLabel("—"); self.address_lbl.setFont(mono)
-        self.address_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.address_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.address_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.address_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.path_lbl = QLabel("—"); self.path_lbl.setFont(mono)
-        self.path_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.path_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.source_lbl = QLabel("—")
         self.scheme_lbl = QLabel("—")
         form.addRow("Address:", self.address_lbl)
@@ -1150,9 +1150,9 @@ class DetailsPanel(QWidget):
         # looks squeezed.
         v.addSpacing(12)
         self.qr_lbl = QLabel()
-        self.qr_lbl.setAlignment(Qt.AlignCenter)
+        self.qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_lbl.setFixedSize(220, 220)
-        v.addWidget(self.qr_lbl, 0, Qt.AlignCenter)
+        v.addWidget(self.qr_lbl, 0, Qt.AlignmentFlag.AlignCenter)
         v.addSpacing(12)
 
         # Short label + tooltip rather than a wide button — keeps the
@@ -1169,7 +1169,7 @@ class DetailsPanel(QWidget):
             "applications-internet",
             QIcon.fromTheme(
                 "internet-web-browser",
-                QApplication.style().standardIcon(QStyle.SP_DesktopIcon),
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DesktopIcon),
             ),
         )
         if not _conn_icon.isNull() and _conn_icon.availableSizes():
@@ -1179,12 +1179,12 @@ class DetailsPanel(QWidget):
             "over the local JSON-RPC server)"
         )
         self.set_default_btn.setEnabled(False)
-        # Pin the height. With QSizePolicy.Fixed Qt re-queries sizeHint()
+        # Pin the height. With QSizePolicy.Policy.Fixed Qt re-queries sizeHint()
         # every time the text changes — and "Connected ✓" can come out
         # a touch shorter than "Connect to browser" depending on the
         # theme. The snapshot here is taken while the (longer) text is
         # set, so the disabled state never shrinks.
-        self.set_default_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.set_default_btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.set_default_btn.setMinimumHeight(self.set_default_btn.sizeHint().height())
         self.set_default_btn.clicked.connect(
             lambda: (self.set_default_requested.emit(self._current)
@@ -1199,7 +1199,7 @@ class DetailsPanel(QWidget):
             "document-edit",
             QIcon.fromTheme(
                 "edit-paste",
-                QApplication.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
             ),
         )
         if not _sig_icon.isNull() and _sig_icon.availableSizes():
@@ -1210,7 +1210,7 @@ class DetailsPanel(QWidget):
         )
         self.sign_message_btn.setEnabled(False)
         self.sign_message_btn.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Preferred,
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
         )
         self.sign_message_btn.setMinimumHeight(
             self.sign_message_btn.sizeHint().height()
@@ -1280,7 +1280,7 @@ class DetailsPanel(QWidget):
         pix = QPixmap()
         pix.loadFromData(buf.getvalue())  # format auto-detected from the PNG header
         self.qr_lbl.setPixmap(pix.scaled(
-            self.qr_lbl.size(), Qt.KeepAspectRatio, Qt.FastTransformation
+            self.qr_lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
         ))
 
     def clear(self) -> None:
@@ -1346,14 +1346,14 @@ class AddLedgerDialog(QDialog):
         layout.addLayout(form)
 
         self.results = QListWidget()
-        self.results.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         font = QFont("monospace")
         self.results.setFont(font)
         # ENS names appended after the address can push rows past
         # the dialog width — middle-elide + no horizontal bar,
         # same treatment as the wallet tree and import dialog.
-        self.results.setTextElideMode(Qt.ElideMiddle)
-        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.results.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.results, 1)
 
         self.progress = QProgressBar()
@@ -1368,7 +1368,7 @@ class AddLedgerDialog(QDialog):
             "system-search",
             QIcon.fromTheme(
                 "edit-find",
-                style_proxy.standardIcon(QStyle.SP_FileDialogContentsView),
+                style_proxy.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
             ),
         )
         if not _scan_icon.isNull() and _scan_icon.availableSizes():
@@ -1378,7 +1378,7 @@ class AddLedgerDialog(QDialog):
         # keeps the meaning stable wherever the user sees it.
         _add_icon = QIcon.fromTheme(
             "list-add",
-            style_proxy.standardIcon(QStyle.SP_FileDialogNewFolder),
+            style_proxy.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder),
         )
         if not _add_icon.isNull() and _add_icon.availableSizes():
             self.add_btn.setIcon(_add_icon)
@@ -1443,7 +1443,7 @@ class AddLedgerDialog(QDialog):
             usage = f"{acct.nonce} txs"
         label = f"#{acct.index:<3} {acct.address}   {usage}"
         item = QListWidgetItem(label)
-        item.setData(Qt.UserRole, acct)
+        item.setData(Qt.ItemDataRole.UserRole, acct)
         item.setSelected(acct.nonce > 0)
         self.results.addItem(item)
         if self.progress.maximum() > 0:
@@ -1484,7 +1484,7 @@ class AddLedgerDialog(QDialog):
             return
         # Defensive: confirm the item still belongs to this row's
         # address (the user could have re-scanned mid-resolve).
-        acct = item.data(Qt.UserRole)
+        acct = item.data(Qt.ItemDataRole.UserRole)
         if acct is None or acct.address.lower() != address.lower():
             return
         item.setText(f"{item.text()}   ({name})")
@@ -1500,7 +1500,7 @@ class AddLedgerDialog(QDialog):
         error(self, "Ledger error", msg)
 
     def selected_accounts(self) -> list[DiscoveredAccount]:
-        return [it.data(Qt.UserRole) for it in self.results.selectedItems()]
+        return [it.data(Qt.ItemDataRole.UserRole) for it in self.results.selectedItems()]
 
 
 class AddWatchOnlyDialog(QDialog):
@@ -1541,10 +1541,10 @@ class AddWatchOnlyDialog(QDialog):
         layout.addWidget(self.error_lbl)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.Cancel,
+            QDialogButtonBox.StandardButton.Cancel,
         )
         self.add_btn = buttons.addButton(
-            "Add", QDialogButtonBox.AcceptRole,
+            "Add", QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self.add_btn.setEnabled(False)
         buttons.rejected.connect(self.reject)
@@ -1684,10 +1684,10 @@ class AddHotWalletDialog(QDialog):
         # per-field minimum height below to keep each input from
         # collapsing into a thin strip.
         form.setVerticalSpacing(14)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         # Stretch the fields to fill the dialog width rather than
         # the default narrow column.
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         # Common minimum height for all the input widgets — Qt's
         # default QLineEdit height (~24 px on some themes) reads
@@ -1723,13 +1723,13 @@ class AddHotWalletDialog(QDialog):
         form.addRow("Pri&vate key:", pk_row)
 
         self.pass1_edit = QLineEdit()
-        self.pass1_edit.setEchoMode(QLineEdit.Password)
+        self.pass1_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pass1_edit.setPlaceholderText("Passphrase")
         self.pass1_edit.setMinimumHeight(_input_min_h)
         form.addRow("&Passphrase:", self.pass1_edit)
 
         self.pass2_edit = QLineEdit()
-        self.pass2_edit.setEchoMode(QLineEdit.Password)
+        self.pass2_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pass2_edit.setPlaceholderText("Repeat passphrase")
         self.pass2_edit.setMinimumHeight(_input_min_h)
         form.addRow("&Confirm:", self.pass2_edit)
@@ -1777,9 +1777,9 @@ class AddHotWalletDialog(QDialog):
         )
         layout.addWidget(self.match_lbl)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.gen_btn = buttons.addButton(
-            "Add", QDialogButtonBox.AcceptRole,
+            "Add", QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self.gen_btn.setEnabled(False)
         buttons.rejected.connect(self.reject)
@@ -2004,12 +2004,12 @@ class _ImportSourcePanel(QWidget):
         # were visually noisier than a simple highlight.
         self.list = QListWidget()
         self.list.setFont(QFont("monospace"))
-        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # Address + label rows can exceed the dialog width; elide
         # in the middle and skip the horizontal scrollbar (same
         # reasoning as the wallet tree).
-        self.list.setTextElideMode(Qt.ElideMiddle)
-        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.itemSelectionChanged.connect(self.state_changed.emit)
         layout.addWidget(self.list, 1)
 
@@ -2026,7 +2026,7 @@ class _ImportSourcePanel(QWidget):
         self.dst_pass2_edit = None
         if source.needs_source_passphrase:
             self.src_pass_edit = QLineEdit()
-            self.src_pass_edit.setEchoMode(QLineEdit.Password)
+            self.src_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.src_pass_edit.setMinimumHeight(30)
             self.src_pass_edit.textChanged.connect(
                 lambda _: self.state_changed.emit()
@@ -2034,10 +2034,10 @@ class _ImportSourcePanel(QWidget):
             form.addRow(f"{source.name} passphrase:", self.src_pass_edit)
         if source.needs_target_passphrase:
             self.dst_pass1_edit = QLineEdit()
-            self.dst_pass1_edit.setEchoMode(QLineEdit.Password)
+            self.dst_pass1_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.dst_pass1_edit.setMinimumHeight(30)
             self.dst_pass2_edit = QLineEdit()
-            self.dst_pass2_edit.setEchoMode(QLineEdit.Password)
+            self.dst_pass2_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.dst_pass2_edit.setMinimumHeight(30)
             self.dst_pass1_edit.textChanged.connect(
                 lambda _: self.state_changed.emit()
@@ -2079,7 +2079,7 @@ class _ImportSourcePanel(QWidget):
                 # Already-imported rows can't be selected — strip
                 # ItemIsSelectable + ItemIsEnabled so the row
                 # renders muted and won't enter the selection.
-                item.setFlags(Qt.NoItemFlags)
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
                 already += 1
             self.list.addItem(item)
             self._candidates.append(c)
@@ -2104,7 +2104,7 @@ class _ImportSourcePanel(QWidget):
         out = []
         for i in range(self.list.count()):
             item = self.list.item(i)
-            if item.isSelected() and (item.flags() & Qt.ItemIsEnabled):
+            if item.isSelected() and (item.flags() & Qt.ItemFlag.ItemIsEnabled):
                 out.append(self._candidates[i])
         return out
 

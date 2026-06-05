@@ -76,37 +76,38 @@ previous worker; if it's still running, Qt's QThread destructor
 let them self-evict via the `finished` signal (`MainWindow._start_worker`
 in this codebase is the pattern).
 
-### Type checking: mypy is enforced (whole package, two tiers)
+### Type checking: mypy enforced over the whole package
 
 `tests/test_typing.py` runs `mypy` (config in `pyproject.toml`
 `[tool.mypy]`) and fails the suite on any type error, so type hints are
-enforced, not decorative. The `files = [...]` list covers **both** the
-Qt-free core and the PySide6 UI layer. `check_untyped_defs` is on, so
-even unannotated function bodies are checked. When adding a module, add
-it to `files`; run `uv run mypy` to check directly.
+enforced, not decorative. The `files = [...]` list covers the whole
+package — Qt-free core **and** PySide6 UI layer — with no per-module
+error-code exceptions. `check_untyped_defs` is on, so even unannotated
+function bodies are checked. When adding a module, add it to `files`;
+run `uv run mypy` to check directly.
 
-Two tiers, because of PySide6's stubs:
-- **Core** (chain, store, tokens, …) — fully checked. `chain.py` is the
-  typed↔untyped seam: it `cast()`s our plain `str`/`dict` to web3's
-  `ChecksumAddress`/`TxParams`/`BlockIdentifier` at the call boundary,
-  and declares the lazy `_ensure_heavy_imports` names under
-  `if TYPE_CHECKING:` so mypy resolves them.
-- **UI layer** (`ui.py`, `plugins/*`, icons, tray, ledger, signing) —
-  checked with **`attr-defined` disabled** (the override block). Our
-  code uses the deprecated flat Qt enum aliases (`Qt.AlignLeft`); the
-  stubs only expose the scoped form (`Qt.AlignmentFlag.AlignLeft`),
-  tripping ~230 false `attr-defined`. Disabling that one code lets the
-  real errors (None-safety, bad args) through. **TODO (migration C):**
-  move to scoped enum access, then drop the override to re-enable
-  `attr-defined`. Until then, a genuine missing-attribute typo in the UI
-  layer won't be caught — keep that in mind.
+- `chain.py` is the typed↔untyped seam: it `cast()`s our plain
+  `str`/`dict` to web3's `ChecksumAddress`/`TxParams`/`BlockIdentifier`
+  at the call boundary, and declares the lazy `_ensure_heavy_imports`
+  names under `if TYPE_CHECKING:` so mypy resolves them.
 
-Qt gotchas the enforced check surfaces: widgets/actions built lazily in
-a `_build()` method are `Optional[...]` — guard or `assert ... is not
-None` (capture a local first inside nested closures, which don't inherit
-the guard's narrowing). `QByteArray` → `bytes(qba.data())`, not
-`bytes(qba)`. `QProgressDialog(text, None, …)` (no cancel button) and a
-mixin-as-QObject parent need a targeted `# type: ignore`.
+**Use scoped Qt enum access** — `Qt.AlignmentFlag.AlignLeft`, not the
+deprecated flat alias `Qt.AlignLeft`. The flat form works at runtime but
+isn't in the PySide6 stubs, so it trips `attr-defined`. (The codebase was
+migrated off the flat aliases; keep new code scoped. To find the scope
+for a flat member, `type(Qt.AlignLeft).__name__` → `AlignmentFlag`.)
+
+Qt gotchas the enforced check surfaces:
+- Widgets/actions built lazily in a `_build()` method are `Optional[...]`
+  — guard or `assert ... is not None` (capture a local first inside
+  nested closures, which don't inherit the guard's narrowing).
+- `QByteArray` → `bytes(qba.data())`, not `bytes(qba)`.
+- A mixin that depends on its host class's attributes declares them under
+  `if TYPE_CHECKING:` (see `_EventPreviewMixin`).
+- Qt method bindings are positional-only (kwargs raise at runtime, and
+  mypy won't catch it — stub/runtime gap); constructors usually take
+  kwargs. `parent()`/`instance()` return the base type — narrow with
+  `isinstance` before calling subclass methods.
 
 ### Use the chain abstraction, don't reinvent JSON-RPC
 

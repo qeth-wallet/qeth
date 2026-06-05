@@ -60,8 +60,8 @@ class _TrayController(QObject):
     # --- Qt overrides -----------------------------------------
 
     def eventFilter(self, obj, event):  # noqa: N802 — Qt name
-        if obj is self._win and event.type() == QEvent.WindowStateChange:
-            if self._win.windowState() & Qt.WindowMinimized:
+        if obj is self._win and event.type() == QEvent.Type.WindowStateChange:
+            if self._win.windowState() & Qt.WindowState.WindowMinimized:
                 # Defer the hide so we finish handling the
                 # current state-change event first.
                 QTimer.singleShot(0, self._dehydrate_to_tray)
@@ -73,14 +73,14 @@ class _TrayController(QObject):
         # Clear the minimised bit before hiding so a later show
         # comes back as a normal window rather than minimised.
         self._win.setWindowState(
-            self._win.windowState() & ~Qt.WindowMinimized
+            self._win.windowState() & ~Qt.WindowState.WindowMinimized
         )
         self._win.hide()
 
     def _on_activated(self, reason) -> None:
         # Left-click toggles. Right-click opens the menu and
         # never reaches here. Middle / double-click ignored.
-        if reason != QSystemTrayIcon.Trigger:
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
             return
         if self._is_user_visible():
             self._hide()
@@ -90,7 +90,7 @@ class _TrayController(QObject):
     def _show(self) -> None:
         self._win.show()
         self._win.setWindowState(
-            self._win.windowState() & ~Qt.WindowMinimized
+            self._win.windowState() & ~Qt.WindowState.WindowMinimized
         )
         self._win.raise_()
         self._win.activateWindow()
@@ -107,5 +107,5 @@ class _TrayController(QObject):
         """True iff the window is on-screen *and* not minimised."""
         return (
             self._win.isVisible()
-            and not bool(self._win.windowState() & Qt.WindowMinimized)
+            and not bool(self._win.windowState() & Qt.WindowState.WindowMinimized)
         )

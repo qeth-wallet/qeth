@@ -108,27 +108,6 @@ warn_unused_ignores = true
 no_implicit_optional = true
 check_untyped_defs = true
 
-# PySide6 UI layer: suppress the deprecated-flat-enum noise (~230
-# `attr-defined`) so the real bugs surface. Remove this once the code
-# is migrated to scoped enum access (Qt.AlignmentFlag.AlignLeft).
-[[tool.mypy.overrides]]
-module = [
-    "qeth.__main__",
-    "qeth.ui",
-    "qeth.plugin",
-    "qeth.plugins.*",
-    "qeth.icons",
-    "qeth.tray",
-    "qeth.ledger",
-    "qeth.signing",
-    "qeth.alerts",
-    "qeth.branding",
-    "qeth.formatting",
-    "qeth.ens",
-    "qeth.chain_rpc_dialog",
-]
-disable_error_code = ["attr-defined"]
-
 # Third-party packages without (complete) type stubs. Suppress
 # "missing import" noise so the check stays focused on our own code.
 [[tool.mypy.overrides]]

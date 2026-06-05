@@ -1265,15 +1265,15 @@ class TokenListPanel(QWidget):
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Symbol", "Balance", "Value (USD)", "Name"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         # Disable focus rectangle on the table — many themes draw a 1px
         # focus border on the current cell which shifts contents on
         # hover/click. Selection still works without it.
-        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setShowGrid(False)
         # Pin padding + border explicitly for every state so no theme can
         # add an on-hover/on-selected border that shifts the text by 1px.
@@ -1293,7 +1293,7 @@ class TokenListPanel(QWidget):
             "QTableView::item:hover { background: transparent; }"
         )
         self.table.setIconSize(QSize(20, 20))
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         # Enter / Return on the focused tokens table opens the Send
@@ -1306,14 +1306,14 @@ class TokenListPanel(QWidget):
         # arrow; the actual sort kicks in each time we toggle sortingEnabled
         # off-then-on around a populate/update cycle.
         h = self.table.horizontalHeader()
-        h.setSortIndicator(2, Qt.DescendingOrder)
+        h.setSortIndicator(2, Qt.SortOrder.DescendingOrder)
         # Interactive = user can drag the column edge. The Name column
         # stays Stretch so widening the window fills the gap instead
         # of leaving a void to the right.
-        h.setSectionResizeMode(0, QHeaderView.Interactive)  # Symbol
-        h.setSectionResizeMode(1, QHeaderView.Interactive)  # Balance
-        h.setSectionResizeMode(2, QHeaderView.Interactive)  # Value (USD)
-        h.setSectionResizeMode(3, QHeaderView.Stretch)      # Name
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)  # Symbol
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # Balance
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)  # Value (USD)
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)      # Name
         for col, width in enumerate((90, 120, 110, 0)):
             if width:
                 h.resizeSection(col, width)
@@ -1335,7 +1335,7 @@ class TokenListPanel(QWidget):
             "mail-send",
             QIcon.fromTheme(
                 "document-send",
-                style.standardIcon(QStyle.SP_ArrowUp),
+                style.standardIcon(QStyle.StandardPixmap.SP_ArrowUp),
             ),
         )
         if _send_icon.isNull() or not _send_icon.availableSizes():
@@ -1351,12 +1351,12 @@ class TokenListPanel(QWidget):
 
         self.btn_add = QPushButton()
         self.btn_add.setIcon(QIcon.fromTheme("list-add",
-                                             style.standardIcon(QStyle.SP_FileDialogNewFolder)))
+                                             style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)))
         self.btn_add.setToolTip("Add a custom token by contract address")
 
         self.btn_hide = QPushButton()
         self.btn_hide.setIcon(QIcon.fromTheme("list-remove",
-                                              style.standardIcon(QStyle.SP_TrashIcon)))
+                                              style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon)))
         self.btn_hide.setToolTip("Hide selected token from this wallet")
         self.btn_hide.setEnabled(False)
 
@@ -1366,7 +1366,7 @@ class TokenListPanel(QWidget):
         # button equivalent and vice versa).
         self.btn_copy = QPushButton()
         self.btn_copy.setIcon(QIcon.fromTheme("edit-copy",
-                                              style.standardIcon(QStyle.SP_DialogSaveButton)))
+                                              style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)))
         self.btn_copy.setToolTip("Copy selected token's contract address")
         self.btn_copy.setEnabled(False)
 
@@ -1401,7 +1401,7 @@ class TokenListPanel(QWidget):
             b.setFlat(True)
             b.setMaximumSize(28, 28)
             b.setIconSize(QSize(16, 16))
-            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         # Send is intentionally NOT flat-and-square — it carries a
         # text label and gets default button sizing so it reads as
         # a primary action vs the icon-only utility row.
@@ -1415,8 +1415,8 @@ class TokenListPanel(QWidget):
         # Ctrl+C copies the selected token's contract address, scoped to
         # the table so it only fires when this tab has focus.
         copy_act = QAction(self.table)
-        copy_act.setShortcut(QKeySequence.Copy)
-        copy_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        copy_act.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         copy_act.triggered.connect(self._copy_selected_contract)
         self.table.addAction(copy_act)
         self.btn_hide.clicked.connect(
@@ -1509,7 +1509,7 @@ class TokenListPanel(QWidget):
         self._native_chain_id = chain.chain_id
         self._native_symbol = chain.symbol
         sym = QTableWidgetItem(chain.symbol)
-        sym.setData(Qt.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
+        sym.setData(Qt.ItemDataRole.UserRole, (chain.chain_id, self.NATIVE_CONTRACT))
         sym.setToolTip(f"Native {chain.symbol} on {chain.name}")
         bf = sym.font(); bf.setBold(True); sym.setFont(bf)
         native_pix = bundled_native_icon(chain.symbol)
@@ -1523,10 +1523,10 @@ class TokenListPanel(QWidget):
         if native_pix is not None:
             sym.setIcon(QIcon(native_pix))
         bal = _NumericItem(_format_balance(native_balance), native_balance)
-        bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bal.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bal.setFont(bf)
         val = _NumericItem("", Decimal(0))
-        val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        val.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         val.setFont(bf)
         name = QTableWidgetItem(chain.name)
         name.setFont(bf)
@@ -1536,13 +1536,13 @@ class TokenListPanel(QWidget):
         self.table.setItem(0, 3, name)
 
         # --- ERC-20 rows --------------------------------------------------
-        alarm_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+        alarm_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
         for row, b in enumerate(tokens, start=1):
             key = (chain.chain_id, b.contract.lower())
             self._balances[key] = b.balance
             entry = list_entries.get(key)
             sym = QTableWidgetItem(b.symbol)
-            sym.setData(Qt.UserRole, key)
+            sym.setData(Qt.ItemDataRole.UserRole, key)
             sym.setToolTip(b.contract)
             # Mark suspected scams with an alarm. Most of the time these
             # don't reach the panel at all (filtered upstream); the case
@@ -1565,9 +1565,9 @@ class TokenListPanel(QWidget):
                 elif entry and entry.logo_uri:
                     self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
             bal = _NumericItem(_format_balance(b.balance), b.balance)
-            bal.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            bal.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val = _NumericItem("", Decimal(0))
-            val.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             name = QTableWidgetItem(b.name)
             self.table.setItem(row, 0, sym)
             self.table.setItem(row, 1, bal)
@@ -1590,7 +1590,7 @@ class TokenListPanel(QWidget):
         target = (chain_id, self.NATIVE_CONTRACT)
         for r in range(self.table.rowCount()):
             it = self.table.item(r, 0)
-            if it is not None and it.data(Qt.UserRole) == target:
+            if it is not None and it.data(Qt.ItemDataRole.UserRole) == target:
                 it.setIcon(QIcon(pix))
                 return
 
@@ -1678,7 +1678,7 @@ class TokenListPanel(QWidget):
             sym = self.table.item(row, 0)
             if sym is None:
                 continue
-            key = sym.data(Qt.UserRole)
+            key = sym.data(Qt.ItemDataRole.UserRole)
             if not key:
                 continue
             _, addr = key
@@ -1776,7 +1776,7 @@ class TokenListPanel(QWidget):
             sym = self.table.item(row, 0)
             if sym is None:
                 continue
-            key = sym.data(Qt.UserRole)
+            key = sym.data(Qt.ItemDataRole.UserRole)
             if not key:
                 continue
             cid, addr = key
@@ -1815,7 +1815,7 @@ class TokenListPanel(QWidget):
             item = self.table.item(row, 0)
             if item is None:
                 continue
-            cid, addr = item.data(Qt.UserRole) or (None, None)
+            cid, addr = item.data(Qt.ItemDataRole.UserRole) or (None, None)
             if cid == chain_id and addr == contract.lower():
                 item.setIcon(QIcon(pix))
                 break
@@ -1831,7 +1831,7 @@ class TokenListPanel(QWidget):
         sym = self.table.item(items[0].row(), 0)
         if sym is None:
             return None
-        key = sym.data(Qt.UserRole)
+        key = sym.data(Qt.ItemDataRole.UserRole)
         if not key or key[1] == self.NATIVE_CONTRACT:
             return None
         return key
@@ -1847,7 +1847,7 @@ class TokenListPanel(QWidget):
         sym = self.table.item(items[0].row(), 0)
         if sym is None:
             return None
-        key = sym.data(Qt.UserRole)
+        key = sym.data(Qt.ItemDataRole.UserRole)
         return key or None
 
     def _emit_for_selected(self, sig) -> None:
@@ -1881,8 +1881,8 @@ class TokenListPanel(QWidget):
     def eventFilter(self, obj, event):  # noqa: N802 — Qt method name
         from PySide6.QtCore import QEvent
         if (obj is self.table
-                and event.type() == QEvent.KeyPress
-                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
             self._emit_for_selected(self.send_requested)
             return True
         return super().eventFilter(obj, event)
@@ -1893,7 +1893,7 @@ class TokenListPanel(QWidget):
         sym_item = self.table.item(row, 0)
         if sym_item is None:
             return
-        meta = sym_item.data(Qt.UserRole)
+        meta = sym_item.data(Qt.ItemDataRole.UserRole)
         if not meta:
             return
         cid, addr = meta
@@ -1908,7 +1908,7 @@ class TokenListPanel(QWidget):
         sym_item = self.table.item(item.row(), 0)
         if sym_item is None:
             return
-        meta = sym_item.data(Qt.UserRole)
+        meta = sym_item.data(Qt.ItemDataRole.UserRole)
         if not meta:
             return
         cid, addr = meta

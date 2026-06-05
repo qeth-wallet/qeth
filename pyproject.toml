@@ -31,6 +31,7 @@ simulate = ["pyrevm>=0.3"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.1.0",
     "pytest>=8",
     "pytest-qt>=4.4",
 ]
@@ -49,6 +50,55 @@ addopts = "-m 'not network'"
 # created, so UI tests don't pop windows on the developer's screen
 # (and also work in CI / SSH sessions without a display).
 qt_api = "pyside6"
+
+[tool.mypy]
+python_version = "3.10"
+# Enforced scope: the Qt-free core only. The PySide6 UI layer (ui.py,
+# plugins/*, icons, tray, ledger, signing, …) is deliberately NOT listed —
+# PySide6's type stubs are incomplete (nested Qt enums like
+# QItemSelectionModel.ClearAndSelect, Signal/Slot), producing ~300
+# unfixable false positives. Run `uv run mypy` (no args) to type-check
+# the enforced set; tests/test_typing.py gates it. Tighten later by
+# adding disallow_untyped_defs once the core is fully annotated.
+files = [
+    "qeth/__init__.py",
+    "qeth/chain.py",
+    "qeth/chains.py",
+    "qeth/store.py",
+    "qeth/tokens.py",
+    "qeth/tokenlists.py",
+    "qeth/token_metadata.py",
+    "qeth/prices.py",
+    "qeth/abi.py",
+    "qeth/abi_cache.py",
+    "qeth/simulate.py",
+    "qeth/transactions.py",
+    "qeth/transactions_cache.py",
+    "qeth/wallet_cache.py",
+    "qeth/risk.py",
+    "qeth/hot_wallet.py",
+    "qeth/import_sources.py",
+    "qeth/chainlist.py",
+    "qeth/rpc.py",
+]
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# Third-party packages without (complete) type stubs. Suppress
+# "missing import" noise so the check stays focused on our own code.
+[[tool.mypy.overrides]]
+module = [
+    "ledgereth.*",
+    "pyrevm.*",
+    "segno.*",
+    "web3.*",
+    "eth_abi.*",
+    "eth_utils.*",
+    "hexbytes.*",
+]
+ignore_missing_imports = true
 
 [project.scripts]
 qeth = "qeth.__main__:main"

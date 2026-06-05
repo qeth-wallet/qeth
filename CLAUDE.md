@@ -76,6 +76,22 @@ previous worker; if it's still running, Qt's QThread destructor
 let them self-evict via the `finished` signal (`MainWindow._start_worker`
 in this codebase is the pattern).
 
+### Type checking: the Qt-free core stays mypy-clean
+
+`tests/test_typing.py` runs `mypy` (config in `pyproject.toml`
+`[tool.mypy]`) and fails the suite on any type error, so the core's
+type hints are enforced, not decorative. Scope is the **Qt-free core
+only** — the `files = [...]` list in the config. The PySide6 UI layer
+(`ui.py`, `plugins/*`, `icons`, `tray`, `ledger`, `signing`) is
+deliberately excluded: incomplete Qt stubs (nested enums, `Signal`/
+`Slot`) throw ~300 unfixable false positives. `check_untyped_defs` is
+on, so even unannotated function bodies are checked. When adding a new
+core module, add it to `files`; run `uv run mypy` to check directly.
+`chain.py` is the typed↔untyped seam — it `cast()`s our plain
+`str`/`dict` to web3's `ChecksumAddress`/`TxParams`/`BlockIdentifier`
+at the call boundary, and declares the lazy `_ensure_heavy_imports`
+names under `if TYPE_CHECKING:` so mypy resolves them.
+
 ### Use the chain abstraction, don't reinvent JSON-RPC
 
 `qeth/chain.py` `EthClient` already has `get_balance`,

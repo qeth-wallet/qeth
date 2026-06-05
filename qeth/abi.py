@@ -576,7 +576,7 @@ def _describe(value, inp: dict) -> dict:
         # fall through to the leaf branch.
         if components:
             elem_inp["components"] = components
-        children: list[dict] = []
+        children = []
         if isinstance(value, (list, tuple)):
             for elem in value:
                 children.append(_describe(elem, elem_inp))
@@ -716,7 +716,7 @@ def _decode_event_with_abi(address, log, abi: Abi) -> Optional[dict]:
             "transactionHash": HexBytes(b""), "blockHash": HexBytes(b""),
             "blockNumber": 0,
         }
-        for ev in contract.events:
+        for ev in contract.events:  # type: ignore[attr-defined]  # web3 ContractEvents iteration isn't typed
             try:
                 decoded = ev().process_log(entry)
             except Exception:

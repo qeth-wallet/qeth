@@ -35,6 +35,7 @@ Simulation is slow-ish, so callers run it off the main thread.
 
 import logging
 import re
+from typing import Any
 
 from eth_utils import to_checksum_address
 
@@ -163,7 +164,7 @@ def _logs_from_simv1(res):
 
 
 def _decode_simv1_revert(call) -> str:
-    err = call.get("error") if hasattr(call, "get") else None
+    err: Any = call.get("error") if hasattr(call, "get") else None
     data = None
     if hasattr(err, "get"):
         data = err.get("data")
@@ -189,8 +190,8 @@ def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
     import time as _time
     sleep = sleep or _time.sleep
     from .chain import EthClient
-    call = {"from": to_checksum_address(from_addr),
-            "to": to_checksum_address(to_addr)}
+    call: dict[str, str] = {"from": to_checksum_address(from_addr),
+                            "to": to_checksum_address(to_addr)}
     if data and data not in ("0x", "0X"):
         call["data"] = data
     if value:
@@ -271,7 +272,7 @@ def _run_fork(EVM, chain, from_addr, to_addr, data, value, block):
     calldata = b""
     if data and data not in ("0x", "0X"):
         calldata = bytes.fromhex(data[2:] if data.startswith("0x") else data)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "caller": to_checksum_address(from_addr),
         "to": to_checksum_address(to_addr),
         "calldata": calldata,

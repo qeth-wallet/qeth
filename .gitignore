@@ -19,3 +19,6 @@ venv/
 
 # Claude Code per-machine settings
 .claude/settings.local.json
+
+# mypy type-checker cache
+.mypy_cache/

@@ -127,7 +127,8 @@ class RpcServer:
             if self._runner:
                 await self._runner.cleanup()
         finally:
-            self._loop.stop()
+            if self._loop is not None:
+                self._loop.stop()
 
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -143,8 +144,14 @@ class RpcServer:
 
     async def _serve(self) -> None:
         self._client = ClientSession()
+        async def _preflight(_request: web.Request) -> web.Response:
+            # CORS preflight. aiohttp requires a coroutine handler — a
+            # plain lambda returning a Response is not awaitable and
+            # raises if this route is ever hit.
+            return web.Response()
+
         app = web.Application(middlewares=[_cors])
-        app.router.add_route("OPTIONS", "/{tail:.*}", lambda r: web.Response())
+        app.router.add_route("OPTIONS", "/{tail:.*}", _preflight)
         app.router.add_post("/", self._http_handler)
         app.router.add_get("/", self._root_or_ws)
         self._runner = web.AppRunner(app)
@@ -199,6 +206,7 @@ class RpcServer:
                              "error": {"code": -32700, "message": "Parse error"}}
                         ))
                         continue
+                    resp: Any
                     if isinstance(req, list):
                         resp = [
                             await self._handle_one(r, origin, ws=ws)
@@ -369,6 +377,8 @@ class RpcServer:
         if isinstance(frame_origin, str) and frame_origin:
             origin = frame_origin
         try:
+            if not isinstance(method, str):
+                raise RpcError(-32600, "Invalid Request: 'method' must be a string")
             result = await self._dispatch(method, params, origin, ws=ws)
             return {"jsonrpc": "2.0", "id": rid, "result": result}
         except RpcError as e:
@@ -601,6 +611,7 @@ class RpcServer:
             # the cool-down) tells us if connectivity is back.
             raise RpcError(-32603, "upstream temporarily unreachable")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        assert self._client is not None  # set in _serve() before any request is handled
         try:
             async with self._client.post(
                 chain.rpc_url, json=payload, timeout=15,

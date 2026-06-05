@@ -18,7 +18,22 @@ context manager so callers never see the raw aggregate3 wire format.
 
 import logging
 from decimal import Decimal
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
+
+if TYPE_CHECKING:
+    # These names are injected into module globals at runtime by
+    # _ensure_heavy_imports() (lazy, to keep the ~700 ms web3/eth_abi
+    # import off the startup path). Declare them here so the type
+    # checker resolves the references the rest of the file makes.
+    import requests
+    from eth_abi import decode as abi_decode
+    from eth_abi import encode as abi_encode
+    from eth_typing import ChecksumAddress
+    from web3 import Web3
+    from web3.exceptions import Web3RPCError
+    from web3.middleware import ExtraDataToPOAMiddleware
+    from web3.providers.rpc import HTTPProvider
+    from web3.types import BlockIdentifier, RPCEndpoint, TxParams
 
 from .chains import Chain
 
@@ -153,7 +168,8 @@ class EthClient:
     def rpc(self, method: str, params: Optional[list] = None):
         """Direct JSON-RPC call. Raises ``ChainError`` on RPC-level errors."""
         try:
-            return self._w3.manager.request_blocking(method, params or [])
+            return self._w3.manager.request_blocking(
+                cast("RPCEndpoint", method), params or [])
         except Web3RPCError as e:
             rpc_resp = getattr(e, "rpc_response", None) or {}
             err = rpc_resp.get("error") or {}
@@ -163,7 +179,8 @@ class EthClient:
 
     def get_balance(self, address: str, block: str = "latest") -> int:
         """Native balance in wei."""
-        return int(self._w3.eth.get_balance(address, block))
+        return int(self._w3.eth.get_balance(
+            cast("ChecksumAddress", address), cast("BlockIdentifier", block)))
 
     def get_block_number(self) -> int:
         return int(self._w3.eth.block_number)
@@ -172,7 +189,8 @@ class EthClient:
         return int(self._w3.eth.chain_id)
 
     def get_transaction_count(self, address: str, block: str = "pending") -> int:
-        return int(self._w3.eth.get_transaction_count(address, block))
+        return int(self._w3.eth.get_transaction_count(
+            cast("ChecksumAddress", address), cast("BlockIdentifier", block)))
 
     def gas_price(self) -> int:
         return int(self._w3.eth.gas_price)
@@ -181,11 +199,12 @@ class EthClient:
         return int(self._w3.eth.max_priority_fee)
 
     def estimate_gas(self, tx: dict) -> int:
-        return int(self._w3.eth.estimate_gas(tx))
+        return int(self._w3.eth.estimate_gas(cast("TxParams", tx)))
 
     def call(self, tx: dict, block: str = "latest") -> str:
         """Returns hex-encoded return data (with 0x prefix)."""
-        result = self._w3.eth.call(tx, block)
+        result = self._w3.eth.call(
+            cast("TxParams", tx), cast("BlockIdentifier", block))
         if hasattr(result, "to_0x_hex"):
             return result.to_0x_hex()
         b = bytes(result)
@@ -279,7 +298,9 @@ class _Pending:
     def __init__(self, decoder: Optional[Callable] = None):
         self.success: Optional[bool] = None  # None until flushed
         self.raw: Optional[bytes] = None
-        self.value = None
+        # None until flushed; then the decoded call result (int, str,
+        # tuple, …) or the raw bytes when there's no decoder.
+        self.value: Any = None
         self._decoder = decoder
 
 
@@ -304,8 +325,9 @@ class Multicall:
     def __enter__(self) -> "Multicall":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> "Literal[False]":
         # Don't flush if the with-block raised — caller is bailing.
+        # Never suppresses (always False), hence the precise return type.
         if exc_type is None:
             self._flush()
         return False

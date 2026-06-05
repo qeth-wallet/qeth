@@ -122,8 +122,9 @@ def native_coingecko_id(chain) -> Optional[str]:
     (CoinGecko asset_platforms, all chains), then the offline symbol map,
     then the chain's own id — but never the unsafe "ethereum" default on a
     non-ETH chain (better no native value than a wildly wrong one)."""
-    if _DISCOVERED_NATIVE_IDS:
-        nid = _DISCOVERED_NATIVE_IDS.get(getattr(chain, "chain_id", None))
+    cid = getattr(chain, "chain_id", None)
+    if _DISCOVERED_NATIVE_IDS and cid is not None:
+        nid = _DISCOVERED_NATIVE_IDS.get(cid)
         if nid:
             return nid
     sym = (getattr(chain, "symbol", "") or "").upper()

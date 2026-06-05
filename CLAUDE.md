@@ -14,6 +14,7 @@ user's Qt theme applies.
 - `qeth/ledger.py` — Ledger account discovery via `ledgereth`, runs in a `QThread`
 - `qeth/tokens.py` — token discovery sources (currently Blockscout); `TokenSource` abstract base
 - `qeth/tokenlists.py` — curated token whitelists from Uniswap / CoinGecko / Curve / 1inch, merged + disk-cached at `~/.qeth/tokenlists/`
+- `qeth/contract_identity.py` — "what is this contract": name/verified (Etherscan v2 `getsourcecode`) + deployer/date (`getcontractcreation`), permanently disk-cached at `~/.qeth/contract_id/`. `describe_identity()` renders a badge (name · age · deployer-cluster / self-deployed; ⚠ for unverified, "(new)" for recent). Shown on the To:/Contract: row of the details + signing + send dialogs.
 - `qeth/icons.py` — disk+memory icon cache (`~/.qeth/icons/`) + `bundled_native_icon` / `bundled_chain_icon` lookups
 - `qeth/rpc.py` — aiohttp HTTP+WS JSON-RPC server on `127.0.0.1:1248` (Frame-compatible)
 - `qeth/assets/{native,chains}/*.png` — bundled logos; shipped via `pyproject.toml` `package-data`

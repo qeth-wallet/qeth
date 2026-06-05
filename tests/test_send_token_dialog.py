@@ -481,3 +481,29 @@ class TestLiveUsdValue:
         assert dlg._value_usd_lbl.text() == ""
         dlg.amount_edit.setText("abc")                # garbage
         assert dlg._value_usd_lbl.text() == ""
+
+
+class TestRecipientIdentity:
+    """The Contract: row resolves the typed recipient's identity once
+    it's a valid address. (The worker is stubbed out via the no-op
+    start_worker, so we assert the synchronous kick/clear behaviour:
+    a valid recipient enters the "…" loading state and records the
+    address; an invalid one clears the row.)"""
+
+    def test_identity_row_present(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        assert dlg._identity_label is not None
+
+    def test_valid_recipient_kicks_lookup(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        addr = "0x" + "12" * 20
+        dlg.recipient_edit.setText(addr)
+        assert dlg._identity_last_addr == addr.lower()
+        assert dlg._identity_label.text() == "…"      # loading; worker stubbed
+
+    def test_invalid_recipient_clears_row(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        dlg.recipient_edit.setText("0x" + "12" * 20)  # valid → kicks
+        dlg.recipient_edit.setText("0xnope")          # invalid → clears
+        assert dlg._identity_last_addr is None
+        assert dlg._identity_label.text() == ""

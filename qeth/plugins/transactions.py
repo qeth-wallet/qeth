@@ -20,10 +20,11 @@ from __future__ import annotations
 import datetime
 import html as _html
 import logging
+import time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Optional
 
-from eth_utils import to_checksum_address
+from eth_utils import is_address, to_checksum_address
 
 
 def _escape_html(text: str) -> str:
@@ -52,6 +53,9 @@ from ..abi import (
 # the caller wired up — or the RoutedAbiSource built internally below.
 AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource
 from ..abi_cache import AbiCache
+from ..contract_identity import (
+    ContractIdentityCache, ContractIdentitySource, describe_identity,
+)
 from ..chain import EthClient, wei_to_ether
 from ..signing import SignerError, SigningRequest
 from ..formatting import format_datetime as _format_datetime
@@ -730,6 +734,15 @@ class TransactionsPlugin(Plugin):
                 abi_source = blockscout_abi
         self._abi_source = abi_source
         self._abi_cache = abi_cache if abi_cache is not None else AbiCache()
+        # Contract-identity machinery (name / verified / deployer / age),
+        # shown on the To: row of the details + signing dialogs. Same
+        # Etherscan-v2 key as the ABI source; immutable facts → cached
+        # permanently on disk. None when there's no store/key (tests).
+        self._identity_source: Optional[ContractIdentitySource] = (
+            ContractIdentitySource(lambda: store.etherscan_api_key)
+            if store is not None else None
+        )
+        self._identity_cache = ContractIdentityCache()
         # In-memory cache, keyed by (chain_id, address_lower). Hydrated
         # lazily from the disk cache on first ``on_account_changed`` for
         # a (chain, addr) — that's what prevents the empty → populated
@@ -832,6 +845,8 @@ class TransactionsPlugin(Plugin):
             tx, chain,
             abi_source=self._abi_source,
             abi_cache=self._abi_cache,
+            identity_source=self._identity_source,
+            identity_cache=self._identity_cache,
             start_worker=self.host.start_worker,
             token_info=token_info,
             icon_cache=icon_cache,
@@ -1754,6 +1769,46 @@ class AbiFetchWorker(QThread):
         self.ready.emit(abi)
 
 
+class ContractIdentityWorker(QThread):
+    """Resolve a contract's identity (name / verified / deployer / age)
+    off the UI thread and emit a rendered ``IdentityBadge``. Disk-cache
+    first (instant + offline on re-open); on a miss, fetch and persist —
+    the facts are immutable. Emits ``ready(IdentityBadge | None)``; None
+    means nothing useful to show (unsupported chain + uncached, or a
+    transient error — the To: row just stays bare)."""
+
+    ready = Signal(object)
+
+    def __init__(self, source: Optional[ContractIdentitySource],
+                 cache: ContractIdentityCache, chain_id: int, address: str,
+                 my_addresses, parent=None):
+        super().__init__(parent)
+        self._source = source
+        self._cache = cache
+        self._chain_id = chain_id
+        self._address = address
+        self._my = list(my_addresses or [])
+
+    def run(self) -> None:
+        idy = self._cache.load(self._chain_id, self._address)
+        if idy is None and self._source is not None:
+            try:
+                idy = self._source.fetch(self._chain_id, self._address)
+            except Exception as e:
+                log.warning("identity fetch failed for %s/%s: %s",
+                            self._chain_id, self._address, e)
+            if idy is not None:
+                self._cache.save(self._chain_id, idy)
+        if idy is None:
+            self.ready.emit(None)
+            return
+        count = (self._cache.deployer_contract_count(self._chain_id, idy.deployer)
+                 if idy.deployer else 0)
+        badge = describe_identity(
+            idy, my_addresses=self._my, deployer_count=count, now_ts=time.time())
+        self.ready.emit(badge)
+
+
 class SignatureFetchWorker(QThread):
     """Last-resort decode when no contract ABI matched: look the call's
     4-byte selector up in 4byte.directory and decode the calldata from
@@ -2171,6 +2226,66 @@ class _EventPreviewMixin:
         self._events.set_logs(logs)
 
 
+# Self-consistent (bg, fg) pairs for the Contract: identity row. Each
+# carries its own background, so it reads on any palette — same theme-safe
+# approach as the wallet-label sticky pill (feedback_theme_safe_colors).
+_IDENTITY_TINT = {
+    "warn":    ("#f8d7da", "#842029"),   # unverified — stands out
+    "caution": ("#fff3cd", "#664d03"),   # verified, but deployed recently
+}
+
+
+def _style_identity_label(label: QLabel, badge) -> None:
+    """Render an IdentityBadge into ``label``: a tinted pill for warn /
+    caution, muted plain text for a neutral EOA, normal text otherwise."""
+    label.setText(badge.text)
+    tint = _IDENTITY_TINT.get(badge.level)
+    if tint:
+        bg, fg = tint
+        label.setStyleSheet(
+            f"background:{bg}; color:{fg}; padding:1px 6px; border-radius:4px;")
+        label.setEnabled(True)
+    else:
+        label.setStyleSheet("")
+        label.setEnabled(badge.level != "info")   # grey out a plain EOA
+
+
+def _make_identity_row(*, to_addr: Optional[str], chain,
+                       identity_source: Optional[ContractIdentitySource],
+                       identity_cache: ContractIdentityCache,
+                       my_addresses, start_worker):
+    """Build the Contract:-row label and a ``kick()`` that fills it via a
+    background ContractIdentityWorker. Returns ``(None, None)`` when there's
+    no recipient to identify."""
+    if not to_addr:
+        return None, None
+    label = QLabel("")
+    # Word wrap on, and DON'T override the size policy — a wrapped QLabel
+    # ships hasHeightForWidth()=True, which is what makes the form row grow
+    # to fit multiple lines. Replacing the policy resets that flag and the
+    # 2nd/3rd line gets clipped (the row keeps the 1-line sizeHint height).
+    label.setWordWrap(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def _apply(badge) -> None:
+        if badge is not None:
+            _style_identity_label(label, badge)
+
+    def kick() -> None:
+        # Skip entirely when there's nothing to go on (no source/key AND
+        # not already cached) — leaves the row blank rather than spinning.
+        if (identity_source is None
+                and identity_cache.load(chain.chain_id, to_addr) is None):
+            return
+        worker = ContractIdentityWorker(
+            identity_source, identity_cache, chain.chain_id, to_addr,
+            my_addresses)
+        worker.ready.connect(_apply)
+        start_worker(worker)
+
+    return label, kick
+
+
 class TransactionDetailsDialog(QDialog):
     """Modal-ish dialog showing the full tx record.
 
@@ -2188,12 +2303,18 @@ class TransactionDetailsDialog(QDialog):
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
+                 identity_source: Optional[ContractIdentitySource] = None,
+                 identity_cache: Optional[ContractIdentityCache] = None,
                  parent=None):
         super().__init__(parent)
         self.tx = tx
         self.chain = chain
         self._abi_source = abi_source
         self._abi_cache = abi_cache
+        self._identity_source = identity_source
+        self._identity_cache = (
+            identity_cache if identity_cache is not None
+            else ContractIdentityCache())
         self._start_worker = start_worker
         self._known_addresses = {a.lower() for a in (known_addresses or ())}
         # Optional dependencies for ERC-20 annotation on the "To:" row.
@@ -2281,6 +2402,15 @@ class TransactionDetailsDialog(QDialog):
         form.addRow(
             "To:", self._build_to_row(tx.to_addr, tx.from_addr, chain, mono),
         )
+        _id_label, _id_kick = _make_identity_row(
+            to_addr=tx.to_addr, chain=chain,
+            identity_source=self._identity_source,
+            identity_cache=self._identity_cache,
+            my_addresses=known_addresses or [],
+            start_worker=self._start_worker)
+        if _id_label is not None and _id_kick is not None:
+            form.addRow("Contract:", _id_label)
+            _id_kick()
         # Value rendered through wei_to_ether (Decimal) — never float.
         if tx.value_wei:
             ether = wei_to_ether(tx.value_wei)
@@ -2864,12 +2994,18 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
+                 identity_source: Optional[ContractIdentitySource] = None,
+                 identity_cache: Optional[ContractIdentityCache] = None,
                  parent=None):
         super().__init__(parent)
         self.req = req
         self.chain = chain
         self._abi_source = abi_source
         self._abi_cache = abi_cache
+        self._identity_source = identity_source
+        self._identity_cache = (
+            identity_cache if identity_cache is not None
+            else ContractIdentityCache())
         self._start_worker = start_worker
         self._token_info = token_info
         self._known_addresses = {a.lower() for a in (known_addresses or ())}
@@ -2961,6 +3097,15 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         header.addRow(
             "To:", self._build_to_row(req.to_addr, req.from_addr, chain, mono),
         )
+        _id_label, _id_kick = _make_identity_row(
+            to_addr=req.to_addr, chain=chain,
+            identity_source=self._identity_source,
+            identity_cache=self._identity_cache,
+            my_addresses=known_addresses or [],
+            start_worker=self._start_worker)
+        if _id_label is not None and _id_kick is not None:
+            header.addRow("Contract:", _id_label)
+            _id_kick()
         if req.value_wei > 0:
             ether = wei_to_ether(req.value_wei)
             header.addRow(
@@ -3448,6 +3593,8 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
+                 identity_source: Optional[ContractIdentitySource] = None,
+                 identity_cache: Optional[ContractIdentityCache] = None,
                  parent=None):
         super().__init__(parent)
         self._asset = asset
@@ -3455,6 +3602,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._from_addr = to_checksum_address(from_addr)
         self._abi_source = abi_source
         self._abi_cache = abi_cache
+        self._identity_source = identity_source
+        self._identity_cache = (
+            identity_cache if identity_cache is not None
+            else ContractIdentityCache())
         self._start_worker = start_worker
         self._token_info = token_info
         self._icon_cache = icon_cache
@@ -3464,6 +3615,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._known_addresses = {
             a.lower() for a in (known_addresses or ())
         }
+        self._known_addresses_list = list(known_addresses or ())
+        # Contract-identity row for the typed recipient (filled async as
+        # the user enters a valid address). Created in the form below.
+        self._identity_label: Optional[QLabel] = None
+        self._identity_last_addr: Optional[str] = None
         self._recipient_hint = ""  # "", "own", or "token"
         self._gas_ready = False
         self._base_fee_wei = 0
@@ -3525,6 +3681,15 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.recipient_edit.setPlaceholderText("0x… recipient address")
         self.recipient_edit.setFont(mono)
         header.addRow("&To:", self.recipient_edit)
+        # Identity of the typed recipient (when it resolves to a contract):
+        # name / verified / age / deployer — filled async, see
+        # _update_recipient_identity.
+        self._identity_label = QLabel("")
+        # Keep the wrapped label's default size policy — see _make_identity_row.
+        self._identity_label.setWordWrap(True)
+        self._identity_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        header.addRow("Contract:", self._identity_label)
 
         # Amount + Max + balance label.
         amount_box = QWidget()
@@ -3684,6 +3849,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         # Wire live updates: recipient/amount changes re-evaluate the
         # Confirm button enable state and (for native) the Total line.
         # Gas spinners re-render the Expected fee + Total.
+        self.recipient_edit.textChanged.connect(self._update_recipient_identity)
         self.recipient_edit.textChanged.connect(self._update_state)
         self.recipient_edit.textChanged.connect(self._update_recipient_hint)
         self.amount_edit.textChanged.connect(self._update_state)
@@ -3824,6 +3990,42 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         return None
 
     # --- input handling --------------------------------------------
+
+    def _update_recipient_identity(self) -> None:
+        """Resolve the typed recipient's contract identity once it's a
+        valid, changed address. The worker hits the disk cache first, so
+        re-typing a seen address is instant + offline; a stale in-flight
+        result (recipient changed meanwhile) is dropped in the handler."""
+        label = self._identity_label
+        if label is None:
+            return
+        text = self.recipient_edit.text().strip()
+        if not is_address(text):
+            label.setText("")
+            label.setStyleSheet("")
+            self._identity_last_addr = None
+            return
+        addr = text.lower()
+        if addr == self._identity_last_addr:
+            return
+        self._identity_last_addr = addr
+        label.setText("…")
+        label.setStyleSheet("")
+        worker = ContractIdentityWorker(
+            self._identity_source, self._identity_cache, self.chain.chain_id,
+            addr, self._known_addresses_list)
+        worker.ready.connect(
+            lambda badge, a=addr: self._on_identity_ready(a, badge))
+        self._start_worker(worker)
+
+    def _on_identity_ready(self, addr: str, badge) -> None:
+        if self._identity_label is None or addr != self._identity_last_addr:
+            return   # stale: recipient changed while this lookup was in flight
+        if badge is None:
+            self._identity_label.setText("")
+            self._identity_label.setStyleSheet("")
+        else:
+            _style_identity_label(self._identity_label, badge)
 
     def _asset_price_usd(self) -> Optional[Decimal]:
         """USD price for the asset being sent: the native price the host

@@ -154,7 +154,12 @@ class RpcServer:
         app.router.add_route("OPTIONS", "/{tail:.*}", _preflight)
         app.router.add_post("/", self._http_handler)
         app.router.add_get("/", self._root_or_ws)
-        self._runner = web.AppRunner(app)
+        # access_log=None silences aiohttp's per-request access logging —
+        # otherwise every dapp poll (the Falkon connector hits eth_chainId +
+        # eth_accounts every 4 s to detect chain/account changes) spams an
+        # INFO line. Our own log.info("listening …") and per-method warnings
+        # stay.
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()

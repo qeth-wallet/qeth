@@ -102,6 +102,7 @@ files = [
     "qeth/formatting.py",
     "qeth/ens.py",
     "qeth/chain_rpc_dialog.py",
+    "qeth/toptokens.py",
 ]
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -138,4 +139,4 @@ version = {attr = "qeth.__version__"}
 include = ["qeth*"]
 
 [tool.setuptools.package-data]
-qeth = ["assets/native/*.png", "assets/chains/*.png", "assets/logos/*.svg"]
+qeth = ["assets/native/*.png", "assets/chains/*.png", "assets/logos/*.svg", "data/top_tokens.json"]

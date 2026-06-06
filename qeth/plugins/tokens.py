@@ -48,6 +48,7 @@ from ..tokens import (
     BlockscoutSource, EtherscanV2Source, RoutedTokenSource, TokenBalance,
     TokenSource,
 )
+from ..toptokens import COINGECKO_PLATFORMS, TopTokens
 from ..wallet_cache import CachedToken, CachedWallet, WalletCache
 
 
@@ -72,6 +73,23 @@ class TokenListsLoader(QThread):
             self.loaded.emit()
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class TopTokensLoader(QThread):
+    """Background TTL refresh of the top-tokens-by-market-cap lists from
+    CoinGecko into ``~/.qeth/toptokens``. A no-op (returns instantly)
+    when the cache is still fresh; ``refresh`` is best-effort and
+    swallows its own failures, so this never breaks discovery — the
+    shipped seed keeps serving the head while a refresh is pending."""
+
+    def __init__(self, top: TopTokens, chain_ids: list[int], parent=None):
+        super().__init__(parent)
+        self.top = top
+        self.chain_ids = chain_ids
+
+    def run(self) -> None:
+        if self.top.is_stale():
+            self.top.refresh(self.chain_ids)
 
 
 class TokenListWorker(QThread):
@@ -237,6 +255,12 @@ class TokensPlugin(Plugin):
             BlockscoutSource(),
         )
         self._token_lists = TokenLists()
+        # Top-tokens-by-market-cap head: a bounded set we always multicall
+        # balanceOf over, so a held major shows even when the indexer's
+        # per-holder list omits it (Blockscout has been observed to drop a
+        # real USDC). Seeded from the shipped snapshot, TTL-refreshed from
+        # CoinGecko in the background. The indexer still covers the long tail.
+        self._top_tokens = TopTokens()
         self._icon_cache = IconCache()
         self._price_source: PriceSource = DefiLlamaPrices()
         self._wallet_cache = WalletCache()
@@ -257,6 +281,7 @@ class TokensPlugin(Plugin):
         self._panel = None
         self._refresh_timer: Optional[QTimer] = None
         self._lists_loader: Optional[TokenListsLoader] = None
+        self._top_tokens_loader: Optional[TopTokensLoader] = None
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -400,6 +425,11 @@ class TokensPlugin(Plugin):
         self._lists_loader.loaded.connect(self._on_lists_loaded)
         self._lists_loader.failed.connect(self._on_lists_load_failed)
         host.start_worker(self._lists_loader)
+        # Refresh the top-tokens head if the cache has gone stale (no-op
+        # otherwise). The shipped seed already serves the head meanwhile.
+        self._top_tokens_loader = TopTokensLoader(
+            self._top_tokens, list(COINGECKO_PLATFORMS))
+        host.start_worker(self._top_tokens_loader)
 
     # --- lifecycle hooks ----------------------------------------------------
 
@@ -721,12 +751,20 @@ class TokensPlugin(Plugin):
             receipt_extras = self._receipt_contracts.pop(
                 (chain.chain_id, address.lower()), set()
             )
+            # Top-tokens-by-market-cap head: always multicalled, so a held
+            # major surfaces even when the indexer's per-holder list dropped
+            # it. Bounded (~a few hundred/chain) — well under the ~5k curated
+            # load that once aborted the balance QThread. The dedupe below
+            # keeps it from double-counting contracts the indexer already
+            # returned; balanceOf for the (mostly zero) rest is cheap.
+            top = self._top_tokens.contracts(chain.chain_id)
             seen = set()
             contracts: list[str] = []
             for c in (
                 [b.contract for b in blockscout_tokens]
                 + sorted(forced) + sorted(siblings)
                 + sorted(receipt_extras)
+                + top
             ):
                 cl = c.lower()
                 if cl in seen:
@@ -826,14 +864,21 @@ class TokensPlugin(Plugin):
             host.start_worker(mw)
 
         def on_failed(msg: str) -> None:
+            # Indexer discovery failed (e.g. Blockscout's tokenlist
+            # endpoint timing out for a high-activity address like
+            # Vitalik's). Rather than leave the panel blank, fall back to
+            # a top-N-only pass — the majors can still be multicalled
+            # directly, so a held USDC shows even with the indexer down.
+            # on_discovered drives the in-flight guard to completion via
+            # _on_combined_ready, so we DON'T discard it here.
+            if self._top_tokens.contracts(chain.chain_id):
+                log.warning("token discovery source failed (%s); falling "
+                            "back to top-N multicall for %s", msg, address)
+                on_discovered(0, [])
+                return
             self._discovery_in_flight.discard(view_key)
-            # Always surface the error when the user is still on
-            # this view — otherwise discovery failures (e.g.
-            # Blockscout's tokenlist endpoint timing out for a
-            # high-activity address like Vitalik's) silently leave
-            # the panel empty and the user has no way to tell
-            # whether they just have no tokens or something
-            # actually broke.
+            # Nothing to fall back to (chain has no top-N): surface the
+            # error so the empty panel isn't mistaken for "no tokens".
             if self._displayed_view == view_key:
                 panel.show_error(msg)
             log.warning("token discovery failed for %s: %s", address, msg)

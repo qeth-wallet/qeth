@@ -49,11 +49,19 @@ def _ensure_legible_icon_theme(environ) -> None:
     chosen theme."""
     if not environ.get("FLATPAK_ID"):
         return
-    from PySide6.QtGui import QIcon
+    from PySide6.QtGui import QIcon, QPalette
+    from PySide6.QtWidgets import QApplication
+    # Match the monochrome-Breeze backstop to the palette: dark glyphs on a
+    # light window, light glyphs on a dark one — otherwise we'd just swap
+    # invisible-on-white for invisible-on-black. Full-colour themes
+    # (Papirus / Adwaita) read fine either way, so they're preferred.
+    dark = QApplication.palette().color(
+        QPalette.ColorRole.Window).lightness() < 128
+    breeze = "breeze-dark" if dark else "breeze"
     # Probe each candidate by asking for an icon we actually use; the first
-    # theme that resolves it (so is installed and has our action icons)
-    # wins. breeze is always present in the runtime, so it's the backstop.
-    for name in ("Papirus", "Adwaita", "breeze"):
+    # that resolves it (so is installed and has our action icons) wins.
+    # breeze/breeze-dark is always in the runtime, so it's the backstop.
+    for name in ("Papirus", "Adwaita", breeze):
         QIcon.setThemeName(name)
         if not QIcon.fromTheme("edit-copy").isNull():
             return

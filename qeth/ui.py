@@ -540,6 +540,14 @@ class MainWindow(QMainWindow):
         decoded calldata and to tint the send-dialog recipient field."""
         return [a["address"] for a in self.store.accounts]
 
+    def account_book(self) -> list[tuple[str, str]]:
+        """(address, label) for every account the user owns — the Send
+        dialog's recipient autocomplete + own-wallet label. Scoped to the
+        user's own wallets only (no arbitrary saved contacts), so the
+        picker can never suggest an address you didn't add yourself."""
+        return [(a["address"], a.get("label") or "")
+                for a in self.store.accounts]
+
     def icon_cache(self):
         return self.tokens_plugin.icon_cache
 
@@ -650,6 +658,7 @@ class MainWindow(QMainWindow):
                 chain.chain_id, from_addr,
             ),
             known_addresses=self.account_addresses(),
+            address_book=self.account_book(),
             parent=self,
         )
         self._launch_sign_flow(

@@ -30,13 +30,15 @@ from eth_utils import to_checksum_address
 def _escape_html(text: str) -> str:
     return _html.escape(text, quote=False)
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QModelIndex, QObject, QSize, Qt, QThread, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (
     QAction, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence,
-    QPalette, QTextDocument, QTextOption,
+    QPalette, QStandardItem, QStandardItemModel, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
     QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
@@ -3700,11 +3702,18 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
+                 address_book=None,
                  identity_source: Optional[ContractIdentitySource] = None,
                  identity_cache: Optional[ContractIdentityCache] = None,
                  tx_cache: Optional[TransactionCache] = None,
                  parent=None):
         super().__init__(parent)
+        # Address book = (address, label) of the user's OWN wallets only —
+        # the recipient autocomplete + own-wallet label. Scoped to wallets
+        # the user added, so the picker can't suggest a foreign address.
+        self._address_book = {
+            a.lower(): (lbl or "") for a, lbl in (address_book or ())
+        }
         self._asset = asset
         self.chain = chain
         self._from_addr = to_checksum_address(from_addr)
@@ -3789,7 +3798,24 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.recipient_edit = QLineEdit()
         self.recipient_edit.setPlaceholderText("0x… address or name.eth")
         self.recipient_edit.setFont(mono)
-        header.addRow("&To:", self.recipient_edit)
+        # Address-book autocomplete over the user's own wallets only. The
+        # popup shows "label — 0x…"; matching is contains-style so you can
+        # search by label OR address. ▾ opens the full list.
+        self._book_completer = self._build_book_completer()
+        if self._book_completer is not None:
+            self.recipient_edit.setCompleter(self._book_completer)
+        to_row = QWidget()
+        to_layout = QHBoxLayout(to_row)
+        to_layout.setContentsMargins(0, 0, 0, 0)
+        to_layout.setSpacing(4)
+        to_layout.addWidget(self.recipient_edit, 1)
+        if self._book_completer is not None:
+            book_btn = QToolButton()
+            book_btn.setText("▾")
+            book_btn.setToolTip("Pick from your wallets")
+            book_btn.clicked.connect(self._show_book_popup)
+            to_layout.addWidget(book_btn)
+        header.addRow("&To:", to_row)
         # ENS: when the recipient is a name (name.eth), forward-resolve it
         # and show the 0x address here (highlighted) so the user verifies
         # the actual destination before signing. Hidden for a plain address.
@@ -4134,6 +4160,14 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         if addr == self._identity_last_addr:
             return
         self._identity_last_addr = addr
+        # One of the user's own wallets → show its label, no contract lookup.
+        if addr in self._address_book:
+            lbl = self._address_book[addr]
+            label.setText(f"Your wallet — {lbl}" if lbl else "Your wallet")
+            label.setStyleSheet(            # theme-safe green pill
+                "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
+                " border-radius:4px;")
+            return
         label.setText("…")
         label.setStyleSheet("")
         worker = ContractIdentityWorker(
@@ -4219,6 +4253,42 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             Decimal(raw) / (Decimal(10) ** self._asset["decimals"])
         )
         self.amount_edit.setText(format(bal, "f"))
+
+    def _build_book_completer(self) -> Optional[QCompleter]:
+        """An autocomplete over the user's own wallets — search by label or
+        address, contains-style. None when the book is empty."""
+        if not self._address_book:
+            return None
+        model = QStandardItemModel(self)
+        for low, label in sorted(self._address_book.items(),
+                                 key=lambda kv: (kv[1] or "￿").lower()):
+            addr = to_checksum_address(low)
+            disp = f"{label} — {addr}" if label else addr
+            item = QStandardItem(disp)
+            item.setData(addr, Qt.ItemDataRole.UserRole)
+            item.setEditable(False)
+            model.appendRow(item)
+        completer = QCompleter(model, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.activated[QModelIndex].connect(  # type: ignore[index]  # overloaded-signal subscript not in stubs
+            self._on_book_pick)
+        return completer
+
+    def _on_book_pick(self, index: QModelIndex) -> None:
+        addr = index.data(Qt.ItemDataRole.UserRole)
+        if addr:
+            # The completer is about to insert the display string
+            # ("label — 0x…"); replace it with the bare address next tick.
+            QTimer.singleShot(0, lambda a=addr: self.recipient_edit.setText(a))
+
+    def _show_book_popup(self) -> None:
+        if self._book_completer is None:
+            return
+        self.recipient_edit.setFocus()
+        self._book_completer.setCompletionPrefix("")
+        self._book_completer.complete()
 
     @staticmethod
     def _looks_like_ens(text: str) -> bool:

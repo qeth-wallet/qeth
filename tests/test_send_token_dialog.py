@@ -31,7 +31,8 @@ USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 
 
 def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
-                  worker_factory=None, known_addresses=None, token_info=None):
+                  worker_factory=None, known_addresses=None, token_info=None,
+                  address_book=None):
     """Construct a SendTokenDialog without firing a real
     GasSuggestionWorker (which would hit the network). We replace
     the worker class with a stub so the rest of the dialog wiring
@@ -60,6 +61,7 @@ def _make_dialog(qtbot, monkeypatch, *, balance_raw: int, is_native=False,
         abi_cache=MagicMock(),
         start_worker=lambda w: None,
         known_addresses=known_addresses,
+        address_book=address_book,
         token_info=token_info,
     )
     qtbot.addWidget(dlg)
@@ -575,3 +577,47 @@ def test_resolve_ens_address(monkeypatch):
     monkeypatch.setattr("web3.Web3", _W3)
     assert ens.resolve_ens_address("http://x", "vitalik.eth") == VITALIK
     assert ens.resolve_ens_address("http://x", "nope.eth") is None
+
+
+LEDGER1 = "0x7a16fF8270133F063aAb6C9977183D9e72835428"
+HOT2 = "0xB325c1AC788f02fF7997cF53C6FF40Dd762897B3"
+
+
+class TestAddressBook:
+    """Recipient autocomplete + own-wallet label, scoped to the user's
+    own wallets only (no arbitrary saved contacts)."""
+
+    def _book_dialog(self, qtbot, monkeypatch):
+        return _make_dialog(
+            qtbot, monkeypatch, balance_raw=10**18, is_native=True,
+            known_addresses=[LEDGER1, HOT2],
+            address_book=[(LEDGER1, "My Ledger 1"), (HOT2, "")],  # one unlabeled
+        )
+
+    def test_completer_lists_the_wallets(self, qtbot, monkeypatch):
+        dlg = self._book_dialog(qtbot, monkeypatch)
+        model = dlg._book_completer.model()
+        entries = [model.item(i).text() for i in range(model.rowCount())]
+        assert any("My Ledger 1" in e and LEDGER1 in e for e in entries)
+        assert HOT2 in entries                     # unlabeled → bare address
+
+    def test_no_book_means_no_completer(self, qtbot, monkeypatch):
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        assert dlg._book_completer is None
+
+    def test_picking_sets_the_address(self, qtbot, monkeypatch):
+        dlg = self._book_dialog(qtbot, monkeypatch)
+        model = dlg._book_completer.model()
+        dlg._on_book_pick(model.index(0, 0))       # My Ledger 1
+        qtbot.wait(20)                             # run the deferred set
+        assert dlg.recipient_edit.text().lower() == LEDGER1.lower()
+
+    def test_own_wallet_shows_its_label(self, qtbot, monkeypatch):
+        dlg = self._book_dialog(qtbot, monkeypatch)
+        dlg.recipient_edit.setText(LEDGER1)
+        dlg._update_recipient_identity()
+        assert dlg._identity_label.text() == "Your wallet — My Ledger 1"
+        # An unlabeled own wallet still flags as yours.
+        dlg.recipient_edit.setText(HOT2)
+        dlg._update_recipient_identity()
+        assert dlg._identity_label.text() == "Your wallet"

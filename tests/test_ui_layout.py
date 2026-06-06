@@ -9,30 +9,28 @@ survives, the refactor is fine.
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QTabBar, QToolButton,
+    QApplication, QPushButton, QTabBar,
 )
 
 from qeth.chains import DEFAULT_CHAINS
 from qeth.tokens import TokenBalance
 
 
-# --- Top-of-left: account actions row ---------------------------------------
+# --- Account actions row ----------------------------------------------------
 
-def test_account_actions_present_at_top_of_left_pane(mainwindow):
+def test_account_actions_rendered_as_buttons(mainwindow):
     """Three account actions (Add / Copy / Remove) are wired up and
-    rendered as buttons. They live on the MainWindow so the test
-    doesn't care which container holds them. The Add button uses a
-    QMenu dropdown (Ledger / Watch-only) instead of a single default
-    action, so we look at button text rather than defaultAction."""
+    rendered as buttons. They live on the MainWindow so the test doesn't
+    care which container holds them (they now sit on the slot's bottom
+    action row, styled like the Tokens 'Send' button)."""
     # Texts carry GNOME-HIG access-key mnemonics ("&A" → Alt+A).
     assert mainwindow.act_add.text() == "&Add Account"
     assert mainwindow.act_copy.text() == "&Copy Address"
     assert mainwindow.act_remove.text() == "&Remove Account"
-    # Strip mnemonics: buttons built via setDefaultAction (copy/remove)
-    # drop the "&" from text(), while the setText-based Add button keeps
-    # it — both still trigger on Alt+letter. Compare on the plain label.
+    # All three are QPushButtons (matching the Send button); their text
+    # keeps the "&" mnemonic, so compare on the plain label.
     button_texts = {
-        b.text().replace("&", "") for b in mainwindow.findChildren(QToolButton)
+        b.text().replace("&", "") for b in mainwindow.findChildren(QPushButton)
     }
     assert {"Add Account", "Copy Address", "Remove Account"} <= button_texts
 

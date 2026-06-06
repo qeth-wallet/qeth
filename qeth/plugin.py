@@ -132,9 +132,16 @@ class Slot(QWidget):
 
     active_plugin_changed = Signal(object)   # emits the new Plugin
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None,
+                 show_single_tab: bool = False):
         super().__init__(parent)
         self._plugins: list[Plugin] = []
+        # Normally the tab bar appears only with ≥2 plugins ("show tabs
+        # only when there's a choice"). A slot can opt to show its single
+        # tab anyway, so its top chrome matches a sibling multi-plugin
+        # slot's tab bar and their lists line up (the Wallets slot does
+        # this — see MainWindow._build_central).
+        self._show_single_tab = show_single_tab
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -178,8 +185,9 @@ class Slot(QWidget):
         self._plugins.append(plugin)
         self._stack.addWidget(plugin.widget())
         self._tab_bar.addTab(plugin.name)
-        # Tab bar appears only when ≥2 plugins are present.
-        self._tab_bar.setVisible(len(self._plugins) > 1)
+        # Tab bar appears with ≥2 plugins, or when this slot opts to show
+        # its single tab (so its chrome height matches a sibling slot).
+        self._tab_bar.setVisible(self._show_single_tab or len(self._plugins) > 1)
 
     def add_shared_widget(self, widget: QWidget) -> None:
         """Add a widget to the bottom row that persists across plugin

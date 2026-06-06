@@ -1865,11 +1865,27 @@ class TestWalletsPlugin:
         assert isinstance(wallets_plugin._tree, QTreeWidget)
         assert isinstance(wallets_plugin._details, DetailsPanel)
 
-    def test_action_widgets_returns_empty(self, wallets_plugin):
-        # Wallets' action row sits at the TOP of its own widget, not
-        # on the slot's bottom row — so action_widgets() is intentionally
-        # empty.
-        assert wallets_plugin.action_widgets() == []
+    def test_action_widgets_are_account_buttons(self, wallets_plugin):
+        # Add / Copy / Remove mount on the slot's bottom row (symmetric
+        # with the Tokens panel), so action_widgets() exposes them.
+        wallets_plugin.widget()  # ensure the buttons are built
+        actions = wallets_plugin.action_widgets()
+        assert actions == wallets_plugin._account_buttons
+        assert len(actions) == 3  # Add, Copy, Remove
+
+    def test_account_buttons_mirror_action_enabled(self, wallets_plugin):
+        # Copy/Remove are QPushButtons (styled like the Tokens Send
+        # button), no longer QToolButton.setDefaultAction — so their
+        # enabled state is wired to the action via enabledChanged. Guard
+        # that wiring: the buttons must track the actions both ways.
+        wallets_plugin.widget()
+        _add, copy_btn, remove_btn = wallets_plugin.action_widgets()
+        assert not copy_btn.isEnabled() and not remove_btn.isEnabled()
+        wallets_plugin.act_copy.setEnabled(True)
+        wallets_plugin.act_remove.setEnabled(True)
+        assert copy_btn.isEnabled() and remove_btn.isEnabled()
+        wallets_plugin.act_copy.setEnabled(False)
+        assert not copy_btn.isEnabled()
 
     def test_actions_are_wired(self, wallets_plugin):
         assert wallets_plugin.act_add is not None

@@ -297,8 +297,11 @@ class MainWindow(QMainWindow):
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left slot: Wallets only. Single-plugin → no tab bar visible.
-        self.left_slot = Slot()
+        # Left slot: Wallets only. Show its single "Accounts" tab anyway,
+        # so its top chrome matches the right slot's Tokens/Transactions
+        # tab bar and the two lists start at the same y (the toolbar that
+        # used to sit here was a different height — see WalletsPlugin).
+        self.left_slot = Slot(show_single_tab=True)
         self.left_slot.add_plugin(self.wallets_plugin, self)
         outer.addWidget(self.left_slot)
 

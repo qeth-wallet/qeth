@@ -194,7 +194,7 @@ class _ReorderTree(QTreeWidget):
 
 
 class WalletsPlugin(Plugin):
-    name = "Wallets"
+    name = "Accounts"
 
     # Emitted when the user's tree selection narrows to a single
     # account (or clears). MainWindow forwards this to the right
@@ -213,7 +213,7 @@ class WalletsPlugin(Plugin):
         self._tree: Optional[QTreeWidget] = None
         self._details = None
         self._splitter: Optional[QSplitter] = None
-        self._account_buttons: list[QToolButton] = []
+        self._account_buttons: list[QPushButton] = []
         self.act_add: Optional[QAction] = None
         self.act_copy: Optional[QAction] = None
         self.act_remove: Optional[QAction] = None
@@ -232,11 +232,12 @@ class WalletsPlugin(Plugin):
         return self._container
 
     def action_widgets(self):
-        # Wallets' action row lives at the top of its own widget (it's
-        # part of the Wallets view, not a generic plugin-action set).
-        # The shared bottom row of a single-plugin left slot stays
-        # empty as a result — by design.
-        return []
+        # Add / Copy / Remove mount on the slot's bottom row (like the
+        # Tokens panel's +/-/star/eye), so this panel is structurally
+        # symmetric with the tabbed slot — [tab][list][actions] — and the
+        # account list lines up with the token list. _build() populates
+        # _account_buttons before the slot first asks for them.
+        return list(self._account_buttons)
 
     # --- public surface (read by MainWindow + Host implementations) --------
 
@@ -312,8 +313,11 @@ class WalletsPlugin(Plugin):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # Top: account action row.
-        v.addLayout(self._build_account_actions())
+        # Build the account-action buttons (Add / Copy / Remove). They are
+        # NOT added here: the slot mounts them on its bottom row via
+        # action_widgets(), so this panel mirrors the tabbed Tokens slot
+        # ([tab][list][actions]) and the two lists' tops align.
+        self._build_account_actions()
 
         # Middle: vertical splitter (tree on top, details on bottom).
         self._splitter = QSplitter(Qt.Orientation.Vertical)
@@ -324,19 +328,11 @@ class WalletsPlugin(Plugin):
         # Group roots carry themed icons; keep them small + aligned with
         # the toolbar/menu icons rather than the style's larger default.
         self._tree.setIconSize(QSize(16, 16))
-        # Align the "Accounts" column header with the row content. The
-        # root-decoration column indents the group icons one indentation
-        # step in from the header's natural left padding, so the title
-        # floats left of everything below it. Pad the header by the same
-        # step to sit it over the icon column. Derived from indentation()
-        # — logical px — so it tracks the active style and the display DPI
-        # rather than baking in a fixed guess.
-        _indent = self._tree.indentation()
-        if _indent > 0:
-            header = self._tree.header()
-            if header is not None:
-                header.setStyleSheet(
-                    f"QHeaderView::section {{ padding-left: {_indent}px; }}")
+        # The slot now shows an "Accounts" tab (Slot show_single_tab) that
+        # labels this list, so the tree's own one-column header would just
+        # repeat it — hide it. (This also retires the old header-vs-rows
+        # alignment tweak: a hidden header can't be misaligned.)
+        self._tree.setHeaderHidden(True)
         self._tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         # Never show a horizontal scrollbar in the wallet tree —
         # addresses are 42 chars + label and the left pane gets
@@ -399,10 +395,11 @@ class WalletsPlugin(Plugin):
         self._splitter.setSizes([290, 365])
         v.addWidget(self._splitter, 1)
 
-    def _build_account_actions(self) -> QHBoxLayout:
-        """Account-level actions (Add / Copy / Remove) rendered as a
-        compact icon+text button row at the top of the Wallets widget.
-        Lived in a QMainWindow toolbar before the plugin refactor."""
+    def _build_account_actions(self) -> None:
+        """Build the account-level action buttons (Add / Copy / Remove)
+        into ``self._account_buttons``. The slot mounts them on its bottom
+        row via ``action_widgets()`` (they lived in a top toolbar, then a
+        QMainWindow toolbar, before the plugin refactor)."""
         style_proxy = QApplication.style()
         self.act_add = QAction(
             QIcon.fromTheme("document-new",
@@ -491,19 +488,14 @@ class WalletsPlugin(Plugin):
         for act in (self.act_copy, self.act_remove):
             act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
-        row = QHBoxLayout()
-        row.setContentsMargins(4, 2, 4, 4)
-
-        # Add button: QMenu of "Ledger account…" / "Watch-only
-        # address…". InstantPopup means a click anywhere on the
-        # button opens the menu (no separate arrow split).
-        add_btn = QToolButton()
+        # Add / Copy / Remove are QPushButtons styled like the Tokens
+        # panel's "Send" button (raised, icon + label) so the two slots'
+        # bottom action rows match. Add carries the source-picker menu
+        # (Ledger / hot wallet / watch-only / import); a QPushButton with
+        # setMenu() pops it on click, with a dropdown indicator.
+        add_btn = QPushButton(self.act_add.text())
         add_btn.setIcon(self.act_add.icon())
-        add_btn.setText(self.act_add.text())
         add_btn.setToolTip(self.act_add.toolTip())
-        add_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        add_btn.setAutoRaise(True)
-        add_btn.setIconSize(QSize(16, 16))
         self._add_menu = QMenu(add_btn)
         self._add_menu.addAction(self.act_add_ledger)
         self._add_menu.addAction(self.act_add_hot)
@@ -512,21 +504,20 @@ class WalletsPlugin(Plugin):
         self._add_menu.addAction(self.act_import_brownie)
         self._add_menu.addAction(self.act_import_frame)
         add_btn.setMenu(self._add_menu)
-        add_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        row.addWidget(add_btn)
         self._account_buttons.append(add_btn)
 
+        # Copy / Remove mirror their QActions (which also carry the tree's
+        # Ctrl+C / Del shortcuts): same label/icon/tooltip, and the
+        # button's enabled state tracks the action's via enabledChanged.
         for act in (self.act_copy, self.act_remove):
-            btn = QToolButton()
-            btn.setDefaultAction(act)
-            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            btn.setAutoRaise(True)
-            btn.setIconSize(QSize(16, 16))
-            row.addWidget(btn)
+            btn = QPushButton(act.text())
+            btn.setIcon(act.icon())
+            btn.setToolTip(act.toolTip())
+            btn.setEnabled(act.isEnabled())
+            act.enabledChanged.connect(btn.setEnabled)
+            btn.clicked.connect(act.trigger)
             # Keep a Python ref so the C++ widgets survive function exit.
             self._account_buttons.append(btn)
-        row.addStretch(1)
-        return row
 
     def _show_add_account_menu(self) -> None:
         """Triggered by act_add (e.g. from the tree's right-click

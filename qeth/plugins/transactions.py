@@ -31,7 +31,8 @@ def _escape_html(text: str) -> str:
     return _html.escape(text, quote=False)
 
 from PySide6.QtCore import (
-    QModelIndex, QObject, QSize, Qt, QThread, QTimer, QUrl, Signal,
+    QModelIndex, QObject, QPersistentModelIndex, QSize, Qt, QThread, QTimer,
+    QUrl, Signal,
 )
 from PySide6.QtGui import (
     QAction, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence,
@@ -3683,6 +3684,21 @@ def _erc20_transfer_calldata(recipient: str, amount_raw: int) -> str:
     return "0x" + (selector + encoded).hex()
 
 
+class _AddressBookCompleter(QCompleter):
+    """Recipient autocomplete over the user's wallets. The popup shows (and
+    matches) "label — 0x…" so you can search by label OR address, but when a
+    row is chosen we insert ONLY the bare address (held in UserRole) — the
+    recipient field must end up with a valid address, not the display text.
+    pathFromIndex() is the hook QLineEdit calls to decide the inserted text,
+    so this is race-free (unlike overriding the text after activation)."""
+
+    def pathFromIndex(
+        self, index: "QModelIndex | QPersistentModelIndex",
+    ) -> str:
+        addr = index.data(Qt.ItemDataRole.UserRole)
+        return addr if addr else super().pathFromIndex(index)
+
+
 class SendTokenDialog(_EventPreviewMixin, QDialog):
     """User-driven counterpart to ``SignTransactionDialog``. Same
     overall shape (gas controls, expected fee, signing flow) but
@@ -4268,20 +4284,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             item.setData(addr, Qt.ItemDataRole.UserRole)
             item.setEditable(False)
             model.appendRow(item)
-        completer = QCompleter(model, self)
+        completer = _AddressBookCompleter(model, self)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        completer.activated[QModelIndex].connect(  # type: ignore[index]  # overloaded-signal subscript not in stubs
-            self._on_book_pick)
         return completer
-
-    def _on_book_pick(self, index: QModelIndex) -> None:
-        addr = index.data(Qt.ItemDataRole.UserRole)
-        if addr:
-            # The completer is about to insert the display string
-            # ("label — 0x…"); replace it with the bare address next tick.
-            QTimer.singleShot(0, lambda a=addr: self.recipient_edit.setText(a))
 
     def _show_book_popup(self) -> None:
         if self._book_completer is None:

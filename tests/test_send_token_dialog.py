@@ -605,12 +605,15 @@ class TestAddressBook:
         dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
         assert dlg._book_completer is None
 
-    def test_picking_sets_the_address(self, qtbot, monkeypatch):
+    def test_picking_inserts_bare_address_not_label(self, qtbot, monkeypatch):
         dlg = self._book_dialog(qtbot, monkeypatch)
-        model = dlg._book_completer.model()
-        dlg._on_book_pick(model.index(0, 0))       # My Ledger 1
-        qtbot.wait(20)                             # run the deferred set
-        assert dlg.recipient_edit.text().lower() == LEDGER1.lower()
+        c = dlg._book_completer
+        model = c.model()
+        # pathFromIndex is what QLineEdit inserts when a row is chosen — it
+        # must be the bare address, never the "label — 0x…" display string.
+        inserted = c.pathFromIndex(model.index(0, 0))   # My Ledger 1 row
+        assert inserted == LEDGER1
+        assert "Ledger" not in inserted
 
     def test_own_wallet_shows_its_label(self, qtbot, monkeypatch):
         dlg = self._book_dialog(qtbot, monkeypatch)

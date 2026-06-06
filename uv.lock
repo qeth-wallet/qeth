@@ -2183,7 +2183,6 @@ wheels = [
 
 [[package]]
 name = "qeth"
-version = "0.9.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

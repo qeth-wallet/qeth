@@ -1,4 +1,4 @@
-__version__ = "0.9.0"
+__version__ = "0.9.5"
 
 # Single source of truth for the HTTP User-Agent we send on every
 # outbound request. DRPC's Cloudflare rejects the default

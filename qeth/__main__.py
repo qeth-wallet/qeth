@@ -28,6 +28,37 @@ def _harden_x11_backing_store(environ, platform) -> None:
         environ.setdefault("QT_X11_NO_MITSHM", "1")
 
 
+def _ensure_legible_icon_theme(environ) -> None:
+    """Inside a Flatpak, pick an icon theme that actually renders.
+
+    The PySide6 Flatpak runs on ``org.kde.Platform``, whose only icon
+    themes are Breeze (monochrome) + a sparse hicolor. Breeze's glyphs are
+    meant to be *recoloured* to the palette by KDE Frameworks' icon loader,
+    which a plain PySide6 app doesn't have — so you get the ``breeze-dark``
+    variant's light glyphs on a light background: near-invisible action
+    icons (copy, +/-, …).
+
+    Force a legible theme: prefer a full-colour one if the user installed
+    its ``org.freedesktop.Platform.Icontheme.*`` extension (Papirus /
+    Adwaita), else pin the light ``breeze`` variant so glyphs are
+    dark-on-light. A no-op outside the sandbox (``FLATPAK_ID`` unset), so
+    native installs keep inheriting the user's real desktop icon theme.
+
+    Must run after QApplication exists (the icon engine needs it) but
+    before any widgets are built, so their icons resolve against the
+    chosen theme."""
+    if not environ.get("FLATPAK_ID"):
+        return
+    from PySide6.QtGui import QIcon
+    # Probe each candidate by asking for an icon we actually use; the first
+    # theme that resolves it (so is installed and has our action icons)
+    # wins. breeze is always present in the runtime, so it's the backstop.
+    for name in ("Papirus", "Adwaita", "breeze"):
+        QIcon.setThemeName(name)
+        if not QIcon.fromTheme("edit-copy").isNull():
+            return
+
+
 def main() -> int:
     _harden_x11_backing_store(os.environ, sys.platform)
 
@@ -48,6 +79,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("qeth")
     app.setOrganizationName("qeth")
+    # Sandboxed runs only: make sure theme icons are legible before any
+    # widget is built. No-op natively.
+    _ensure_legible_icon_theme(os.environ)
     # Pick the light- or dark-bg variant of the window icon based
     # on the current palette. Theme swaps mid-session don't update
     # it — restart picks up the new one.

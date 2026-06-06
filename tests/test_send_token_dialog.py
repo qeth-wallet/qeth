@@ -562,6 +562,16 @@ class TestEnsRecipient:
         assert not dlg._ens_form.isRowVisible(dlg._ens_label)
         assert dlg._parsed_recipient() == "0x" + "22" * 20
 
+    def test_retyping_same_name_keeps_resolution(self, qtbot, monkeypatch):
+        # Re-firing _update_ens for the already-resolved name is a no-op
+        # (dedup), not a reset back to "resolving" — the address survives.
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18, is_native=True)
+        dlg.recipient_edit.setText("vitalik.eth")
+        dlg._on_ens_resolved("vitalik.eth", VITALIK)
+        dlg._update_ens()                                # same text again
+        assert dlg._ens_resolved == VITALIK
+        assert dlg._parsed_recipient() == VITALIK
+
 
 def test_resolve_ens_address(monkeypatch):
     from qeth import ens
@@ -577,6 +587,31 @@ def test_resolve_ens_address(monkeypatch):
     monkeypatch.setattr("web3.Web3", _W3)
     assert ens.resolve_ens_address("http://x", "vitalik.eth") == VITALIK
     assert ens.resolve_ens_address("http://x", "nope.eth") is None
+
+
+def test_resolve_ens_address_degrades_on_rpc_error(monkeypatch):
+    """The resolver promises never to raise — an RPC failure → None."""
+    from qeth import ens
+
+    class _W3:
+        def __init__(self, _provider):
+            self.ens = self
+
+        def address(self, name):
+            raise RuntimeError("rpc down")
+
+    monkeypatch.setattr("web3.Web3", _W3)
+    assert ens.resolve_ens_address("http://x", "vitalik.eth") is None
+
+
+def test_ens_resolve_worker_emits_name_and_address(qtbot, monkeypatch):
+    from qeth import ens
+    monkeypatch.setattr(ens, "resolve_ens_address", lambda rpc, name: VITALIK)
+    worker = ens.EnsResolveWorker("http://x", "vitalik.eth")
+    with qtbot.waitSignal(worker.resolved, timeout=2000) as blocker:
+        worker.start()
+    worker.wait()
+    assert blocker.args == ["vitalik.eth", VITALIK]
 
 
 LEDGER1 = "0x7a16fF8270133F063aAb6C9977183D9e72835428"
@@ -624,3 +659,9 @@ class TestAddressBook:
         dlg.recipient_edit.setText(HOT2)
         dlg._update_recipient_identity()
         assert dlg._identity_label.text() == "Your wallet"
+
+    def test_popup_button_lists_all_wallets(self, qtbot, monkeypatch):
+        dlg = self._book_dialog(qtbot, monkeypatch)
+        dlg._show_book_popup()                     # the ▾ button handler
+        assert dlg._book_completer.completionPrefix() == ""
+        assert dlg._book_completer.completionCount() == 2   # both wallets

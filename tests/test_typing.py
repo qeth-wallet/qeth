@@ -1,4 +1,4 @@
-"""Type-check gate: the Qt-free core must stay mypy-clean.
+"""Type-check gate: the whole package must stay mypy-clean.
 
 qeth's type hints are otherwise unenforced (we ship no runtime type
 checking), so this test makes them real — it runs mypy over the
@@ -7,9 +7,9 @@ the suite on any new type error. That gives the annotations a
 generate→typecheck→fix verifier loop and catches drift where an
 annotation silently stops matching the code.
 
-Scope is the pure-Python core only; the PySide6 UI layer is excluded in
-the mypy config because incomplete Qt stubs produce unfixable false
-positives (see the comment in pyproject.toml). To run just this gate:
+Scope is the WHOLE package — the Qt-free core and the PySide6 UI layer
+alike (see ``files`` in pyproject.toml's ``[tool.mypy]``), with no
+per-module error-code exemptions. To run just this gate:
 
     uv run pytest tests/test_typing.py
     uv run mypy            # the same check, directly

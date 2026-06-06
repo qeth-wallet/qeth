@@ -3823,12 +3823,14 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         to_row = QWidget()
         to_layout = QHBoxLayout(to_row)
         to_layout.setContentsMargins(0, 0, 0, 0)
-        to_layout.setSpacing(4)
+        to_layout.setSpacing(0)                       # button sits flush
         to_layout.addWidget(self.recipient_edit, 1)
         if self._book_completer is not None:
             book_btn = QToolButton()
             book_btn.setText("▾")
             book_btn.setToolTip("Pick from your wallets")
+            # Match the input field's height so it doesn't stick up above it.
+            book_btn.setFixedHeight(self.recipient_edit.sizeHint().height())
             book_btn.clicked.connect(self._show_book_popup)
             to_layout.addWidget(book_btn)
         header.addRow("&To:", to_row)

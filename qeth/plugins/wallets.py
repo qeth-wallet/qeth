@@ -324,6 +324,19 @@ class WalletsPlugin(Plugin):
         # Group roots carry themed icons; keep them small + aligned with
         # the toolbar/menu icons rather than the style's larger default.
         self._tree.setIconSize(QSize(16, 16))
+        # Align the "Accounts" column header with the row content. The
+        # root-decoration column indents the group icons one indentation
+        # step in from the header's natural left padding, so the title
+        # floats left of everything below it. Pad the header by the same
+        # step to sit it over the icon column. Derived from indentation()
+        # — logical px — so it tracks the active style and the display DPI
+        # rather than baking in a fixed guess.
+        _indent = self._tree.indentation()
+        if _indent > 0:
+            header = self._tree.header()
+            if header is not None:
+                header.setStyleSheet(
+                    f"QHeaderView::section {{ padding-left: {_indent}px; }}")
         self._tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         # Never show a horizontal scrollbar in the wallet tree —
         # addresses are 42 chars + label and the left pane gets
@@ -376,7 +389,9 @@ class WalletsPlugin(Plugin):
         details_wrap = QFrame()
         details_wrap.setFrameShape(QFrame.Shape.StyledPanel)
         dlay = QVBoxLayout(details_wrap)
-        dlay.setContentsMargins(12, 12, 12, 0)
+        # Symmetric bottom margin: without it the last button (Connect to
+        # Browser) sits flush against the framed panel's bottom border.
+        dlay.setContentsMargins(12, 12, 12, 12)
         dlay.addWidget(self._details)
         self._splitter.addWidget(details_wrap)
         self._splitter.setStretchFactor(0, 1)
@@ -1108,8 +1123,9 @@ class DetailsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         v = QVBoxLayout(self)
-        # No bottom margin so the Set-as-default button can sit flush with
-        # the bottom of the splitter (matches the right panel's bottom edge).
+        # Inner bottom margin stays 0: the framed wrapper (details_wrap)
+        # owns the gap between the buttons and its bottom border, so the
+        # two margins don't stack into an oversized void below the buttons.
         v.setContentsMargins(9, 9, 9, 0)
         # Header placeholder shown when no account is selected.
         # We hide it (and show the form) once show_account runs.

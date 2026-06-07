@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, cast
 
@@ -146,6 +147,24 @@ class _Verbs:
             abi = fetched
         return selector_names(abi) if isinstance(abi, list) else {}
 
+    def prewarm(self, contracts: Iterable[Optional[str]]) -> None:
+        """Resolve the distinct contracts' ABIs concurrently so the per-tx
+        verb lookups don't serialize one slow Blockscout round-trip per
+        contract — the difference between ~1 s and tens of seconds before
+        any activity shows on a chain's first visit. AbiCache is per-
+        contract-file disk I/O with no shared state, so parallel cold
+        builds for distinct contracts are safe; maps are stored back on
+        this thread after the pool drains."""
+        todo = list(dict.fromkeys(
+            c.lower() for c in contracts
+            if c and c.lower() not in self._maps))
+        if len(todo) < 2:
+            return
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            built = list(ex.map(self._build, todo))
+        for contract, m in zip(todo, built):
+            self._maps[contract] = m
+
 
 def fetch_activities(
     chain: Chain,
@@ -190,6 +209,11 @@ def fetch_activities(
 
     verbs = _Verbs(chain.chain_id, abi_source or BlockscoutAbiSource(),
                    abi_cache if abi_cache is not None else AbiCache())
+    # Warm every distinct callee's ABI in parallel up front, so the verb
+    # lookups in the loop below are cache hits instead of one slow
+    # Blockscout round-trip each (the "no activities for ages on a chain's
+    # first visit" lag).
+    verbs.prewarm(tx.to_addr for tx in txs)
     out: dict[str, Activity] = {}
 
     for tx in txs:

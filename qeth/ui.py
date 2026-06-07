@@ -1329,6 +1329,16 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             size.setHeight(floor)
         return size
 
+    def _row_fill_rect(self, option, index):
+        """The rect to fill for a selected row, extended left over the
+        tree's indent column (column 0). The view leaves that strip to the
+        row background and the delegate's own rect starts after it, so a
+        fill confined to option.rect leaves a gap there. A no-op in the
+        tables, where column 0 already starts at the left edge."""
+        if index.column() == 0:
+            return option.rect.adjusted(-option.rect.left(), 0, 0, 0)
+        return option.rect
+
     def paint(self, painter, option, index):
         view = self.parent()
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -1345,9 +1355,13 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         )
 
         if is_selected and is_focused:
-            # Fill the cell with the highlight colour first.
+            # Fill the row with the highlight colour first — extended left
+            # over the tree's indent column (a no-op in the tables) so the
+            # fill reaches the edge the same way the muted unfocused fill
+            # does; under some styles (Kvantum) the view leaves that strip
+            # unpainted, which otherwise shows as a white gap only here.
             highlight = option.palette.color(QPalette.ColorRole.Highlight)
-            painter.fillRect(option.rect, highlight)
+            painter.fillRect(self._row_fill_rect(option, index), highlight)
             # Now paint the cell contents (icon + text) on top,
             # without letting the style re-fill the background.
             # Stripping ``State_Selected`` keeps the default style
@@ -1392,14 +1406,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
                 (hl.green() * 11 + bg.green() * 9) // 20,
                 (hl.blue() * 11 + bg.blue() * 9) // 20,
             )
-            # Extend the fill left over the tree's indent/branch column —
-            # the view fills it with the bright selection and the delegate's
-            # rect doesn't reach it, so without this a bright sliver sits
-            # beside the muted row. A no-op in the tables (column 0 starts
-            # at x=0 there).
-            fill = (option.rect.adjusted(-option.rect.left(), 0, 0, 0)
-                    if index.column() == 0 else option.rect)
-            painter.fillRect(fill, muted)
+            painter.fillRect(self._row_fill_rect(option, index), muted)
             text_color = option.palette.color(
                 QPalette.ColorRole.HighlightedText
                 if muted.lightness() < 140

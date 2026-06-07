@@ -717,6 +717,33 @@ class TxActivityWorker(QThread):
             log.debug("activity build failed: %s", e)
 
 
+class ReceiptScanWorker(QThread):
+    """Background RPC pass for the rare confirmed txs the tokentx index
+    returned no coins for. Pulls each receipt and hands its event logs
+    back, so the activity can be filled in from the Transfer events the
+    indexer missed. Best-effort, sequential, capped — these are rare."""
+
+    found = Signal(int, str, object)   # chain_id, tx_hash, receipt logs
+
+    def __init__(self, chain, hashes: list[str], parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._chain = chain
+        self._hashes = hashes
+
+    def run(self) -> None:
+        client = EthClient(self._chain)
+        cid = self._chain.chain_id
+        for h in self._hashes:
+            try:
+                receipt = client.rpc("eth_getTransactionReceipt", [h])
+            except Exception as e:
+                log.debug("receipt scan failed for %s: %s", h, e)
+                continue
+            logs = receipt.get("logs") if hasattr(receipt, "get") else None
+            if logs:
+                self.found.emit(cid, h, logs)
+
+
 class TransactionsPlugin(Plugin):
     name = "Transactions"
 
@@ -830,6 +857,9 @@ class TransactionsPlugin(Plugin):
         # instantly instead of refetching (and receipt coins survive a
         # restart).
         self._activity_cache = ActivityCache()
+        # Hashes we've already RPC-receipt-scanned for the rare tokentx
+        # misses, so we don't re-scan within a session.
+        self._receipt_checked: set[str] = set()
         # The widget is built lazily so the plugin can be instantiated
         # outside a Qt event loop (useful in pure-Python imports).
         self._panel: Optional[TransactionListPanel] = None
@@ -1183,6 +1213,30 @@ class TransactionsPlugin(Plugin):
         self._activity_cache.update(key[0], key[1], merged)
         if self._panel is not None and self._rendered_for == key:
             self._panel.set_activities(merged)
+        self._scan_coinless(key, merged)
+
+    def _scan_coinless(self, key: tuple[int, str],
+                       acts: dict[str, Activity]) -> None:
+        """Queue an RPC receipt scan for any just-resolved txs that came
+        back with no coins — the tokentx index occasionally drops a tx's
+        transfers, and the receipt still has them. Rare, so best-effort,
+        deduped, and capped; results fold in via note_transfer_legs."""
+        if self.host is None:
+            return
+        hashes = [h for h, a in acts.items()
+                  if not a.out and not a.inn and not a.muted
+                  and h not in self._receipt_checked][:30]
+        if not hashes:
+            return
+        chain = self.host.current_chain()
+        if chain.chain_id != key[0]:
+            return
+        self._receipt_checked.update(hashes)
+        worker = ReceiptScanWorker(chain, hashes)
+        worker.found.connect(
+            lambda cid, h, logs, viewer=key[1]:
+            self.note_transfer_legs(cid, h, logs, viewer))
+        self.host.start_worker(worker)
 
     def _with_known_legs(self, chain_id: int, tx_hash: str,
                          activity: Activity) -> Activity:
@@ -1224,13 +1278,22 @@ class TransactionsPlugin(Plugin):
             return
         self._known_legs[tx_hash] = (out_c, in_c)
         key = (chain_id, viewer.lower())
-        if self._panel is None or self._rendered_for != key:
+        panel = self._panel
+        on_view = panel is not None and self._rendered_for == key
+        # Base activity from the live panel if we're on this view, else the
+        # disk cache — so a background receipt scan persists its coins even
+        # if the user has navigated away (a pending tx with no resolved
+        # activity yet stays in _known_legs and folds in once it resolves).
+        base = (panel.activity_for(tx_hash)
+                if on_view and panel is not None else None)
+        if base is None:
+            base = self._activity_cache.load(chain_id, key[1]).get(tx_hash)
+        if base is None:
             return
-        base = self._panel.activity_for(tx_hash)
-        if base is not None:
-            merged = {tx_hash: self._with_known_legs(chain_id, tx_hash, base)}
-            self._activity_cache.update(chain_id, key[1], merged)
-            self._panel.set_activities(merged)
+        merged = {tx_hash: self._with_known_legs(chain_id, tx_hash, base)}
+        self._activity_cache.update(chain_id, key[1], merged)
+        if on_view and panel is not None:
+            panel.set_activities(merged)
 
     def _refresh(self, address: str, force_fetch: bool = False) -> None:
         """Render cached transactions immediately (if any) and kick a
@@ -1289,9 +1352,12 @@ class TransactionsPlugin(Plugin):
             self._displayed_count[key] = cap
             # Seed last session's resolved activities so the rows paint
             # their verb + coins immediately; only the still-unknown ones
-            # get a worker.
-            self._panel.prime_activities(
-                self._activity_cache.load(chain.chain_id, address))
+            # get a worker. Re-scan any cached-coinless rows by receipt too,
+            # so a tokentx miss persisted last session gets a second chance
+            # without forcing a full re-resolve.
+            primed = self._activity_cache.load(chain.chain_id, address)
+            self._panel.prime_activities(primed)
+            self._scan_coinless(key, primed)
             self._panel.show_transactions(cached[:cap])
             self._rendered_for = key
         elif view_changed and (force_fetch or self._is_active()):

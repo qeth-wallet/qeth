@@ -1259,6 +1259,23 @@ def _apply_focus_aware_selection(widget) -> None:
     widget._focus_repainter = repainter
 
 
+_TABLE_ROW_H = 0
+
+
+def _table_row_height() -> int:
+    """The current style's natural QTableView row height. A QTreeView's
+    rows come out shorter than a QTableView's under most styles (Fusion:
+    18 vs 30), so the wallet tree on the left looked cramped next to the
+    token/tx tables on the right. The delegate raises the tree's rows to
+    this. Cached — the style is fixed at startup."""
+    global _TABLE_ROW_H
+    if not _TABLE_ROW_H:
+        ref = QTableWidget(0, 0)
+        _TABLE_ROW_H = ref.verticalHeader().defaultSectionSize()
+        ref.deleteLater()
+    return _TABLE_ROW_H
+
+
 class _FocusAwareSelectionDelegate(QStyledItemDelegate):
     """Hand-paints selected rows with focus awareness:
 
@@ -1301,6 +1318,16 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
+
+    def sizeHint(self, option, index):
+        # Raise rows to the table row height so the wallet tree lines up
+        # with the token/tx tables beside it (a QTreeView's natural rows
+        # are shorter). No effect on the tables — they already sit there.
+        size = super().sizeHint(option, index)
+        floor = _table_row_height()
+        if size.height() < floor:
+            size.setHeight(floor)
+        return size
 
     def paint(self, painter, option, index):
         view = self.parent()

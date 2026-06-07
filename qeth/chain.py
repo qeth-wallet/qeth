@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     import requests
     from eth_abi import decode as abi_decode
     from eth_abi import encode as abi_encode
-    from eth_typing import ChecksumAddress
     from web3 import Web3
     from web3.exceptions import Web3RPCError
     from web3.middleware import ExtraDataToPOAMiddleware
@@ -180,7 +179,8 @@ class EthClient:
     def get_balance(self, address: str, block: str = "latest") -> int:
         """Native balance in wei."""
         return int(self._w3.eth.get_balance(
-            cast("ChecksumAddress", address), cast("BlockIdentifier", block)))
+            self._w3.to_checksum_address(address),
+            cast("BlockIdentifier", block)))
 
     def get_block_number(self) -> int:
         return int(self._w3.eth.block_number)
@@ -190,7 +190,8 @@ class EthClient:
 
     def get_transaction_count(self, address: str, block: str = "pending") -> int:
         return int(self._w3.eth.get_transaction_count(
-            cast("ChecksumAddress", address), cast("BlockIdentifier", block)))
+            self._w3.to_checksum_address(address),
+            cast("BlockIdentifier", block)))
 
     def gas_price(self) -> int:
         return int(self._w3.eth.gas_price)

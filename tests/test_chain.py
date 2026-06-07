@@ -139,6 +139,29 @@ class TestEthMethodWrappers:
         eth_client.get_balance(addr, block="0x1000")
         assert captured[0][0] == "eth_getBalance"
 
+    def test_get_balance_checksums_lowercase_address(self, eth_client,
+                                                     monkeypatch):
+        """A lowercase address (how watch-only/paste accounts are stored)
+        must be checksummed before web3 — web3.eth.get_balance EIP-55
+        validates and *raises* on mixed/lower case, which silently zeroed
+        the native balance in the flatpak. It must reach the node already
+        checksummed, not raise."""
+        checksummed = _addr("a")
+        captured = _patch_provider(monkeypatch, eth_client, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x10",
+        })
+        assert eth_client.get_balance(checksummed.lower()) == 0x10
+        assert captured[0][1][0] == checksummed   # not the lowercase form
+
+    def test_get_transaction_count_checksums_lowercase_address(
+            self, eth_client, monkeypatch):
+        checksummed = _addr("b")
+        captured = _patch_provider(monkeypatch, eth_client, {
+            "jsonrpc": "2.0", "id": 1, "result": "0x5",
+        })
+        assert eth_client.get_transaction_count(checksummed.lower()) == 5
+        assert captured[0][1][0] == checksummed
+
     def test_get_block_number(self, eth_client, monkeypatch):
         _patch_provider(monkeypatch, eth_client, {
             "jsonrpc": "2.0", "id": 1, "result": "0x1234567",

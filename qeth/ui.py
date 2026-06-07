@@ -1378,38 +1378,18 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             return
 
         if is_selected and not is_focused:
+            # Inactive selection: let the *style* paint it — keep
+            # State_Selected but clear State_Active so the theme renders its
+            # own muted inactive-selection fill (the way it does in every
+            # other unfocused list), instead of a hand-forced outline that
+            # followed no theme and looked out of place (notably on Fusion).
+            # The style also drives the text colour, so no palette swap.
             opt = QStyleOptionViewItem(option)
             opt.rect = text_rect
-            opt.state &= ~QStyle.StateFlag.State_Selected
             opt.state &= ~QStyle.StateFlag.State_HasFocus
+            opt.state &= ~QStyle.StateFlag.State_Active
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
-            painter.save()
-            try:
-                color = option.palette.color(QPalette.ColorRole.Highlight)
-                pen = QPen(color)
-                pen.setWidth(1)
-                painter.setPen(pen)
-                rect = option.rect
-                painter.drawLine(rect.topLeft(), rect.topRight())
-                painter.drawLine(
-                    rect.bottomLeft() - _PT_UP,
-                    rect.bottomRight() - _PT_UP,
-                )
-                model = index.model()
-                if index.column() == 0:
-                    painter.drawLine(
-                        rect.topLeft(), rect.bottomLeft() - _PT_UP,
-                    )
-                if (model is not None
-                        and index.column()
-                        == model.columnCount(index.parent()) - 1):
-                    painter.drawLine(
-                        rect.topRight() - _PT_LEFT,
-                        rect.bottomRight() - _PT_UP - _PT_LEFT,
-                    )
-            finally:
-                painter.restore()
             return
 
         # Not selected: default paint, but never the per-cell focus
@@ -1429,11 +1409,6 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.StateFlag.State_MouseOver
         super().paint(painter, opt, index)
         self._draw_sticky_pill(painter, pill, label, option.font)
-
-
-from PySide6.QtCore import QPoint as _QPoint   # noqa: E402
-_PT_UP = _QPoint(0, 1)
-_PT_LEFT = _QPoint(1, 0)
 
 
 class _FocusRepainter(QObject):

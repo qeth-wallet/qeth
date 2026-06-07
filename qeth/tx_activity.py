@@ -101,17 +101,40 @@ def transfer_legs_from_logs(
     return out, inn
 
 
-def _account_rows(base: str, action: str, address: str, timeout: float) -> list[dict]:
-    q = urllib.parse.urlencode({
-        "module": "account", "action": action, "address": address,
-        "page": 1, "offset": 300, "sort": "desc",
-    })
-    req = urllib.request.Request(
-        f"{base.rstrip('/')}/api?{q}",
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        res = json.loads(r.read()).get("result")
-    return [row for row in res if isinstance(row, dict)] if isinstance(res, list) else []
+_PAGE = 300
+
+
+def _account_rows(base: str, action: str, address: str, timeout: float, *,
+                  startblock: Optional[int] = None,
+                  endblock: Optional[int] = None,
+                  max_pages: int = 1) -> list[dict]:
+    """One Etherscan-style account list (tokentx / txlistinternal). When a
+    block range is given, walk pages (newest-first) until the range is
+    exhausted or ``max_pages`` is hit — the displayed window can span far
+    more than one page of transfers on a busy address, and a single page
+    would leave its older txs with no coins."""
+    rows: list[dict] = []
+    for page in range(1, max_pages + 1):
+        params: dict[str, object] = {
+            "module": "account", "action": action, "address": address,
+            "page": page, "offset": _PAGE, "sort": "desc",
+        }
+        if startblock is not None:
+            params["startblock"] = startblock
+        if endblock is not None:
+            params["endblock"] = endblock
+        q = urllib.parse.urlencode(params)
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api?{q}",
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            res = json.loads(r.read()).get("result")
+        batch = ([row for row in res if isinstance(row, dict)]
+                 if isinstance(res, list) else [])
+        rows.extend(batch)
+        if len(batch) < _PAGE:          # last page of the range
+            break
+    return rows
 
 
 class _Verbs:
@@ -241,9 +264,18 @@ def fetch_activities(
     viewer = address.lower()
     native = chain.symbol or "ETH"
 
+    # Scope the transfer/internal fetch to the block span of the txs we're
+    # actually showing (paged), not just the most-recent 300 transfers for
+    # the whole address — on a busy wallet the displayed window reaches well
+    # past one page, leaving its older txs coinless.
+    blocks = [tx.block_number for tx in txs if tx.block_number]
+    sb = min(blocks) if blocks else None
+    eb = max(blocks) if blocks else None
     try:
-        transfers = _account_rows(base, "tokentx", address, timeout)
-        internals = _account_rows(base, "txlistinternal", address, timeout)
+        transfers = _account_rows(base, "tokentx", address, timeout,
+                                  startblock=sb, endblock=eb, max_pages=12)
+        internals = _account_rows(base, "txlistinternal", address, timeout,
+                                  startblock=sb, endblock=eb, max_pages=12)
     except (urllib.error.URLError, OSError, ValueError) as e:
         log.debug("activity fetch failed on %s: %s", chain.name, e)
         transfers, internals = [], []

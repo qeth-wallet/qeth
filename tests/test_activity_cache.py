@@ -1,6 +1,8 @@
 """ActivityCache — persist resolved Activity objects so a chain's second
 visit paints from disk instead of refetching."""
 
+import json
+
 from qeth.activity_cache import ActivityCache
 from qeth.tx_activity import Activity, AssetLeg
 
@@ -51,4 +53,21 @@ def test_missing_and_empty_are_safe(tmp_path):
     c = ActivityCache(root=tmp_path)
     assert c.load(1, "0xabc") == {}
     c.update(1, "0xabc", {})          # no-op, no file written
+    assert c.load(1, "0xabc") == {}
+
+
+def test_legacy_unversioned_cache_is_ignored(tmp_path):
+    c = ActivityCache(root=tmp_path)
+    f = c._file(1, "0xabc")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"0xaa": {"v": "deposit", "o": [], "i": []}}))
+    assert c.load(1, "0xabc") == {}   # no _v → rebuilt, not pinned stale
+
+
+def test_other_build_version_is_ignored(tmp_path):
+    c = ActivityCache(root=tmp_path)
+    f = c._file(1, "0xabc")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(
+        {"_v": -999, "acts": {"0xaa": {"v": "deposit", "o": [], "i": []}}}))
     assert c.load(1, "0xabc") == {}

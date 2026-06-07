@@ -27,6 +27,12 @@ log = logging.getLogger("qeth.activity_cache")
 
 ACTIVITIES_DIR = CONFIG_DIR / "activities"
 
+# Bump when the activity-build logic changes what a tx resolves to (e.g.
+# widening the transfer fetch so older rows gain coins). A cache written by
+# an older build is then ignored and those rows are rebuilt, rather than
+# pinning the stale result forever.
+_BUILD_VERSION = 2
+
 
 def _leg_to_json(leg: AssetLeg) -> list:
     return [leg.symbol, leg.contract]
@@ -81,11 +87,14 @@ class ActivityCache:
                 raw = json.loads(self._file(chain_id, address).read_text())
             except (OSError, ValueError):
                 raw = {}
-            for h, d in raw.items():
-                try:
-                    cached[h] = _from_json(d)
-                except Exception:   # tolerate a stale/partial schema
-                    continue
+            # Skip an older build's file (legacy flat format, or a build
+            # before a logic change) — those rows get rebuilt.
+            if isinstance(raw, dict) and raw.get("_v") == _BUILD_VERSION:
+                for h, d in (raw.get("acts") or {}).items():
+                    try:
+                        cached[h] = _from_json(d)
+                    except Exception:   # tolerate a partial schema
+                        continue
             self._mem[key] = cached
         return dict(cached)
 
@@ -101,7 +110,9 @@ class ActivityCache:
         f = self._file(chain_id, address)
         try:
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps(
-                {h: _to_json(a) for h, a in self._mem[key].items()}))
+            f.write_text(json.dumps({
+                "_v": _BUILD_VERSION,
+                "acts": {h: _to_json(a) for h, a in self._mem[key].items()},
+            }))
         except OSError as e:
             log.debug("activity cache write failed for %s: %s", key, e)

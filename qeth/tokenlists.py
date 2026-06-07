@@ -178,13 +178,14 @@ class Curve(TokenListSource):
     """
 
     name = "curve"
-    # chain_id → Curve blockchainId slug
+    # chain_id → Curve blockchainId slug (Gnosis is "xdai", its old name)
     SLUGS: dict[int, str] = {
         1:     "ethereum",
         10:    "optimism",
         137:   "polygon",
         42161: "arbitrum",
         8453:  "base",
+        100:   "xdai",
         43114: "avalanche",
     }
 
@@ -200,13 +201,16 @@ class Curve(TokenListSource):
                     addr = str(t.get("address", "")).lower()
                     if not addr.startswith("0x") or len(addr) != 42:
                         continue
-                    # Curve doesn't return logoURI; their curve-assets repo
-                    # serves icons by lower-case address (verified for
-                    # mainnet; per-chain folders don't follow a slug pattern,
-                    # so this 404s gracefully on non-mainnet entries).
+                    # Curve doesn't return logoURI, but curve-assets serves
+                    # icons by lower-case address under a per-chain folder:
+                    # images/assets/ for mainnet, images/assets-<slug>/ for
+                    # every other chain (assets-xdai, assets-polygon, …). The
+                    # old code always used images/assets/, which 404'd for
+                    # every non-mainnet token (e.g. Gnosis EURe).
+                    asset_dir = "assets" if slug == "ethereum" else f"assets-{slug}"
                     logo = (
                         "https://raw.githubusercontent.com/curvefi/curve-assets"
-                        f"/main/images/assets/{addr}.png"
+                        f"/main/images/{asset_dir}/{addr}.png"
                     )
                     yield TokenListEntry(
                         chain_id=cid,

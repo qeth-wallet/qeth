@@ -149,3 +149,26 @@ class TestLoadFailureTolerant:
         e = lists.get(1, "0xaaaa")
         assert e.symbol == "FIRST"
         assert e.source == "a"
+
+
+def test_curve_logo_path_is_per_chain(monkeypatch, tmp_path):
+    """curve-assets serves token icons from images/assets/ for mainnet and
+    images/assets-<slug>/ for every other chain. The logo URL must follow
+    that per-chain layout — the old single images/assets/ path 404'd for
+    every non-mainnet token (e.g. Gnosis EURe showed a generic glyph)."""
+    import qeth.tokenlists as tl
+    from qeth.tokenlists import Curve
+
+    def fake_fetch_json(url, path, ttl, timeout):
+        return {"data": {"tokens": [
+            {"address": "0x" + "ab" * 20, "symbol": "X",
+             "name": "X", "decimals": 18}]}}
+    monkeypatch.setattr(tl, "_fetch_json", fake_fetch_json)
+
+    by_chain = {e.chain_id: e.logo_uri
+                for e in Curve().fetch_entries(tmp_path, 0, 1)}
+    assert "/images/assets/0x" in by_chain[1]            # Ethereum: bare dir
+    assert "/images/assets-xdai/0x" in by_chain[100]     # Gnosis
+    assert "/images/assets-polygon/0x" in by_chain[137]
+    assert "/images/assets-optimism/0x" in by_chain[10]
+    assert "/images/assets-base/0x" in by_chain[8453]

@@ -281,6 +281,17 @@ class WalletsPlugin(Plugin):
         for i in range(self._tree.topLevelItemCount()):
             hit = walk(self._tree.topLevelItem(i))
             if hit is not None:
+                # Already the sole selection? Do nothing. clearSelection()
+                # would broadcast account=None — which clears the
+                # transactions view and its cached activities — then the
+                # re-select forces a full show_transactions + re-fetch of
+                # every row's activity (the "redraws every pic" on send).
+                # A no-op keeps a just-sent pending row a cheap one-row
+                # prepend.
+                sel = self._tree.selectedItems()
+                if (self._tree.currentItem() is hit
+                        and len(sel) == 1 and sel[0] is hit):
+                    return True
                 self._tree.clearSelection()
                 self._tree.setCurrentItem(hit)
                 hit.setSelected(True)

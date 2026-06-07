@@ -700,13 +700,21 @@ class TxActivityWorker(QThread):
         self._abi_cache = abi_cache
 
     def run(self) -> None:
+        cid = self._chain.chain_id
+        addr = self._address.lower()
+
+        def emit(batch: dict) -> None:
+            # One signal per batch: pass 1 paints coins + known/placeholder
+            # verbs, then each cold callee's resolve refines its rows — so
+            # the panel fills in progressively instead of all at the end.
+            if batch:
+                self.loaded.emit(cid, addr, dict(batch))
+
         try:
-            acts = fetch_activities(
-                self._chain, self._address, self._txs, abi_cache=self._abi_cache)
+            fetch_activities(self._chain, self._address, self._txs,
+                             abi_cache=self._abi_cache, on_batch=emit)
         except Exception as e:
             log.debug("activity build failed: %s", e)
-            acts = {}
-        self.loaded.emit(self._chain.chain_id, self._address.lower(), acts)
 
 
 class TransactionsPlugin(Plugin):

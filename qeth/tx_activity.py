@@ -21,9 +21,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, cast
+from typing import Any, Callable, Iterable, Optional, cast
 
 from . import USER_AGENT
 from .abi import BlockscoutAbiSource, selector_names
@@ -126,14 +126,32 @@ class _Verbs:
         self._cache = cache
         self._maps: dict[str, dict[str, str]] = {}
 
-    def name(self, to: Optional[str], selector: str) -> Optional[str]:
+    def name(self, to: Optional[str], selector: str, *,
+             fetch: bool = True) -> Optional[str]:
         if not to:
             return None
         key = to.lower()
         m = self._maps.get(key)
         if m is None:
-            m = self._maps[key] = self._build(key)
+            if fetch:
+                m = self._maps[key] = self._build(key)
+            else:
+                # Cache-only: warm from disk if already known, but never hit
+                # the network here — cold callees are resolved in parallel
+                # afterwards. Returns None so the caller can mark it cold.
+                cached = self._cache.load(self._chain_id, key)
+                if cached is None:
+                    return None
+                m = self._maps[key] = (
+                    selector_names(cached) if isinstance(cached, list) else {})
         return m.get(selector)
+
+    def resolve(self, contract: str) -> dict[str, str]:
+        """Force-build (network) and store a single contract's selector map.
+        Used as the unit of work for the parallel cold-callee resolve."""
+        m = self._build(contract)
+        self._maps[contract] = m
+        return m
 
     def _build(self, contract: str) -> dict[str, str]:
         abi = self._cache.load(self._chain_id, contract)
@@ -147,23 +165,60 @@ class _Verbs:
             abi = fetched
         return selector_names(abi) if isinstance(abi, list) else {}
 
-    def prewarm(self, contracts: Iterable[Optional[str]]) -> None:
-        """Resolve the distinct contracts' ABIs concurrently so the per-tx
-        verb lookups don't serialize one slow Blockscout round-trip per
-        contract — the difference between ~1 s and tens of seconds before
-        any activity shows on a chain's first visit. AbiCache is per-
-        contract-file disk I/O with no shared state, so parallel cold
-        builds for distinct contracts are safe; maps are stored back on
-        this thread after the pool drains."""
-        todo = list(dict.fromkeys(
-            c.lower() for c in contracts
-            if c and c.lower() not in self._maps))
-        if len(todo) < 2:
+
+def _coins(tx: Transaction, viewer: str, native: str,
+           tok_by_hash: dict, int_by_hash: dict
+           ) -> tuple[list[AssetLeg], list[AssetLeg]]:
+    """The viewer-touching assets a tx moved: native value + ERC-20
+    transfers (tokentx) + internal native (txlistinternal), deduped."""
+    out_legs: list[AssetLeg] = []
+    in_legs: list[AssetLeg] = []
+    seen_out: set[str] = set()
+    seen_in: set[str] = set()
+
+    def add(legs: list[AssetLeg], seen: set[str], sym: str,
+            contract: Optional[str]) -> None:
+        k = contract or f"native:{sym}"
+        if k in seen:
             return
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            built = list(ex.map(self._build, todo))
-        for contract, m in zip(todo, built):
-            self._maps[contract] = m
+        seen.add(k)
+        legs.append(AssetLeg(sym, contract))
+
+    h = tx.hash.lower()
+    if tx.value_wei > 0:
+        if tx.from_addr == viewer:
+            add(out_legs, seen_out, native, None)
+        elif (tx.to_addr or "") == viewer:
+            add(in_legs, seen_in, native, None)
+    for t in tok_by_hash.get(h, []):
+        c = str(t.get("contractAddress") or "").lower()
+        sym = str(t.get("tokenSymbol") or "?")
+        if str(t.get("from") or "").lower() == viewer:
+            add(out_legs, seen_out, sym, c)
+        if str(t.get("to") or "").lower() == viewer:
+            add(in_legs, seen_in, sym, c)
+    for it in int_by_hash.get(h, []):
+        try:
+            if int(it.get("value") or 0) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if str(it.get("from") or "").lower() == viewer:
+            add(out_legs, seen_out, native, None)
+        if str(it.get("to") or "").lower() == viewer:
+            add(in_legs, seen_in, native, None)
+    return out_legs, in_legs
+
+
+def _make_activity(verb: str, out_legs: list[AssetLeg],
+                   in_legs: list[AssetLeg], sel: str, tx: Transaction,
+                   sym_of: dict[str, str]) -> Activity:
+    muted = not tx.success
+    if sel == _APPROVE and tx.to_addr:           # show only the approved token
+        token = tx.to_addr.lower()
+        return Activity(verb, (AssetLeg(sym_of.get(token, "?"), token),),
+                        (), show_arrow=False, muted=muted)
+    return Activity(verb, tuple(out_legs), tuple(in_legs), muted=muted)
 
 
 def fetch_activities(
@@ -174,6 +229,7 @@ def fetch_activities(
     timeout: float = 25.0,
     abi_source: Optional[BlockscoutAbiSource] = None,
     abi_cache: Optional[AbiCache] = None,
+    on_batch: Optional[Callable[[dict[str, Activity]], None]] = None,
 ) -> dict[str, Activity]:
     """Build ``{tx_hash: Activity}`` for ``txs``. Best-effort: a failed
     transfers/internal fetch yields verb-only activities (still useful);
@@ -209,65 +265,62 @@ def fetch_activities(
 
     verbs = _Verbs(chain.chain_id, abi_source or BlockscoutAbiSource(),
                    abi_cache if abi_cache is not None else AbiCache())
-    # Warm every distinct callee's ABI in parallel up front, so the verb
-    # lookups in the loop below are cache hits instead of one slow
-    # Blockscout round-trip each (the "no activities for ages on a chain's
-    # first visit" lag).
-    verbs.prewarm(tx.to_addr for tx in txs)
     out: dict[str, Activity] = {}
+    by_hash = {tx.hash.lower(): tx for tx in txs}
+    coins: dict[str, tuple[list[AssetLeg], list[AssetLeg], str]] = {}
+    cold: dict[str, list[str]] = defaultdict(list)   # cold callee → tx hashes
 
+    # Pass 1 — coins (one fast tokentx/internal batch) plus the verbs we
+    # already know: send / deploy / approve, or a callee whose ABI is
+    # cached. A callee whose ABI isn't cached yet shows its bare selector
+    # as a placeholder and is queued for the parallel resolve below.
     for tx in txs:
         h = tx.hash.lower()
-        out_legs: list[AssetLeg] = []
-        in_legs: list[AssetLeg] = []
-        seen_out: set[str] = set()
-        seen_in: set[str] = set()
-
-        def add(legs: list[AssetLeg], seen: set[str], sym: str, contract: Optional[str]) -> None:
-            k = contract or f"native:{sym}"
-            if k in seen:
-                return
-            seen.add(k)
-            legs.append(AssetLeg(sym, contract))
-
-        if tx.value_wei > 0:
-            if tx.from_addr == viewer:
-                add(out_legs, seen_out, native, None)
-            elif (tx.to_addr or "") == viewer:
-                add(in_legs, seen_in, native, None)
-        for t in tok_by_hash.get(h, []):
-            c = str(t.get("contractAddress") or "").lower()
-            sym = str(t.get("tokenSymbol") or "?")
-            if str(t.get("from") or "").lower() == viewer:
-                add(out_legs, seen_out, sym, c)
-            if str(t.get("to") or "").lower() == viewer:
-                add(in_legs, seen_in, sym, c)
-        for it in int_by_hash.get(h, []):
-            try:
-                if int(it.get("value") or 0) <= 0:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            if str(it.get("from") or "").lower() == viewer:
-                add(out_legs, seen_out, native, None)
-            if str(it.get("to") or "").lower() == viewer:
-                add(in_legs, seen_in, native, None)
-
+        out_legs, in_legs = _coins(tx, viewer, native, tok_by_hash, int_by_hash)
         sel = (tx.method_id or "").lower()
+        coins[h] = (out_legs, in_legs, sel)
         if sel in ("", "0x"):           # no calldata → a plain value send
             verb = "send"
         elif tx.to_addr is None:
             verb = "deploy"
         else:
-            verb = verbs.name(tx.to_addr, sel) or sel
-        muted = not tx.success
+            name = verbs.name(tx.to_addr, sel, fetch=False)
+            if name is None:            # cold ABI — placeholder + queue
+                verb = sel
+                cold[tx.to_addr.lower()].append(h)
+            else:
+                verb = name
+        out[tx.hash] = _make_activity(verb, out_legs, in_legs, sel, tx, sym_of)
 
-        if sel == _APPROVE and tx.to_addr:
-            token = tx.to_addr.lower()
-            out[tx.hash] = Activity(
-                verb, (AssetLeg(sym_of.get(token, "?"), token),), (),
-                show_arrow=False, muted=muted)
-        else:
-            out[tx.hash] = Activity(verb, tuple(out_legs), tuple(in_legs), muted=muted)
+    if on_batch:
+        # Emit only the already-final rows now; the cold ones follow once
+        # their ABI lands (below). This keeps every emitted/cached activity
+        # final — a placeholder-selector row is never persisted, so a reload
+        # mid-resolve can't freeze a verified contract on its bare selector.
+        cold_hashes = {h for hs in cold.values() for h in hs}
+        first = {tx.hash: out[tx.hash] for tx in txs
+                 if tx.hash.lower() not in cold_hashes}
+        if first:
+            on_batch(first)
+
+    # Pass 2 — fetch the cold callees' ABIs 8-wide; as each lands, refine
+    # its txs' verbs and emit just those rows, so the column fills in
+    # progressively on a chain's first visit instead of after one long
+    # blank wait. (Runs even without on_batch so the returned dict is
+    # always fully resolved — that path just doesn't emit.)
+    if cold:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = {ex.submit(verbs.resolve, c): c for c in cold}
+            for fut in as_completed(futs):
+                m = fut.result()
+                batch: dict[str, Activity] = {}
+                for h in cold[futs[fut]]:
+                    tx = by_hash[h]
+                    ol, il, sel = coins[h]
+                    act = _make_activity(m.get(sel) or sel, ol, il, sel, tx, sym_of)
+                    out[tx.hash] = act
+                    batch[tx.hash] = act
+                if on_batch:
+                    on_batch(batch)
 
     return out

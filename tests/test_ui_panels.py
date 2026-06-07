@@ -271,9 +271,10 @@ class TestTransactionListPanel:
             panel.table.horizontalHeaderItem(i).text()
             for i in range(panel.table.columnCount())
         ]
-        # Activity is split into a verb column ("Activity") and a
-        # following coins-icon column (empty header).
-        assert labels == ["", "Nonce", "Time", "Activity", ""]
+        # Status | Nonce | gap | Time | gap | Activity (verb) | coins.
+        # The two empty-header gap columns stretch so a wide window
+        # justifies the row instead of trailing whitespace on the right.
+        assert labels == ["", "Nonce", "", "Time", "", "Activity", ""]
 
     def test_status_nonce_and_hash_render(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
@@ -283,14 +284,13 @@ class TestTransactionListPanel:
         panel.show_transactions([tx])
         assert panel.table.item(0, 0).toolTip() == "Success"
         assert panel.table.item(0, 1).text() == "42"
-        # Time cell is locale-formatted — just assert non-empty rather
-        # than locking in a specific format string.
-        assert panel.table.item(0, 2).text()
-        # The Activity cell (col 3) paints "verb + coins" via a delegate,
-        # so its DisplayRole text is blank — but the full hash is on the
-        # tooltip, and the full Transaction rides on UserRole (so the
-        # details dialog / explorer can recover it from a double-click).
-        act_cell = panel.table.item(0, 3)
+        # Time cell (col 3 now — col 2 is a stretch gap) is locale-formatted
+        # — just assert non-empty rather than locking in a format string.
+        assert panel.table.item(0, 3).text()
+        # The Activity verb cell (col 5): blank until its activity resolves,
+        # but the full hash is on the tooltip and the Transaction rides on
+        # UserRole (so the details dialog / explorer recover it).
+        act_cell = panel.table.item(0, 5)
         assert act_cell.text() == ""
         assert act_cell.toolTip() == tx.hash
         assert act_cell.data(Qt.UserRole) is tx

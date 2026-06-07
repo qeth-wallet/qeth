@@ -1571,6 +1571,15 @@ def _cancel_tx_icon() -> QIcon:
     return QIcon.fromTheme("process-stop", QIcon.fromTheme("dialog-cancel"))
 
 
+# Activity-table columns: Status | Nonce | gap | Time | gap | Verb | Coins.
+# The two empty gap columns Stretch, so a wide window "justifies" the row —
+# Nonce hard left, Time centred, Activity + coins hard right — instead of
+# leaving all the dead space trailing on the right.
+(_C_STATUS, _C_NONCE, _C_GAP1, _C_TIME,
+ _C_GAP2, _C_VERB, _C_COINS) = range(7)
+_N_COLS = 7
+
+
 class TransactionListPanel(QWidget):
     """Right pane / Transactions tab: top-level txs for the selected
     account, newest first.
@@ -1595,8 +1604,9 @@ class TransactionListPanel(QWidget):
         # Status / Nonce / Time / Hash. The Status column has an empty
         # label — the ✓/✗ glyph speaks for itself, and dropping the word
         # "Status" lets the column be tight against the left edge.
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["", "Nonce", "Time", "Activity", ""])
+        self.table = QTableWidget(0, _N_COLS)
+        self.table.setHorizontalHeaderLabels(
+            ["", "Nonce", "", "Time", "", "Activity", ""])
         # "Activity" is split into two plain columns so each renders with
         # standard cell painting (no custom delegate, no whole-line image —
         # both broke selection/hover/scroll or font rendering under the
@@ -1669,18 +1679,22 @@ class TransactionListPanel(QWidget):
         # their text. The coins column stretches to fill — its icon is
         # left-aligned, so the coins sit right after the verb with the
         # spare space trailing.
-        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)             # Status
-        self.table.setColumnWidth(0, 34)
-        h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Nonce
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Time
-        # Verb is sized by hand (_fit_verb_column): just wide enough for
-        # its text so the coins sit right after it, but capped to whatever
-        # space is left so it gives way first — eliding long method names —
-        # when the window narrows. Coins are sized to content so every coin
-        # always fits. No horizontal scrollbar: the verb never widens past
-        # the available room, so nothing overflows.
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)             # Verb
-        h.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Coins
+        h.setSectionResizeMode(_C_STATUS, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(_C_STATUS, 34)
+        h.setSectionResizeMode(_C_NONCE, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(_C_TIME, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(_C_COINS, QHeaderView.ResizeMode.ResizeToContents)
+        # The two empty gap columns soak up the slack on a wide window so
+        # the row justifies (Nonce left, Time centre, Activity+coins right)
+        # instead of pooling whitespace on the right; they shrink to the
+        # minimum as the window narrows.
+        h.setSectionResizeMode(_C_GAP1, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(_C_GAP2, QHeaderView.ResizeMode.Stretch)
+        # Verb is sized by hand (_fit_verb_column): just wide enough for its
+        # text so the coins sit right after it, but capped to the room left
+        # after the gaps' minimum, so it elides long names when the window
+        # narrows rather than overflowing. Coins are content-sized.
+        h.setSectionResizeMode(_C_VERB, QHeaderView.ResizeMode.Fixed)
         h.setMinimumSectionSize(24)
         self.table.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1837,7 +1851,7 @@ class TransactionListPanel(QWidget):
         """Write an Activity into its two cells: the verb (col 3, text) and
         the moved-coins icon (col 4)."""
         summary = self._build_summary(activity)
-        verb = self.table.item(row, 3)
+        verb = self.table.item(row, _C_VERB)
         if verb is not None:
             verb.setText(summary.verb)
             self._max_verb_px = max(
@@ -1846,30 +1860,33 @@ class TransactionListPanel(QWidget):
             if summary.muted:
                 verb.setForeground(self.table.palette().color(
                     QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text))
-        coins = self.table.item(row, 4)
+        coins = self.table.item(row, _C_COINS)
         if coins is not None:
             coins.setIcon(self._coins_icon(summary))
 
     def _fit_verb_column(self) -> None:
         """Size the verb column to its text, but never wider than the room
-        left after the fixed columns — so the coins always fit, the verb
-        elides when squeezed, and no horizontal scrollbar appears."""
+        left after the fixed columns *and the two gaps' minimum* — so the
+        coins always fit, the verb elides when squeezed, no horizontal
+        scrollbar appears, and on a wide window the leftover goes to the
+        gaps (justifying the row) rather than to the verb."""
         t = self.table
-        if t.columnCount() < 5:
+        if t.columnCount() < _N_COLS:
             return
-        others = sum(t.columnWidth(i) for i in (0, 1, 2, 4))
-        avail = t.viewport().width() - others
+        hdr = t.horizontalHeader()
+        others = sum(t.columnWidth(i)
+                     for i in (_C_STATUS, _C_NONCE, _C_TIME, _C_COINS))
+        gaps_min = 2 * hdr.minimumSectionSize()
+        avail = t.viewport().width() - others - gaps_min
         # text + the cell's L/R padding (stylesheet 6px each) + a little
         # slack so the widest verb doesn't elide when there's room — but
         # never narrower than the "Activity" header itself, so before any
-        # activity has resolved the header reads cleanly instead of being
-        # squeezed to ~nothing.
-        hdr = self.table.horizontalHeader()
-        head = self.table.horizontalHeaderItem(3)
+        # activity has resolved the header reads cleanly.
+        head = t.horizontalHeaderItem(_C_VERB)
         header_w = hdr.fontMetrics().horizontalAdvance(
             head.text() if head else "Activity") + 28
         natural = max(self._max_verb_px + 24, header_w)
-        t.setColumnWidth(3, max(24, min(natural, max(24, avail))))
+        t.setColumnWidth(_C_VERB, max(24, min(natural, max(24, avail))))
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -1928,7 +1945,7 @@ class TransactionListPanel(QWidget):
                    for leg in (*act.out, *act.inn)):
                 # Only the coins icon depends on the logo; leave the verb
                 # cell untouched so just the picture refreshes, not the row.
-                coins = self.table.item(row, 4)
+                coins = self.table.item(row, _C_COINS)
                 if coins is not None:
                     coins.setIcon(self._coins_icon(self._build_summary(act)))
 
@@ -2113,28 +2130,28 @@ class TransactionListPanel(QWidget):
 
         time_item = QTableWidgetItem(_format_datetime(tx.timestamp))
 
-        # Activity = two cells: the verb (col 3, plain text) and the
-        # moved-coins icon (col 4). The verb cell also carries the full
-        # hash on its tooltip and the Transaction on UserRole, for the
-        # copy / explorer / details handlers (and _tx_at). Both stay empty
-        # until this tx's Activity resolves; _apply_activity fills them.
+        # Activity = two cells: the verb (text) and the moved-coins icon,
+        # separated from Nonce/Time by the stretch gap columns. The verb
+        # cell also carries the full hash on its tooltip and the Transaction
+        # on UserRole, for the copy / explorer / details handlers (and
+        # _tx_at). Both stay empty until the Activity resolves.
         verb_item = QTableWidgetItem()
         verb_item.setToolTip(tx.hash)
         verb_item.setData(Qt.ItemDataRole.UserRole, tx)
         coins_item = QTableWidgetItem()
 
-        self.table.setItem(row, 0, status)
-        self.table.setItem(row, 1, nonce)
-        self.table.setItem(row, 2, time_item)
-        self.table.setItem(row, 3, verb_item)
-        self.table.setItem(row, 4, coins_item)
+        self.table.setItem(row, _C_STATUS, status)
+        self.table.setItem(row, _C_NONCE, nonce)
+        self.table.setItem(row, _C_TIME, time_item)
+        self.table.setItem(row, _C_VERB, verb_item)
+        self.table.setItem(row, _C_COINS, coins_item)
 
         activity = self._activities.get(tx.hash)
         if activity is not None:
             self._apply_activity(row, activity)
 
     def _tx_at(self, row: int) -> Optional[Transaction]:
-        item = self.table.item(row, 3)
+        item = self.table.item(row, _C_VERB)
         if item is None:
             return None
         data = item.data(Qt.ItemDataRole.UserRole)

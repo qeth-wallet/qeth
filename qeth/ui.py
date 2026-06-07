@@ -1378,16 +1378,40 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             return
 
         if is_selected and not is_focused:
-            # Inactive selection: let the *style* paint it — keep
-            # State_Selected but clear State_Active so the theme renders its
-            # own muted inactive-selection fill (the way it does in every
-            # other unfocused list), instead of a hand-forced outline that
-            # followed no theme and looked out of place (notably on Fusion).
-            # The style also drives the text colour, so no palette swap.
+            # Inactive selection: a *muted* fill — the highlight blended
+            # toward the row background — over the whole row, contents on
+            # top. Hand-painted exactly like the focused fill (rather than
+            # left to the style, which a cell stylesheet on the tables
+            # suppresses entirely, and which would only cover part of a
+            # labelled tree row), but in a quieter colour so the focused
+            # panel still stands out. Replaces a hand-drawn outline.
+            hl = option.palette.color(QPalette.ColorRole.Highlight)
+            bg = option.palette.color(QPalette.ColorRole.Base)
+            muted = QColor(
+                (hl.red() * 11 + bg.red() * 9) // 20,
+                (hl.green() * 11 + bg.green() * 9) // 20,
+                (hl.blue() * 11 + bg.blue() * 9) // 20,
+            )
+            # Extend the fill left over the tree's indent/branch column —
+            # the view fills it with the bright selection and the delegate's
+            # rect doesn't reach it, so without this a bright sliver sits
+            # beside the muted row. A no-op in the tables (column 0 starts
+            # at x=0 there).
+            fill = (option.rect.adjusted(-option.rect.left(), 0, 0, 0)
+                    if index.column() == 0 else option.rect)
+            painter.fillRect(fill, muted)
+            text_color = option.palette.color(
+                QPalette.ColorRole.HighlightedText
+                if muted.lightness() < 140
+                else QPalette.ColorRole.Text)
             opt = QStyleOptionViewItem(option)
             opt.rect = text_rect
+            opt.state &= ~QStyle.StateFlag.State_Selected
             opt.state &= ~QStyle.StateFlag.State_HasFocus
-            opt.state &= ~QStyle.StateFlag.State_Active
+            opt.palette.setColor(QPalette.ColorRole.Text, text_color)
+            opt.palette.setColor(QPalette.ColorRole.WindowText, text_color)
+            opt.palette.setColor(QPalette.ColorRole.Base, muted)
+            opt.palette.setColor(QPalette.ColorRole.AlternateBase, muted)
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
             return

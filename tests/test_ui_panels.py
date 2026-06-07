@@ -573,3 +573,29 @@ class TestFocusAwareDelegate:
         assert labeled.pixelColor(40, 11).name() != _STICKY_BG    # address area
         plain = render(1)
         assert plain.pixelColor(285, 11).name() != _STICKY_BG     # no pill
+
+
+def test_identity_row_loading_placeholder_then_badge(qtbot, tmp_path):
+    """The Contract: row shows a muted 'identifying…' while the (multi
+    round-trip) fetch runs, so a slow lookup reads as loading rather than
+    'no info'; a resolved badge replaces it, and a None (transient error /
+    unsupported chain) clears it back to blank."""
+    from qeth.plugins.transactions import _make_identity_row
+    from qeth.contract_identity import ContractIdentityCache, IdentityBadge
+
+    captured = []
+    label, kick = _make_identity_row(
+        to_addr="0x" + "ab" * 20, chain=DEFAULT_CHAINS[0],
+        identity_source=object(),                 # non-None → kick won't skip
+        identity_cache=ContractIdentityCache(root=tmp_path),
+        my_addresses=[], start_worker=captured.append, tx_cache=None)
+    qtbot.addWidget(label)
+    assert label.text() == ""                     # blank before kick
+    kick()
+    assert label.text() == "identifying…"         # muted loading placeholder
+    assert not label.isEnabled()
+    assert len(captured) == 1                      # a worker was started
+    captured[0].ready.emit(IdentityBadge("RewardClaimHelper", "ok"))
+    assert label.text() == "RewardClaimHelper" and label.isEnabled()
+    captured[0].ready.emit(None)                   # transient error → blank
+    assert label.text() == ""

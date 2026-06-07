@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime
 import json
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -237,26 +238,29 @@ class ContractIdentitySource:
         ts = row.get("timestamp")
         deployed_at = int(ts) if isinstance(ts, str) and ts.isdigit() else None
 
-        # Name + verification (a failure here just leaves it unverified —
-        # we still have the valuable provenance above).
+        # Name/verification (getsourcecode, Etherscan) and the public
+        # name-tags (Blockscout's metadata service) are independent and hit
+        # different hosts, so fetch them together — the identity resolves in
+        # two round-trips instead of three, which the user sees as a faster
+        # "identifying…". A getsourcecode failure just leaves it unverified;
+        # the provenance from the creation record above still stands.
         name: Optional[str] = None
         verified = False
-        try:
-            sc = self._get(chain_id, [
+        to_label = [address] + ([deployer] if deployer else [])
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            sc_fut = ex.submit(self._get, chain_id, [
                 ("module", "contract"),
                 ("action", "getsourcecode"),
                 ("address", address)])
-            sres = sc.get("result")
-            if isinstance(sres, list) and sres and isinstance(sres[0], dict):
-                nm = (sres[0].get("ContractName") or "").strip()
-                if nm:
-                    name, verified = nm, True
-        except Exception:
-            pass
-
-        # Public name-tags for the contract itself AND its deployer, batched.
-        to_label = [address] + ([deployer] if deployer else [])
-        labels = self.fetch_labels(chain_id, to_label)
+            labels = ex.submit(self.fetch_labels, chain_id, to_label).result()
+            try:
+                sres = sc_fut.result().get("result")
+                if isinstance(sres, list) and sres and isinstance(sres[0], dict):
+                    nm = (sres[0].get("ContractName") or "").strip()
+                    if nm:
+                        name, verified = nm, True
+            except Exception:
+                pass
         return ContractIdentity(
             address=address, is_contract=True, name=name, verified=verified,
             deployer=deployer, deployed_at=deployed_at,

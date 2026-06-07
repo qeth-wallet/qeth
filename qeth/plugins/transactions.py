@@ -2774,6 +2774,12 @@ def _make_identity_row(*, to_addr: Optional[str], chain,
     def _apply(badge) -> None:
         if badge is not None:
             _style_identity_label(label, badge)
+        else:
+            # Unsupported chain / transient error — drop the placeholder
+            # back to blank rather than leave it stuck on "identifying…".
+            label.clear()
+            label.setStyleSheet("")
+            label.setEnabled(True)
 
     def kick() -> None:
         # Skip entirely when there's nothing to go on (no source/key AND
@@ -2781,6 +2787,12 @@ def _make_identity_row(*, to_addr: Optional[str], chain,
         if (identity_source is None
                 and identity_cache.load(chain.chain_id, to_addr) is None):
             return
+        # The fetch is several explorer round-trips; without a placeholder
+        # the row sits blank the whole time, indistinguishable from "no
+        # info". Show a muted "identifying…" so a slow fetch reads as
+        # loading. (A cache hit resolves in ~ms, so the flash is invisible.)
+        label.setText("identifying…")
+        label.setEnabled(False)
         worker = ContractIdentityWorker(
             identity_source, identity_cache, chain.chain_id, to_addr,
             my_addresses, tx_cache=tx_cache)

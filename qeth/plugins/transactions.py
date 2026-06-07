@@ -1767,8 +1767,15 @@ class TransactionListPanel(QWidget):
         others = sum(t.columnWidth(i) for i in (0, 1, 2, 4))
         avail = t.viewport().width() - others
         # text + the cell's L/R padding (stylesheet 6px each) + a little
-        # slack so the widest verb doesn't elide when there's room.
-        natural = self._max_verb_px + 24
+        # slack so the widest verb doesn't elide when there's room — but
+        # never narrower than the "Activity" header itself, so before any
+        # activity has resolved the header reads cleanly instead of being
+        # squeezed to ~nothing.
+        hdr = self.table.horizontalHeader()
+        head = self.table.horizontalHeaderItem(3)
+        header_w = hdr.fontMetrics().horizontalAdvance(
+            head.text() if head else "Activity") + 28
+        natural = max(self._max_verb_px + 24, header_w)
         t.setColumnWidth(3, max(24, min(natural, max(24, avail))))
 
     def resizeEvent(self, event: QResizeEvent) -> None:

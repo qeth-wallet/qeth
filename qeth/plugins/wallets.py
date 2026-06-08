@@ -1551,7 +1551,8 @@ class AddWatchOnlyDialog(QDialog):
 
         form = QFormLayout()
         self.address_edit = QLineEdit()
-        self.address_edit.setPlaceholderText("0x… address to watch")
+        self.address_edit.setPlaceholderText(
+            "0x… address or ENS name (e.g. vitalik.eth)")
         self.address_edit.setFont(QFont("monospace"))
         form.addRow("&Address:", self.address_edit)
 
@@ -1559,6 +1560,11 @@ class AddWatchOnlyDialog(QDialog):
         self.label_edit.setPlaceholderText("e.g. Cold storage, Treasury")
         form.addRow("&Label (optional):", self.label_edit)
         layout.addLayout(form)
+
+        # ENS forward-resolution status: "resolving…" → "→ 0x…" / "not found".
+        self.resolved_lbl = QLabel("")
+        self.resolved_lbl.setVisible(False)
+        layout.addWidget(self.resolved_lbl)
 
         self.error_lbl = QLabel("")
         self.error_lbl.setStyleSheet("color: palette(highlighted-text);")
@@ -1585,45 +1591,68 @@ class AddWatchOnlyDialog(QDialog):
         self._ens_timer.timeout.connect(self._kick_ens_lookup)
         # Track in-flight workers so they survive Python GC.
         self._ens_workers: list[QThread] = []
+        # Set when the entered ENS name forward-resolves to an address; used
+        # in place of the raw text on accept.
+        self._ens_forward_addr: Optional[str] = None
 
     def _on_address_changed(self) -> None:
-        """Light validation as the user types: enable Add only when
-        the address looks like a 42-char 0x-prefixed hex string.
-        Full checksum normalisation happens on accept so a
-        lower-case paste is accepted."""
+        """Accept either a 0x address or an ENS name as the user types.
+        A 42-char 0x hex enables Add immediately (and kicks a *reverse*
+        lookup to pre-fill the Label); a name like ``vitalik.eth`` is
+        *forward*-resolved to an address, with Add disabled until it
+        resolves. Both run debounced against Ethereum mainnet. Full
+        checksum normalisation happens on accept (lower-case paste OK)."""
         text = self.address_edit.text().strip()
-        ok = text.startswith("0x") and len(text) == 42
-        try:
-            int(text, 16)
-        except ValueError:
-            ok = False
-        self.add_btn.setEnabled(ok)
+        self._ens_forward_addr = None
+        is_addr = text.startswith("0x") and len(text) == 42
+        if is_addr:
+            try:
+                int(text, 16)
+            except ValueError:
+                is_addr = False
+        is_name = "." in text and not text.startswith("0x") and len(text) >= 5
+        if is_addr:
+            self.add_btn.setEnabled(True)
+            self._set_resolved(None)
+            self._ens_timer.start()           # reverse → Label
+        elif is_name:
+            self.add_btn.setEnabled(False)    # until it resolves
+            self._set_resolved("resolving ENS…")
+            self._ens_timer.start()           # forward → address
+        else:
+            self.add_btn.setEnabled(False)
+            self._set_resolved(None)
+            self._ens_timer.stop()
         if not text:
             self.error_lbl.setVisible(False)
-        if ok:
-            # Restart the debounce timer so we only query ENS once
-            # the user stops typing for 300 ms.
-            self._ens_timer.start()
-        else:
-            self._ens_timer.stop()
+
+    def _set_resolved(self, text: Optional[str]) -> None:
+        self.resolved_lbl.setText(text or "")
+        self.resolved_lbl.setVisible(bool(text))
 
     def _kick_ens_lookup(self) -> None:
-        """Start a reverse-resolve against Ethereum mainnet. ENS
-        lives on chain 1 regardless of which chain the user is
-        currently viewing on; the resulting name is informational
-        and used only to pre-populate the empty Label field."""
+        """Debounced ENS query against Ethereum mainnet (ENS lives on
+        chain 1 regardless of the viewing chain). A 0x address →
+        reverse-resolve for the Label; a name → forward-resolve to an
+        address."""
         text = self.address_edit.text().strip()
-        if not (text.startswith("0x") and len(text) == 42):
-            return
         from ..chains import DEFAULT_CHAINS
-        from ..ens import EnsReverseWorker
+        from ..ens import EnsResolveWorker, EnsReverseWorker
         mainnet = next(
             (c for c in DEFAULT_CHAINS if c.chain_id == 1), None,
         )
         if mainnet is None:
             return
-        worker = EnsReverseWorker(mainnet.rpc_url, text)
-        worker.resolved.connect(self._on_ens_resolved)
+        if text.startswith("0x") and len(text) == 42:
+            rev = EnsReverseWorker(mainnet.rpc_url, text)
+            rev.resolved.connect(self._on_ens_reverse)
+            worker: QThread = rev
+        elif "." in text:
+            fwd = EnsResolveWorker(mainnet.rpc_url, text)
+            fwd.resolved.connect(self._on_ens_forward)
+            worker = fwd
+        else:
+            return
         self._ens_workers.append(worker)
         worker.finished.connect(
             lambda w=worker: self._ens_workers.remove(w)
@@ -1632,12 +1661,10 @@ class AddWatchOnlyDialog(QDialog):
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
-    def _on_ens_resolved(self, address: str, name: str) -> None:
-        """Drop the verified ENS name into the Label field — only
-        when the user is still looking at the same address (they
-        may have edited further while the lookup was in flight)
-        AND they haven't typed their own label, which we never
-        overwrite."""
+    def _on_ens_reverse(self, address: str, name: str) -> None:
+        """Reverse result: drop the verified ENS name into an empty
+        Label, only when the user is still on the same address (they
+        may have edited further while the lookup was in flight)."""
         if self.address_edit.text().strip().lower() != address.lower():
             return
         if self.label_edit.text().strip():
@@ -1645,9 +1672,27 @@ class AddWatchOnlyDialog(QDialog):
         if name:
             self.label_edit.setText(name)
 
+    def _on_ens_forward(self, name: str, address: str) -> None:
+        """Forward result: a name → address. Show the resolved address,
+        enable Add, and offer the name as the default Label. Ignored if
+        the user has since edited the field."""
+        if self.address_edit.text().strip().lower() != name.lower():
+            return
+        if address:
+            self._ens_forward_addr = address
+            self._set_resolved(f"→ {address}")
+            self.add_btn.setEnabled(True)
+            if not self.label_edit.text().strip():
+                self.label_edit.setText(name)
+        else:
+            self._ens_forward_addr = None
+            self._set_resolved("ENS name not found")
+            self.add_btn.setEnabled(False)
+
     def _on_accept(self) -> None:
         from eth_utils import to_checksum_address
-        text = self.address_edit.text().strip()
+        # An ENS name that forward-resolved → use the resolved address.
+        text = self._ens_forward_addr or self.address_edit.text().strip()
         try:
             checksum = to_checksum_address(text)
         except Exception as e:

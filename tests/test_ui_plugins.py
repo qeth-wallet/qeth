@@ -2072,7 +2072,7 @@ class TestWalletsPlugin:
         addr = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
         dlg.address_edit.setText(addr)
         # Simulate the worker resolving by calling the slot directly.
-        dlg._on_ens_resolved(addr, "vitalik.eth")
+        dlg._on_ens_reverse(addr, "vitalik.eth")
         assert dlg.label_edit.text() == "vitalik.eth"
 
     def test_add_watch_only_dialog_does_not_overwrite_user_label(
@@ -2084,8 +2084,39 @@ class TestWalletsPlugin:
         addr = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
         dlg.address_edit.setText(addr)
         dlg.label_edit.setText("My label")
-        dlg._on_ens_resolved(addr, "vitalik.eth")
+        dlg._on_ens_reverse(addr, "vitalik.eth")
         assert dlg.label_edit.text() == "My label"
+
+    def test_add_watch_only_dialog_resolves_ens_name(self, qtbot, tmp_qeth):
+        """Typing an ENS name forward-resolves to an address: Add enables,
+        the resolved address shows, the name pre-fills the Label, and accept
+        stores the resolved (checksummed) address — not the name text."""
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        dlg.address_edit.setText("vitalik.eth")
+        # A name (not a 0x address) leaves Add disabled until it resolves.
+        assert not dlg.add_btn.isEnabled()
+        dlg._on_ens_forward(
+            "vitalik.eth", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
+        assert dlg.add_btn.isEnabled()
+        assert dlg.resolved_lbl.isVisibleTo(dlg)
+        assert dlg.label_edit.text() == "vitalik.eth"   # default label
+        dlg._on_accept()
+        acct = dlg.result_account()
+        assert acct["address"] == "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+        assert acct["source"] == "watch_only"
+
+    def test_add_watch_only_dialog_unresolved_ens_stays_disabled(
+        self, qtbot, tmp_qeth,
+    ):
+        from qeth.plugins.wallets import AddWatchOnlyDialog
+        dlg = AddWatchOnlyDialog(set())
+        qtbot.addWidget(dlg)
+        dlg.address_edit.setText("does-not-exist-zzz.eth")
+        dlg._on_ens_forward("does-not-exist-zzz.eth", "")   # empty = not found
+        assert not dlg.add_btn.isEnabled()
+        assert dlg.resolved_lbl.isVisibleTo(dlg)                 # shows "not found"
 
     def test_add_watch_only_dialog_ignores_stale_ens_result(
         self, qtbot, tmp_qeth,
@@ -2099,7 +2130,7 @@ class TestWalletsPlugin:
         qtbot.addWidget(dlg)
         dlg.address_edit.setText("0x" + "11" * 20)
         # Resolver returns a name for a now-stale address.
-        dlg._on_ens_resolved(
+        dlg._on_ens_reverse(
             "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "vitalik.eth",
         )
         assert dlg.label_edit.text() == ""

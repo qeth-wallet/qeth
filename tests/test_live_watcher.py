@@ -37,7 +37,7 @@ class _FakeStreamWatcher(LiveWatcher):
     every 20 ms, numbered from a per-chain base so a test can tell chains
     apart. Loops until cancelled/stopped, like a live connection."""
 
-    async def _serve_connection(self, chain):  # type: ignore[override]
+    async def _serve_connection(self, chain, account=None):  # type: ignore[override]
         self.link_state.emit(chain, True)
         n = chain.chain_id * 1000
         while not self._stopping.is_set():
@@ -186,3 +186,25 @@ def test_probe_one_rebroadcast_is_capped(qapp):
     for _ in range(LiveWatcher.REBROADCAST_MAX_ATTEMPTS + 3):
         asyncio.run(w._probe_one(_chain(100), tx, w3))
     assert len(prov.sent) == LiveWatcher.REBROADCAST_MAX_ATTEMPTS
+
+
+# --- Transfer-log subscription (Phase 2) ----------------------------------
+
+def test_transfer_filters_topics():
+    from qeth.live_watcher import TRANSFER_TOPIC0
+    acct = "0x" + "ab" * 20
+    padded = "0x" + "00" * 12 + "ab" * 20
+    incoming, outgoing = LiveWatcher._transfer_filters(acct)
+    assert incoming == [TRANSFER_TOPIC0, None, padded]   # to = account
+    assert outgoing == [TRANSFER_TOPIC0, padded, None]   # from = account
+
+
+def test_handle_log_emits_balance_dirty(qapp):
+    w = _watcher()
+    got: list = []
+    w.balance_dirty.connect(lambda c, acct, tok: got.append((acct, tok)))
+    chain = _chain(100)
+    w._handle_log(chain, "0xacc", {"address": "0xTok", "removed": False})
+    # reorg-removed log re-reads too — we never trust the log's value
+    w._handle_log(chain, "0xacc", {"address": "0xTok", "removed": True})
+    assert got == [("0xacc", "0xTok"), ("0xacc", "0xTok")]

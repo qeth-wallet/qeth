@@ -58,6 +58,18 @@ def _to_int(value: Any) -> int:
     return int(value)
 
 
+# keccak256("Transfer(address,address,uint256)") — the ERC-20 Transfer event
+# topic0. Stable; defined here to keep the watcher import-light (the same
+# value lives in tx_activity.TRANSFER_TOPIC0).
+TRANSFER_TOPIC0 = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+
+
+def _topic_address(account: str) -> str:
+    """A 20-byte address as a 32-byte (left-zero-padded) log topic."""
+    return "0x" + "00" * 12 + account[2:].lower()
+
+
 class PendingTx(NamedTuple):
     """The minimum a probe needs about a pending tx, independent of the
     plugin's Transaction model so the watcher stays Qt-core-light."""
@@ -82,6 +94,7 @@ class LiveWatcher(QThread):
     link_state = Signal(object, bool)        # (chain, ws_connected)
     confirmed = Signal(object, str, object)  # (chain, hash, raw receipt dict)
     dropped = Signal(object, str)            # (chain, hash) — nonce consumed
+    balance_dirty = Signal(object, str, str)  # (chain, account, token_address)
 
     _POLL_S = 1.0          # supervisor reconcile / stop-poll cadence
     _MAX_BACKOFF_S = 30.0  # reconnect backoff ceiling
@@ -93,11 +106,16 @@ class LiveWatcher(QThread):
         self,
         chains_provider: "Callable[[], list[Chain]]",
         pending_provider: "Optional[Callable[[int], List[PendingTx]]]" = None,
+        account_provider:
+            "Optional[Callable[[], Optional[tuple[Chain, str]]]]" = None,
         parent: Optional[object] = None,
     ) -> None:
         super().__init__(parent)  # type: ignore[arg-type]
         self._chains_provider = chains_provider
         self._pending_provider = pending_provider
+        # Returns the (chain, account) currently on screen, whose ERC-20
+        # Transfer logs we subscribe to for live balances — or None.
+        self._account_provider = account_provider
         self._stopping = threading.Event()
         self._rebroadcast_attempts: dict[str, int] = {}
         self._capped_warned: set[str] = set()
@@ -122,34 +140,66 @@ class LiveWatcher(QThread):
 
     async def _serve(self) -> None:
         """Supervisor: keep one ``_watch_chain`` task alive per desired
-        chain, starting new ones and cancelling departed ones, until
-        ``stop()``."""
-        tasks: dict[int, "asyncio.Task[None]"] = {}
+        chain, restarting it when its on-screen account changes (so the
+        Transfer-log subscription re-targets), cancelling departed ones,
+        until ``stop()``."""
+        tasks: dict[int, "tuple[asyncio.Task[None], Optional[str]]"] = {}
         try:
             while not self._stopping.is_set():
-                desired = {c.chain_id: c for c in self._chains_provider()}
-                for cid, chain in desired.items():
-                    existing = tasks.get(cid)
-                    if existing is None or existing.done():
-                        tasks[cid] = asyncio.create_task(
-                            self._watch_chain(chain))
+                desired = self._desired_targets()
+                for cid, (chain, account) in desired.items():
+                    cur = tasks.get(cid)
+                    if cur is None or cur[0].done() or cur[1] != account:
+                        if cur is not None and not cur[0].done():
+                            await self._cancel(cur[0])   # account changed
+                        tasks[cid] = (asyncio.create_task(
+                            self._watch_chain(chain, account)), account)
                 for cid in [c for c in tasks if c not in desired]:
-                    tasks.pop(cid).cancel()
+                    await self._cancel(tasks.pop(cid)[0])
                 await asyncio.sleep(self._POLL_S)
         finally:
-            for t in tasks.values():
-                t.cancel()
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            await asyncio.gather(
+                *(self._cancel(t) for t, _ in tasks.values()),
+                return_exceptions=True)
 
-    async def _watch_chain(self, chain: "Chain") -> None:
+    def _desired_targets(self) -> "dict[int, tuple[Chain, Optional[str]]]":
+        """Chains to watch and, for the on-screen chain, the account whose
+        Transfer logs we also subscribe to. Pending-tx chains get newHeads
+        only (account ``None``); the current chain gets logs too. The current
+        chain may also have a pending tx — it gets both."""
+        targets: "dict[int, tuple[Chain, Optional[str]]]" = {}
+        for chain in self._chains_provider():
+            targets[chain.chain_id] = (chain, None)
+        if self._account_provider is not None:
+            cur = self._account_provider()
+            if cur is not None:
+                chain, account = cur
+                targets[chain.chain_id] = (chain, account)
+        return targets
+
+    @staticmethod
+    async def _cancel(task: "asyncio.Task[None]") -> None:
+        """Cancel a per-chain task and await its unwind, so a re-subscribe or
+        shutdown never leaves an orphaned pending task (asyncio would warn)."""
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+    async def _watch_chain(
+        self, chain: "Chain", account: Optional[str] = None,
+    ) -> None:
         """Hold a connection for one chain, reconnecting with exponential
         backoff. ``link_state(False)`` whenever down so the legacy timer
         takes over; a chain with no working ws settles into the backoff
-        idle rather than churning supervisor restarts."""
+        idle rather than churning supervisor restarts. ``account`` (the
+        on-screen account) adds Transfer-log subscriptions for live
+        balances; ``None`` means newHeads-only (a pending-tx-only chain)."""
         backoff = 1.0
         while not self._stopping.is_set():
             try:
-                await self._serve_connection(chain)
+                await self._serve_connection(chain, account)
                 backoff = 1.0  # connected + streamed then dropped; reset
             except asyncio.CancelledError:
                 raise
@@ -159,24 +209,38 @@ class LiveWatcher(QThread):
             await asyncio.sleep(min(backoff, self._MAX_BACKOFF_S))
             backoff *= 2
 
-    async def _serve_connection(self, chain: "Chain") -> None:
+    async def _serve_connection(
+        self, chain: "Chain", account: Optional[str] = None,
+    ) -> None:
         """Connect to the chain's ws endpoints in order; on the first that
-        subscribes, emit each ``newHeads`` block and probe the pending txs
-        over the same connection until it drops (then return — the caller
-        reconnects). Raise if no endpoint connects (the caller backs off).
+        subscribes, multiplex ``newHeads`` (→ block + pending-tx probe) and,
+        when ``account`` is set, the account's ERC-20 ``Transfer`` logs (→
+        ``balance_dirty``) over the one connection, routed by subscription
+        id, until it drops (then return — the caller reconnects). Raise if no
+        endpoint connects (the caller backs off).
 
         The single live-I/O seam — orchestration tests override it with a
-        synthetic emitter; the probe logic itself is tested via
-        ``_probe_one``."""
+        synthetic emitter; the probe / log logic is tested via ``_probe_one``
+        and ``_handle_log``."""
         last_err: Optional[Exception] = None
         for url in ws_urls_for(chain):
             try:
                 async with make_async_web3(url) as w3:
-                    await w3.eth.subscribe("newHeads")
+                    heads_sub = await w3.eth.subscribe("newHeads")
+                    log_subs: set = set()
+                    if account:
+                        for topics in self._transfer_filters(account):
+                            log_subs.add(await w3.eth.subscribe(
+                                "logs", {"topics": topics}))
                     self.link_state.emit(chain, True)
                     async for msg in w3.socket.process_subscriptions():
-                        self.head.emit(chain, _to_int(msg["result"]["number"]))
-                        await self._probe_pending(chain, w3)
+                        sub = msg["subscription"]
+                        if sub == heads_sub:
+                            self.head.emit(
+                                chain, _to_int(msg["result"]["number"]))
+                            await self._probe_pending(chain, w3)
+                        elif account is not None and sub in log_subs:
+                            self._handle_log(chain, account, msg["result"])
                 return
             except asyncio.CancelledError:
                 raise
@@ -184,6 +248,27 @@ class LiveWatcher(QThread):
                 last_err = e
                 log.debug("[%s] ws %s failed: %s", chain.name, url, e)
         raise last_err or RuntimeError(f"no ws endpoint for {chain.name}")
+
+    @staticmethod
+    def _transfer_filters(account: str) -> "list[list[Optional[str]]]":
+        """The two ``logs`` filter topic-lists for ERC-20 Transfers touching
+        the account: incoming (``to == account``) and outgoing
+        (``from == account``), any token contract. You can't OR across topic
+        positions in one filter, hence two subscriptions."""
+        padded = _topic_address(account)
+        return [
+            [TRANSFER_TOPIC0, None, padded],   # to = account (incoming)
+            [TRANSFER_TOPIC0, padded, None],   # from = account (outgoing)
+        ]
+
+    def _handle_log(self, chain: "Chain", account: str, log: Any) -> None:
+        """A Transfer touching the account → the token's balance changed.
+        Emit ``balance_dirty`` so the consumer re-reads ``balanceOf`` — we
+        never trust the log's value, so a removed (reorg) log is treated the
+        same: re-read gives the truth."""
+        token = log.get("address") if hasattr(log, "get") else log["address"]
+        if token:
+            self.balance_dirty.emit(chain, account, str(token))
 
     async def _probe_pending(self, chain: "Chain", w3: Any) -> None:
         """Probe every pending tx the provider reports for this chain over

@@ -80,6 +80,32 @@ if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&
 fi
 echo "DIAG: AppDir after install = $(du -sh "$APPDIR" | cut -f1)"
 
+# 3b. Trim Qt modules qeth doesn't use. It's a pure QtWidgets app (only
+#     QtCore/QtGui/QtWidgets; QtSvg/QtNetwork/QtDBus stay as runtime deps), so
+#     the heavyweight Addons — WebEngine, the whole QML/Quick stack, 3D, Charts,
+#     Multimedia, Pdf, Designer — are dead weight that dominates the size. None
+#     is a dependency of QtWidgets, so removing them is safe.
+PS="$(echo "$APPDIR"/usr/python/lib/python*/site-packages/PySide6)"
+rm -rf "$PS/Qt/qml" "$PS/Qt/resources" "$PS/Qt/translations" \
+       "$PS"/Qt/libexec 2>/dev/null
+for mod in WebEngineCore WebEngineWidgets WebEngineQuick WebChannel WebChannelQuick \
+           WebView Quick Quick3D QuickWidgets QuickControls2 QuickControls2Impl \
+           QuickTemplates2 QuickShapes QuickParticles QuickTest QuickLayouts \
+           QuickDialogs2 QuickDialogs2QuickImpl QuickDialogs2Utils QuickEffects \
+           QuickTimeline QuickVectorImage Qml QmlModels QmlWorkerScript \
+           QmlLocalStorage QmlCore QmlXmlListModel QmlMeta 3DCore 3DRender 3DInput \
+           3DLogic 3DAnimation 3DExtras 3DQuick 3DQuickRender 3DQuickScene2D \
+           Charts ChartsQml DataVisualization DataVisualizationQml Graphs \
+           GraphsWidgets Multimedia MultimediaWidgets MultimediaQuick SpatialAudio \
+           Pdf PdfWidgets PdfQuick Designer DesignerComponents Help UiTools \
+           Sql Test Bluetooth Nfc Positioning PositioningQuick Location Sensors \
+           SensorsQuick SerialPort SerialBus RemoteObjects RemoteObjectsQml \
+           Scxml ScxmlQml TextToSpeech WebSockets StateMachine StateMachineQml; do
+    rm -f "$PS/Qt/lib/libQt6${mod}".so* "$PS/Qt${mod}.abi3.so" "$PS/Qt${mod}.pyi" 2>/dev/null
+done
+rm -rf "$PS"/Qt/plugins/{qmltooling,webview,multimedia,sqldrivers,designer,position,sensors,texttospeech,scenegraph} 2>/dev/null
+echo "DIAG: AppDir after trim = $(du -sh "$APPDIR" | cut -f1)"
+
 # 4. Bundle the external (non-wheel) shared-lib deps of Qt's libs + plugins.
 #    PySide6 already ships its own libQt6*.so inside site-packages; we only need
 #    the system libs those link that aren't in the wheel.

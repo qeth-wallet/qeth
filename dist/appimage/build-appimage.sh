@@ -43,6 +43,11 @@ cp -a "/opt/python/${PYVER}" "$APPDIR/usr/python"
 M="${PYVER#cp3}"; M="${M%%-*}"                 # cp312-cp312 -> 12
 ln -sf "python3.${M}" "$APPDIR/usr/python/bin/python3"
 PY="$APPDIR/usr/python/bin/python3"
+# manylinux's CPython is built with a fixed /opt/python prefix, so pip would
+# install back THERE, not into our copy. Point its home at the AppDir for the
+# rest of the build so every install lands in the bundle's site-packages. (At
+# runtime AppRun sets the same PYTHONHOME.)
+export PYTHONHOME="$APPDIR/usr/python"
 
 # 3. qeth + bundled PySide6 + the eth stack, installed FRESH from PyPI manylinux
 #    wheels. Anything without a wheel compiles with the container's generic gcc

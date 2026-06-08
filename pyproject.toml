@@ -91,6 +91,7 @@ files = [
     # --- PySide6 UI layer (fully checked, attr-defined enforced) ---
     "qeth/__main__.py",
     "qeth/ui.py",
+    "qeth/live_watcher.py",
     "qeth/plugin.py",
     "qeth/plugins/wallets.py",
     "qeth/plugins/tokens.py",

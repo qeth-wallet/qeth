@@ -20,6 +20,14 @@ def _chain(cid: int):
     return next(c for c in DEFAULT_CHAINS if c.chain_id == cid)
 
 
+def test_construction_quiets_web3_ws_logging():
+    import logging
+    lg = logging.getLogger("web3.providers.WebSocketProvider")
+    lg.setLevel(logging.INFO)            # pretend something turned it up
+    LiveWatcher(lambda: [])              # constructing quiets it
+    assert lg.level == logging.WARNING
+
+
 def test_to_int_normalises_hex_and_int():
     """newHeads block numbers arrive as a hex str from DRPC but an int from
     publicnode (web3's subscription formatting is provider-inconsistent);

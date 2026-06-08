@@ -111,6 +111,13 @@ class LiveWatcher(QThread):
         parent: Optional[object] = None,
     ) -> None:
         super().__init__(parent)  # type: ignore[arg-type]
+        # web3's ws provider logs every connect / subscribe / disconnect at
+        # INFO; on an account-switching session (each switch re-subscribes)
+        # that's a wall of noise. Quiet to WARNING — errors still surface, and
+        # qeth's own link_state (DEBUG) covers connection state.
+        for _name in ("web3.providers.WebSocketProvider",
+                      "web3.providers.persistent.subscription_manager"):
+            logging.getLogger(_name).setLevel(logging.WARNING)
         self._chains_provider = chains_provider
         self._pending_provider = pending_provider
         # Returns the (chain, account) currently on screen, whose ERC-20

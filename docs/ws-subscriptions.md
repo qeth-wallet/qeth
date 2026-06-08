@@ -1,8 +1,27 @@
 # qeth — WebSocket live updates (design note)
 
-**Status:** design sketch, not implemented. Captures the agreed approach so
-it can be picked up later. Pairs with `ARCHITECTURE.md`; `CLAUDE.md` covers
-the recurring web3/transport traps this would have to respect.
+**Status:** **implemented** — on by default (`QETH_LIVE_WS=0` to disable).
+Modules: `async_chain.py` (async transport), `live_watcher.py` (the watcher,
+pending-tx probe, and Transfer-log handling), wired through
+`plugins/transactions.py` (owns the watcher; feeds chains/pending/account
+providers; relays to tokens) and `plugins/tokens.py` (live balances + sweep
+throttle). This note is the design rationale; the code is the source of
+truth. Pairs with `ARCHITECTURE.md`; `CLAUDE.md` covers the web3/transport
+traps it respects.
+
+**Deltas from this sketch as built:**
+- The receipt/nonce probe rides the **same** ws connection that pushed the
+  head (raw `make_request`), not a separate async-http client — simpler, and
+  reconnect + the legacy timer cover resilience.
+- newHeads block numbers are **provider-inconsistent** (hex `str` from DRPC,
+  `int` from publicnode) — normalised in `live_watcher._to_int`. Caught a
+  flapping bug; the same care applies to any hex log field.
+- The 60 s balance sweep **slows to 5 min** when ws is live (still covers
+  native + is the floor), rather than being removed.
+- `Chain.ws_url` carries validated explicit endpoints (§8); the picker ws
+  field is deferred (derivation/inheritance covers real cases).
+- **Still future work:** native-via-newHeads (§3a) and a unified async
+  query path — the probe stays on the ws/raw path for now.
 
 The goal: stop *polling* the chain on wall-clock timers and instead **react
 to what actually happened** — a new block, a transfer touching one of our

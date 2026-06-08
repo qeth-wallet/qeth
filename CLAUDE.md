@@ -10,7 +10,9 @@ user's Qt theme applies.
 - `qeth/ui.py` — PySide6 main window, dialogs, token panel, QThread workers
 - `qeth/store.py` — JSON config at `~/.qeth/config.json` (accounts, chains, default account, hidden/shown token overrides)
 - `qeth/chain.py` — sync JSON-RPC client (`EthClient`) shaped like `w3.eth.*`; the seam for swapping to web3.py later
-- `qeth/chains.py` — `Chain` dataclass + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, all on DRPC)
+- `qeth/async_chain.py` — async transport (`AsyncWeb3` over a `WebSocketProvider` or async-http failover stack) for the live watcher; mirrors `chain.py`'s UA / failover / PoA plumbing. `ws_urls_for(chain)` resolves explicit `Chain.ws_url` → inherited default → derived `https→wss`.
+- `qeth/live_watcher.py` — the WebSocket live-update watcher: a `QThread` running one asyncio loop that subscribes per active chain to `newHeads` (→ pending-tx confirmation, the async port of `PendingProbeWorker`) and the on-screen account's ERC-20 `Transfer` logs (→ live token balances). **On by default**; `QETH_LIVE_WS=0` disables it. A pure accelerator over the always-on polling floor. Design + rationale in `docs/ws-subscriptions.md`.
+- `qeth/chains.py` — `Chain` dataclass (incl. `ws_url` for the live watcher) + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, all on DRPC)
 - `qeth/ledger.py` — Ledger account discovery via `ledgereth`, runs in a `QThread`
 - `qeth/tokens.py` — token discovery sources (currently Blockscout); `TokenSource` abstract base
 - `qeth/tokenlists.py` — curated token whitelists from Uniswap / CoinGecko / Curve / 1inch, merged + disk-cached at `~/.qeth/tokenlists/`

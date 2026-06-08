@@ -114,3 +114,19 @@ def test_tokens_on_balance_dirty_throttles_for_current_view(qtbot, monkeypatch):
     # firing re-reads the authoritative balances for the view
     tp._on_live_refresh()
     assert calls == ["0xABC"]
+
+
+def test_tokens_sweep_slows_when_current_chain_ws_live(qtbot):
+    from PySide6.QtCore import QTimer
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp._refresh_timer = QTimer()
+    tp._refresh_timer.setInterval(TokensPlugin.REFRESH_INTERVAL_MS)
+    tp._displayed_view = (100, "0xabc")
+
+    tp.on_ws_link_state(SimpleNamespace(chain_id=100), True)    # current chain live
+    assert tp._refresh_timer.interval() == TokensPlugin.SLOW_REFRESH_INTERVAL_MS
+    tp.on_ws_link_state(SimpleNamespace(chain_id=100), False)   # dropped -> floor
+    assert tp._refresh_timer.interval() == TokensPlugin.REFRESH_INTERVAL_MS
+    tp.on_ws_link_state(SimpleNamespace(chain_id=137), True)    # other chain -> no change
+    assert tp._refresh_timer.interval() == TokensPlugin.REFRESH_INTERVAL_MS

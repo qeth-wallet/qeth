@@ -984,6 +984,12 @@ class TransactionsPlugin(Plugin):
 
     def _on_ws_link_state(self, chain, connected: bool) -> None:
         log.debug("ws %s: %s", chain.name, "up" if connected else "down")
+        tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
+        if tokens is not None and hasattr(tokens, "on_ws_link_state"):
+            try:
+                tokens.on_ws_link_state(chain, connected)
+            except Exception:
+                log.exception("on_ws_link_state relay failed")
 
     def _live_account_provider(self) -> "Optional[tuple[Any, str]]":
         """The on-screen (chain, account) for the LiveWatcher's Transfer-log

@@ -242,6 +242,10 @@ class TokensPlugin(Plugin):
     # Coalesce a burst of ws Transfer logs (a swap's many legs) into one
     # balance refresh, fired this long after the first dirty event.
     LIVE_REFRESH_DEBOUNCE_MS = 1500
+    # When the on-screen chain has a live ws (Transfer logs carry token
+    # balances), the periodic sweep slows to this — still covers native and
+    # is the floor if ws drops, but stops the per-minute idle polling.
+    SLOW_REFRESH_INTERVAL_MS = 300_000  # 5 min
 
     def __init__(self, store):
         super().__init__()
@@ -277,6 +281,9 @@ class TokensPlugin(Plugin):
         # on_balance_dirty (relayed from the TransactionsPlugin's LiveWatcher).
         self._live_refresh_timer: Optional[QTimer] = None
         self._live_refresh_addr: Optional[str] = None
+        # Chains with a live ws connection (LiveWatcher link_state, relayed) —
+        # drives the sweep-interval throttle.
+        self._ws_live_chains: set[int] = set()
         self._discovery_in_flight: set[tuple[int, str]] = set()
         # Per (chain_id, addr_lower): contracts pulled from a
         # confirmed tx receipt's Transfer logs since the last
@@ -507,6 +514,29 @@ class TokensPlugin(Plugin):
         if (addr and self._displayed_view is not None
                 and self._displayed_view[1] == addr.lower()):
             self._refresh(addr)
+
+    def on_ws_link_state(self, chain, connected: bool) -> None:
+        """ws link up/down for a chain (LiveWatcher, relayed). When the
+        on-screen chain's ws is live, Transfer logs carry token balances, so
+        the periodic sweep slows to a safety net (still covers native + is the
+        floor if ws drops)."""
+        if connected:
+            self._ws_live_chains.add(chain.chain_id)
+        else:
+            self._ws_live_chains.discard(chain.chain_id)
+        self._apply_sweep_interval()
+
+    def _apply_sweep_interval(self) -> None:
+        """Set the sweep timer to the slow interval when the on-screen chain
+        has a live ws, else the normal one. Re-evaluated on every link_state
+        — and a chain switch re-emits link_state as the connection retargets,
+        so the view change is covered too."""
+        if self._refresh_timer is None:
+            return
+        cur = self._displayed_view[0] if self._displayed_view else None
+        live = cur is not None and cur in self._ws_live_chains
+        self._refresh_timer.setInterval(
+            self.SLOW_REFRESH_INTERVAL_MS if live else self.REFRESH_INTERVAL_MS)
 
     def note_receipt_logs(self, chain, receipt) -> None:
         """Called by TransactionsPlugin when a tx receipt comes in.

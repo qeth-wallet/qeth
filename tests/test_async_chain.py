@@ -29,6 +29,28 @@ def test_ws_urls_for_derives_wss_from_http():
     assert len(urls) == len(set(urls))
 
 
+def test_ws_urls_for_uses_explicit_ws_url():
+    eth = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+    assert ac.ws_urls_for(eth) == [
+        "wss://eth.drpc.org", "wss://ethereum-rpc.publicnode.com"]
+
+
+def test_ws_urls_for_inherits_default_for_custom_rpc():
+    from qeth.chains import Chain
+    # a custom http RPC override of Ethereum (no ws_url of its own) still gets
+    # the default chain's validated ws endpoints
+    custom = Chain("Eth-custom", 1, "https://my-eth-node.example")
+    assert ac.ws_urls_for(custom) == [
+        "wss://eth.drpc.org", "wss://ethereum-rpc.publicnode.com"]
+
+
+def test_ws_urls_for_derives_for_unknown_chain():
+    from qeth.chains import Chain
+    # unknown chain, no ws_url anywhere -> derive wss from the http url
+    custom = Chain("Foo", 999_999, "https://foo.example")
+    assert ac.ws_urls_for(custom) == ["wss://foo.example"]
+
+
 def test_make_async_web3_picks_provider_by_scheme():
     ac._ensure_async_imports()
     w3_ws = ac.make_async_web3("wss://example.org")

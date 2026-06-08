@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 from . import USER_AGENT
 from .chain import _rpc_urls  # primary + ordered fallbacks (shared resolution)
-from .chains import Chain
+from .chains import Chain, DEFAULT_CHAINS
 
 log = logging.getLogger("qeth.async_chain")
 
@@ -141,23 +141,36 @@ def make_async_web3(
 
 
 def ws_urls_for(chain: Chain) -> list[str]:
-    """The chain's ws endpoints to try, in order.
+    """The chain's ws endpoints to try, in order:
 
-    For now derived from the http primary+fallbacks (``https://host`` →
-    ``wss://host``), which holds for DRPC and publicnode. Explicit
-    ``Chain.ws_url`` and the ``chainid.network`` wss entries are a later
-    task; until then a chain whose host doesn't serve ws on the same
-    origin simply fails to connect and the watcher falls back to http."""
-    out: list[str] = []
+      1. the chain's explicit ``ws_url`` — or, for a custom-RPC override of a
+         known chain (one with no ``ws_url`` of its own), the matching
+         ``DEFAULT_CHAINS`` entry's, so overriding Ethereum's http RPC still
+         gets ws;
+      2. else derived from the http primary+fallbacks (``https://host`` →
+         ``wss://host``), which holds when the host serves ws on the same
+         origin (DRPC, publicnode).
+
+    A chain with no resolvable / working ws simply fails to connect and the
+    watcher falls back to http polling (the legacy timers)."""
+    explicit = tuple(chain.ws_url)
+    if not explicit:
+        default = next((c for c in DEFAULT_CHAINS
+                        if c.chain_id == chain.chain_id), None)
+        explicit = tuple(default.ws_url) if default else ()
+    if explicit:
+        candidates: list[str] = list(explicit)
+    else:
+        candidates = []
+        for u in _rpc_urls(chain):
+            if u.startswith("https://"):
+                candidates.append("wss://" + u[len("https://"):])
+            elif u.startswith("http://"):
+                candidates.append("ws://" + u[len("http://"):])
     seen: set[str] = set()
-    for u in _rpc_urls(chain):
-        if u.startswith("https://"):
-            ws = "wss://" + u[len("https://"):]
-        elif u.startswith("http://"):
-            ws = "ws://" + u[len("http://"):]
-        else:
-            continue
-        if ws not in seen:
+    out: list[str] = []
+    for ws in candidates:
+        if ws and ws not in seen:
             seen.add(ws)
             out.append(ws)
     return out

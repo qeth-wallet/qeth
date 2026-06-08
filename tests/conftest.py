@@ -25,6 +25,11 @@ import pytest
 # already-set value alone (someone might want to run a visible test).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# The ws live watcher is on by default in the app, but tests must not open
+# real ws connections (or spawn QThreads the fixtures don't manage). Disable
+# it for the suite; the watcher's own tests opt back in via monkeypatch.
+os.environ.setdefault("QETH_LIVE_WS", "0")
+
 
 @pytest.fixture
 def tmp_qeth(tmp_path, monkeypatch) -> Path:

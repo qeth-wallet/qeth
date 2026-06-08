@@ -58,8 +58,23 @@ def test_attach_creates_live_watcher_when_flagged(qtbot, monkeypatch):
     assert plugin._live_watcher.isFinished()
 
 
+def test_attach_enables_live_watcher_by_default(qtbot, monkeypatch):
+    monkeypatch.delenv("QETH_LIVE_WS", raising=False)   # no env -> on by default
+    plugin = TransactionsPlugin(disk_cache=Mock())
+    host = Mock()
+    host.current_chain = lambda: None       # nothing on screen -> watches nothing
+    host.selected_address = None
+    plugin.attach(host)
+    try:
+        assert plugin._live_watcher is not None
+        qtbot.waitUntil(lambda: plugin._live_watcher.isRunning(), timeout=2000)
+    finally:
+        if plugin._live_watcher is not None:
+            plugin._live_watcher.stop()
+
+
 def test_attach_skips_live_watcher_without_flag(qtbot, monkeypatch):
-    monkeypatch.delenv("QETH_LIVE_WS", raising=False)
+    monkeypatch.setenv("QETH_LIVE_WS", "0")   # explicit opt-out (on by default)
     plugin = TransactionsPlugin(disk_cache=Mock())
     plugin.attach(Mock())
     assert plugin._live_watcher is None
@@ -74,7 +89,7 @@ def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
     """The on-screen (chain, account) snapshot tracks the view, and
     balance_dirty relays to TokensPlugin.on_balance_dirty (no real watcher —
     we stand a Mock in so no ws connection opens)."""
-    monkeypatch.delenv("QETH_LIVE_WS", raising=False)
+    monkeypatch.setenv("QETH_LIVE_WS", "0")   # explicit opt-out (on by default)
     gnosis = SimpleNamespace(chain_id=100)
     plugin = TransactionsPlugin(disk_cache=Mock())
     tokens = Mock()

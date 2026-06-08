@@ -917,12 +917,15 @@ class TransactionsPlugin(Plugin):
         super().attach(host)
         self._pending_watcher = PendingTxWatcher(self, parent=self)
         self._pending_watcher.start()
-        # Opt-in ws live watcher: subscribes to newHeads per chain-with-a-
-        # pending-tx and confirms on the mining block. The polling watcher
-        # above stays the floor (covers ws-down chains + brand-new txs), so
-        # this is purely an accelerator; confirmed/dropped route into the
-        # same idempotent handlers. aboutToQuit joins the asyncio thread.
-        if os.environ.get("QETH_LIVE_WS"):
+        # ws live watcher (on by default; set QETH_LIVE_WS=0 to disable):
+        # subscribes to newHeads per chain-with-a-pending-tx (confirms on the
+        # mining block) and the on-screen account's ERC-20 Transfer logs (live
+        # token balances). The polling watcher above stays the floor — covers
+        # ws-down chains, brand-new txs, and native balances — so this is
+        # purely an accelerator; confirmed / dropped / balance_dirty route
+        # into idempotent handlers. aboutToQuit joins the asyncio thread.
+        if os.environ.get("QETH_LIVE_WS", "1").strip().lower() not in (
+                "0", "false", "no", "off", ""):
             self._live_watcher = LiveWatcher(
                 self._live_chains_provider,
                 self._live_pending_provider,
@@ -938,7 +941,7 @@ class TransactionsPlugin(Plugin):
             if app is not None:
                 app.aboutToQuit.connect(self._live_watcher.stop)
             self._live_watcher.start()
-            log.info("ws live watcher enabled (QETH_LIVE_WS)")
+            log.info("ws live watcher enabled")
         # Catch txs sent from another wallet client: the explorer-backed
         # history only refreshes on tab/account/chain change (and the
         # _is_full_history short-circuit means a "complete" cache never

@@ -3318,6 +3318,16 @@ def _format_usd(usd) -> str:
     return f"{usd:.6f} USD"
 
 
+# A chain's absolute minimum priority fee. Gnosis (Nethermind/Erigon)
+# rejects a tx whose EffectivePriorityFeePerGas is < 1 wei outright
+# ("FeeTooLow … 0 < 1"). Its base fee is a few wei, so baseFee×5% underflows
+# to 0, and eth_maxPriorityFeePerGas returns 0 while the chain is idle —
+# leaving a 0 tip the node bounces. This floor keeps it above the threshold.
+# It binds only when every other signal is already 0, so it never overpays
+# where a real fee market exists (and the cost is negligible regardless).
+_MIN_PRIORITY_FEE_WEI = 1
+
+
 def apply_gas_policy(
     *,
     estimated_gas: int,
@@ -3335,10 +3345,10 @@ def apply_gas_policy(
 
       gas limit                = max(estimate × 1.5, dapp gas)
       EIP-1559 chain, baseFee > 0:
-        maxPriorityFeePerGas   = max(baseFee × 0.05, node tip)
+        maxPriorityFeePerGas   = max(baseFee × 0.05, node tip, 1 wei)
         maxFeePerGas           = max(baseFee × 2, baseFee + tip)  (≥ dapp's)
       EIP-1559 chain, baseFee == 0 (BSC-style):
-        maxPriorityFeePerGas   = max(gasPrice, node tip)
+        maxPriorityFeePerGas   = max(gasPrice, node tip, 1 wei)
         maxFeePerGas           = tip × 2  (≥ dapp's)
       Legacy chain:
         gasPrice               = current × 1.35  (≥ dapp's)
@@ -3374,8 +3384,9 @@ def apply_gas_policy(
             ref = base_fee_wei
             priority = (ref * 5) // 100
             # …but on OP-stack L2s baseFee is ~0, so 5 % underflows the
-            # tip; floor it at the node's own suggested minimum.
-            priority = max(priority, max_priority_fee_wei)
+            # tip; floor it at the node's own suggested minimum, and below
+            # that at the chain hard minimum (Gnosis idle: both are 0).
+            priority = max(priority, max_priority_fee_wei, _MIN_PRIORITY_FEE_WEI)
             # 2× base fee for spike headroom, but never below base+tip —
             # that's what binds when the base fee is negligible.
             max_fee = max(ref * 2, ref + priority)
@@ -3388,7 +3399,7 @@ def apply_gas_policy(
             # Use gas_price (floored at the node tip) as the priority,
             # doubled as the max_fee ceiling.
             ref = gas_price_wei
-            priority = max(ref, max_priority_fee_wei)
+            priority = max(ref, max_priority_fee_wei, _MIN_PRIORITY_FEE_WEI)
             max_fee = priority * 2
         if (req.max_fee_per_gas is not None
                 and req.max_fee_per_gas > max_fee):

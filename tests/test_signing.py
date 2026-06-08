@@ -253,6 +253,28 @@ class TestApplyGasPolicy1559:
         )
         assert out["max_priority_fee_per_gas"] == 10**9  # 20 gwei × 0.05
 
+    def test_gnosis_tiny_base_fee_floors_tip_at_one_wei(self):
+        """Gnosis: a few-wei base fee makes 5% underflow to 0, and the node
+        tip is 0 when the chain is idle — without a floor the tip is 0 and
+        Nethermind rejects it ("FeeTooLow … 0 < 1"). Floor at 1 wei, and the
+        effective tip min(priority, maxFee - baseFee) must clear 1."""
+        out = apply_gas_policy(
+            estimated_gas=21_000, eip1559=True,
+            base_fee_wei=18, gas_price_wei=0, req=_req(),
+            max_priority_fee_wei=0)
+        prio = out["max_priority_fee_per_gas"]
+        assert prio >= 1
+        assert min(prio, out["max_fee_per_gas"] - 18) >= 1   # effective tip
+
+    def test_priority_floor_does_not_clobber_a_real_node_tip(self):
+        """The 1-wei floor binds only when every other signal is 0; a real
+        node tip (active chain) still wins."""
+        out = apply_gas_policy(
+            estimated_gas=21_000, eip1559=True,
+            base_fee_wei=12, gas_price_wei=0, req=_req(),
+            max_priority_fee_wei=60_059)
+        assert out["max_priority_fee_per_gas"] == 60_059
+
     def test_dapp_max_fee_raises_the_floor(self):
         # Dapp's maxFeePerGas raises our suggestion (it's an upper-
         # bound safety buffer — keeping the ceiling low risks a

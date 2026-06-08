@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import html as _html
 import logging
+import os
 import time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -61,6 +62,7 @@ from ..contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
 from ..chain import EthClient, wei_to_ether
+from ..live_watcher import LiveWatcher, PendingTx
 from ..signing import ReplacementFloor, SignerError, SigningRequest
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
@@ -280,6 +282,10 @@ class PendingTxWatcher(QObject):
         self._timer.stop()
 
     def _tick(self) -> None:
+        # Refresh the ws live watcher's pending snapshot from the cache —
+        # picks up app-restart pending txs and prunes confirmed/dropped ones
+        # (no-op when the live watcher is off).
+        self._plugin._rebuild_live_snapshot()
         host = self._plugin.host
         if host is None:
             return
@@ -342,6 +348,31 @@ class PendingTxWatcher(QObject):
 
 
 log = logging.getLogger("qeth.plugin.transactions")
+
+
+def _build_pending_snapshot(
+    cache: "dict[tuple[int, str], list]",
+    chain_lookup: "Callable[[int], Any]",
+) -> "dict[int, tuple[Any, list[PendingTx]]]":
+    """Pure: scan the tx cache for pending entries and group them per chain
+    as ``{chain_id: (Chain, [PendingTx, ...])}`` — the immutable snapshot the
+    LiveWatcher reads from its asyncio thread. Pending txs for the same chain
+    but different accounts are merged. Chains the host can't resolve are
+    skipped."""
+    snap: "dict[int, tuple[Any, list[PendingTx]]]" = {}
+    for (chain_id, _addr), txs in cache.items():
+        pend = [PendingTx(t.hash, t.from_addr, t.nonce, t.raw_signed)
+                for t in txs if t.pending]
+        if not pend:
+            continue
+        entry = snap.get(chain_id)
+        if entry is not None:
+            snap[chain_id] = (entry[0], entry[1] + pend)
+            continue
+        chain = chain_lookup(chain_id)
+        if chain is not None:
+            snap[chain_id] = (chain, pend)
+    return snap
 
 
 # --- decoded-call renderer ------------------------------------------------
@@ -866,6 +897,12 @@ class TransactionsPlugin(Plugin):
         # Wired in attach(); polls for receipts of broadcast txs whose
         # hashes are sitting in cache with pending=True.
         self._pending_watcher: Optional[PendingTxWatcher] = None
+        # Optional ws live watcher (QETH_LIVE_WS): confirms pending txs on the
+        # block they mine in, alongside the polling watcher (the floor).
+        self._live_watcher: Optional[LiveWatcher] = None
+        # Immutable per-chain pending-tx snapshot the LiveWatcher reads from
+        # its asyncio thread; rebuilt + atomically swapped on the main thread.
+        self._live_snapshot: "dict[int, tuple[Any, list[PendingTx]]]" = {}
         # Keys with a NonceCheckWorker in flight (coalesce polls).
         self._nonce_in_flight: set[tuple[int, str]] = set()
         self._nonce_timer: Optional[QTimer] = None
@@ -876,6 +913,25 @@ class TransactionsPlugin(Plugin):
         super().attach(host)
         self._pending_watcher = PendingTxWatcher(self, parent=self)
         self._pending_watcher.start()
+        # Opt-in ws live watcher: subscribes to newHeads per chain-with-a-
+        # pending-tx and confirms on the mining block. The polling watcher
+        # above stays the floor (covers ws-down chains + brand-new txs), so
+        # this is purely an accelerator; confirmed/dropped route into the
+        # same idempotent handlers. aboutToQuit joins the asyncio thread.
+        if os.environ.get("QETH_LIVE_WS"):
+            self._live_watcher = LiveWatcher(
+                self._live_chains_provider,
+                self._live_pending_provider,
+                parent=self,
+            )
+            self._live_watcher.confirmed.connect(self._on_receipt_confirmed)
+            self._live_watcher.dropped.connect(self._on_tx_dropped)
+            self._live_watcher.link_state.connect(self._on_ws_link_state)
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self._live_watcher.stop)
+            self._live_watcher.start()
+            log.info("ws live watcher enabled (QETH_LIVE_WS)")
         # Catch txs sent from another wallet client: the explorer-backed
         # history only refreshes on tab/account/chain change (and the
         # _is_full_history short-circuit means a "complete" cache never
@@ -892,6 +948,35 @@ class TransactionsPlugin(Plugin):
         if self._abi_source is not None and hasattr(
                 self._abi_source, "set_storage_reader"):
             self._abi_source.set_storage_reader(self._abi_read_storage)
+
+    # --- ws live watcher wiring -------------------------------------------
+
+    def _live_chains_provider(self) -> "list[Any]":
+        """Chains to watch live = those with a pending tx. Read from the
+        asyncio thread; returns the current immutable snapshot's Chains."""
+        return [chain for chain, _ in self._live_snapshot.values()]
+
+    def _live_pending_provider(self, chain_id: int) -> "list[PendingTx]":
+        """Pending txs for a chain, for the live probe. Asyncio-thread read
+        of the immutable snapshot (built on the main thread)."""
+        entry = self._live_snapshot.get(chain_id)
+        return entry[1] if entry is not None else []
+
+    def _rebuild_live_snapshot(self) -> None:
+        """Main-thread rebuild of the pending snapshot the LiveWatcher reads,
+        assigning a fresh dict (atomic swap → no lock). Cheap no-op when the
+        live watcher is disabled."""
+        if self._live_watcher is None:
+            return
+        host = self.host
+        chain_lookup = getattr(host, "chain_by_id", None) if host else None
+        if not callable(chain_lookup):
+            self._live_snapshot = {}
+            return
+        self._live_snapshot = _build_pending_snapshot(self._cache, chain_lookup)
+
+    def _on_ws_link_state(self, chain, connected: bool) -> None:
+        log.debug("ws %s: %s", chain.name, "up" if connected else "down")
 
     def _abi_read_storage(self, chain_id: int, address: str, slot: str):
         """``eth_getStorageAt`` for the ABI source's proxy-slot probing.
@@ -1014,6 +1099,9 @@ class TransactionsPlugin(Plugin):
         # already started.
         if self._pending_watcher is not None:
             self._pending_watcher.start()
+        # Surface the new pending tx to the ws live watcher right away so it
+        # can confirm on the next block rather than after a poll refresh.
+        self._rebuild_live_snapshot()
 
     def _on_receipt_confirmed(self, chain, tx_hash: str, receipt) -> None:
         """ReceiptWorker → PendingTxWatcher → here. Find the pending

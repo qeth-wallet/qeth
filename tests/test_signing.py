@@ -1270,12 +1270,15 @@ class TestRpcProxyFailFast:
         """Fake aiohttp session. mode='fail' drops the connection on
         entry; mode='ok' returns ``result``. Counts post() calls so a
         test can prove the wire was never touched."""
+        import json
         from aiohttp import ServerDisconnectedError
         payload = result or {"jsonrpc": "2.0", "id": 1, "result": "0x10"}
 
         class _Resp:
-            async def json(self_inner):
-                return payload
+            status = 200
+
+            async def text(self_inner):
+                return json.dumps(payload)
 
         class _CM:
             async def __aenter__(self_inner):

@@ -621,7 +621,8 @@ class RpcServer:
             async with self._client.post(
                 chain.rpc_url, json=payload, timeout=15,
             ) as r:
-                data = await r.json()
+                status = r.status
+                body = await r.text()
         except (
             ClientConnectorError,
             ClientOSError,
@@ -630,6 +631,22 @@ class RpcServer:
         ):
             self._host_last_fail[host] = now
             raise
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            # Upstream returned a non-JSON / truncated body — DRPC under
+            # load, a connection cut mid-response, a Cloudflare error page,
+            # etc. Don't let a JSONDecodeError crash the dispatch with a
+            # traceback: treat it as a host failure (so fail-fast kicks in)
+            # and hand the dapp a clean JSON-RPC error.
+            self._host_last_fail[host] = now
+            log.warning(
+                "proxy %s: non-JSON response from %s (HTTP %s): %r",
+                method, host, status, body[:200],
+            )
+            raise RpcError(
+                -32603, f"upstream returned an invalid response (HTTP {status})",
+            )
         # Successful response — clear any prior fail-fast cooldown
         # so the very next request goes through normally.
         self._host_last_fail.pop(host, None)

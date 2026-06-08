@@ -117,6 +117,12 @@ done | awk '/=> \// {print $3}' \
   | grep -vE 'PySide6/|/libQt6|/libpython|/ld-linux|/libc\.so|/libm\.so|/libdl|/libpthread|/librt|/libstdc\+\+|/libgcc_s' \
   | sort -u | xargs -r -I{} cp -Lu {} "$APPDIR/usr/lib/" 2>/dev/null || true
 
+# 4b. Strip debug symbols from every bundled .so — safe for shared objects
+#     (--strip-unneeded preserves what dynamic linking needs) and saves tens of
+#     MB across the Qt libs, python extensions and the bundled system libs.
+find "$APPDIR" -type f -name '*.so*' -exec strip --strip-unneeded {} \; 2>/dev/null || true
+echo "DIAG: AppDir after strip = $(du -sh "$APPDIR" | cut -f1)"
+
 # 5. AppImage metadata at the AppDir root (AppImage conventions: AppRun + one
 #    top-level .desktop + a matching icon).
 install -Dm755 "$SRC/dist/appimage/AppRun"                          "$APPDIR/AppRun"

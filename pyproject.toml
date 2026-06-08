@@ -67,6 +67,7 @@ files = [
     # --- Qt-free core (fully checked) ---
     "qeth/__init__.py",
     "qeth/chain.py",
+    "qeth/async_chain.py",
     "qeth/chains.py",
     "qeth/store.py",
     "qeth/tokens.py",

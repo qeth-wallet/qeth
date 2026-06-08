@@ -64,6 +64,7 @@ mkdir -p "$BUILD_SRC"
 tar -C "$SRC" \
     --exclude=.git --exclude=.venv --exclude=build --exclude=dist \
     --exclude=.flatpak-builder --exclude=resume --exclude='__pycache__' \
+    --exclude='.env' --exclude='.env.local' \
     -cf - . | tar -C "$BUILD_SRC" -xf -
 "$PY" -m pip install --no-cache-dir --upgrade pip wheel >/dev/null
 # --prefix pins the install into the AppDir copy. manylinux's CPython resolves

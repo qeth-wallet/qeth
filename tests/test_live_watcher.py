@@ -20,6 +20,16 @@ def _chain(cid: int):
     return next(c for c in DEFAULT_CHAINS if c.chain_id == cid)
 
 
+def test_to_int_normalises_hex_and_int():
+    """newHeads block numbers arrive as a hex str from DRPC but an int from
+    publicnode (web3's subscription formatting is provider-inconsistent);
+    int(hex_str) raised and flapped the connection every block."""
+    from qeth.live_watcher import _to_int
+    assert _to_int("0x1819da1") == 0x1819DA1
+    assert _to_int("0x0") == 0
+    assert _to_int(46588696) == 46588696
+
+
 # --- orchestration (real thread, synthetic connection) --------------------
 
 class _FakeStreamWatcher(LiveWatcher):

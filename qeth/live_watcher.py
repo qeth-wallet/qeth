@@ -46,6 +46,18 @@ if TYPE_CHECKING:
 log = logging.getLogger("qeth.live_watcher")
 
 
+def _to_int(value: Any) -> int:
+    """Normalise a quantity from a newHeads result. web3's subscription
+    result formatting is provider-inconsistent: a block ``number`` arrives
+    web3-formatted to ``int`` from some endpoints (publicnode) but as a raw
+    ``0x`` hex string from others (DRPC). ``int(hex_str)`` raises, which —
+    uncaught in the head loop — used to drop the connection and reconnect on
+    every block (flapping). Handle both."""
+    if isinstance(value, str):
+        return int(value, 16)
+    return int(value)
+
+
 class PendingTx(NamedTuple):
     """The minimum a probe needs about a pending tx, independent of the
     plugin's Transaction model so the watcher stays Qt-core-light."""
@@ -163,7 +175,7 @@ class LiveWatcher(QThread):
                     await w3.eth.subscribe("newHeads")
                     self.link_state.emit(chain, True)
                     async for msg in w3.socket.process_subscriptions():
-                        self.head.emit(chain, int(msg["result"]["number"]))
+                        self.head.emit(chain, _to_int(msg["result"]["number"]))
                         await self._probe_pending(chain, w3)
                 return
             except asyncio.CancelledError:

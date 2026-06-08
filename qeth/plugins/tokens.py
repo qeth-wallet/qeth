@@ -239,6 +239,9 @@ class TokensPlugin(Plugin):
     name = "Tokens"
 
     REFRESH_INTERVAL_MS = 60_000
+    # Coalesce a burst of ws Transfer logs (a swap's many legs) into one
+    # balance refresh, fired this long after the first dirty event.
+    LIVE_REFRESH_DEBOUNCE_MS = 1500
 
     def __init__(self, store):
         super().__init__()
@@ -270,6 +273,10 @@ class TokensPlugin(Plugin):
         # Display state.
         self._show_all = False
         self._displayed_view: Optional[tuple[int, str]] = None
+        # Throttled live-balance refresh, driven by ws Transfer logs via
+        # on_balance_dirty (relayed from the TransactionsPlugin's LiveWatcher).
+        self._live_refresh_timer: Optional[QTimer] = None
+        self._live_refresh_addr: Optional[str] = None
         self._discovery_in_flight: set[tuple[int, str]] = set()
         # Per (chain_id, addr_lower): contracts pulled from a
         # confirmed tx receipt's Transfer logs since the last
@@ -471,6 +478,35 @@ class TokensPlugin(Plugin):
             h = topic.hex()
             return h if h.startswith("0x") else "0x" + h.lower()
         return str(topic).lower()
+
+    def on_balance_dirty(self, chain, account: str, token: str) -> None:
+        """A ws ERC-20 Transfer touched ``account`` on ``chain`` (the
+        LiveWatcher, relayed by TransactionsPlugin). If it's the on-screen
+        view, schedule a throttled refresh — re-reading balances and running
+        discovery, so a newly-received token shows up live instead of after
+        the 60 s sweep. We never trust the log's value; the refresh reads the
+        authoritative balance (a reorg-removed log re-reads the same way)."""
+        if self._displayed_view != (chain.chain_id, account.lower()):
+            return
+        self._schedule_live_refresh(account)
+
+    def _schedule_live_refresh(self, address: str) -> None:
+        """Throttle: the first dirty event arms a one-shot timer; events
+        arriving while it's pending fold in (no restart → no starvation under
+        a steady transfer stream)."""
+        self._live_refresh_addr = address
+        if self._live_refresh_timer is None:
+            self._live_refresh_timer = QTimer(self)
+            self._live_refresh_timer.setSingleShot(True)
+            self._live_refresh_timer.timeout.connect(self._on_live_refresh)
+        if not self._live_refresh_timer.isActive():
+            self._live_refresh_timer.start(self.LIVE_REFRESH_DEBOUNCE_MS)
+
+    def _on_live_refresh(self) -> None:
+        addr = self._live_refresh_addr
+        if (addr and self._displayed_view is not None
+                and self._displayed_view[1] == addr.lower()):
+            self._refresh(addr)
 
     def note_receipt_logs(self, chain, receipt) -> None:
         """Called by TransactionsPlugin when a tx receipt comes in.

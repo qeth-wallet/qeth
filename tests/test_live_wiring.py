@@ -66,3 +66,51 @@ def test_attach_skips_live_watcher_without_flag(qtbot, monkeypatch):
     # the rebuild is a cheap no-op with the watcher off
     plugin._rebuild_live_snapshot()
     assert plugin._live_snapshot == {}
+
+
+# --- Phase 2 consumer wiring ----------------------------------------------
+
+def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
+    """The on-screen (chain, account) snapshot tracks the view, and
+    balance_dirty relays to TokensPlugin.on_balance_dirty (no real watcher —
+    we stand a Mock in so no ws connection opens)."""
+    monkeypatch.delenv("QETH_LIVE_WS", raising=False)
+    gnosis = SimpleNamespace(chain_id=100)
+    plugin = TransactionsPlugin(disk_cache=Mock())
+    tokens = Mock()
+    host = Mock()
+    host.current_chain = lambda: gnosis
+    host.selected_address = "0xABC"
+    host.tokens_plugin = tokens
+    plugin.attach(host)
+    plugin._live_watcher = Mock()        # pretend it's on, but never connects
+
+    plugin._update_live_account()
+    assert plugin._live_account == (gnosis, "0xabc")
+    assert plugin._live_account_provider() == (gnosis, "0xabc")
+
+    plugin._on_balance_dirty(gnosis, "0xabc", "0xToken")
+    tokens.on_balance_dirty.assert_called_once_with(gnosis, "0xabc", "0xToken")
+
+
+def test_tokens_on_balance_dirty_throttles_for_current_view(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp._displayed_view = (100, "0xabc")
+    calls: list = []
+    monkeypatch.setattr(tp, "_refresh", lambda a: calls.append(a))
+
+    # off-view: ignored, no timer armed
+    tp.on_balance_dirty(SimpleNamespace(chain_id=137), "0xABC", "0xtok")
+    assert tp._live_refresh_timer is None
+
+    # on-view: throttle armed; a second dirty doesn't restart it
+    tp.on_balance_dirty(SimpleNamespace(chain_id=100), "0xABC", "0xtok")
+    assert tp._live_refresh_timer is not None and tp._live_refresh_timer.isActive()
+    tp.on_balance_dirty(SimpleNamespace(chain_id=100), "0xABC", "0xtok2")
+    assert tp._live_refresh_timer.isActive()
+
+    # firing re-reads the authoritative balances for the view
+    tp._on_live_refresh()
+    assert calls == ["0xABC"]

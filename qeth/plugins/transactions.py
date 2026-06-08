@@ -903,6 +903,10 @@ class TransactionsPlugin(Plugin):
         # Immutable per-chain pending-tx snapshot the LiveWatcher reads from
         # its asyncio thread; rebuilt + atomically swapped on the main thread.
         self._live_snapshot: "dict[int, tuple[Any, list[PendingTx]]]" = {}
+        # The (chain, account) currently on screen, whose ERC-20 Transfer
+        # logs the LiveWatcher subscribes to for live balances. Atomic tuple
+        # swap on the main thread; read from the asyncio thread.
+        self._live_account: "Optional[tuple[Any, str]]" = None
         # Keys with a NonceCheckWorker in flight (coalesce polls).
         self._nonce_in_flight: set[tuple[int, str]] = set()
         self._nonce_timer: Optional[QTimer] = None
@@ -922,11 +926,14 @@ class TransactionsPlugin(Plugin):
             self._live_watcher = LiveWatcher(
                 self._live_chains_provider,
                 self._live_pending_provider,
+                self._live_account_provider,
                 parent=self,
             )
             self._live_watcher.confirmed.connect(self._on_receipt_confirmed)
             self._live_watcher.dropped.connect(self._on_tx_dropped)
             self._live_watcher.link_state.connect(self._on_ws_link_state)
+            self._live_watcher.balance_dirty.connect(self._on_balance_dirty)
+            self._update_live_account()
             app = QApplication.instance()
             if app is not None:
                 app.aboutToQuit.connect(self._live_watcher.stop)
@@ -977,6 +984,36 @@ class TransactionsPlugin(Plugin):
 
     def _on_ws_link_state(self, chain, connected: bool) -> None:
         log.debug("ws %s: %s", chain.name, "up" if connected else "down")
+
+    def _live_account_provider(self) -> "Optional[tuple[Any, str]]":
+        """The on-screen (chain, account) for the LiveWatcher's Transfer-log
+        subscription. Asyncio-thread read of the atomically-swapped snapshot
+        built on the main thread by _update_live_account."""
+        return self._live_account
+
+    def _update_live_account(self) -> None:
+        """Recompute the (chain, account) whose Transfer logs we want live,
+        from the current view. Main-thread only (atomic tuple swap → no
+        lock); cheap no-op when the live watcher is off. Called on attach
+        and on every account / chain change."""
+        if self._live_watcher is None:
+            return
+        host = self.host
+        chain = host.current_chain() if host is not None else None
+        addr = getattr(host, "selected_address", None) if host else None
+        self._live_account = (
+            (chain, addr.lower()) if (chain is not None and addr) else None)
+
+    def _on_balance_dirty(self, chain, account: str, token: str) -> None:
+        """A ws Transfer touched the account (LiveWatcher.balance_dirty).
+        Relay it to TokensPlugin, which re-reads that balance — mirrors the
+        _on_receipt_confirmed → note_receipt_logs cross-plugin hop."""
+        tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
+        if tokens is not None and hasattr(tokens, "on_balance_dirty"):
+            try:
+                tokens.on_balance_dirty(chain, account, token)
+            except Exception:
+                log.exception("on_balance_dirty failed")
 
     def _abi_read_storage(self, chain_id: int, address: str, slot: str):
         """``eth_getStorageAt`` for the ABI source's proxy-slot probing.
@@ -1196,6 +1233,7 @@ class TransactionsPlugin(Plugin):
     # --- lifecycle hooks ----------------------------------------------------
 
     def on_account_changed(self, address: Optional[str]) -> None:
+        self._update_live_account()   # re-target the live Transfer-log sub
         if address is None:
             if self._panel is not None:
                 self._panel.clear()
@@ -1211,6 +1249,7 @@ class TransactionsPlugin(Plugin):
         self._refresh(address)
 
     def on_chain_changed(self) -> None:
+        self._update_live_account()   # re-target the live Transfer-log sub
         addr = self.host.selected_address if self.host else None
         if addr is not None:
             self._refresh(addr)

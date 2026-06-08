@@ -63,7 +63,19 @@ tar -C "$SRC" \
     --exclude=.flatpak-builder --exclude=resume --exclude='__pycache__' \
     -cf - . | tar -C "$BUILD_SRC" -xf -
 "$PY" -m pip install --no-cache-dir --upgrade pip wheel >/dev/null
-"$PY" -m pip install --no-cache-dir "${BUILD_SRC}[bundled]"
+# --prefix pins the install into the AppDir copy. manylinux's CPython resolves
+# its own prefix back to /opt/python, so neither the default scheme nor
+# PYTHONHOME reliably redirects pip — --prefix is explicit and deterministic.
+"$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
+    "${BUILD_SRC}[bundled]"
+# Fail loudly if Qt didn't actually land in the bundle, rather than shipping a
+# tiny empty AppImage.
+if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&1; then
+    echo "FATAL: PySide6 not in the AppDir after install. site-packages holds:"
+    ls "$APPDIR"/usr/python/lib/python*/site-packages/ 2>&1 | head -40
+    exit 1
+fi
+echo "DIAG: AppDir after install = $(du -sh "$APPDIR" | cut -f1)"
 
 # 4. Bundle the external (non-wheel) shared-lib deps of Qt's libs + plugins.
 #    PySide6 already ships its own libQt6*.so inside site-packages; we only need
@@ -83,7 +95,7 @@ install -Dm644 "$SRC/dist/appimage/io.github.michwill.qeth.desktop" "$APPDIR/io.
 install -Dm644 "$SRC/qeth/assets/logos/qeth-icon-rounded.svg"       "$APPDIR/io.github.michwill.qeth.svg"
 
 # 6. Pack. --appimage-extract-and-run avoids needing FUSE inside the container.
-VERSION="$("$PY" -c 'import qeth; print(qeth.__version__)')"
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$BUILD_SRC/qeth/__init__.py")"
 curl -sSL -o "$WORK/appimagetool" \
   "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
 chmod +x "$WORK/appimagetool"

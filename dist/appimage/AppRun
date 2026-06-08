@@ -16,4 +16,13 @@ export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # PySide6 locates its own Qt + plugins relative to the package, so no plugin-path
 # pin is needed. QT_QPA_PLATFORMTHEME stays unset: there's no qt6ct plugin in
 # the bundle, so qeth adopts the host font/icons itself.
+
+# The bundled Python's OpenSSL defaults to a CA-bundle path baked in by the
+# manylinux build (e.g. /etc/ssl/cert.pem) that doesn't exist on most targets,
+# so HTTPS cert verification fails (token discovery, https RPC). Point it at
+# certifi's bundle — shipped in the venv and always valid.
+for _c in "$HERE"/usr/python/lib/python3.*/site-packages/certifi/cacert.pem; do
+    [ -f "$_c" ] && export SSL_CERT_FILE="$_c" && break
+done
+
 exec "$HERE/usr/python/bin/python3" -m qeth "$@"

@@ -1,0 +1,8 @@
+#!/bin/sh
+# qeth launcher (RPM build). PySide6 and most of the eth stack come from the
+# system (dnf Requires) — so system Qt loads the system qt6ct/desktop theme
+# (native theming, unlike the flatpak/AppImage). The unpackaged or
+# version-pinned deps (web3, ledgereth, eth-utils, rlp, …) live in a private
+# vendor dir, prepended on PYTHONPATH so they shadow any newer system copy.
+exec env PYTHONPATH="/usr/lib/qeth/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+     python3 -m qeth "$@"

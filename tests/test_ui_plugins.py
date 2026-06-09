@@ -813,6 +813,30 @@ class TestTransactionsPlugin:
         plugin._on_scroll_bottom()
         assert host.started_workers == []
 
+    def test_refresh_backfills_a_partial_cache_stub(self, qtbot, tmp_qeth):
+        """An interrupted earlier load can leave a < INITIAL_BATCH stub in
+        cache. A refresh whose page 1 only re-confirms the stub (so it did NOT
+        progress) must still walk older to backfill the view — not freeze at
+        the stub (the _yb.eth "stuck at 7 of 657" bug)."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        # A 7-row stub already persisted (blocks/nonces 100..106).
+        stub = [Transaction(
+            chain_id=1, hash="0x" + format(b, "064x"), block_number=b,
+            timestamp=b, nonce=b, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=0,
+            method_id="", input_data="0x", success=True,
+        ) for b in range(106, 99, -1)]
+        plugin._cache[(ETH.chain_id, ADDR.lower())] = list(stub)
+        host.started_workers.clear()
+        # Refresh: page 1 returns the same stub (overlap -> did not progress).
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, list(stub), True)
+        # Walks older from the oldest stub block to backfill, despite no progress.
+        assert len(host.started_workers) == 1
+        assert host.started_workers[0].before_block == 100
+
     def test_worker_signals_has_more_only_on_full_page(self, qtbot, tmp_qeth):
         """Blockscout returns a partial last page; the worker uses
         ``len(raw) >= page_size`` to detect it and tells the caller

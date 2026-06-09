@@ -1695,11 +1695,16 @@ class TransactionsPlugin(Plugin):
             elif len(new_rows) < self.INITIAL_BATCH:
                 self._fetch_page(key, address_lower, page=1,
                                  walk_on_overlap=True, before_block=oldest)
-        elif len(merged) < self.INITIAL_BATCH and progressed:
-            # Refresh of a fresh/sparse account (page 1 was mostly received
-            # txs the sent-only filter stripped): walk older to fill the
-            # initial view. A large already-cached account skips this — no
-            # more marching the whole history on every tab open.
+        elif len(merged) < self.INITIAL_BATCH:
+            # Fresh, sparse, OR partially-cached account (< INITIAL_BATCH rows).
+            # Page 1 may just re-confirm the few rows we hold — a receive-heavy
+            # account's sent txs are sparse, and an interrupted earlier load can
+            # leave a stub in cache — so do NOT require this page to have
+            # *progressed* (it won't have, when it only overlaps that stub).
+            # Walk older from the oldest row we hold to backfill the view; the
+            # walk stops itself once no new older rows surface, and a genuinely
+            # full account is already caught by the has_more / full-history check
+            # above, so a large cache still skips this.
             self._fetch_page(key, address_lower, page=1,
                              walk_on_overlap=True, before_block=oldest)
 

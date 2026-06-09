@@ -11,6 +11,10 @@ on:
 jobs:
   appimage:
     runs-on: ubuntu-latest
+    # The "Attach to the release" step (gh release upload) needs write access;
+    # the default GITHUB_TOKEN is read-only and returns HTTP 403 on upload.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 

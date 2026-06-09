@@ -94,7 +94,6 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 
 %files
 %license LICENSE
-%doc README.md
 %{_bindir}/%{name}
 %{_prefix}/lib/%{name}/
 %{_datadir}/applications/io.github.michwill.qeth.desktop

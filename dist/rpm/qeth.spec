@@ -10,6 +10,12 @@ Source0:        %{name}-%{version}.tar.gz
 # Vendored deps include compiled extensions (pycryptodome) -> arch-specific.
 ExclusiveArch:  x86_64
 
+# The vendored deps are pre-built manylinux wheels — no useful debuginfo, and
+# eu-strip/find-debuginfo choke on their ELF ("illformed file", no build-id).
+# Nothing here is compiled from source, so skip the debug subpackage + strip.
+%global debug_package %{nil}
+%global __strip /bin/true
+
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  gcc
@@ -95,5 +101,5 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
-* Mon Jun 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.0-1
+* Tue Jun 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.0-1
 - Initial Fedora package: system PySide6 + eth stack, vendor web3/ledgereth/etc.

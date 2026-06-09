@@ -5,7 +5,7 @@ import threading
 from typing import Any, Optional
 
 from aiohttp import (
-    ClientConnectorError, ClientOSError, ClientSession,
+    ClientConnectorError, ClientOSError, ClientSession, TCPConnector,
     ServerDisconnectedError, WSMsgType, web,
 )
 
@@ -143,7 +143,9 @@ class RpcServer:
         self._loop.run_forever()
 
     async def _serve(self) -> None:
-        self._client = ClientSession()
+        self._client = ClientSession(
+            connector=TCPConnector(ttl_dns_cache=self._DNS_CACHE_TTL_S),
+        )
         async def _preflight(_request: web.Request) -> web.Response:
             # CORS preflight. aiohttp requires a coroutine handler — a
             # plain lambda returning a Response is not awaitable and
@@ -592,6 +594,14 @@ class RpcServer:
     # add 1-15 s of wasted asyncio-thread time + a log line, which
     # is what made the app appear to hang when DRPC's DNS went out.
     _FAIL_FAST_S = 5.0
+
+    # Cache resolved upstream IPs for this long (aiohttp's default is 10 s).
+    # Once a host is resolved, a DNS outage shorter than this is invisible —
+    # the cached IP is reused with no lookup, which is what rides out the
+    # "Timeout while contacting DNS servers" blips. RPC provider IPs are
+    # stable, and _proxy fails over (re-resolving the next host) if a cached
+    # IP ever goes stale, so a long TTL is safe.
+    _DNS_CACHE_TTL_S = 3600
 
     async def _proxy(
         self, method: str, params: list,

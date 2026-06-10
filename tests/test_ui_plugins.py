@@ -837,6 +837,38 @@ class TestTransactionsPlugin:
         assert len(host.started_workers) == 1
         assert host.started_workers[0].before_block == 100
 
+    def test_overlap_only_page_skips_the_disk_save(self, qtbot, tmp_qeth):
+        """A page-1 refresh that merely re-confirms the cache must NOT
+        re-serialize it — json.dumps of a busy wallet's multi-MB cache cost
+        ~150 ms on the main thread on every tab open. A page that CHANGES an
+        entry (pending→confirmed) must still save."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        pend = Transaction(
+            chain_id=1, hash="0x" + "cd" * 32, block_number=200,
+            timestamp=200, nonce=7, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=0,
+            method_id="", input_data="0x", success=True, pending=True,
+        )
+        plugin._cache[key] = [pend]
+        saves: list = []
+        plugin._disk_cache.save = (          # type: ignore[method-assign]
+            lambda *a, **k: saves.append(a))
+
+        # Pure overlap: the page returns exactly what's cached -> no save.
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, [pend], True)
+        assert saves == []
+
+        # Same hash, changed fields (confirmed now) -> must save.
+        from dataclasses import replace
+        confirmed = replace(pend, pending=False, block_number=201)
+        plugin._on_page_fetched(
+            ETH.chain_id, ADDR.lower(), 1, [confirmed], True)
+        assert len(saves) == 1
+
     def test_walk_advances_by_raw_block_past_received_only_window(self, qtbot, tmp_qeth):
         """Receive-heavy account: an older-walk page brings NO new sent tx
         (the window was all received), but its RAW oldest block reached older

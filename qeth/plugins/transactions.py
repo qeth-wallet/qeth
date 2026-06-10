@@ -1698,7 +1698,14 @@ class TransactionsPlugin(Plugin):
         existing_hashes = {t.hash for t in existing}
         merged = merge_txs(page, existing)
         self._cache[key] = merged
-        self._disk_cache.save(chain_id, address_lower, merged)
+        # Save only when the merge actually changed something. A page-1
+        # refresh of an already-complete view otherwise re-serialized the
+        # ENTIRE cache on the main thread on every tab open / account switch —
+        # ~150 ms of json.dumps for a 12.7 MB busy-wallet cache. Value
+        # equality (frozen dataclasses, deterministic merge order) catches
+        # both new rows and updated fields (pending→confirmed, reorg fixes).
+        if merged != existing:
+            self._disk_cache.save(chain_id, address_lower, merged)
 
         new_rows = [t for t in page if t.hash not in existing_hashes]
         oldest = min((t.block_number for t in merged), default=None)

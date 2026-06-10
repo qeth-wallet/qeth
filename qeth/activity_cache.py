@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from .fsatomic import atomic_write_text
 from .store import CONFIG_DIR
 from .tx_activity import Activity, AssetLeg
 
@@ -110,7 +111,7 @@ class ActivityCache:
         f = self._file(chain_id, address)
         try:
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps({
+            atomic_write_text(f, json.dumps({
                 "_v": _BUILD_VERSION,
                 "acts": {h: _to_json(a) for h, a in self._mem[key].items()},
             }))

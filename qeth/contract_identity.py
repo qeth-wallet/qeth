@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .abi import _urllib_transport
+from .fsatomic import atomic_write_text
 from .tokens import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
 
 CACHE_DIR = Path.home() / ".qeth" / "contract_id"
@@ -137,7 +138,7 @@ class ContractIdentityCache:
         p.parent.mkdir(parents=True, exist_ok=True)
         payload = identity.to_dict()
         payload["v"] = _SCHEMA_VERSION
-        p.write_text(json.dumps(payload, separators=(",", ":")))
+        atomic_write_text(p, json.dumps(payload, separators=(",", ":")))
 
     def deployer_contract_count(self, chain_id: int, deployer: str) -> int:
         """How many cached contracts on this chain were deployed by

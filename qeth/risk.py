@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import USER_AGENT
+from .fsatomic import atomic_write_text
 
 log = logging.getLogger("qeth.risk")
 
@@ -242,7 +243,7 @@ class RiskCache:
                 c[addr.lower()] = report
             p = self._path(chain_id)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(
+            atomic_write_text(p, json.dumps(
                 {addr: asdict(r) for addr, r in c.items()},
                 indent=2, sort_keys=True,
             ))

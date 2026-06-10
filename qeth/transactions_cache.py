@@ -17,6 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+from .fsatomic import atomic_write_text
 from .transactions import Transaction
 
 
@@ -106,7 +107,7 @@ class TransactionCache:
         data = [asdict(tx) for tx in txs]
         # No indent — these files can hold 50+ rows and the on-disk
         # bytes don't need to be human-readable.
-        p.write_text(json.dumps(data, separators=(",", ":")))
+        atomic_write_text(p, json.dumps(data, separators=(",", ":")))
 
     def sent_to_count(self, chain_id: int, recipient: str, addresses) -> int:
         """How many distinct txs the user's accounts *sent value to*

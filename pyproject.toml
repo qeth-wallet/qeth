@@ -70,6 +70,7 @@ files = [
     "qeth/async_chain.py",
     "qeth/chains.py",
     "qeth/store.py",
+    "qeth/fsatomic.py",
     "qeth/tokens.py",
     "qeth/tokenlists.py",
     "qeth/token_metadata.py",

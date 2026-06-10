@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .fsatomic import atomic_write_text
+
 log = logging.getLogger("qeth.token_metadata")
 
 CACHE_DIR = Path.home() / ".qeth" / "token_metadata"
@@ -77,4 +79,4 @@ class TokenMetadataCache:
                 }
             p = self._path(chain_id)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(cc, indent=2, sort_keys=True))
+            atomic_write_text(p, json.dumps(cc, indent=2, sort_keys=True))

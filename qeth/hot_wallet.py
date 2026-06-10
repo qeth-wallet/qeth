@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from .chains import Chain
+from .fsatomic import atomic_write_text
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
     TypedDataSigningRequest,
@@ -89,10 +90,16 @@ def save_keystore(address: str, keystore: dict) -> Path:
     if a keystore for the address already exists — overwriting
     silently would be a footgun."""
     KEYSTORE_DIR.mkdir(parents=True, exist_ok=True)
+    # Owner-only, like every other wallet's keystore dir. mkdir's mode only
+    # applies on creation, so tighten an existing dir explicitly.
+    os.chmod(KEYSTORE_DIR, 0o700)
     p = keystore_path(address)
     if p.exists():
         raise SignerError(f"Keystore already exists at {p}")
-    p.write_text(json.dumps(keystore))
+    # Atomic + 0600: a crash mid-write must not leave a torn keystore for an
+    # address the user may already have funded, and the (encrypted) key
+    # material has no business being world-readable.
+    atomic_write_text(p, json.dumps(keystore), mode=0o600)
     return p
 
 

@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 from typing import Optional, Union
 
+from .fsatomic import atomic_write_text
+
 # An ABI is a JSON list of fragment dicts. We don't tighten the type
 # further here — web3.py validates shape when we try to decode.
 Abi = list[dict]
@@ -130,4 +132,4 @@ class AbiCache:
             payload = {"abi": abi}
         else:
             return  # nothing useful to save
-        p.write_text(json.dumps(payload, separators=(",", ":")))
+        atomic_write_text(p, json.dumps(payload, separators=(",", ":")))

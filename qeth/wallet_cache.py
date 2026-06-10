@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .fsatomic import atomic_write_text
+
 log = logging.getLogger("qeth.wallet_cache")
 
 CACHE_DIR = Path.home() / ".qeth" / "wallets"
@@ -106,4 +108,4 @@ class WalletCache:
                 "native_balance_updated": cached.native_balance_updated,
                 "native_price_updated": cached.native_price_updated,
             }
-            p.write_text(json.dumps(data, indent=2))
+            atomic_write_text(p, json.dumps(data, indent=2))

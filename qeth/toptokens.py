@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import USER_AGENT
+from .fsatomic import atomic_write_text
 
 log = logging.getLogger("qeth.toptokens")
 
@@ -218,7 +219,7 @@ class TopTokens:
         payload = build_payload(fetched, now, top_n)
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._cache_path().write_text(json.dumps(payload, indent=1))
+            atomic_write_text(self._cache_path(), json.dumps(payload, indent=1))
         except OSError as e:
             log.warning("top-tokens cache write failed: %s", e)  # in-memory still updates
         self._by_chain = {cid: [t.address.lower() for t in toks]

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .chains import Chain, DEFAULT_CHAINS
+from .fsatomic import atomic_write_text
 
 
 _CHAIN_FIELDS = {f.name for f in fields(Chain)}
@@ -148,7 +149,8 @@ class Store:
                 "etherscan_api_key": self.etherscan_api_key,
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(data, indent=2))
+        # Atomic: a crash mid-write must not torch the accounts list.
+        atomic_write_text(CONFIG_FILE, json.dumps(data, indent=2))
 
     def add_account(self, account: dict) -> bool:
         with self._lock:

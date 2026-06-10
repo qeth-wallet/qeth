@@ -837,6 +837,55 @@ class TestTransactionsPlugin:
         assert len(host.started_workers) == 1
         assert host.started_workers[0].before_block == 100
 
+    def test_walk_advances_by_raw_block_past_received_only_window(self, qtbot, tmp_qeth):
+        """Receive-heavy account: an older-walk page brings NO new sent tx
+        (the window was all received), but its RAW oldest block reached older
+        ground — so the walk keeps going, advancing by that raw block, instead
+        of declaring exhaustion (the _yb.eth "stuck at 3 of 657" bug)."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        stub = [Transaction(
+            chain_id=1, hash="0x" + format(b, "064x"), block_number=b,
+            timestamp=b, nonce=b, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=0,
+            method_id="", input_data="0x", success=True,
+        ) for b in (300, 299, 298)]
+        plugin._cache[key] = list(stub)
+        host.started_workers.clear()
+        # Walk page re-confirms only the boundary sent tx (block 298, overlap),
+        # but the raw window reached down to block 250 (received txs stripped).
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, [stub[-1]], True,
+                                walk_on_overlap=True, raw_oldest=250,
+                                requested_before=298)
+        assert key not in plugin._exhausted
+        assert len(host.started_workers) == 1
+        assert host.started_workers[0].before_block == 250   # advanced by raw
+
+    def test_walk_stops_when_raw_cursor_truly_stalls(self, qtbot, tmp_qeth):
+        """If the raw cursor can't advance (a single block heavier than a page)
+        AND nothing new surfaced, the walk has genuinely bottomed out."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        stub = [Transaction(
+            chain_id=1, hash="0x" + format(b, "064x"), block_number=b,
+            timestamp=b, nonce=b, from_addr=ADDR, to_addr="0xbeef",
+            value_wei=0, gas_used=0, gas_price_wei=0,
+            method_id="", input_data="0x", success=True,
+        ) for b in (300, 299, 298)]
+        plugin._cache[key] = list(stub)
+        host.started_workers.clear()
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, [stub[-1]], True,
+                                walk_on_overlap=True, raw_oldest=298,
+                                requested_before=298)   # cursor did not advance
+        assert key in plugin._exhausted
+        assert host.started_workers == []
+
     def test_worker_signals_has_more_only_on_full_page(self, qtbot, tmp_qeth):
         """Blockscout returns a partial last page; the worker uses
         ``len(raw) >= page_size`` to detect it and tells the caller

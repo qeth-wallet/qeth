@@ -677,7 +677,7 @@ class TransactionsWorker(QThread):
     empty round-trip."""
 
     # Object signal carries Python objects (avoids qint64 marshalling).
-    fetched = Signal(int, str, int, object, bool)
+    fetched = Signal(int, str, int, object, bool, object)
     # (chain_id, addr_lower, page_idx, list[Transaction], has_more)
     failed = Signal(str)
 
@@ -727,11 +727,15 @@ class TransactionsWorker(QThread):
         # A partial page means Blockscout has nothing more — used
         # by the plugin to flag the (chain, addr) as exhausted.
         has_more = len(raw) >= self.page_size
+        # The paging cursor must follow the RAW oldest block (incl. received
+        # txs), not the sent-filtered page below — or a receive-heavy account's
+        # sparse sent txs stall the older-walk on a received-only window.
+        raw_oldest = min((t.block_number for t in raw), default=None)
         page = raw
         if self.sent_only:
             page = [t for t in raw if t.from_addr.lower() == viewer]
         self.fetched.emit(
-            self.chain.chain_id, viewer, self.page, page, has_more,
+            self.chain.chain_id, viewer, self.page, page, has_more, raw_oldest,
         )
 
 
@@ -1620,8 +1624,9 @@ class TransactionsPlugin(Plugin):
             self._source, chain, address, page=page, before_block=before_block,
         )
         worker.fetched.connect(
-            lambda c, a, p, t, m, w=walk_on_overlap:
-                self._on_page_fetched(c, a, p, t, m, walk_on_overlap=w)
+            lambda c, a, p, t, m, ro, w=walk_on_overlap, bb=before_block:
+                self._on_page_fetched(c, a, p, t, m, walk_on_overlap=w,
+                                      raw_oldest=ro, requested_before=bb)
         )
         worker.failed.connect(
             lambda msg, k=key: self._on_failed(k, msg)
@@ -1657,7 +1662,9 @@ class TransactionsPlugin(Plugin):
 
     def _on_page_fetched(self, chain_id: int, address_lower: str,
                          page_idx: int, page: list, has_more: bool,
-                         walk_on_overlap: bool = False) -> None:
+                         walk_on_overlap: bool = False,
+                         raw_oldest: Optional[int] = None,
+                         requested_before: Optional[int] = None) -> None:
         """One page arrived. Merge it into the cache, persist, advance
         the paging cursor, and incrementally update the visible table
         — never rebuilding it from the full cache (which can be tens
@@ -1671,30 +1678,36 @@ class TransactionsPlugin(Plugin):
             return
         existing = self._cache.get(key) or []
         existing_hashes = {t.hash for t in existing}
-        prev_oldest = min((t.block_number for t in existing), default=None)
         merged = merge_txs(page, existing)
         self._cache[key] = merged
         self._disk_cache.save(chain_id, address_lower, merged)
 
         new_rows = [t for t in page if t.hash not in existing_hashes]
         oldest = min((t.block_number for t in merged), default=None)
-        # Did this fetch reach genuinely older ground? (Used to know when
-        # the block cursor has bottomed out.)
-        progressed = oldest is not None and (
-            prev_oldest is None or oldest < prev_oldest)
+        # The older-walk cursor follows the RAW oldest block fetched (incl.
+        # received txs the sent filter strips) so a receive-heavy account
+        # doesn't stall on a window that held only received txs. Fall back to
+        # the sent oldest when the worker reported none (e.g. unit tests).
+        cursor = raw_oldest if raw_oldest is not None else oldest
+        # "Advanced" = the raw cursor went strictly below what we asked for;
+        # if it didn't (one block heavier than a page) and nothing new
+        # surfaced, the walk has genuinely bottomed out.
+        cursor_advanced = raw_oldest is not None and (
+            requested_before is None or raw_oldest < requested_before)
 
         if not has_more or _is_full_history(merged):
             self._exhausted.add(key)
         elif walk_on_overlap:
-            # Paging older via the block cursor (endblock = oldest loaded
-            # block). Keep walking until a full INITIAL_BATCH of new older
-            # rows surfaces — but stop if the cursor stalled (no progress
-            # AND nothing new = end of history or the explorer's window).
-            if not progressed and not new_rows:
+            # Paging older via the block cursor — advance by the RAW oldest
+            # block. Keep walking until a full INITIAL_BATCH of new older rows
+            # surfaces or the page runs short (has_more=False, above). A
+            # received-only window still advances the cursor, so the walk
+            # marches past it instead of giving up on a sparse-sent account.
+            if not cursor_advanced and not new_rows:
                 self._exhausted.add(key)
             elif len(new_rows) < self.INITIAL_BATCH:
                 self._fetch_page(key, address_lower, page=1,
-                                 walk_on_overlap=True, before_block=oldest)
+                                 walk_on_overlap=True, before_block=cursor)
         elif len(merged) < self.INITIAL_BATCH:
             # Fresh, sparse, OR partially-cached account (< INITIAL_BATCH rows).
             # Page 1 may just re-confirm the few rows we hold — a receive-heavy

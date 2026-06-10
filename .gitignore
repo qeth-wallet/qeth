@@ -12,6 +12,7 @@ build/
 !/dist/appimage/
 /dist/appimage/out/
 !/dist/rpm/
+/dist/rpm/*.rpm
 !/dist/deb/
 /dist/deb/*.deb
 

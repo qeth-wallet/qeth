@@ -1,0 +1,14 @@
+#!/bin/sh
+# qeth launcher (Debian/Ubuntu build). Unlike Fedora, Mint 22 / Ubuntu 24.04
+# ship neither a Python-3.11 PySide6 nor the eth stack, so EVERYTHING Python is
+# vendored: the from-source PySide6 6.4 bindings (abi3) + web3/eth-* live in the
+# private vendor dir, run under the deadsnakes python3.11. The bindings link the
+# SYSTEM Qt 6.4 (Depends: libqt6*), so the user's qt6ct/Kvantum theme applies —
+# the native-theming win over the flatpak/AppImage.
+# The from-source PySide6 had its bundled Qt removed, so the bindings link the
+# system Qt libs (via RPATH fall-through) but need to be TOLD where the system
+# Qt plugins are — the platform (xcb/wayland) + platformtheme (qt6ct) plugins
+# live in the distro's multiarch Qt6 plugin dir, not next to the bindings.
+exec env PYTHONPATH="/usr/lib/qeth/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+     QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}" \
+     python3.11 -m qeth "$@"

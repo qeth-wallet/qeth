@@ -140,13 +140,49 @@ def _draw_arrow(p: QPainter, fg: QColor, x: int, cy: float) -> int:
     return x + _ARROW
 
 
+# coins_icon is a pure function of its inputs, and a wallet switch re-renders
+# ~200 rows of mostly-identical icons (the generic lettered coin especially) —
+# QPainter vector work that profiled at ~210 ms per switch on the MAIN thread,
+# stretching to ~0.5 s when something else pegs the CPU. Memoize the composed
+# QIcon: QPixmap.cacheKey() identifies a coin pixmap's contents, rgba() the
+# theme colours, so repeat renders are a dict hit. Bounded by wholesale clear —
+# entries are a few KB and 4096 covers many wallets of distinct activity.
+_ICON_CACHE: dict = {}
+_ICON_CACHE_MAX = 4096
+
+
+def _coin_key(c: Coin) -> tuple[Optional[int], str]:
+    icon = c.icon
+    if icon is None or icon.isNull():
+        return (None, c.symbol)
+    return (icon.cacheKey(), c.symbol)
+
+
 def coins_icon(summary: TxSummary, normal_fg: QColor, selected_fg: QColor,
                dpr: float = 1.0) -> QIcon:
     """Composite the moved-assets row (out → in) into a QIcon — coin icons
     + a vector arrow only, never text. Returns an empty icon when nothing
-    moved (e.g. a bare ``vote``)."""
+    moved (e.g. a bare ``vote``). Memoized (see ``_ICON_CACHE`` above)."""
     if not (summary.out or summary.inn):
         return QIcon()
+    key = (
+        tuple(_coin_key(c) for c in summary.out),
+        tuple(_coin_key(c) for c in summary.inn),
+        summary.show_arrow, summary.muted,
+        normal_fg.rgba(), selected_fg.rgba(), round(dpr * 100),
+    )
+    hit = _ICON_CACHE.get(key)
+    if hit is not None:
+        return hit
+    icon = _render_coins_icon(summary, normal_fg, selected_fg, dpr)
+    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
+        _ICON_CACHE.clear()
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+def _render_coins_icon(summary: TxSummary, normal_fg: QColor,
+                       selected_fg: QColor, dpr: float) -> QIcon:
     w = _coins_width(summary) + 2 * _PAD
     h = _ICON + 2 * _PAD
     icon = QIcon()

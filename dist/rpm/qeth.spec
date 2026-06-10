@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.11.1
+Version:        0.11.2
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -107,6 +107,15 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Wed Jun 10 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.2-1
+- Transaction list: retry a transient explorer error instead of aborting the
+  load; backfill a partial cache stub on refresh; and walk the paging cursor by
+  raw block so receive-heavy accounts load their full sent history rather than
+  freezing at the few most-recent sends.
+- Nonce/drops: trust our own broadcast record over a single node's pending view,
+  so back-to-back sends get increasing nonces and confirmed txs aren't shown
+  dropped.
+
 * Tue Jun 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.1-1
 - JSON-RPC proxy: fail over to the chain's fallback_rpcs on a transport error.
 - Cache upstream DNS for 1h so short DNS outages are absorbed.

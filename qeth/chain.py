@@ -190,8 +190,20 @@ class EthClient:
         self.chain = chain
         self.timeout = timeout
         self._session = _build_session()
+        # Reads fail over across the chain's fallbacks (resilience). Broadcasts
+        # do NOT — they use ``self._broadcast_w3``, pinned to the user's chosen
+        # RPC only. Relaying a *signed* tx to a fallback would defeat a private /
+        # MEV-protecting endpoint (the tx would surface in a public mempool,
+        # exposed to frontrunning) and override the user's explicit choice; if
+        # their RPC is unreachable the broadcast simply errors. (With a single
+        # URL, ``_failover_provider`` is a plain, non-rotating ``HTTPProvider``.)
         self._w3 = Web3(_failover_provider(
             _rpc_urls(chain),
+            request_kwargs={"timeout": timeout},
+            session=self._session,
+        ))
+        self._broadcast_w3 = Web3(_failover_provider(
+            [chain.rpc_url],
             request_kwargs={"timeout": timeout},
             session=self._session,
         ))
@@ -206,9 +218,8 @@ class EthClient:
         # non-PoA chains because qeth never reads extraData
         # anyway, so we inject unconditionally instead of gating
         # on a per-chain flag we'd have to maintain.
-        self._w3.middleware_onion.inject(
-            ExtraDataToPOAMiddleware, layer=0,
-        )
+        for _w3 in (self._w3, self._broadcast_w3):
+            _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
     @property
     def w3(self):
@@ -274,7 +285,8 @@ class EthClient:
             raw_tx = bytes.fromhex(
                 raw_tx[2:] if raw_tx.startswith("0x") else raw_tx
             )
-        tx_hash = self._w3.eth.send_raw_transaction(raw_tx)
+        # Broadcast ONLY via the user's chosen RPC — never a fallback.
+        tx_hash = self._broadcast_w3.eth.send_raw_transaction(raw_tx)
         if hasattr(tx_hash, "to_0x_hex"):
             return tx_hash.to_0x_hex()
         return "0x" + bytes(tx_hash).hex()

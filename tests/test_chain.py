@@ -489,3 +489,37 @@ class TestRpcFailover:
             ["http://a", "http://b"], request_kwargs={}, session=None)
         out = p2.make_request("eth_call", [])
         assert "error" in out and seen == ["http://a"]   # stopped at first
+
+    def test_broadcast_pins_to_primary_while_reads_fail_over(self, monkeypatch):
+        """A read falls over to a fallback RPC when the primary has a transport
+        error; a BROADCAST goes only to the user's chosen RPC and errors if it's
+        down — it must never relay a signed tx to a fallback (that would leak a
+        private / MEV-protected tx to a public mempool and ignore the user's
+        explicit choice)."""
+        import qeth.chain as ch
+        from qeth.chains import Chain
+        ch._ensure_heavy_imports()
+        PRIMARY, FALLBACK = "http://primary", "http://fallback"
+        client = EthClient(Chain("Test", 999, PRIMARY, fallback_rpcs=(FALLBACK,)))
+
+        tried: list = []
+
+        def fake(self, method, params):
+            tried.append(self.endpoint_uri)
+            if self.endpoint_uri == PRIMARY:
+                raise ch.requests.exceptions.ConnectionError("primary down")
+            return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+        monkeypatch.setattr(ch.HTTPProvider, "make_request", fake)
+
+        # Read: primary fails -> falls over to the fallback -> succeeds.
+        assert client._w3.provider.make_request(
+            "eth_blockNumber", [])["result"] == "0x1"
+        assert tried == [PRIMARY, FALLBACK]
+
+        # Broadcast: only the primary is tried, then it errors — no fallback.
+        tried.clear()
+        with pytest.raises(ch.requests.exceptions.ConnectionError):
+            client._broadcast_w3.provider.make_request(
+                "eth_sendRawTransaction", ["0xab"])
+        assert tried == [PRIMARY]

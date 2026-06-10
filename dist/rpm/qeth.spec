@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.11.2
+Version:        0.11.3
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -107,6 +107,17 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Wed Jun 10 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.3-1
+- Broadcast policy: transactions go ONLY to the user's chosen RPC, never a
+  fallback — wallet sends, dapp eth_sendTransaction / raw eth_sendRawTransaction,
+  and WebSocket re-broadcasts all pinned (protects private / MEV-shielded RPCs).
+- Reliability: tx "dropped" verdicts need consecutive readings; dapp-added
+  chain ids above qint32 no longer overflow internal signals.
+- Performance: wallet switching under CPU load ~3x faster (memoized activity
+  icons; skip no-op cache re-serialization).
+- Storage: atomic writes everywhere (config/keystores/caches survive a crash
+  mid-write); keystores written 0600 in a 0700 dir.
+
 * Wed Jun 10 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.2-1
 - Transaction list: retry a transient explorer error instead of aborting the
   load; backfill a partial cache stub on refresh; and walk the paging cursor by

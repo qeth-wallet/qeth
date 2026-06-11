@@ -3530,13 +3530,33 @@ _GAS_LIMIT_MAX = 30_000_000
 _GWEI_MAX = 100_000.0
 
 
-def _wei_to_gwei(wei: int, places: int = 4) -> float:
+def _wei_to_gwei(wei: int) -> float:
     """Convert wei → gwei for spinbox display. Using float for the
     spinbox's native value; we always recompute back to wei via
     Decimal at submission time so display rounding doesn't corrupt
     the on-chain value."""
     from decimal import Decimal
     return float(Decimal(wei) / Decimal(_WEI_PER_GWEI))
+
+
+def _gwei_decimals(wei: int) -> int:
+    """Spinbox decimals needed so ``wei`` survives the gwei round-trip.
+    QDoubleSpinBox rounds its *stored* value to ``decimals`` — not just
+    the display — so at the default 4 anything under 10⁵ wei quantizes
+    to 0.0 and would be signed as a 0 tip (which Gnosis, base fee a few
+    hundred kwei, rejects outright: "EffectivePriorityFeePerGas too low
+    0 < 1"). 4 decimals when they suffice; up to 9 (= 1 wei) when not."""
+    d = 4
+    while d < 9 and wei % 10 ** (9 - d):
+        d += 1
+    return d
+
+
+def _set_gwei(sp: QDoubleSpinBox, wei: int) -> None:
+    """Populate a gwei spinbox from a wei amount, widening its precision
+    first so tiny Gnosis/L2 fees aren't quantized to zero."""
+    sp.setDecimals(_gwei_decimals(wei))
+    sp.setValue(_wei_to_gwei(wei))
 
 
 def _gwei_to_wei(gwei: float) -> int:
@@ -4156,16 +4176,16 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
                     max_fee = max(max_fee, floor.max_fee_per_gas)
                 if floor.max_priority_fee_per_gas:
                     prio = max(prio, floor.max_priority_fee_per_gas)
-            self.spin_max_fee.setValue(_wei_to_gwei(max_fee))
+            _set_gwei(self.spin_max_fee, max_fee)
             self.spin_max_fee.setEnabled(True)
-            self.spin_priority.setValue(_wei_to_gwei(prio))
+            _set_gwei(self.spin_priority, prio)
             self.spin_priority.setEnabled(True)
         else:
             assert self.spin_gas_price is not None
             gp = info["gas_price"]
             if floor is not None and floor.gas_price:
                 gp = max(gp, floor.gas_price)
-            self.spin_gas_price.setValue(_wei_to_gwei(gp))
+            _set_gwei(self.spin_gas_price, gp)
             self.spin_gas_price.setEnabled(True)
         self.base_fee_lbl.setText(
             f"{_wei_to_gwei(self._base_fee_wei):.4f} gwei"
@@ -5244,15 +5264,13 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.spin_gas.setEnabled(True)
         if self.chain.eip1559:
             assert self.spin_max_fee is not None and self.spin_priority is not None
-            self.spin_max_fee.setValue(_wei_to_gwei(info["max_fee_per_gas"]))
+            _set_gwei(self.spin_max_fee, info["max_fee_per_gas"])
             self.spin_max_fee.setEnabled(True)
-            self.spin_priority.setValue(
-                _wei_to_gwei(info["max_priority_fee_per_gas"])
-            )
+            _set_gwei(self.spin_priority, info["max_priority_fee_per_gas"])
             self.spin_priority.setEnabled(True)
         else:
             assert self.spin_gas_price is not None
-            self.spin_gas_price.setValue(_wei_to_gwei(info["gas_price"]))
+            _set_gwei(self.spin_gas_price, info["gas_price"])
             self.spin_gas_price.setEnabled(True)
         self.base_fee_lbl.setText(
             f"{_wei_to_gwei(self._base_fee_wei):.4f} gwei"

@@ -266,6 +266,18 @@ class TestApplyGasPolicy1559:
         assert prio >= 1
         assert min(prio, out["max_fee_per_gas"] - 18) >= 1   # effective tip
 
+    def test_gwei_decimals_widen_for_tiny_fees(self):
+        """QDoubleSpinBox rounds its STORED value to `decimals`, so the
+        gwei spinboxes must widen past the default 4 for sub-10⁵-wei
+        values — otherwise the Gnosis tip from the test above quantizes
+        back to a 0 the chain rejects, undoing the policy floor."""
+        from qeth.plugins.transactions import _gwei_decimals
+        assert _gwei_decimals(2 * 10**9) == 4        # 2 gwei
+        assert _gwei_decimals(5 * 10**5) == 4        # 0.0005 gwei: exact at 4
+        assert _gwei_decimals(30_528) == 9           # 5% of Gnosis base fee
+        assert _gwei_decimals(1) == 9                # the policy floor itself
+        assert _gwei_decimals(0) == 4
+
     def test_priority_floor_does_not_clobber_a_real_node_tip(self):
         """The 1-wei floor binds only when every other signal is 0; a real
         node tip (active chain) still wins."""

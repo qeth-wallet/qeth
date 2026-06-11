@@ -2615,6 +2615,37 @@ class TestEventPreviewTab:
         assert fin.nonce == 7                        # fixed, not the suggested 99
         assert fin.max_fee_per_gas == 60_000_000_000
 
+    def test_gnosis_tiny_tip_survives_the_spinbox(self, qtbot, tmp_qeth):
+        """Gnosis idle: base fee ~610 kwei → suggested tip ~30 kwei =
+        0.000030528 gwei, below the spinbox's default 4 decimals.
+        QDoubleSpinBox rounds the STORED value, so without widening the
+        precision the tip quantizes to 0.0 and the tx is signed with a
+        0-wei tip Gnosis rejects ("FeeTooLow … 0 < 1") — silently
+        undoing apply_gas_policy's floor."""
+        _, started = self._started()
+        dlg = self._sign(qtbot, started)
+        dlg._on_gas_suggested({
+            "base_fee": 610_575, "estimated_gas": 21_000, "gas": 21_000,
+            "max_fee_per_gas": 1_221_150,         # 2 × base
+            "max_priority_fee_per_gas": 30_528,   # 5 % of base
+            "nonce": 0,
+        })
+        fin = dlg.finalised_request()
+        assert fin.max_priority_fee_per_gas == 30_528
+        assert fin.max_fee_per_gas == 1_221_150
+
+    def test_one_wei_tip_floor_survives_the_spinbox(self, qtbot, tmp_qeth):
+        """The 1-wei policy floor (fully idle Gnosis) needs the full
+        9 decimals to round-trip."""
+        _, started = self._started()
+        dlg = self._sign(qtbot, started)
+        dlg._on_gas_suggested({
+            "base_fee": 18, "estimated_gas": 21_000, "gas": 21_000,
+            "max_fee_per_gas": 36, "max_priority_fee_per_gas": 1,
+            "nonce": 0,
+        })
+        assert dlg.finalised_request().max_priority_fee_per_gas == 1
+
     def test_both_dialogs_have_an_events_tab(self, qtbot, tmp_qeth):
         _, started = self._started()
         for dlg in (self._send(qtbot, started), self._sign(qtbot, started)):

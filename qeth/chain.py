@@ -17,6 +17,7 @@ context manager so callers never see the raw aggregate3 wire format.
 """
 
 import logging
+import re
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
@@ -135,15 +136,41 @@ def _rpc_urls(chain: Chain) -> list[str]:
     return out
 
 
+# JSON-RPC error objects that mean the PROVIDER is refusing/limiting rather
+# than answering this request — worth failing over, unlike a revert or an
+# invalid-params error (which every provider would answer identically).
+# -32005 is EIP-1474 "limit exceeded"; some gateways tunnel HTTP 429 into
+# the error code. The message check catches providers using generic codes
+# for their limiter (DRPC under load); kept narrow so nothing matches a
+# real node answer like "exceeds block gas limit".
+_LIMIT_CODES = frozenset({-32005, 429})
+_LIMIT_MSG_RE = re.compile(
+    r"rate.?limit|too many request|request limit|over.?capacity|quota|throttl",
+    re.IGNORECASE,
+)
+
+
+def is_provider_limit_error(err: object) -> bool:
+    """True when a JSON-RPC error object reports provider overload / rate
+    limiting (vs an answer to the request itself)."""
+    if not isinstance(err, dict):
+        return False
+    if err.get("code") in _LIMIT_CODES:
+        return True
+    return bool(_LIMIT_MSG_RE.search(str(err.get("message") or "")))
+
+
 def _failover_provider(urls: list[str], *, request_kwargs: dict,
                        session: Any) -> "HTTPProvider":
     """An ``HTTPProvider`` whose ``make_request`` rotates through ``urls`` on
     a *transport* failure — an HTTP error (DRPC's free Gnosis endpoint 400s
-    on every eth_call), a connection error, a timeout — and then sticks to
-    whichever endpoint answered. A JSON-RPC *error* response (a revert, a
-    request the node understood and rejected) is a valid answer, not a
-    transport failure, so it does NOT trigger failover. With a single URL
-    it's a plain HTTPProvider."""
+    on every eth_call), a connection error, a timeout — or a rate-limit
+    error body (a 200 whose JSON-RPC error is the provider's limiter, not
+    the chain answering), and then sticks to whichever endpoint answered.
+    Any other JSON-RPC *error* response (a revert, a request the node
+    understood and rejected) is a valid answer every provider would repeat,
+    so it does NOT trigger failover. With a single URL it's a plain
+    HTTPProvider."""
     members = [HTTPProvider(u, request_kwargs=request_kwargs, session=session)
                for u in urls]
     provider = members[0]
@@ -152,21 +179,33 @@ def _failover_provider(urls: list[str], *, request_kwargs: dict,
     state = {"i": 0}
 
     def make_request(method: Any, params: Any) -> Any:
-        last: Optional[Exception] = None
+        last_exc: Optional[Exception] = None
+        last_limited: Any = None
         for offset in range(len(members)):
             i = (state["i"] + offset) % len(members)
             try:
                 # Call the *class* method on the member so the primary's
                 # patched make_request (this very function) isn't re-entered.
                 resp = HTTPProvider.make_request(members[i], method, params)
-                if i != state["i"]:
-                    log.debug("rpc failover -> %s", urls[i])
-                state["i"] = i
-                return resp
             except requests.exceptions.RequestException as exc:
-                last = exc
-        assert last is not None   # len(members) >= 2, so the loop ran
-        raise last
+                last_exc = exc
+                continue
+            err = resp.get("error") if hasattr(resp, "get") else None
+            if is_provider_limit_error(err):
+                # Don't move state["i"]: the limited host may recover, and
+                # the one that answers below becomes the sticky choice.
+                log.debug("rpc %s rate-limited by %s, failing over",
+                          method, urls[i])
+                last_limited = resp
+                continue
+            if i != state["i"]:
+                log.debug("rpc failover -> %s", urls[i])
+            state["i"] = i
+            return resp
+        if last_limited is not None:
+            return last_limited   # every member limited — surface the error
+        assert last_exc is not None   # len(members) >= 2, so the loop ran
+        raise last_exc
 
     setattr(provider, "make_request", make_request)
     return provider

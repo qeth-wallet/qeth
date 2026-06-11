@@ -114,6 +114,100 @@ def test_proxy_fails_over_to_fallback_on_transport_error():
     assert client.tried == [primary, fallback]  # primary, then failed over
 
 
+# --- provider-side failures behind a parseable body -------------------------
+#
+# Captured live from eth.drpc.org under load (2026-06-11): the free-tier
+# limiter answers HTTP 408 with a VALID JSON-RPC error — the old proxy
+# parsed it, saw "error", and forwarded DRPC's upsell to the dapp as a
+# final answer instead of failing over.
+
+DRPC_408_BODY = ('{"id":1,"jsonrpc":"2.0","error":{"message":"Request timeout'
+                 ' on the free tier, please upgrade your tier to the paid one'
+                 '","code":30}}')
+OK_BODY = '{"jsonrpc":"2.0","id":1,"result":"0xbeef"}'
+
+
+class _PerUrlClient:
+    """Maps each URL to a fixed (status, body) response; records the order."""
+    closed = False
+
+    def __init__(self, responses):
+        self._responses = responses
+        self.tried: list = []
+
+    def post(self, url, *a, **k):
+        self.tried.append(url)
+        status, body = self._responses[url]
+        return _FakeResp(status, body)
+
+
+def _per_url_server(responses):
+    store = MagicMock()
+    store.current_chain.return_value = DEFAULT_CHAINS[0]
+    store.chains = [DEFAULT_CHAINS[0]]
+    srv = RpcServer(store)
+    srv._client = _PerUrlClient(responses)
+    return srv
+
+
+def test_proxy_fails_over_on_drpc_free_tier_408():
+    chain = DEFAULT_CHAINS[0]
+    srv = _per_url_server({chain.rpc_url: (408, DRPC_408_BODY),
+                           chain.fallback_rpcs[0]: (200, OK_BODY)})
+    assert asyncio.run(srv._proxy("eth_call", [])) == "0xbeef"
+    assert srv._client.tried == [chain.rpc_url, chain.fallback_rpcs[0]]
+    # The 408 lands after a server-side stall — the host must go on cooldown
+    # so the next request doesn't re-eat it.
+    assert chain.rpc_url in srv._host_last_fail
+
+
+def test_proxy_fails_over_on_rate_limit_error_body_with_200():
+    chain = DEFAULT_CHAINS[0]
+    limited = ('{"jsonrpc":"2.0","id":1,'
+               '"error":{"code":-32005,"message":"rate limit exceeded"}}')
+    srv = _per_url_server({chain.rpc_url: (200, limited),
+                           chain.fallback_rpcs[0]: (200, OK_BODY)})
+    assert asyncio.run(srv._proxy("eth_call", [])) == "0xbeef"
+    assert chain.rpc_url in srv._host_last_fail
+
+
+def test_proxy_surfaces_limiter_error_when_all_providers_limited():
+    chain = DEFAULT_CHAINS[0]
+    srv = _per_url_server({chain.rpc_url: (408, DRPC_408_BODY),
+                           chain.fallback_rpcs[0]: (408, DRPC_408_BODY)})
+    with pytest.raises(RpcError) as ei:
+        asyncio.run(srv._proxy("eth_call", []))
+    assert "free tier" in str(ei.value)
+
+
+def test_proxy_request_level_error_does_not_fail_over():
+    """A revert is the chain's answer, not the provider's failure — forward
+    it from the FIRST provider; the fallback must not even be tried."""
+    chain = DEFAULT_CHAINS[0]
+    revert = ('{"jsonrpc":"2.0","id":1,'
+              '"error":{"code":3,"message":"execution reverted"}}')
+    srv = _per_url_server({chain.rpc_url: (200, revert),
+                           chain.fallback_rpcs[0]: (200, OK_BODY)})
+    with pytest.raises(RpcError) as ei:
+        asyncio.run(srv._proxy("eth_call", []))
+    assert ei.value.code == 3
+    assert srv._client.tried == [chain.rpc_url]
+    assert not srv._host_last_fail
+
+
+def test_proxy_plain_4xx_fails_over_without_cooldown():
+    """A 400 is often per-method brokenness (DRPC's free Gnosis endpoint
+    400s eth_call while serving everything else) — fail over, but don't
+    cooldown the host: its other methods still work."""
+    chain = DEFAULT_CHAINS[0]
+    bad = ('{"jsonrpc":"2.0","id":1,'
+           '"error":{"code":-32601,"message":"can\'t route this method"}}')
+    srv = _per_url_server({chain.rpc_url: (400, bad),
+                           chain.fallback_rpcs[0]: (200, OK_BODY)})
+    assert asyncio.run(srv._proxy("eth_call", [])) == "0xbeef"
+    assert chain.rpc_url not in srv._host_last_fail
+
+
 # --- broadcasts: pinned to the user's chosen RPC, never a fallback ---------
 
 class _RecordingClient:

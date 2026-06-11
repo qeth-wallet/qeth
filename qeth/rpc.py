@@ -9,6 +9,7 @@ from aiohttp import (
     ServerDisconnectedError, WSMsgType, web,
 )
 
+from .chain import is_provider_limit_error
 from .chains import Chain
 from .signing import (
     SignerBridge, SignerError,
@@ -674,10 +675,38 @@ class RpcServer:
                     -32603, f"upstream returned an invalid response (HTTP {status})",
                 )
                 continue
+            # A parseable body can still be the PROVIDER failing rather than
+            # the chain answering. Probed live (2026-06-11): DRPC under load
+            # answers HTTP 408 + {"code":30,"message":"Request timeout on the
+            # free tier…"} for most requests, and occasionally HTTP 500 +
+            # {"code":19,"message":"Temporary internal error…"} — valid JSON,
+            # so the old "parsed and has an error" path forwarded the
+            # provider's own error to the dapp as a final answer instead of
+            # failing over. Treat any HTTP error status, or a rate-limit
+            # error object on a 200, like a transport failure. A
+            # request-level error (a revert, bad params) comes on a 200 and
+            # is forwarded below — every provider would answer it the same.
+            err = data.get("error") if isinstance(data, dict) else None
+            limited = is_provider_limit_error(err)
+            if status >= 400 or limited:
+                # Cooldown for limiter / overload / server-side states (the
+                # DRPC 408 lands after a multi-second server stall — without
+                # a cooldown every request would re-eat that stall before
+                # failing over). A plain 4xx gets no cooldown: it's often
+                # per-method brokenness (DRPC's free Gnosis endpoint 400s
+                # eth_call while serving everything else), not host sickness.
+                if limited or status in (408, 429) or status >= 500:
+                    self._host_last_fail[url] = now
+                msg = ((err.get("message") if isinstance(err, dict) else None)
+                       or f"upstream HTTP {status}")
+                log.warning("proxy %s: provider-side failure from %s "
+                            "(HTTP %s): %s", method, url, status, msg[:200])
+                code = err.get("code", -32603) if isinstance(err, dict) else -32603
+                last_err = RpcError(code, msg)
+                continue
             # Success — clear this host's cooldown so it's preferred next time.
             self._host_last_fail.pop(url, None)
-            if "error" in data and data["error"]:
-                err = data["error"]
+            if err:
                 raise RpcError(err.get("code", -32603), err.get("message", "upstream error"))
             return data.get("result")
         # Every provider failed or is on cooldown. Surface the last error — a

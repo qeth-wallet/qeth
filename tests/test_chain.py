@@ -490,6 +490,59 @@ class TestRpcFailover:
         out = p2.make_request("eth_call", [])
         assert "error" in out and seen == ["http://a"]   # stopped at first
 
+    def test_failover_rotates_past_rate_limit_body(self, monkeypatch):
+        """A 200 whose JSON-RPC error is the provider's LIMITER (not the
+        chain answering the request) rotates to the next member — and when
+        every member is limited, the limiter error is returned rather than
+        swallowed."""
+        import qeth.chain as ch
+        ch._ensure_heavy_imports()
+        seen = []
+        LIMIT = {"jsonrpc": "2.0", "id": 1,
+                 "error": {"code": -32005, "message": "rate limit exceeded"}}
+
+        def fake(self, method, params):
+            seen.append(self.endpoint_uri)
+            if "limited" in self.endpoint_uri:
+                return dict(LIMIT)
+            return {"jsonrpc": "2.0", "id": 1, "result": "0xok"}
+
+        monkeypatch.setattr(ch.HTTPProvider, "make_request", fake)
+        provider = ch._failover_provider(
+            ["http://limited", "http://good"], request_kwargs={}, session=None)
+        assert provider.make_request("eth_call", [])["result"] == "0xok"
+        assert seen == ["http://limited", "http://good"]
+        # The answering member becomes the sticky choice — the limited one
+        # isn't re-eaten on the next request.
+        seen.clear()
+        assert provider.make_request("eth_call", [])["result"] == "0xok"
+        assert seen == ["http://good"]
+
+        p2 = ch._failover_provider(
+            ["http://limited-a", "http://limited-b"],
+            request_kwargs={}, session=None)
+        assert p2.make_request("eth_call", [])["error"]["code"] == -32005
+
+    def test_is_provider_limit_error_classification(self):
+        """Limiter shapes → True; request-level answers → False. The DRPC
+        free-tier shapes (probed live 2026-06-11: HTTP 408 + code 30, HTTP
+        500 + code 19) are deliberately NOT matched — they always arrive on
+        an HTTP error status, which both failover layers already treat as a
+        host failure."""
+        from qeth.chain import is_provider_limit_error
+        assert is_provider_limit_error(
+            {"code": -32005, "message": "limit exceeded"})       # EIP-1474
+        assert is_provider_limit_error(
+            {"code": 429, "message": "Too Many Requests"})
+        assert is_provider_limit_error(
+            {"code": -32603, "message": "Rate limit reached"})   # generic code
+        assert not is_provider_limit_error(
+            {"code": 3, "message": "execution reverted"})
+        assert not is_provider_limit_error(
+            {"code": -32000, "message": "exceeds block gas limit"})
+        assert not is_provider_limit_error(None)
+        assert not is_provider_limit_error("rate limit")          # not a dict
+
     def test_broadcast_pins_to_primary_while_reads_fail_over(self, monkeypatch):
         """A read falls over to a fallback RPC when the primary has a transport
         error; a BROADCAST goes only to the user's chosen RPC and errors if it's

@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.11.3
+Version:        0.11.4
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -107,6 +107,18 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Fri Jun 12 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.4-1
+- Gas dialog: tiny Gnosis/L2 fees survive the fee spinboxes (precision widens
+  to 1 wei) instead of quantizing to a 0 tip the chain rejects ("FeeTooLow").
+- Broadcast: a first push that dies at the transport level no longer loses the
+  signed tx — it is recorded as pending and re-broadcast in the background,
+  regardless of which account is selected. Node rejections still surface in
+  the dialog for a re-price.
+- JSON-RPC proxy: fail over on provider-side errors hiding behind a parseable
+  body (DRPC free-tier HTTP 408 "upgrade your tier" / 500 "please retry"),
+  with a cooldown for overloaded hosts; reverts still forward verbatim.
+- Wallet reads also rotate past a 200-bodied rate-limit error.
+
 * Wed Jun 10 2026 Michael Egorov <michwill@yieldbasis.com> - 0.11.3-1
 - Broadcast policy: transactions go ONLY to the user's chosen RPC, never a
   fallback — wallet sends, dapp eth_sendTransaction / raw eth_sendRawTransaction,

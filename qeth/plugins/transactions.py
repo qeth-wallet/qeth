@@ -2617,11 +2617,12 @@ class LogsFetchWorker(QThread):
 
 
 class SimulateWorker(QThread):
-    """Run a not-yet-broadcast tx through local revm simulation off the
+    """Run a not-yet-broadcast tx through local simulation off the
     main thread and emit the event logs it would produce — the same
     ``{address, topics, data}`` shape ``LogsFetchWorker`` emits, so the
-    two feed ``_EventsView`` interchangeably. ``ready(None)`` when pyrevm
-    is absent or the simulation fails (the pane shows a placeholder)."""
+    two feed ``_EventsView`` interchangeably. ``ready(None)`` when no
+    simulation route works or the tx reverts (the pane shows a
+    placeholder)."""
 
     ready = Signal(object)   # list of log dicts, or None
 
@@ -2927,7 +2928,7 @@ class _EventPreviewMixin:
 
     def _no_simulation_text(self) -> str:
         return ("(no simulation available — this RPC has no eth_simulateV1 "
-                "and the optional 'pyrevm' package isn't installed)")
+                "and the optional 'py-evm' package isn't installed)")
 
     def _detach_sim(self, *_args) -> None:
         """Stop waiting on the current worker (it keeps running in the
@@ -2960,7 +2961,7 @@ class _EventPreviewMixin:
         self._detach_sim()
         if logs is None:
             # The worker may have just *learned* this endpoint can't
-            # simulate (no eth_simulateV1, no pyrevm) — distinguish that
+            # simulate (no eth_simulateV1, no py-evm) — distinguish that
             # from a genuine revert so the note is accurate.
             from ..simulate import simulation_available
             if not simulation_available(self.chain):

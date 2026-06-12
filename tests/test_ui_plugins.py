@@ -2565,7 +2565,7 @@ class _SimList:
 class TestEventPreviewTab:
     """Send / dapp-Sign dialogs gain an 'Events' tab that previews the
     tx's logs via local revm simulation — lazy on tab-open, cached until
-    the tx params change, and graceful when pyrevm is absent."""
+    the tx params change, and graceful when the fork engine is absent."""
 
     def _started(self):
         # The dialogs also kick AbiFetch / GasSuggestion workers on
@@ -2685,7 +2685,7 @@ class TestEventPreviewTab:
 
     def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._maybe_simulate()                 # no recipient/amount yet
@@ -2696,7 +2696,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)
@@ -2735,7 +2735,7 @@ class TestEventPreviewTab:
 
     def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
@@ -2745,10 +2745,10 @@ class TestEventPreviewTab:
 
     def test_no_route_shows_unavailable_hint(
             self, qtbot, tmp_qeth, monkeypatch):
-        # No pyrevm AND this endpoint already learned to lack simulateV1
+        # No fork engine AND this endpoint already learned to lack simulateV1
         # → neither route can run, so show the 'no simulation' note.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        monkeypatch.setattr(sim, "fork_available", lambda: False)
         monkeypatch.setitem(sim._SIMV1_SUPPORT, ETH.rpc_url, False)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
@@ -2756,16 +2756,16 @@ class TestEventPreviewTab:
         dlg.amount_edit.setText("5")
         dlg._maybe_simulate()
         text = dlg._events.events_view.toPlainText()
-        assert "eth_simulateV1" in text and "pyrevm" in text
+        assert "eth_simulateV1" in text and "py-evm" in text
         assert not workers                    # no worker kicked
 
-    def test_simv1_endpoint_simulates_without_pyrevm(
+    def test_simv1_endpoint_simulates_without_fork_engine(
             self, qtbot, tmp_qeth, monkeypatch):
-        # No pyrevm but the endpoint's simulateV1 support is unprobed →
+        # No fork engine but the endpoint's simulateV1 support is unprobed →
         # still kick the worker (it'll try the fast path).
         import qeth.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        monkeypatch.setattr(sim, "fork_available", lambda: False)
         sim._SIMV1_SUPPORT.pop(ETH.rpc_url, None)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
@@ -2777,7 +2777,7 @@ class TestEventPreviewTab:
     def test_sign_simulates_fixed_request_once(
             self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._sign(qtbot, started)
         dlg._maybe_simulate()
@@ -2796,7 +2796,7 @@ class TestEventPreviewTab:
         # A slow fork (Arbitrum-style) must not spin the tab forever: the
         # timeout resolves it, and a late worker result is ignored.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)
@@ -2818,7 +2818,7 @@ class TestEventPreviewTab:
         # Closing must disconnect it so a late `ready` can't reach the
         # (deleted) dialog.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)

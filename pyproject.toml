@@ -27,17 +27,25 @@ dependencies = [
 
 [project.optional-dependencies]
 bundled = ["PySide6>=6.6"]
-# Local transaction simulation (event preview before broadcast). revm
-# (Rust) via PyO3 — one compiled wheel, ~no Python dep tree; the app
-# degrades gracefully to "no preview" when it's absent. Install with:
+# Local transaction simulation (event preview before broadcast) on RPCs
+# without eth_simulateV1. py-evm (pure Python, EF-maintained): ships on
+# every platform/Python — unlike pyrevm, whose wheels stop at Linux
+# cp312 with no aarch64 — and its fork state DB is OUR code (the seam
+# where proof-verified reads plug in later; see docs/eth-browsing.md).
+# Speed is irrelevant here: a fork simulation is network-round-trip-
+# bound, not EVM-bound. The app degrades gracefully to "no preview"
+# when absent. Install with:
 #   uv pip install -e '.[simulate]'
-simulate = ["pyrevm>=0.3"]
+simulate = ["py-evm>=0.10"]
 
 [dependency-groups]
 dev = [
     "mypy>=2.1.0",
     "pytest>=8",
     "pytest-qt>=4.4",
+    # The simulate extra, mirrored here so the fork-engine tests always
+    # run the real (pure-Python) EVM rather than skipping.
+    "py-evm>=0.10",
 ]
 
 [tool.pytest.ini_options]
@@ -79,6 +87,7 @@ files = [
     "qeth/abi_cache.py",
     "qeth/contract_identity.py",
     "qeth/simulate.py",
+    "qeth/pyevm_fork.py",
     "qeth/activity_cache.py",
     "qeth/transactions.py",
     "qeth/transactions_cache.py",
@@ -120,7 +129,8 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "ledgereth.*",
-    "pyrevm.*",
+    "eth.*",
+    "eth_typing.*",
     "segno.*",
     "web3.*",
     "eth_abi.*",

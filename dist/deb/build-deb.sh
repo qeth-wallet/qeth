@@ -33,7 +33,10 @@ fi
 
 # 2. qeth + the eth stack into the same venv (vendored). pip's build isolation
 #    keeps the venv's build-pinned setuptools out of the dep installs.
-"$VENV/bin/$PY" -m pip install --no-warn-script-location --no-compile "$REPO"
+#    [simulate] = the pure-Python py-evm fork engine: event previews on RPCs
+#    without eth_simulateV1, and Helios-verified previews when the user has
+#    a helios binary installed.
+"$VENV/bin/$PY" -m pip install --no-warn-script-location --no-compile "$REPO[simulate]"
 
 # 3. Assemble the .deb tree.
 STAGE="$(mktemp -d)/qeth"

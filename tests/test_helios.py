@@ -228,6 +228,25 @@ def test_simulate_logs_prefers_verified_fork(monkeypatch):
     assert isinstance(out, sim.VerifiedLogs)
 
 
+def test_no_fork_engine_skips_verified_mode_entirely(monkeypatch):
+    """helios binary present but py-evm absent (a package without the
+    simulate extra): the verified branch must not hijack the flow into a
+    None — previews fall through to eth_simulateV1. It must not even
+    probe/spawn the sidecar."""
+    import qeth.simulate as sim
+    monkeypatch.setattr(sim, "fork_available", lambda: False)
+    monkeypatch.setattr(hl, "verified_chain",
+                        lambda chain, **kw: pytest.fail(
+                            "must not probe helios without an engine"))
+    monkeypatch.setattr(sim, "_simulate_via_rpc",
+                        lambda *a, **k: [{"address": "0xab"}])
+    sim._SIMV1_SUPPORT.clear()
+    out = sim.simulate_logs(ETH, "0x" + "11" * 20, "0x" + "22" * 20,
+                            "0xdead", 0)
+    assert out == [{"address": "0xab"}]
+    sim._SIMV1_SUPPORT.clear()
+
+
 def test_simulate_logs_falls_back_without_helios(monkeypatch):
     import qeth.simulate as sim
     monkeypatch.setattr(hl, "verified_chain", lambda chain, **kw: None)

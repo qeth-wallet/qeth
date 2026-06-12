@@ -393,7 +393,12 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         # defense. Slower (per-slot proof fetches), but the remote
         # node can no longer lie about what this tx does.
         from .helios import verified_chain
-        helios_chain = verified_chain(chain)
+        # Verified mode needs the LOCAL engine: without py-evm, entering
+        # this branch would return None instead of falling through to
+        # eth_simulateV1 — killing previews for anyone with a helios
+        # binary but no simulate extra. Don't even probe (or spawn) the
+        # sidecar in that case.
+        helios_chain = verified_chain(chain) if fork_available() else None
         if helios_chain is not None:
             log.info("simulating on helios-verified state (%s)",
                      helios_chain.rpc_url)

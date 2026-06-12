@@ -70,8 +70,10 @@ tar -C "$SRC" \
 # --prefix pins the install into the AppDir copy. manylinux's CPython resolves
 # its own prefix back to /opt/python, so neither the default scheme nor
 # PYTHONHOME reliably redirects pip — --prefix is explicit and deterministic.
+# [simulate] = pure-Python py-evm fork engine (previews on simV1-less RPCs;
+# Helios-verified previews when a helios binary is on the host).
 "$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
-    "${BUILD_SRC}[bundled]"
+    "${BUILD_SRC}[bundled,simulate]"
 # Fail loudly if Qt didn't actually land in the bundle, rather than shipping a
 # tiny empty AppImage.
 if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&1; then

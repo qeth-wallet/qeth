@@ -1726,6 +1726,37 @@ class TestReceiptTransferScan:
         tokens_plugin.note_receipt_logs(ETH, None)
         assert tokens_plugin._receipt_contracts == {}
 
+    def test_logless_receipt_from_our_wallet_refreshes_displayed_view(
+        self, tokens_plugin, monkeypatch,
+    ):
+        """A confirmed tx changed the sender's NATIVE balance by
+        construction (gas + value) even when it emitted no Transfer
+        events — a plain send, or custom events only (TAC bridge /
+        system-contract calls). The displayed view must refresh
+        immediately, not wait for the 60 s sweep (the only floor on
+        chains with no working ws)."""
+        from types import SimpleNamespace
+        tokens_plugin._store.add_account({
+            "address": self.ME, "source": "hot", "label": "Me",
+        })
+        tokens_plugin.host = SimpleNamespace(
+            selected_address=self.ME,
+            current_chain=lambda: ETH,
+        )
+        called = []
+        monkeypatch.setattr(tokens_plugin, "_invalidate_view_and_refresh",
+                            lambda: called.append(True))
+        tokens_plugin.note_receipt_logs(
+            ETH, {"from": self.ME.lower(), "to": self.UNI_ROUTER.lower(),
+                  "logs": []})
+        assert called == [True]
+        # …but a logless receipt between strangers must not refresh.
+        called.clear()
+        tokens_plugin.note_receipt_logs(
+            ETH, {"from": "0x" + "11" * 20, "to": "0x" + "22" * 20,
+                  "logs": []})
+        assert called == []
+
     def test_handles_attributedict_receipt_from_web3py(self, tokens_plugin):
         # web3.py 7 returns receipts as AttributeDict which is a
         # Mapping but NOT a dict subclass. The earlier
@@ -2565,7 +2596,7 @@ class _SimList:
 class TestEventPreviewTab:
     """Send / dapp-Sign dialogs gain an 'Events' tab that previews the
     tx's logs via local revm simulation — lazy on tab-open, cached until
-    the tx params change, and graceful when pyrevm is absent."""
+    the tx params change, and graceful when the fork engine is absent."""
 
     def _started(self):
         # The dialogs also kick AbiFetch / GasSuggestion workers on
@@ -2683,9 +2714,59 @@ class TestEventPreviewTab:
             assert [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())] \
                 == ["&Details", "&Events"]
 
+    def test_simulation_note_shows_as_placeholder(self, qtbot, tmp_qeth):
+        """A SimulationNote outcome (e.g. calldata to a code-less TAC
+        system contract) must surface its text — not render as an empty
+        events list implying 'this tx does nothing'."""
+        from qeth.simulate import SimulationNote
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._sim_key = ("k",)
+        dlg._sim_done = False
+        dlg._on_sim_ready(("k",), SimulationNote("(target has no code…)"))
+        assert "no code" in dlg._events.events_view.toPlainText()
+
+    def test_busy_spinner_animates_then_stops(self, qtbot, tmp_qeth):
+        """set_busy shows an animated spinner; a result/placeholder stops
+        the timer so it can't tick into a settled pane."""
+        _, started = self._started()
+        ev = self._send(qtbot, started)._events
+        ev.set_busy("simulating…")
+        assert ev._spin_timer.isActive()
+        first = ev.events_view.toPlainText()
+        assert "simulating…" in first
+        ev._tick_spinner()                       # advance one frame
+        assert ev.events_view.toPlainText() != first   # the glyph moved
+        assert "simulating…" in ev.events_view.toPlainText()
+        ev.set_logs([])                          # result arrives
+        assert not ev._spin_timer.isActive()
+        ev.set_busy("again…")
+        ev.set_placeholder("(done)")             # or a placeholder
+        assert not ev._spin_timer.isActive()
+
+    def test_verified_badge_tracks_result_type(self, qtbot, tmp_qeth):
+        """VerifiedLogs (Helios-backed simulation) shows the ⚡ verified
+        badge; a plain unverified result hides it again; placeholders
+        (new sim starting, failures) clear it."""
+        from qeth.simulate import VerifiedLogs
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        ev = dlg._events
+        assert ev.verified_lbl.isHidden()              # default: off
+        dlg._sim_key, dlg._sim_done = ("k",), False
+        dlg._on_sim_ready(("k",), VerifiedLogs([]))
+        assert not ev.verified_lbl.isHidden()          # verified → badge
+        dlg._sim_key, dlg._sim_done = ("k2",), False
+        dlg._on_sim_ready(("k2",), [])                 # plain unverified
+        assert ev.verified_lbl.isHidden()
+        dlg._sim_key, dlg._sim_done = ("k3",), False
+        dlg._on_sim_ready(("k3",), VerifiedLogs([]))
+        ev.set_placeholder("(simulating…)")            # new sim starting
+        assert ev.verified_lbl.isHidden()
+
     def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._maybe_simulate()                 # no recipient/amount yet
@@ -2696,7 +2777,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)
@@ -2735,7 +2816,7 @@ class TestEventPreviewTab:
 
     def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
@@ -2745,10 +2826,10 @@ class TestEventPreviewTab:
 
     def test_no_route_shows_unavailable_hint(
             self, qtbot, tmp_qeth, monkeypatch):
-        # No pyrevm AND this endpoint already learned to lack simulateV1
+        # No fork engine AND this endpoint already learned to lack simulateV1
         # → neither route can run, so show the 'no simulation' note.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        monkeypatch.setattr(sim, "fork_available", lambda: False)
         monkeypatch.setitem(sim._SIMV1_SUPPORT, ETH.rpc_url, False)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
@@ -2756,16 +2837,16 @@ class TestEventPreviewTab:
         dlg.amount_edit.setText("5")
         dlg._maybe_simulate()
         text = dlg._events.events_view.toPlainText()
-        assert "eth_simulateV1" in text and "pyrevm" in text
+        assert "eth_simulateV1" in text and "py-evm" in text
         assert not workers                    # no worker kicked
 
-    def test_simv1_endpoint_simulates_without_pyrevm(
+    def test_simv1_endpoint_simulates_without_fork_engine(
             self, qtbot, tmp_qeth, monkeypatch):
-        # No pyrevm but the endpoint's simulateV1 support is unprobed →
+        # No fork engine but the endpoint's simulateV1 support is unprobed →
         # still kick the worker (it'll try the fast path).
         import qeth.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+        monkeypatch.setattr(sim, "fork_available", lambda: False)
         sim._SIMV1_SUPPORT.pop(ETH.rpc_url, None)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
@@ -2777,7 +2858,7 @@ class TestEventPreviewTab:
     def test_sign_simulates_fixed_request_once(
             self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._sign(qtbot, started)
         dlg._maybe_simulate()
@@ -2796,7 +2877,7 @@ class TestEventPreviewTab:
         # A slow fork (Arbitrum-style) must not spin the tab forever: the
         # timeout resolves it, and a late worker result is ignored.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)
@@ -2818,7 +2899,7 @@ class TestEventPreviewTab:
         # Closing must disconnect it so a late `ready` can't reach the
         # (deleted) dialog.
         import qeth.simulate as sim
-        monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
+        monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg.recipient_edit.setText("0x" + "bb" * 20)

@@ -1,11 +1,14 @@
 """Hermetic tests for qeth.simulate — the log-extraction logic.
 
-A fake EVM class is injected so these never fork a real chain. The live
-pyrevm-against-mainnet path is exercised manually (it's slow + networked).
+The fork path injects a fake ``StateReader`` and runs the REAL py-evm
+engine against it (pure Python, no network) — hand-rolled bytecodes
+below stand in for contracts. The live fork-against-mainnet path is
+exercised manually (it's slow + networked).
 """
 
 from types import SimpleNamespace
 
+from qeth.pyevm_fork import StateReader
 from qeth.simulate import simulate_logs
 
 CHAIN = SimpleNamespace(chain_id=1, rpc_url="https://rpc.example/eth")
@@ -13,70 +16,283 @@ FROM = "0x7a16ff8270133f063aab6c9977183d9e72835428"
 USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
+# PUSH1 0xaa, PUSH1 0x20, PUSH1 0x00, LOG1, STOP — emit one log with
+# topic 0xaa and 32 zero bytes of data.
+LOG1_CODE = bytes.fromhex("60aa60206000a100")
+# PUSH1 0, SLOAD, PUSH1 0, MSTORE, PUSH1 0x20, PUSH1 0, LOG0, STOP —
+# log storage slot 0 as the data payload (proves SLOADs hit the reader).
+SLOAD_LOG_CODE = bytes.fromhex("60005460005260206000a000")
+# PUSH1 0, PUSH1 0, REVERT — revert with empty output.
+REVERT_CODE = bytes.fromhex("60006000fd")
 
-class _FakeLog:
-    def __init__(self, address, topics, data_bytes):
-        self.address = address
-        self.topics = topics
-        # pyrevm shape: .data is a (topics, data_bytes) tuple.
-        self.data = (topics, data_bytes)
 
+class _WorldReader(StateReader):
+    """A tiny world: ``code``/``storage`` live at the call target, every
+    other address is an EOA with ``balance`` wei. Records lookups."""
 
-class _FakeEVM:
-    """Records construction + the message_call, returns one Transfer."""
-    seen: dict = {}
+    def __init__(self, code=b"", storage=None, balance=10**20):
+        self.code = code
+        self.storage = storage or {}
+        self.balance = balance
+        self.calls: list = []
 
-    def __init__(self, fork_url=None):
-        _FakeEVM.seen["fork_url"] = fork_url
+    def get_account(self, address):
+        self.calls.append(("account", address.lower()))
+        if address.lower() == USDC:
+            return (0, 0, self.code)
+        return (self.balance, 0, b"")
 
-    def message_call(self, **kwargs):
-        _FakeEVM.seen["call"] = kwargs
-        self.result = SimpleNamespace(logs=[
-            _FakeLog(USDC, [TRANSFER, "0x" + "00" * 31 + "01"],
-                     b"\x00" * 31 + b"\x05"),
-        ])
+    def get_storage(self, address, slot):
+        self.calls.append(("storage", address.lower(), slot))
+        if address.lower() == USDC:
+            return self.storage.get(slot, 0)
+        return 0
 
 
 def test_returns_decode_ready_log_dicts():
-    _FakeEVM.seen = {}
-    logs = simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb", 0, evm_cls=_FakeEVM)
-    assert _FakeEVM.seen["fork_url"] == CHAIN.rpc_url
+    world = _WorldReader(code=LOG1_CODE)
+    logs = simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb", 0,
+                         fork_reader=world)
     assert len(logs) == 1
     lg = logs[0]
-    assert lg["address"] == USDC
-    assert lg["topics"][0] == TRANSFER
-    assert lg["data"] == "0x" + "00" * 31 + "05"
+    assert lg["address"].lower() == USDC          # checksummed in output
+    assert lg["address"] != USDC                  # i.e. NOT the lowercase
+    assert lg["topics"] == ["0x" + "00" * 31 + "aa"]
+    assert lg["data"] == "0x" + "00" * 32
 
 
-def test_calldata_and_addresses_are_normalised():
-    _FakeEVM.seen = {}
-    simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb00ff", 0, evm_cls=_FakeEVM)
-    call = _FakeEVM.seen["call"]
-    assert call["calldata"] == bytes.fromhex("a9059cbb00ff")
-    # web3/pyrevm want checksum addresses — the lowercased inputs are fixed.
-    assert call["caller"].lower() == FROM
-    assert call["caller"] != FROM           # i.e. it got checksummed
-    assert "value" not in call               # zero value omitted
+def test_storage_reads_go_through_the_reader():
+    world = _WorldReader(code=SLOAD_LOG_CODE, storage={0: 5})
+    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world)
+    assert logs and logs[0]["data"] == "0x" + "00" * 31 + "05"
+    assert any(c[0] == "storage" and c[1] == USDC and c[2] == 0
+               for c in world.calls)
 
 
-def test_value_is_passed_when_nonzero():
-    _FakeEVM.seen = {}
-    simulate_logs(CHAIN, FROM, USDC, "0x", 10**18, evm_cls=_FakeEVM)
-    assert _FakeEVM.seen["call"]["value"] == 10**18
+def test_plain_value_transfer_has_no_logs():
+    world = _WorldReader()       # target is a plain EOA
+    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 10**18, fork_reader=world)
+    assert logs == []
+
+
+def test_insufficient_funds_returns_none():
+    world = _WorldReader(balance=1)   # sender can't cover the value
+    assert simulate_logs(CHAIN, FROM, USDC, "0x", 10**18,
+                         fork_reader=world) is None
 
 
 def test_contract_creation_returns_none():
-    assert simulate_logs(CHAIN, FROM, None, "0x", 0, evm_cls=_FakeEVM) is None
+    assert simulate_logs(CHAIN, FROM, None, "0x", 0,
+                         fork_reader=_WorldReader()) is None
+
+
+def test_calldata_to_codeless_target_returns_note():
+    """Calldata to an address with no code simulates as a clean no-op,
+    but on chains with NATIVE system contracts (TAC 0x08xx) the node acts
+    on it outside the EVM — an empty events list would falsely read as
+    'this tx does nothing'. The fork path must return a SimulationNote."""
+    from qeth.simulate import SimulationNote
+    world = _WorldReader(code=b"")            # target has no bytecode
+    out = simulate_logs(CHAIN, FROM, USDC, "0xb46a8d61ff", 0,
+                        fork_reader=world)
+    assert isinstance(out, SimulationNote)
+    assert "no contract code" in out.text
+
+
+def test_plain_send_to_codeless_target_is_not_a_note():
+    # No calldata → a no-op preview is the truth, not a trap.
+    world = _WorldReader(code=b"")
+    assert simulate_logs(CHAIN, FROM, USDC, "0x", 10**18,
+                         fork_reader=world) == []
 
 
 def test_simulation_error_returns_none():
-    class _Boom:
-        def __init__(self, fork_url=None): pass
-        def message_call(self, **kw): raise RuntimeError("revm exploded")
-    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0, evm_cls=_Boom) is None
+    class _Boom(StateReader):
+        def get_account(self, address): raise RuntimeError("reader exploded")
+        def get_storage(self, address, slot): raise RuntimeError("boom")
+    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0,
+                         fork_reader=_Boom()) is None
 
 
-# --- revert-reason decoding (pyrevm raises RuntimeError with output bytes) ---
+def test_revert_returns_none_without_retrying():
+    # A genuine revert must fail fast — no backoff, single attempt.
+    world = _WorldReader(code=REVERT_CODE)
+    delays: list = []
+    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
+                         sleep=delays.append) is None
+    assert delays == []
+
+
+def test_engine_invokes_reader_prefetch():
+    """run_fork_call must offer the reader its warm-up hint exactly once,
+    with the call's own params, before execution."""
+    calls = []
+
+    class _Recorder(_WorldReader):
+        def prefetch(self, **kw):
+            calls.append(kw)
+
+    world = _Recorder(code=LOG1_CODE)
+    simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb", 7, fork_reader=world)
+    assert len(calls) == 1
+    assert calls[0]["to_addr"] == USDC and calls[0]["value"] == 7
+
+
+def _hint_urlopen(handler):
+    """Build a fake urllib.urlopen that routes each JSON-RPC POST through
+    ``handler(method, params) -> result`` and records the methods seen."""
+    import json
+    seen = []
+
+    def fake(req, timeout=None):
+        item = json.loads(req.data)
+        seen.append(item["method"])
+        out = {"jsonrpc": "2.0", "id": item["id"],
+               "result": handler(item["method"], item["params"])}
+
+        class _R:
+            def read(self): return json.dumps(out).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+
+    return fake, seen
+
+
+def test_rpc_reader_prefetch_seeds_the_memo(monkeypatch):
+    """prestateTracer hint → concurrent seed → memo, with EXACTLY the key
+    formats the lazy getters use (a mismatch turns the prefetch into dead
+    weight). The hint and the seed both go to _hint_url / the reader's
+    RPC via urllib; EthClient is only the lazy read fallback."""
+    from qeth.pyevm_fork import RpcStateReader
+
+    TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    SLOT = "0x" + "00" * 31 + "05"
+
+    def handler(method, params):
+        if method == "debug_traceCall":          # prestateTracer hint
+            return {TOKEN.lower(): {"balance": "0x0", "storage": {SLOT: "0x2a"}}}
+        return ("0x2386f26fc10000" if method == "eth_getBalance"
+                else "0x1" if method == "eth_getTransactionCount"
+                else "0x6001" if method == "eth_getCode"
+                else "0x" + "00" * 31 + "2a")   # eth_getStorageAt
+
+    fake, seen = _hint_urlopen(handler)
+
+    class _Client:
+        calls: list = []
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            _Client.calls.append(method)   # lazy read fallback only
+            return "0x0"
+
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+
+    reader = RpcStateReader(
+        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+    reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
+    assert seen[0] == "debug_traceCall"          # prestate hint went first
+    # sender (3) + token (3) account calls + 1 slot = 7 seed fetches
+    assert sum(1 for m in seen if m != "debug_traceCall") == 7
+
+    _Client.calls.clear()
+    bal, nonce, code = reader.get_account(TOKEN)
+    assert (bal, nonce, code) == (10**16, 1, bytes.fromhex("6001"))
+    assert reader.get_storage(TOKEN, 5) == 42
+    assert reader.get_account(FROM)[0] == 10**16
+    assert _Client.calls == []      # everything came from the seeded memo
+
+
+def test_prefetch_falls_back_to_access_list(monkeypatch):
+    """When the upstream lacks debug_traceCall, the hint falls back to
+    eth_createAccessList (and still seeds the memo)."""
+    from qeth.pyevm_fork import RpcStateReader
+
+    TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+
+    def handler(method, params):
+        if method == "debug_traceCall":
+            raise RuntimeError("the method debug_traceCall does not exist")
+        if method == "eth_createAccessList":
+            return {"accessList": [{"address": TOKEN.lower(),
+                                    "storageKeys": []}]}
+        return "0x1" if method == "eth_getTransactionCount" else "0x0"
+
+    import json
+    seen = []
+
+    def fake(req, timeout=None):
+        item = json.loads(req.data)
+        seen.append(item["method"])
+        try:
+            res = handler(item["method"], item["params"])
+        except RuntimeError as e:
+            out = {"jsonrpc": "2.0", "id": item["id"],
+                   "error": {"code": -32601, "message": str(e)}}
+        else:
+            out = {"jsonrpc": "2.0", "id": item["id"], "result": res}
+
+        class _R:
+            def read(self): return json.dumps(out).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params): return "0x0"
+
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    reader = RpcStateReader(
+        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+    reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
+    assert "debug_traceCall" in seen and "eth_createAccessList" in seen
+
+
+def test_static_accounts_never_hit_the_network():
+    """Precompiles and the Cancun/Prague system contracts answer
+    (0, 0, b'') locally — py-evm overwrites system-contract code at
+    State init and executes precompiles natively, so fetching their
+    account fields was pure waste (profiled: ~9 round-trips, ~2s of
+    every warm simulation)."""
+    from qeth.pyevm_fork import RpcStateReader
+
+    class _Exploding:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            raise AssertionError("static account hit the network")
+
+    import unittest.mock as mock
+    with mock.patch("qeth.chain.EthClient", _Exploding):
+        reader = RpcStateReader(
+            SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x1")
+    for addr in ("0x" + "00" * 19 + "04",                       # identity
+                 "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02",  # 4788
+                 "0x0000F90827F1C53a10cb7A02335B175320002935"): # 2935
+        assert reader.get_account(addr) == (0, 0, b"")
+
+
+def test_rpc_reader_prefetch_failure_is_silent(monkeypatch):
+    from qeth.pyevm_fork import RpcStateReader
+
+    class _NoAccessList:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            if method == "eth_createAccessList":
+                raise RuntimeError("-32601 method not found")
+            return "0x6001" if method == "eth_getCode" else "0x1"
+
+    monkeypatch.setattr("qeth.chain.EthClient", _NoAccessList)
+    reader = RpcStateReader(
+        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+    reader.prefetch(from_addr=FROM, to_addr=USDC, data="0xdead", value=0)
+    # …and the lazy path still works afterwards.
+    assert reader.get_account(USDC)[1] == 1
+
+
+# --- revert-reason decoding ---------------------------------------------------
 
 from qeth.simulate import _decode_revert
 
@@ -105,57 +321,67 @@ def test_decode_revert_no_reason_and_unknown():
         "Revert { output: 0xdeadbeef }")
 
 
+def test_simulation_revert_carries_decodable_output():
+    # The engine's revert exception → the decoded reason, end to end.
+    from qeth.pyevm_fork import SimulationRevert
+    from qeth.simulate import _decode_revert_output
+    e = SimulationRevert(bytes.fromhex(
+        "08c379a0"
+        "0000000000000000000000000000000000000000000000000000000000000020"
+        "0000000000000000000000000000000000000000000000000000000000000003"
+        "6e6f700000000000000000000000000000000000000000000000000000000000"
+    ), error=None)
+    assert _decode_revert_output("0x" + e.output.hex()) == "nop"
+
+
+# --- retry / rate-limit handling ----------------------------------------------
+
+class _FlakyReader(_WorldReader):
+    """Raises a rate-limit error from the first ``fail`` reader touches —
+    each raise aborts exactly one run_fork_call attempt, so ``failures``
+    counts failed attempts."""
+
+    def __init__(self, fail, **kwargs):
+        super().__init__(**kwargs)
+        self.failures = 0
+        self._fail = fail
+
+    def get_account(self, address):
+        if self.failures < self._fail:
+            self.failures += 1
+            raise RuntimeError(
+                'JsonRpcError { code: 15, message: "Too many request" }')
+        return super().get_account(address)
+
+
 def test_rate_limited_retries_then_succeeds():
-    # message_call raises a rate-limit twice, then succeeds; the helper
-    # should back off (injected no-op sleep) and return the logs.
-    class _Flaky:
-        attempts = 0
-        def __init__(self, fork_url=None): pass
-        def message_call(self, **kw):
-            _Flaky.attempts += 1
-            if _Flaky.attempts < 3:
-                raise RuntimeError(
-                    'JsonRpcError { code: 15, message: "Too many request" }')
-            self.result = SimpleNamespace(logs=[
-                _FakeLog(USDC, [TRANSFER], b"\x01")])
-    delays = []
-    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 0, evm_cls=_Flaky,
+    world = _FlakyReader(fail=2, code=LOG1_CODE)
+    delays: list = []
+    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
                          sleep=delays.append)
-    assert _Flaky.attempts == 3        # two failures + one success
+    assert world.failures == 2         # two failed attempts, then success
     assert len(delays) == 2            # backed off before each retry
     assert logs and len(logs) == 1
 
 
 def test_rate_limited_gives_up_after_retries():
-    class _AlwaysLimited:
-        def __init__(self, fork_url=None): pass
-        def message_call(self, **kw):
-            raise RuntimeError('code: 15, message: "Too many request"')
-    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 0, evm_cls=_AlwaysLimited,
+    world = _FlakyReader(fail=99)
+    logs = simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
                          retries=3, sleep=lambda d: None)
     assert logs is None
+    assert world.failures == 3
 
 
-def test_revert_is_not_retried():
-    # A genuine revert must fail fast — no backoff, single attempt.
-    class _Reverter:
-        attempts = 0
-        def __init__(self, fork_url=None): pass
-        def message_call(self, **kw):
-            _Reverter.attempts += 1
-            raise RuntimeError("Revert { output: 0x }")
-    delays = []
-    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0, evm_cls=_Reverter,
-                         sleep=delays.append) is None
-    assert _Reverter.attempts == 1 and delays == []
-
-
-def test_injected_evm_skips_networked_block_env():
-    # With evm_cls injected the helper must not touch the network for a
-    # block env — _FakeEVM has no set_block_env and a fork_url to nowhere.
-    _FakeEVM.seen = {}
-    logs = simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb", 0, evm_cls=_FakeEVM)
-    assert logs and "block" not in _FakeEVM.seen   # no set_block_env call
+def test_fork_deadline_stops_retries():
+    # A rate-limited fork past its deadline must not start another attempt.
+    import time as _t
+    import qeth.simulate as sim
+    world = _FlakyReader(fail=99)
+    out = sim._simulate_via_fork(
+        CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
+        deadline=_t.monotonic() - 1, sleep=lambda d: None,
+    )
+    assert out is None and world.failures == 1   # no retry past the deadline
 
 
 # --- eth_simulateV1 fast path + orchestrator routing -------------------------
@@ -250,6 +476,23 @@ def test_simv1_rpc_raises_unsupported_on_minus_32601(monkeypatch):
         sim._simulate_via_rpc(CHAIN, FROM, USDC, "0x", 0, sleep=lambda d: None)
 
 
+def test_simv1_empty_logs_to_codeless_target_returns_note(monkeypatch):
+    """Same trap through the FAST path: simulateV1 says 'success, no
+    logs' for calldata to a code-less address — one follow-up getCode
+    turns that into the honest note."""
+    from qeth.simulate import SimulationNote
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            if method == "eth_simulateV1":
+                return [{"calls": [{"status": "0x1", "logs": []}]}]
+            assert method == "eth_getCode"
+            return "0x"
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    out = sim._simulate_via_rpc(CHAIN, FROM, USDC, "0xb46a8d61ff", 0)
+    assert isinstance(out, SimulationNote)
+
+
 def test_simv1_rpc_returns_logs(monkeypatch):
     log = {"address": USDC, "topics": [TRANSFER], "data": "0x" + "00" * 31 + "07"}
     class _Client:
@@ -264,31 +507,15 @@ def test_simv1_rpc_returns_logs(monkeypatch):
 
 def test_simulation_available(monkeypatch):
     sim._SIMV1_SUPPORT.clear()
-    monkeypatch.setattr(sim, "pyrevm_available", lambda: True)
-    assert simulation_available(CHAIN)                 # pyrevm present
-    monkeypatch.setattr(sim, "pyrevm_available", lambda: False)
+    monkeypatch.setattr(sim, "fork_available", lambda: True)
+    assert simulation_available(CHAIN)                 # fork engine present
+    monkeypatch.setattr(sim, "fork_available", lambda: False)
     assert simulation_available(CHAIN)                 # endpoint unprobed → try
     sim._SIMV1_SUPPORT[CHAIN.rpc_url] = False
     assert not simulation_available(CHAIN)             # neither route works
     sim._SIMV1_SUPPORT[CHAIN.rpc_url] = True
     assert simulation_available(CHAIN)                 # simulateV1 works
     sim._SIMV1_SUPPORT.clear()
-
-
-def test_fork_deadline_stops_retries():
-    # A rate-limited fork past its deadline must not start another attempt.
-    import time as _t
-    class _Limited:
-        n = 0
-        def __init__(self, fork_url=None): pass
-        def message_call(self, **kw):
-            _Limited.n += 1
-            raise RuntimeError('JsonRpcError { code: 15, message: "Too many request" }')
-    out = sim._simulate_via_fork(
-        CHAIN, FROM, USDC, "0x", 0, evm_cls=_Limited,
-        deadline=_t.monotonic() - 1, sleep=lambda d: None,
-    )
-    assert out is None and _Limited.n == 1   # no retry past the deadline
 
 
 def test_budget_threads_a_deadline_into_the_fork(monkeypatch):

@@ -560,12 +560,20 @@ class TokensPlugin(Plugin):
         # dict also matches (used in tests + the raw RPC path).
         if receipt is None or not hasattr(receipt, "get"):
             return
-        logs = receipt.get("logs")
-        if not logs:
-            return
         our_addrs = {a["address"].lower() for a in self._store.accounts}
         chain_id = chain.chain_id
         affected_wallets: set[str] = set()
+        # The tx's own endpoints are affected regardless of its events:
+        # the sender's NATIVE balance changed by construction (gas +
+        # value), a plain value transfer has no logs at all, and a tx
+        # whose events are custom (bridge calls, TAC system contracts)
+        # still moved value. Without this, a chain with no working ws
+        # (chainlist-added, e.g. TAC) showed a stale native balance
+        # until the next 60 s sweep even though we held the receipt.
+        for party in (receipt.get("from"), receipt.get("to")):
+            if isinstance(party, str) and party.lower() in our_addrs:
+                affected_wallets.add(party.lower())
+        logs = receipt.get("logs") or []
         for log in logs:
             topics = log.get("topics") or []
             if len(topics) != 3:

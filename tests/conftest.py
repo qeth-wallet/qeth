@@ -30,6 +30,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # it for the suite; the watcher's own tests opt back in via monkeypatch.
 os.environ.setdefault("QETH_LIVE_WS", "0")
 
+# Same for the Helios verified-simulation sidecar: the developer machine
+# may have a real `helios` binary installed, and any simulate_logs call
+# on a supported chain would otherwise SPAWN it mid-test. Helios's own
+# tests opt back in / inject fakes via monkeypatch.
+os.environ.setdefault("QETH_HELIOS", "0")
+
 # Local-only test config from a gitignored `.env` at the repo root. Mainly a
 # fast local archive node for the anvil fork — e.g.
 # `QETH_ANVIL_FORK_RPC=http://10.0.0.5:8545` — so tests/test_live_anvil.py

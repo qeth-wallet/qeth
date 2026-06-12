@@ -13,24 +13,23 @@ Two routes, picked per-endpoint (``simulate_logs`` orchestrates):
    e.g. cloudflare-eth.com rejects it with ``-32601``. So support is
    probed by *using* it and cached per RPC URL (``_SIMV1_SUPPORT``).
 
-2. **Fallback — local revm fork (``pyrevm``).** Universal: forking only
-   uses standard state reads (``getStorageAt`` / ``getCode`` / …) that
-   every endpoint exposes. The cost is one request per cold storage slot,
-   fetched serially on demand, so it's slow and can trip a throttled
-   endpoint's rate limit — hence it's the fallback, not the default. Also
-   needs the block-env fix below.
+2. **Fallback — local py-evm fork (``qeth.pyevm_fork``).** Universal:
+   forking only uses standard state reads (``getStorageAt`` / ``getCode``
+   / …) that every endpoint exposes. The cost is one request per cold
+   storage slot, fetched serially on demand, so it's slow and can trip a
+   throttled endpoint's rate limit — hence it's the fallback, not the
+   default. The block env is built from the real latest block (an
+   env-less fork falsely reverts time-math contracts — oracle staleness,
+   deadlines, TWAP — on a zeroed timestamp), and the engine is pure
+   Python, so this route ships on every platform/Python (unlike the
+   pyrevm it replaced, whose wheels stopped at Linux cp312).
 
-   **Block environment.** pyrevm forks *state* at latest but leaves the
-   block env zeroed (``timestamp == 1``, ``number == 0``). Contracts that
-   do time math (oracle staleness, deadlines, TWAP) then revert on a
-   checked-math underflow, so a valid tx simulates as reverting. We fetch
-   the real latest block and ``set_block_env`` from it before the call.
-
-``pyrevm`` is an **optional** dependency and ``eth_simulateV1`` isn't
-everywhere, so simulation may be unavailable; ``simulation_available``
-reports whether *either* route can work, and the helpers return ``None``
-when neither can (or the tx reverts) — callers then skip the preview.
-Simulation is slow-ish, so callers run it off the main thread.
+``py-evm`` is an **optional** dependency (``qeth[simulate]``) and
+``eth_simulateV1`` isn't everywhere, so simulation may be unavailable;
+``simulation_available`` reports whether *either* route can work, and the
+helpers return ``None`` when neither can (or the tx reverts) — callers
+then skip the preview. Simulation is slow-ish, so callers run it off the
+main thread.
 """
 
 import logging
@@ -44,8 +43,8 @@ log = logging.getLogger("qeth.simulate")
 # Standard Solidity revert envelopes: Error(string) and Panic(uint256).
 _ERROR_SELECTOR = "08c379a0"
 _PANIC_SELECTOR = "4e487b71"
-# pyrevm raises RuntimeError("Revert { gas_used: N, output: 0x.. }") on a
-# reverting call; pull the output payload back out to decode the reason.
+# Some RPC error strings embed the revert payload as "output: 0x.."; pull
+# it back out to decode the reason.
 _REVERT_OUTPUT_RE = re.compile(r"output:\s*(0x[0-9a-fA-F]*)")
 
 # Per-RPC-URL eth_simulateV1 capability, learned by using it: True =
@@ -60,21 +59,45 @@ class _SimV1Unsupported(Exception):
     the local fork."""
 
 
-def pyrevm_available() -> bool:
-    """True if the optional ``pyrevm`` dependency can be imported."""
-    try:
-        import pyrevm  # noqa: F401
-        return True
-    except Exception:
-        return False
+class SimulationNote:
+    """A 'ran fine, but an events list would mislead' outcome. The UI
+    shows ``text`` as the placeholder instead of an (empty) events list."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class VerifiedLogs(list):
+    """Simulation logs produced over proof-verified state (a Helios
+    sidecar): every account/slot the execution touched was checked
+    against sync-committee-verified roots, so the RPC endpoint cannot
+    have faked this preview. A plain ``list`` everywhere it matters —
+    the type is the marker the UI uses to show the verified badge."""
+
+
+# Calldata sent to an address with no contract code: the EVM ignores it
+# (simulates as a clean no-op), but on chains with NATIVE system
+# contracts (e.g. TAC's 0x08xx precompile range) the node acts on it
+# outside the EVM — so an empty preview would falsely read as "this tx
+# does nothing".
+_NO_CODE_NOTE = (
+    "(the target address has no contract code — the EVM ignores the "
+    "calldata, so there is nothing to preview; on chains with native "
+    "system contracts the node may act on it outside the EVM)")
+
+
+def fork_available() -> bool:
+    """True if the optional local-fork engine (py-evm) can be imported."""
+    from .pyevm_fork import fork_available as _avail
+    return _avail()
 
 
 def simulation_available(chain) -> bool:
     """True if *some* route can simulate on ``chain``'s current RPC: the
-    local fork (pyrevm installed), or ``eth_simulateV1`` unless we've
+    local fork (py-evm installed), or ``eth_simulateV1`` unless we've
     already learned this endpoint lacks it. Lets the UI show an accurate
     'no preview available' note only when nothing can work."""
-    if pyrevm_available():
+    if fork_available():
         return True
     return _SIMV1_SUPPORT.get(chain.rpc_url) is not False
 
@@ -104,7 +127,7 @@ def _decode_revert_output(out_hex: str) -> str:
 
 
 def _decode_revert(msg: str) -> str:
-    """Reason from pyrevm's RuntimeError text, which embeds ``output: 0x..``."""
+    """Reason from an error string that embeds ``output: 0x..``."""
     m = _REVERT_OUTPUT_RE.search(msg)
     if not m:
         return msg.strip()
@@ -214,11 +237,31 @@ def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
                 sleep(min(0.75 * (2 ** attempt), 4.0))
                 continue
             raise
-        return _logs_from_simv1(res)
+        logs = _logs_from_simv1(res)
+        if logs == [] and "data" in call:
+            # Empty preview for a calldata-carrying tx: if the target has
+            # no code, an events list would mislead (see _NO_CODE_NOTE).
+            # One extra RPC, only on this rare shape; best-effort.
+            try:
+                code = EthClient(chain).rpc(
+                    "eth_getCode", [call["to"], "latest"])
+                if not code or code in ("0x", "0x0"):
+                    return SimulationNote(_NO_CODE_NOTE)
+            except Exception:
+                pass
+        return logs
     return None
 
 
-# --- fallback: local revm fork ----------------------------------------------
+# --- fallback: local py-evm fork ---------------------------------------------
+
+# A neutral block env for injected-reader (hermetic test) runs.
+_TEST_BLOCK: dict = {
+    "number": 1, "timestamp": 1_700_000_000, "basefee": 0,
+    "gas_limit": 30_000_000, "coinbase": None,
+    "mix_hash": None, "excess_blob_gas": 0,
+}
+
 
 def _hexint(v):
     if v is None:
@@ -228,97 +271,81 @@ def _hexint(v):
     return int(v, 16)
 
 
-def _latest_block(chain):
-    """Latest block's env-relevant fields (ints / address) so the fork
-    runs in a realistic block context. Raises on RPC failure — the retry
-    loop handles transient rate-limits; other errors abort the preview
-    (an env-less fork reintroduces zeroed-timestamp false reverts)."""
+def _latest_block(chain) -> "dict | None":
+    """Latest block's env-relevant fields (ints / address / bytes) so the
+    fork runs in a realistic block context. Raises on RPC failure — the
+    retry loop handles transient rate-limits; other errors abort the
+    preview (an env-less fork falsely reverts time-math contracts)."""
     from .chain import EthClient
     blk = EthClient(chain).rpc("eth_getBlockByNumber", ["latest", False])
     if not blk:
         return None
+    mix = blk.get("mixHash")
     return {
         "number": _hexint(blk["number"]),
         "timestamp": _hexint(blk["timestamp"]),
         "basefee": _hexint(blk.get("baseFeePerGas")) or 0,
         "gas_limit": _hexint(blk.get("gasLimit")) or 0,
         "coinbase": blk.get("miner"),
+        # PREVRANDAO / blob-fee inputs for the execution context.
+        "mix_hash": bytes.fromhex(mix[2:]) if isinstance(mix, str) else None,
+        "excess_blob_gas": _hexint(blk.get("excessBlobGas")) or 0,
     }
-
-
-def _apply_block_env(evm, block) -> None:
-    from pyrevm import BlockEnv
-    kwargs = {
-        "number": block["number"],
-        "timestamp": block["timestamp"],
-        "basefee": block["basefee"],
-    }
-    if block.get("gas_limit"):
-        kwargs["gas_limit"] = block["gas_limit"]
-    if block.get("coinbase"):
-        kwargs["coinbase"] = to_checksum_address(block["coinbase"])
-    evm.set_block_env(BlockEnv(**kwargs))
-
-
-def _run_fork(EVM, chain, from_addr, to_addr, data, value, block):
-    """Fork, set the block env, run the call, return its logs."""
-    if block is not None:
-        evm = EVM(fork_url=chain.rpc_url, fork_block=hex(block["number"]))
-        _apply_block_env(evm, block)
-        log.debug("forking at block %s (ts=%s)",
-                  block["number"], block["timestamp"])
-    else:
-        evm = EVM(fork_url=chain.rpc_url)
-    calldata = b""
-    if data and data not in ("0x", "0X"):
-        calldata = bytes.fromhex(data[2:] if data.startswith("0x") else data)
-    kwargs: dict[str, Any] = {
-        "caller": to_checksum_address(from_addr),
-        "to": to_checksum_address(to_addr),
-        "calldata": calldata,
-    }
-    if value:
-        kwargs["value"] = int(value)
-    evm.message_call(**kwargs)
-    out = []
-    for lg in evm.result.logs:
-        # pyrevm Log: .address (str), .topics (list[str]), .data is a
-        # (topics, data_bytes) tuple — the payload is [1].
-        out.append({
-            "address": lg.address,
-            "topics": list(lg.topics),
-            "data": "0x" + lg.data[1].hex(),
-        })
-    return out
 
 
 def _simulate_via_fork(chain, from_addr, to_addr, data, value,
-                       *, evm_cls=None, retries=4, sleep=None, deadline=None):
-    """Local revm fork. ``evm_cls`` is a test seam; when set we skip the
-    (networked) block-env fetch so tests stay hermetic. Retries transient
+                       *, fork_reader=None, fork_block=None, hint_url=None,
+                       retries=4, sleep=None, deadline=None):
+    """Local py-evm fork (``qeth.pyevm_fork``). ``fork_reader`` is the
+    test seam: a fake ``StateReader`` makes the run hermetic (the real
+    pure-Python engine executes against injected state, no network) —
+    ``fork_block`` then defaults to a neutral env. Retries transient
     rate-limits with backoff up to ``deadline`` then gives up; a genuine
-    revert fails fast (logged).
+    revert fails fast (logged with the decoded reason).
 
-    A single ``message_call`` can't be interrupted (pyrevm fetches cold
-    slots one-by-one through its own HTTP client, with no callback), so on
-    a slow/throttled endpoint *one* attempt can still take tens of seconds
-    — the deadline only stops the retry loop from compounding that. The UI
-    caps how long it *waits* separately (see ``_EventPreviewMixin``)."""
+    State is fetched slot-by-slot through the reader, so on a throttled
+    endpoint *one* attempt can still take tens of seconds — the deadline
+    only stops the retry loop from compounding that. The UI caps how long
+    it *waits* separately (see ``_EventPreviewMixin``)."""
     import time as _time
     sleep = sleep or _time.sleep
-    injected = evm_cls is not None
-    EVM = evm_cls
-    if EVM is None:
-        try:
-            from pyrevm import EVM
-        except Exception:
-            return None
+    from .pyevm_fork import (
+        RpcStateReader, SimulationRevert, fork_available, run_fork_call,
+    )
+    if not fork_available():
+        return None
+    injected = fork_reader is not None
     fork_no = None
     for attempt in range(retries):
         try:
-            block = None if injected else _latest_block(chain)
-            fork_no = block["number"] if block else None
-            return _run_fork(EVM, chain, from_addr, to_addr, data, value, block)
+            block = (fork_block or _TEST_BLOCK) if injected \
+                else _latest_block(chain)
+            if block is None:
+                log.warning("no block env available; skipping the preview")
+                return None
+            fork_no = int(block["number"])
+            reader = fork_reader if injected \
+                else RpcStateReader(chain, hex(fork_no), hint_url=hint_url)
+            log.debug("forking at block %s (ts=%s)",
+                      block["number"], block["timestamp"])
+            out = run_fork_call(
+                reader, block, chain_id=chain.chain_id,
+                from_addr=from_addr, to_addr=to_addr,
+                data=data, value=value,
+            )
+            if out == [] and data and data not in ("0x", "0X"):
+                # Empty preview for a calldata-carrying tx: a code-less
+                # target makes the events list a lie (TAC-style native
+                # precompiles act outside the EVM). The reader memoizes,
+                # so this re-ask is free on the RPC path.
+                _, _, code = reader.get_account(to_checksum_address(to_addr))
+                if not code:
+                    return SimulationNote(_NO_CODE_NOTE)
+            return out
+        except SimulationRevert as e:
+            log.warning("fork simulation reverted (block %s): %s", fork_no,
+                        _decode_revert_output("0x" + e.output.hex()))
+            return None
         except Exception as e:
             if (_is_rate_limited(e) and attempt < retries - 1
                     and not _past(deadline)):
@@ -340,22 +367,52 @@ _TIME_BUDGET_S = 40.0
 
 
 def simulate_logs(chain, from_addr: str, to_addr, data, value,
-                  *, evm_cls=None, retries=4, sleep=None, budget_s=_TIME_BUDGET_S):
+                  *, fork_reader=None, fork_block=None,
+                  retries=4, sleep=None, budget_s=_TIME_BUDGET_S):
     """Simulate the tx and return its event logs as ``decode_event``-ready
     dicts ``[{"address", "topics", "data"}, …]``, or ``None`` (logged) when
     it's a contract creation, the tx reverts, or no route can run it.
 
     Prefers ``eth_simulateV1`` (one request) and remembers per RPC URL
-    whether the endpoint supports it; falls back to a local pyrevm fork
+    whether the endpoint supports it; falls back to a local py-evm fork
     otherwise. ``budget_s`` bounds the retry loops so a thrashing,
     rate-limited fork can't run for minutes (``None`` = unbounded).
-    ``evm_cls`` (a test seam) forces the fork path. ``sleep`` is injectable
-    so retry tests don't actually wait."""
+    ``fork_reader`` (a test seam — a fake ``StateReader``) forces the fork
+    path and keeps it hermetic. ``sleep`` is injectable so retry tests
+    don't actually wait."""
     if not to_addr:
         return None   # contract creation — not previewed
     import time as _time
     deadline = _time.monotonic() + budget_s if budget_s else None
-    if evm_cls is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
+    if fork_reader is None:
+        # Verified mode: when a Helios sidecar can serve this chain,
+        # prefer the local fork over PROOF-VERIFIED state to the
+        # (unverified) eth_simulateV1 fast path — a compromised RPC
+        # could otherwise serve a benign-looking preview for a
+        # malicious tx, and the preview is exactly the signing-time
+        # defense. Slower (per-slot proof fetches), but the remote
+        # node can no longer lie about what this tx does.
+        from .helios import verified_chain
+        # Verified mode needs the LOCAL engine: without py-evm, entering
+        # this branch would return None instead of falling through to
+        # eth_simulateV1 — killing previews for anyone with a helios
+        # binary but no simulate extra. Don't even probe (or spawn) the
+        # sidecar in that case.
+        helios_chain = verified_chain(chain) if fork_available() else None
+        if helios_chain is not None:
+            log.info("simulating on helios-verified state (%s)",
+                     helios_chain.rpc_url)
+            out = _simulate_via_fork(
+                helios_chain, from_addr, to_addr, data, value,
+                # Hint from the untrusted upstream (fast prestateTracer),
+                # not the Helios shadow (slow iterative proving). Keys
+                # only — values are re-proven through Helios.
+                hint_url=chain.rpc_url,
+                retries=retries, sleep=sleep, deadline=deadline)
+            # Mark success (incl. an empty log list) as verified; None /
+            # SimulationNote pass through unchanged.
+            return VerifiedLogs(out) if isinstance(out, list) else out
+    if fork_reader is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
         try:
             logs = _simulate_via_rpc(chain, from_addr, to_addr, data, value,
                                      retries=retries, sleep=sleep,
@@ -370,5 +427,5 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
             log.warning("eth_simulateV1 failed on %s (%s); trying local fork",
                         chain.rpc_url, e)
     return _simulate_via_fork(chain, from_addr, to_addr, data, value,
-                              evm_cls=evm_cls, retries=retries, sleep=sleep,
-                              deadline=deadline)
+                              fork_reader=fork_reader, fork_block=fork_block,
+                              retries=retries, sleep=sleep, deadline=deadline)

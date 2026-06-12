@@ -78,7 +78,10 @@ does not ship (web3, ledgereth, …) or whose version web3 pins differently
 # into it pulls only the deps Fedora doesn't satisfy. Its venv-local
 # site-packages is therefore exactly the private vendor set + qeth itself.
 python3 -m venv --system-site-packages %{_builddir}/qeth-venv
-%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile .
+# [simulate] ships the pure-Python py-evm fork engine: event previews on
+# RPCs without eth_simulateV1, and Helios-verified previews when the user
+# has a helios binary installed.
+%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile '.[simulate]'
 
 VENDOR=%{buildroot}%{_prefix}/lib/%{name}/vendor
 install -d "$VENDOR"

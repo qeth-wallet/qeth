@@ -71,7 +71,9 @@ modules:
     build-commands:
       # qeth + its declared deps (ledgereth, aiohttp, segno, eth-abi, web3 + transitive).
       # PySide6 is NOT a dependency here — it is provided by the BaseApp.
-      - pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location .
+      # [simulate] = pure-Python py-evm fork engine (previews on simV1-less
+      # RPCs; Helios-verified previews when a helios binary is on the host).
+      - pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location '.[simulate]'
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.desktop ${FLATPAK_DEST}/share/applications/io.github.michwill.qeth.desktop
       - install -Dm644 qeth/assets/logos/qeth-icon-rounded.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.michwill.qeth.metainfo.xml

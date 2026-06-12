@@ -111,6 +111,14 @@ class MainWindow(QMainWindow):
         if initial_addr is not None:
             self.right_slot.broadcast_account_changed(initial_addr)
 
+        # Pre-warm the Helios verified-state sidecar for the current
+        # chain (no-op without a helios binary / on unsupported chains):
+        # one instant Popen here lets checkpoint sync overlap with the
+        # user looking at balances, so the FIRST event preview is
+        # already verified-warm instead of paying spawn+sync inline.
+        from .helios import prewarm as _helios_prewarm
+        _helios_prewarm(self.store.current_chain())
+
         # Restore prior window geometry + splitter states.
         if self.store.window_geometry:
             try:
@@ -1101,6 +1109,10 @@ class MainWindow(QMainWindow):
             # "provided 1" complaints.
             if self.rpc is not None:
                 self.rpc.set_rpc_chain(int(cid))
+            # Pre-warm the verified-state sidecar for the new chain so a
+            # preview shortly after the switch doesn't pay sync inline.
+            from .helios import prewarm as _helios_prewarm
+            _helios_prewarm(self.store.current_chain())
 
     def _push_accounts_changed(self) -> None:
         """Slot for default_account_changed — push the EIP-1193

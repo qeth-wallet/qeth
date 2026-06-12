@@ -70,7 +70,7 @@ def transfer_legs_from_logs(
 ) -> tuple[list[str], list[str]]:
     """The ERC-20 contracts the viewer **sent** (out) and **received** (in)
     according to a tx's event logs — works on a confirmed receipt's logs
-    and on ``eth_simulate`` / pyrevm logs alike (both Mappings carrying
+    and on ``eth_simulate`` / fork-simulation logs alike (both Mappings carrying
     ``topics`` / ``data`` / ``address``). First-seen order, deduped. Native
     ETH is handled separately from the tx value, not here."""
     viewer = viewer.lower()

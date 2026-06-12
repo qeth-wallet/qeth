@@ -2617,11 +2617,12 @@ class LogsFetchWorker(QThread):
 
 
 class SimulateWorker(QThread):
-    """Run a not-yet-broadcast tx through local revm simulation off the
+    """Run a not-yet-broadcast tx through local simulation off the
     main thread and emit the event logs it would produce — the same
     ``{address, topics, data}`` shape ``LogsFetchWorker`` emits, so the
-    two feed ``_EventsView`` interchangeably. ``ready(None)`` when pyrevm
-    is absent or the simulation fails (the pane shows a placeholder)."""
+    two feed ``_EventsView`` interchangeably. ``ready(None)`` when no
+    simulation route works or the tx reverts (the pane shows a
+    placeholder)."""
 
     ready = Signal(object)   # list of log dicts, or None
 
@@ -2666,6 +2667,22 @@ class _EventsView(QWidget):
         lay.setSpacing(6)
         header = QHBoxLayout()
         header.addWidget(QLabel("Events:"))
+        # Shown when the logs came from a simulation over proof-verified
+        # state (Helios sidecar) — see set_verified. A self-consistent
+        # (bg, fg) success-green pill, same theme-safe approach as the
+        # _IDENTITY_TINT pills: carrying both colors reads on any
+        # palette, where a lone gray drowned on light themes.
+        self.verified_lbl = QLabel("✓ verified")
+        self.verified_lbl.setStyleSheet(
+            "background:#d1e7dd; color:#0f5132; "
+            "padding:1px 6px; border-radius:4px;")
+        self.verified_lbl.setToolTip(
+            "Simulated on proof-verified chain state: every account and "
+            "storage slot this transaction touched was checked against "
+            "sync-committee-verified roots by a local Helios light "
+            "client. The RPC endpoint cannot fake this preview.")
+        self.verified_lbl.hide()
+        header.addWidget(self.verified_lbl)
         header.addStretch(1)
         self.show_all_events_btn = QPushButton("Show &all events")
         self.show_all_events_btn.setCheckable(True)
@@ -2682,11 +2699,45 @@ class _EventsView(QWidget):
         )
         lay.addWidget(self.events_view, 1)
 
+        # Spinner for the "busy" placeholder (simulating / loading). A
+        # braille cycle reads as motion in any monospace-ish font and
+        # needs no color, so it's theme-safe; QTimer-driven, parented to
+        # this widget so it dies with the pane.
+        self._spin_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._spin_i = 0
+        self._spin_text = ""
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(90)
+        self._spin_timer.timeout.connect(self._tick_spinner)
+
+    def _tick_spinner(self) -> None:
+        self._spin_i = (self._spin_i + 1) % len(self._spin_frames)
+        self.events_view.setPlainText(
+            f"{self._spin_frames[self._spin_i]}  {self._spin_text}")
+
+    def set_busy(self, text: str) -> None:
+        """An animated 'working…' placeholder (a spinner + ``text``).
+        Cleared by the next ``set_placeholder`` / ``set_logs``."""
+        self._spin_text = text
+        self.show_all_events_btn.setEnabled(False)
+        self.verified_lbl.hide()
+        self._spin_i = 0
+        self.events_view.setPlainText(f"{self._spin_frames[0]}  {text}")
+        self._spin_timer.start()
+
     def set_placeholder(self, text: str) -> None:
+        self._spin_timer.stop()
         self.events_view.setPlainText(text)
         self.show_all_events_btn.setEnabled(False)
+        self.verified_lbl.hide()
+
+    def set_verified(self, on: bool) -> None:
+        """Show/hide the '⚡ verified' badge. Only the simulation path
+        sets it (receipt-log views never call this)."""
+        self.verified_lbl.setVisible(on)
 
     def set_logs(self, logs) -> None:
+        self._spin_timer.stop()
         self._logs = logs or []
         self.show_all_events_btn.setEnabled(bool(self._logs))
         if self._show_all_events:
@@ -2914,7 +2965,7 @@ class _EventPreviewMixin:
         if not simulation_available(self.chain):
             self._events.set_placeholder(self._no_simulation_text())
             return
-        self._events.set_placeholder("(simulating…)")
+        self._events.set_busy("simulating…")
         self._sim_done = False
         self._detach_sim()                 # drop any prior in-flight worker
         worker = SimulateWorker(self.chain, *params)
@@ -2927,7 +2978,7 @@ class _EventPreviewMixin:
 
     def _no_simulation_text(self) -> str:
         return ("(no simulation available — this RPC has no eth_simulateV1 "
-                "and the optional 'pyrevm' package isn't installed)")
+                "and the optional 'py-evm' package isn't installed)")
 
     def _detach_sim(self, *_args) -> None:
         """Stop waiting on the current worker (it keeps running in the
@@ -2958,9 +3009,17 @@ class _EventPreviewMixin:
             return   # superseded by a newer sim, or already timed out
         self._sim_done = True
         self._detach_sim()
+        from ..simulate import SimulationNote, VerifiedLogs
+        if isinstance(logs, SimulationNote):
+            # Ran fine, but an (empty) events list would mislead — e.g.
+            # calldata to a code-less target that the chain's node may
+            # handle natively (TAC system contracts).
+            self._events.set_placeholder(logs.text)
+            return
+        self._events.set_verified(isinstance(logs, VerifiedLogs))
         if logs is None:
             # The worker may have just *learned* this endpoint can't
-            # simulate (no eth_simulateV1, no pyrevm) — distinguish that
+            # simulate (no eth_simulateV1, no py-evm) — distinguish that
             # from a genuine revert so the note is accurate.
             from ..simulate import simulation_available
             if not simulation_available(self.chain):
@@ -3292,7 +3351,7 @@ class TransactionDetailsDialog(QDialog):
         if tx.pending or getattr(tx, "dropped", False):
             self._events.set_placeholder("(no events — transaction not mined)")
         else:
-            self._events.set_placeholder("(loading events…)")
+            self._events.set_busy("loading events…")
             logs_worker = LogsFetchWorker(chain, tx.hash)
             logs_worker.ready.connect(self._events.set_logs)
             self._start_worker(logs_worker)

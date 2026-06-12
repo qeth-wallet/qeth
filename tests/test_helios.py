@@ -170,6 +170,39 @@ def test_dead_sidecar_is_respawned(monkeypatch):
     assert second.rpc_url != first.rpc_url    # fresh port, fresh process
 
 
+def test_prewarm_spawns_once_and_never_blocks(monkeypatch):
+    """prewarm = one instant Popen, NO readiness polling (that's the
+    whole point — sync overlaps with the user looking at the wallet).
+    A later verified_chain must reuse the prewarmed process."""
+    _enable(monkeypatch)
+    spawned = []
+
+    def popen(argv, **kw):
+        spawned.append(argv)
+        return _FakeProc(argv)
+
+    monkeypatch.setattr(hl.subprocess, "Popen", popen)
+    monkeypatch.setattr(hl, "_rpc",
+                        lambda *a, **k: pytest.fail("prewarm must not poll"))
+    hl.prewarm(ETH)
+    hl.prewarm(ETH)                       # idempotent while alive
+    assert len(spawned) == 1
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)   # now synced
+    shadow = hl.verified_chain(ETH, wait_s=5)
+    assert shadow is not None
+    assert len(spawned) == 1              # reused, not respawned
+
+
+def test_prewarm_is_noop_when_unsupported_or_disabled(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(hl.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("must not spawn"))
+    hl.prewarm(Chain("TAC", 239, "https://rpc.tac.build"))
+    monkeypatch.setenv("QETH_HELIOS", "0")
+    hl.prewarm(ETH)
+    assert hl._sidecars == {}
+
+
 # --- orchestrator routing -------------------------------------------------------
 
 def test_simulate_logs_prefers_verified_fork(monkeypatch):

@@ -175,16 +175,11 @@ def _stop_all() -> None:
 atexit.register(_stop_all)
 
 
-def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
-                   ) -> Optional[Chain]:
-    """A Chain whose RPC is a ready Helios sidecar verifying ``chain`` —
-    or None when helios is absent/disabled, the chain isn't one Helios
-    supports, or the sidecar didn't become ready in time (callers fall
-    back to the direct untrusted path).
-
-    Blocking (first call spawns + syncs, ~6–10 s) — call from a worker
-    thread. Subsequent calls reuse the running sidecar.
-    """
+def _ensure_sidecar(chain: Chain) -> Optional[HeliosSidecar]:
+    """The running (not necessarily synced) sidecar for ``chain`` —
+    spawning one if needed. None when helios is absent/disabled or the
+    chain isn't one Helios supports. Non-blocking (Popen returns
+    immediately; the sync happens inside the helios process)."""
     if chain.chain_id not in HELIOS_NETWORKS:
         return None
     binary = helios_binary()
@@ -200,6 +195,30 @@ def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
                               chain.chain_id)
                 return None
             _sidecars[chain.chain_id] = sc
+        return sc
+
+
+def prewarm(chain: Chain) -> None:
+    """Spawn the sidecar WITHOUT waiting for it to sync — call at app
+    start / chain switch so checkpoint sync (~3–6 s) overlaps with the
+    user looking at their wallet instead of delaying the first preview.
+    Instant (one Popen) and silent; safe on the main thread."""
+    _ensure_sidecar(chain)
+
+
+def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
+                   ) -> Optional[Chain]:
+    """A Chain whose RPC is a ready Helios sidecar verifying ``chain`` —
+    or None when helios is absent/disabled, the chain isn't one Helios
+    supports, or the sidecar didn't become ready in time (callers fall
+    back to the direct untrusted path).
+
+    Blocking unless prewarmed (first call spawns + syncs, ~6–10 s) —
+    call from a worker thread. Reuses the running sidecar.
+    """
+    sc = _ensure_sidecar(chain)
+    if sc is None:
+        return None
     if not sc.wait_ready(timeout=wait_s):
         return None
     # The shadow chain must read from Helios ONLY. fallback_rpcs is set

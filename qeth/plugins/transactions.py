@@ -2699,7 +2699,34 @@ class _EventsView(QWidget):
         )
         lay.addWidget(self.events_view, 1)
 
+        # Spinner for the "busy" placeholder (simulating / loading). A
+        # braille cycle reads as motion in any monospace-ish font and
+        # needs no color, so it's theme-safe; QTimer-driven, parented to
+        # this widget so it dies with the pane.
+        self._spin_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._spin_i = 0
+        self._spin_text = ""
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(90)
+        self._spin_timer.timeout.connect(self._tick_spinner)
+
+    def _tick_spinner(self) -> None:
+        self._spin_i = (self._spin_i + 1) % len(self._spin_frames)
+        self.events_view.setPlainText(
+            f"{self._spin_frames[self._spin_i]}  {self._spin_text}")
+
+    def set_busy(self, text: str) -> None:
+        """An animated 'working…' placeholder (a spinner + ``text``).
+        Cleared by the next ``set_placeholder`` / ``set_logs``."""
+        self._spin_text = text
+        self.show_all_events_btn.setEnabled(False)
+        self.verified_lbl.hide()
+        self._spin_i = 0
+        self.events_view.setPlainText(f"{self._spin_frames[0]}  {text}")
+        self._spin_timer.start()
+
     def set_placeholder(self, text: str) -> None:
+        self._spin_timer.stop()
         self.events_view.setPlainText(text)
         self.show_all_events_btn.setEnabled(False)
         self.verified_lbl.hide()
@@ -2710,6 +2737,7 @@ class _EventsView(QWidget):
         self.verified_lbl.setVisible(on)
 
     def set_logs(self, logs) -> None:
+        self._spin_timer.stop()
         self._logs = logs or []
         self.show_all_events_btn.setEnabled(bool(self._logs))
         if self._show_all_events:
@@ -2937,7 +2965,7 @@ class _EventPreviewMixin:
         if not simulation_available(self.chain):
             self._events.set_placeholder(self._no_simulation_text())
             return
-        self._events.set_placeholder("(simulating…)")
+        self._events.set_busy("simulating…")
         self._sim_done = False
         self._detach_sim()                 # drop any prior in-flight worker
         worker = SimulateWorker(self.chain, *params)
@@ -3323,7 +3351,7 @@ class TransactionDetailsDialog(QDialog):
         if tx.pending or getattr(tx, "dropped", False):
             self._events.set_placeholder("(no events — transaction not mined)")
         else:
-            self._events.set_placeholder("(loading events…)")
+            self._events.set_busy("loading events…")
             logs_worker = LogsFetchWorker(chain, tx.hash)
             logs_worker.ready.connect(self._events.set_logs)
             self._start_worker(logs_worker)

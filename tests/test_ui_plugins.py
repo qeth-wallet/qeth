@@ -2726,6 +2726,24 @@ class TestEventPreviewTab:
         dlg._on_sim_ready(("k",), SimulationNote("(target has no code…)"))
         assert "no code" in dlg._events.events_view.toPlainText()
 
+    def test_busy_spinner_animates_then_stops(self, qtbot, tmp_qeth):
+        """set_busy shows an animated spinner; a result/placeholder stops
+        the timer so it can't tick into a settled pane."""
+        _, started = self._started()
+        ev = self._send(qtbot, started)._events
+        ev.set_busy("simulating…")
+        assert ev._spin_timer.isActive()
+        first = ev.events_view.toPlainText()
+        assert "simulating…" in first
+        ev._tick_spinner()                       # advance one frame
+        assert ev.events_view.toPlainText() != first   # the glyph moved
+        assert "simulating…" in ev.events_view.toPlainText()
+        ev.set_logs([])                          # result arrives
+        assert not ev._spin_timer.isActive()
+        ev.set_busy("again…")
+        ev.set_placeholder("(done)")             # or a placeholder
+        assert not ev._spin_timer.isActive()
+
     def test_verified_badge_tracks_result_type(self, qtbot, tmp_qeth):
         """VerifiedLogs (Helios-backed simulation) shows the ⚡ verified
         badge; a plain unverified result hides it again; placeholders

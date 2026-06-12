@@ -90,9 +90,14 @@ heliosup
 ```
 
 Supported on Ethereum, Optimism, Base and Linea (the chains Helios verifies).
-Set `QETH_HELIOS=0` to disable. Note: the **Flatpak** is sandboxed and can't
-reach a host Helios binary, so verified mode isn't available there yet — use the
-`.deb` / `.rpm` / AppImage for it.
+Set `QETH_HELIOS=0` to disable.
+
+**Or skip the install:** every package has a **`-verify` variant** (e.g.
+`qeth-verify_<version>_amd64.deb`) that **bundles Helios**, so verified previews
+work out of the box with nothing extra. It's the only way verified mode works in
+the Flatpak (the sandbox can't reach a host binary); the verify AppImage needs
+glibc ≥ 2.39 (Ubuntu 24.04+, Fedora 39+). The normal packages stay lean and
+auto-detect a host Helios if you prefer to manage it yourself.
 
 ## Notes
 

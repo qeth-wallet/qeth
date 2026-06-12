@@ -2683,6 +2683,18 @@ class TestEventPreviewTab:
             assert [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())] \
                 == ["&Details", "&Events"]
 
+    def test_simulation_note_shows_as_placeholder(self, qtbot, tmp_qeth):
+        """A SimulationNote outcome (e.g. calldata to a code-less TAC
+        system contract) must surface its text — not render as an empty
+        events list implying 'this tx does nothing'."""
+        from qeth.simulate import SimulationNote
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._sim_key = ("k",)
+        dlg._sim_done = False
+        dlg._on_sim_ready(("k",), SimulationNote("(target has no code…)"))
+        assert "no code" in dlg._events.events_view.toPlainText()
+
     def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)

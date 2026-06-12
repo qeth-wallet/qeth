@@ -2959,6 +2959,13 @@ class _EventPreviewMixin:
             return   # superseded by a newer sim, or already timed out
         self._sim_done = True
         self._detach_sim()
+        from ..simulate import SimulationNote
+        if isinstance(logs, SimulationNote):
+            # Ran fine, but an (empty) events list would mislead — e.g.
+            # calldata to a code-less target that the chain's node may
+            # handle natively (TAC system contracts).
+            self._events.set_placeholder(logs.text)
+            return
         if logs is None:
             # The worker may have just *learned* this endpoint can't
             # simulate (no eth_simulateV1, no py-evm) — distinguish that

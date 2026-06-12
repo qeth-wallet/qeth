@@ -86,6 +86,26 @@ def test_contract_creation_returns_none():
                          fork_reader=_WorldReader()) is None
 
 
+def test_calldata_to_codeless_target_returns_note():
+    """Calldata to an address with no code simulates as a clean no-op,
+    but on chains with NATIVE system contracts (TAC 0x08xx) the node acts
+    on it outside the EVM — an empty events list would falsely read as
+    'this tx does nothing'. The fork path must return a SimulationNote."""
+    from qeth.simulate import SimulationNote
+    world = _WorldReader(code=b"")            # target has no bytecode
+    out = simulate_logs(CHAIN, FROM, USDC, "0xb46a8d61ff", 0,
+                        fork_reader=world)
+    assert isinstance(out, SimulationNote)
+    assert "no contract code" in out.text
+
+
+def test_plain_send_to_codeless_target_is_not_a_note():
+    # No calldata → a no-op preview is the truth, not a trap.
+    world = _WorldReader(code=b"")
+    assert simulate_logs(CHAIN, FROM, USDC, "0x", 10**18,
+                         fork_reader=world) == []
+
+
 def test_simulation_error_returns_none():
     class _Boom(StateReader):
         def get_account(self, address): raise RuntimeError("reader exploded")
@@ -285,6 +305,23 @@ def test_simv1_rpc_raises_unsupported_on_minus_32601(monkeypatch):
     monkeypatch.setattr("qeth.chain.EthClient", _Client)
     with pytest.raises(_SimV1Unsupported):
         sim._simulate_via_rpc(CHAIN, FROM, USDC, "0x", 0, sleep=lambda d: None)
+
+
+def test_simv1_empty_logs_to_codeless_target_returns_note(monkeypatch):
+    """Same trap through the FAST path: simulateV1 says 'success, no
+    logs' for calldata to a code-less address — one follow-up getCode
+    turns that into the honest note."""
+    from qeth.simulate import SimulationNote
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            if method == "eth_simulateV1":
+                return [{"calls": [{"status": "0x1", "logs": []}]}]
+            assert method == "eth_getCode"
+            return "0x"
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    out = sim._simulate_via_rpc(CHAIN, FROM, USDC, "0xb46a8d61ff", 0)
+    assert isinstance(out, SimulationNote)
 
 
 def test_simv1_rpc_returns_logs(monkeypatch):

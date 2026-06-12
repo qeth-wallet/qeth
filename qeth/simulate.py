@@ -59,6 +59,25 @@ class _SimV1Unsupported(Exception):
     the local fork."""
 
 
+class SimulationNote:
+    """A 'ran fine, but an events list would mislead' outcome. The UI
+    shows ``text`` as the placeholder instead of an (empty) events list."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+# Calldata sent to an address with no contract code: the EVM ignores it
+# (simulates as a clean no-op), but on chains with NATIVE system
+# contracts (e.g. TAC's 0x08xx precompile range) the node acts on it
+# outside the EVM — so an empty preview would falsely read as "this tx
+# does nothing".
+_NO_CODE_NOTE = (
+    "(the target address has no contract code — the EVM ignores the "
+    "calldata, so there is nothing to preview; on chains with native "
+    "system contracts the node may act on it outside the EVM)")
+
+
 def fork_available() -> bool:
     """True if the optional local-fork engine (py-evm) can be imported."""
     from .pyevm_fork import fork_available as _avail
@@ -210,7 +229,19 @@ def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
                 sleep(min(0.75 * (2 ** attempt), 4.0))
                 continue
             raise
-        return _logs_from_simv1(res)
+        logs = _logs_from_simv1(res)
+        if logs == [] and "data" in call:
+            # Empty preview for a calldata-carrying tx: if the target has
+            # no code, an events list would mislead (see _NO_CODE_NOTE).
+            # One extra RPC, only on this rare shape; best-effort.
+            try:
+                code = EthClient(chain).rpc(
+                    "eth_getCode", [call["to"], "latest"])
+                if not code or code in ("0x", "0x0"):
+                    return SimulationNote(_NO_CODE_NOTE)
+            except Exception:
+                pass
+        return logs
     return None
 
 
@@ -289,11 +320,20 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                 else RpcStateReader(chain, hex(fork_no))
             log.debug("forking at block %s (ts=%s)",
                       block["number"], block["timestamp"])
-            return run_fork_call(
+            out = run_fork_call(
                 reader, block, chain_id=chain.chain_id,
                 from_addr=from_addr, to_addr=to_addr,
                 data=data, value=value,
             )
+            if out == [] and data and data not in ("0x", "0X"):
+                # Empty preview for a calldata-carrying tx: a code-less
+                # target makes the events list a lie (TAC-style native
+                # precompiles act outside the EVM). The reader memoizes,
+                # so this re-ask is free on the RPC path.
+                _, _, code = reader.get_account(to_checksum_address(to_addr))
+                if not code:
+                    return SimulationNote(_NO_CODE_NOTE)
+            return out
         except SimulationRevert as e:
             log.warning("fork simulation reverted (block %s): %s", fork_no,
                         _decode_revert_output("0x" + e.output.hex()))

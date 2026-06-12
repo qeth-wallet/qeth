@@ -53,6 +53,21 @@ rm -rf "$VENDOR"/pip "$VENDOR"/pip-*.dist-info \
 find "$VENDOR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 install -Dm0755 "$HERE/qeth.launcher" "$STAGE/usr/bin/qeth"
+
+# "verify" variant: bundle a Helios light client so verified previews work
+# out of the box (the launcher points QETH_HELIOS_BIN at it). Pass the path
+# to a helios binary — e.g. heliosup's ~/.helios/bin/helios — in
+# QETH_BUNDLE_HELIOS. Without it, the normal package is produced.
+VARIANT=""
+DESC_HELIOS=""
+if [ -n "${QETH_BUNDLE_HELIOS:-}" ]; then
+    [ -x "$QETH_BUNDLE_HELIOS" ] || { echo "QETH_BUNDLE_HELIOS not executable: $QETH_BUNDLE_HELIOS" >&2; exit 1; }
+    install -Dm0755 "$QETH_BUNDLE_HELIOS" "$STAGE/usr/lib/qeth/helios"
+    VARIANT="-verify"
+    DESC_HELIOS=$'\n This "verify" build bundles a Helios light client, so transaction\n previews are proof-verified against Ethereum consensus out of the box.'
+    echo ">> bundling helios: $("$QETH_BUNDLE_HELIOS" --version 2>/dev/null | head -1)"
+fi
+
 install -Dm0644 "$REPO/dist/flatpak/io.github.michwill.qeth.desktop" \
         "$STAGE/usr/share/applications/io.github.michwill.qeth.desktop"
 install -Dm0644 "$REPO/qeth/assets/logos/qeth-icon-rounded.svg" \
@@ -73,11 +88,11 @@ Description: Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-
  qeth is a PySide6 Ethereum wallet for the Linux desktop with Ledger support and
  a Frame-compatible JSON-RPC server. This build runs under deadsnakes python3.11
  with a from-source PySide6 6.4 against the system Qt 6.4 (native theming),
- vendoring PySide6 + the eth stack (web3, eth-*, ledgereth, ...) privately.
+ vendoring PySide6 + the eth stack (web3, eth-*, ledgereth, ...) privately.$DESC_HELIOS
 EOF
 
 mkdir -p "$OUT"
-DEB="$OUT/qeth_${VERSION}_amd64.deb"
+DEB="$OUT/qeth${VARIANT}_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
 rm -rf "$(dirname "$STAGE")"
 echo ">> built $DEB"

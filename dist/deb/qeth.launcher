@@ -9,6 +9,11 @@
 # system Qt libs (via RPATH fall-through) but need to be TOLD where the system
 # Qt plugins are — the platform (xcb/wayland) + platformtheme (qt6ct) plugins
 # live in the distro's multiarch Qt6 plugin dir, not next to the bindings.
+# QETH_HELIOS_BIN points at the (optional) bundled Helios light client —
+# present only in the "verify" package variant. When the file is absent
+# (the normal package) qeth.helios.helios_binary() falls through to PATH
+# / ~/.helios/bin, so this is harmless either way.
 exec env PYTHONPATH="/usr/lib/qeth/vendor${PYTHONPATH:+:$PYTHONPATH}" \
      QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}" \
+     QETH_HELIOS_BIN="${QETH_HELIOS_BIN:-/usr/lib/qeth/helios}" \
      python3.11 -m qeth "$@"

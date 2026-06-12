@@ -88,9 +88,11 @@ echo "DIAG: AppDir after install = $(du -sh "$APPDIR" | cut -f1)"
 # QETH_HELIOS_BIN at it. NOTE: the official helios release needs glibc >= 2.39,
 # which raises this AppImage's floor above the usual 2.34 — the verify AppImage
 # therefore targets glibc >= 2.39 (Ubuntu 24.04+, Fedora 39+).
+VARIANT=""
 if [ -n "${QETH_BUNDLE_HELIOS:-}" ]; then
     [ -x "$QETH_BUNDLE_HELIOS" ] || { echo "QETH_BUNDLE_HELIOS not executable" >&2; exit 1; }
     install -Dm0755 "$QETH_BUNDLE_HELIOS" "$APPDIR/usr/bin/helios"
+    VARIANT="-verify"
     echo "DIAG: bundled helios $("$QETH_BUNDLE_HELIOS" --version 2>/dev/null | head -1)"
 fi
 
@@ -149,5 +151,6 @@ curl -sSL -o "$WORK/appimagetool" \
   "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
 chmod +x "$WORK/appimagetool"
 ARCH="$ARCH" "$WORK/appimagetool" --appimage-extract-and-run \
-  "$APPDIR" "$OUT/qeth-${VERSION}-${ARCH}.AppImage"
-echo "OK -> $OUT/qeth-${VERSION}-${ARCH}.AppImage  (needs glibc >= 2.34, generic x86-64)"
+  "$APPDIR" "$OUT/qeth${VARIANT}-${VERSION}-${ARCH}.AppImage"
+_floor="2.34"; [ -n "$VARIANT" ] && _floor="2.39 (bundled helios)"
+echo "OK -> $OUT/qeth${VARIANT}-${VERSION}-${ARCH}.AppImage  (needs glibc >= $_floor, generic x86-64)"

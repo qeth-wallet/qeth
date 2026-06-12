@@ -31,6 +31,28 @@ jobs:
             quay.io/pypa/manylinux_2_34_x86_64 \
             bash /src/dist/appimage/build-appimage.sh
 
+      # "verify" variant: bundle the official Helios release so previews are
+      # proof-verified out of the box. Helios needs glibc >= 2.39, so this
+      # AppImage's floor is 2.39 (vs 2.34 for the normal one) — but it only
+      # gets COPIED into the AppDir here, so the 2.34 build container is fine.
+      - name: Fetch helios release
+        run: |
+          mkdir -p "$PWD/helios"
+          curl -sSL "https://github.com/a16z/helios/releases/latest/download/helios_linux_amd64.tar.gz" \
+            | tar -xzC "$PWD/helios"
+          chmod +x "$PWD/helios/helios"
+          "$PWD/helios/helios" --version
+
+      - name: Build verify AppImage in manylinux_2_34
+        run: |
+          docker run --rm \
+            -v "$PWD":/src:ro \
+            -v "$PWD/out":/out \
+            -e PYVER=cp312-cp312 \
+            -e QETH_BUNDLE_HELIOS=/src/helios/helios \
+            quay.io/pypa/manylinux_2_34_x86_64 \
+            bash /src/dist/appimage/build-appimage.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: qeth-appimage

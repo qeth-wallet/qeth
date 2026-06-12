@@ -128,10 +128,56 @@ stakes, already exists for ENS-name **sends** in the wallet.)
   light-client protocol from a weak-subjectivity checkpoint, then serves
   `eth_call` by fetching state from an untrusted RPC **with EIP-1186 proofs**
   verified against the verified state root. Light (single Rust binary, tens of
-  MB, syncs in seconds). qeth integration is zero code: `chain.py` is the RPC
-  seam, so a "verified mode" is just pointing the chain at Helios's port —
+  MB, syncs in seconds). qeth integration is near-zero code: `chain.py` is the
+  RPC seam, so a "verified mode" is just pointing the chain at Helios's port —
   hardening *all* wallet reads, not only `.eth` browsing. The checkpoint
   source is the one trust input worth scrutinizing rather than defaulting.
+
+### Helios integration shape (grounded in the a16z/helios repo, 2026-04)
+
+Settled by reading the source, not guessing:
+
+- **Sidecar process, not a Python library.** There is **no Python binding**
+  (no pyo3/maturin anywhere in the tree). The only non-Rust binding is
+  `helios-ts` — a `cdylib` compiled to **WASM** for JS hosts (assumes
+  fetch/timers), not usable from Python. The maintained consumption modes are
+  exactly two: the **standalone CLI binary** that serves JSON-RPC, and the
+  **Rust `Client` / `HeliosApi` library** for Rust hosts. Rolling our own
+  PyO3 wrapper would mean a Rust toolchain in CI + per-arch compiled wheels —
+  fighting qeth's "system PySide6, vendor pure-Python" packaging (the `.deb`
+  already compiles PySide from source; that's enough). Bonus: process
+  isolation means a Helios hang/crash mid-sync leaves the wallet up and
+  `chain.py` falls back to direct RPC — an in-process library crash couldn't.
+- **Talk over loopback TCP, not a pipe — Helios decides this for us.** Its RPC
+  server is `jsonrpc::start(client, addr: SocketAddr)` → jsonrpsee
+  `ServerBuilder::default().build(addr)`, i.e. HTTP+WS on one TCP socket.
+  There is **no Unix-domain-socket / IPC / stdio server** in the codebase; the
+  CLI exposes only `--rpc-bind-ip` (default `127.0.0.1`) and `--rpc-port`. A
+  pipe would require forking Helios or a translating shim — pointless. And TCP
+  loopback is the right answer anyway: `chain.py`'s `HTTPProvider` speaks it
+  natively, so verified mode is literally `http://127.0.0.1:<port>` with zero
+  new transport code. Security surface is the same as qeth's own Frame server
+  on `:1248`, and Helios serves read-only verified data (no keys). (A UDS's
+  one advantage — isolation from *other local users* — is moot; Helios doesn't
+  offer one.)
+- **Spawn/supervise with `QProcess`** (the process analog of the long-lived
+  `QThread`s qeth already manages):
+  `helios ethereum --execution-rpc <untrusted> --rpc-bind-ip 127.0.0.1 --rpc-port <chosen>`.
+- **Readiness gate:** Helios must sync from the checkpoint before it can
+  answer, so verified mode needs a "warming up → ready" state. Helios
+  implements `eth_syncing` — that's the clean readiness probe.
+- **Binary distribution:** probe for an installed `helios` first (same
+  "Kubo-optional" pattern as the content layer above), bundle per-arch as a
+  fallback.
+- **The access-list groundwork already fits:** Helios implements
+  `eth_createAccessList` as a first-class method — the untrusted-RPC
+  slot-prefetch hint `qeth/chainlist.py::probe_access_list` now probes for.
+- **`verifiable-api` (a newer Helios crate)** is a REST API that wraps the
+  execution layer with verifiable responses, splitting heavy proof-fetching
+  (server, next to the untrusted RPC) from a thin verifying client. Doesn't
+  change the sidecar+loopback conclusion for a desktop wallet (you still run
+  the verifying half locally), but it's the building block if a shared
+  verified endpoint is ever wanted instead of per-machine sync.
 
 ## Phasing
 

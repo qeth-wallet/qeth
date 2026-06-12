@@ -36,8 +36,9 @@ venv/
 # Local test config (e.g. a local archive node for the anvil fork). NOT committed.
 .env
 
-# helios binaries copied in at build time for the verify variants
+# verify-variant build artifacts (deb/rpm already covered above by
+# /dist/{deb,rpm}/* ; these cover the flatpak/appimage bundles + build temps)
+/dist/flatpak/*.flatpak
+/dist/appimage/*.AppImage
 dist/flatpak/helios
-dist/flatpak/qeth-verify.flatpak
-dist/deb/qeth-verify_*.deb
-dist/rpm/qeth-verify-*.rpm
+dist/flatpak/.qeth-verify.yml

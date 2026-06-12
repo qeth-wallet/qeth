@@ -294,7 +294,7 @@ def _latest_block(chain) -> "dict | None":
 
 
 def _simulate_via_fork(chain, from_addr, to_addr, data, value,
-                       *, fork_reader=None, fork_block=None,
+                       *, fork_reader=None, fork_block=None, hint_url=None,
                        retries=4, sleep=None, deadline=None):
     """Local py-evm fork (``qeth.pyevm_fork``). ``fork_reader`` is the
     test seam: a fake ``StateReader`` makes the run hermetic (the real
@@ -325,7 +325,7 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                 return None
             fork_no = int(block["number"])
             reader = fork_reader if injected \
-                else RpcStateReader(chain, hex(fork_no))
+                else RpcStateReader(chain, hex(fork_no), hint_url=hint_url)
             log.debug("forking at block %s (ts=%s)",
                       block["number"], block["timestamp"])
             out = run_fork_call(
@@ -404,6 +404,10 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
                      helios_chain.rpc_url)
             out = _simulate_via_fork(
                 helios_chain, from_addr, to_addr, data, value,
+                # Hint from the untrusted upstream (fast prestateTracer),
+                # not the Helios shadow (slow iterative proving). Keys
+                # only — values are re-proven through Helios.
+                hint_url=chain.rpc_url,
                 retries=retries, sleep=sleep, deadline=deadline)
             # Mark success (incl. an empty log list) as verified; None /
             # SimulationNote pass through unchanged.

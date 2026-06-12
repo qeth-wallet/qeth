@@ -129,19 +129,29 @@ class RpcStateReader(StateReader):
     A per-instance memo keeps repeat lookups (State init probes, the
     AccountDB's uncached ``from_journal=False`` paths) off the network.
 
-    ``prefetch`` collapses the lazy path's serial round-trips: one
-    ``eth_createAccessList`` (the "which accounts/slots will this call
-    touch" hint — Helios serves it natively and proof-fetches the whole
-    set concurrently as a side effect) + one BATCHED JSON-RPC POST that
-    seeds the memo for every hinted key. Per the probed lesson
-    (reference: chainlist.probe_access_list) the hint call carries no
-    fee fields. Best-effort: any failure leaves the lazy path intact."""
+    ``prefetch`` collapses the lazy path's serial round-trips: a HINT for
+    "which accounts/slots will this call touch" + concurrent seeding of
+    the memo for every hinted key. The hint comes from ``debug_traceCall``
+    (prestateTracer) — one non-iterative pass that returns the full
+    touched set — falling back to ``eth_createAccessList``. The hint is an
+    optimization, NEVER a trust input: keys are seeded through the
+    reader's own (verified, when on Helios) channel, and anything the
+    hint misses is fetched lazily + verified during execution. So the
+    hint is taken from ``hint_url`` (the untrusted upstream) even in
+    verified mode — crucial, since routing the hint through Helios makes
+    it do an iterative execute-prove-reprove loop (measured 2–9s cold vs
+    ~0.3s for prestateTracer upstream + parallel verified seed).
+    Best-effort throughout: any failure leaves the lazy path intact."""
 
-    def __init__(self, chain: Any, block_id: str) -> None:
+    def __init__(self, chain: Any, block_id: str,
+                 hint_url: "Optional[str]" = None) -> None:
         from .chain import EthClient
         self._chain = chain
         self._client = EthClient(chain)
         self._block_id = block_id
+        # Where the (untrusted) touched-set hint is fetched from. In
+        # verified mode this is the real upstream, NOT the Helios shadow.
+        self._hint_url = hint_url or chain.rpc_url
         self._memo: dict[tuple, Any] = {}
 
     def _rpc(self, method: str, params: list) -> Any:
@@ -172,7 +182,11 @@ class RpcStateReader(StateReader):
         import time as _time
         t0 = _time.monotonic()
         try:
-            entries = self._access_list_hint(from_addr, to_addr, data, value)
+            call = self._call_obj(from_addr, to_addr, data, value)
+            # prestateTracer first (one non-iterative pass); fall back to
+            # the access list where debug_traceCall isn't available.
+            entries = (self._prestate_hint(call)
+                       or self._access_list_hint(call))
             if not entries:
                 return
             n = self._batch_seed(entries, from_addr, to_addr)
@@ -181,21 +195,59 @@ class RpcStateReader(StateReader):
             return
         log.debug("prefetched %d keys in %.2fs", n, _time.monotonic() - t0)
 
-    def _access_list_hint(self, from_addr: str, to_addr: str, data: str,
-                          value: int) -> "list[dict]":
-        call: dict[str, str] = {
-            "from": to_checksum_address(from_addr),
-            "to": to_checksum_address(to_addr),
-        }
+    def _call_obj(self, from_addr: str, to_addr: str, data: str,
+                  value: int) -> "dict[str, str]":
+        # No fee fields (reference: chainlist.probe_access_list — gasPrice
+        # 0x0 is rejected post-London, a priced probe trips balance checks).
+        call: dict[str, str] = {"from": to_checksum_address(from_addr),
+                                "to": to_checksum_address(to_addr)}
         if data and data not in ("0x", "0X"):
             call["data"] = data
         if value:
             call["value"] = hex(int(value))
-        # Straight through the client (the memo can't hash the call dict,
-        # and the hint runs once per fork anyway). web3 wraps result
-        # objects in AttributeDict — a Mapping but NOT a dict subclass —
-        # so duck-type on .get(), never isinstance(x, dict).
-        res = self._client.rpc("eth_createAccessList", [call, self._block_id])
+        return call
+
+    def _hint_rpc(self, method: str, params: list) -> Any:
+        """One JSON-RPC call to the (untrusted) hint upstream — separate
+        from the verified read channel."""
+        import json as _json
+        import urllib.request as _u
+        from . import USER_AGENT
+        body = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                            "params": params}).encode()
+        req = _u.Request(self._hint_url, data=body, method="POST",
+                         headers={"User-Agent": USER_AGENT,
+                                  "Content-Type": "application/json"})
+        with _u.urlopen(req, timeout=30) as r:
+            return _json.loads(r.read()).get("result")
+
+    def _prestate_hint(self, call: "dict[str, str]") -> "list[dict]":
+        """``debug_traceCall`` with the prestateTracer: the full set of
+        accounts/slots the call touches, in ONE pass (no iterative
+        execute-prove rounds). Returns ``[]`` when the upstream doesn't
+        support it (→ access-list fallback), whether that surfaces as a
+        JSON-RPC error (HTTP 200) or an HTTP 4xx/5xx. Trust-irrelevant:
+        only the KEYS are used; values are re-fetched through the verified
+        channel."""
+        try:
+            res = self._hint_rpc(
+                "debug_traceCall",
+                [call, self._block_id, {"tracer": "prestateTracer"}])
+        except Exception:
+            return []
+        if not hasattr(res, "items"):
+            return []
+        out: list[dict] = []
+        for addr, acct in res.items():
+            storage = acct.get("storage") if hasattr(acct, "get") else None
+            out.append({"address": addr,
+                        "storageKeys": list(storage) if storage else []})
+        return out
+
+    def _access_list_hint(self, call: "dict[str, str]") -> "list[dict]":
+        # web3-style AttributeDict tolerance: duck-type on .get(), never
+        # isinstance(x, dict).
+        res = self._hint_rpc("eth_createAccessList", [call, self._block_id])
         entries = res.get("accessList") if hasattr(res, "get") else None
         return list(entries) if isinstance(entries, (list, tuple)) else []
 

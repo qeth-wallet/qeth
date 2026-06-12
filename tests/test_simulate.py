@@ -123,6 +123,102 @@ def test_revert_returns_none_without_retrying():
     assert delays == []
 
 
+def test_engine_invokes_reader_prefetch():
+    """run_fork_call must offer the reader its warm-up hint exactly once,
+    with the call's own params, before execution."""
+    calls = []
+
+    class _Recorder(_WorldReader):
+        def prefetch(self, **kw):
+            calls.append(kw)
+
+    world = _Recorder(code=LOG1_CODE)
+    simulate_logs(CHAIN, FROM, USDC, "0xa9059cbb", 7, fork_reader=world)
+    assert len(calls) == 1
+    assert calls[0]["to_addr"] == USDC and calls[0]["value"] == 7
+
+
+def test_rpc_reader_prefetch_seeds_the_memo(monkeypatch):
+    """The batched prefetch must seed EXACTLY the memo keys the lazy
+    getters use — a key-format mismatch would silently turn the prefetch
+    into dead weight (everything re-fetched serially)."""
+    import json
+    from io import BytesIO
+    from qeth.pyevm_fork import RpcStateReader
+
+    TOKEN = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    # web3 wraps results in AttributeDict (a Mapping, NOT a dict
+    # subclass) — the prefetch must duck-type, or it silently discards
+    # the whole hint (the live bug this test pins).
+    from web3.datastructures import AttributeDict
+    hint = AttributeDict({"accessList": [
+        AttributeDict({"address": TOKEN.lower(),
+                       "storageKeys": ["0x" + "00" * 31 + "05"]}),
+    ], "gasUsed": "0x5208"})
+
+    class _Client:
+        calls: list = []
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            _Client.calls.append(method)
+            assert method == "eth_createAccessList"
+            return hint
+
+    batch_seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        payload = json.loads(req.data)
+        batch_seen["n"] = len(payload)
+        out = []
+        for item in payload:
+            m = item["method"]
+            res = ("0x2386f26fc10000" if m == "eth_getBalance"
+                   else "0x1" if m == "eth_getTransactionCount"
+                   else "0x6001" if m == "eth_getCode"
+                   else "0x" + "00" * 31 + "2a")
+            out.append({"jsonrpc": "2.0", "id": item["id"], "result": res})
+
+        class _R:
+            def read(self): return json.dumps(out).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    reader = RpcStateReader(
+        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+    reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
+    # sender (3) + token (3) account calls + 1 slot = 7 batched requests
+    assert batch_seen["n"] == 7
+
+    _Client.calls.clear()
+    bal, nonce, code = reader.get_account(TOKEN)
+    assert (bal, nonce, code) == (10**16, 1, bytes.fromhex("6001"))
+    assert reader.get_storage(TOKEN, 5) == 42
+    assert reader.get_account(FROM)[0] == 10**16
+    assert _Client.calls == []      # everything came from the seeded memo
+
+
+def test_rpc_reader_prefetch_failure_is_silent(monkeypatch):
+    from qeth.pyevm_fork import RpcStateReader
+
+    class _NoAccessList:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            if method == "eth_createAccessList":
+                raise RuntimeError("-32601 method not found")
+            return "0x6001" if method == "eth_getCode" else "0x1"
+
+    monkeypatch.setattr("qeth.chain.EthClient", _NoAccessList)
+    reader = RpcStateReader(
+        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+    reader.prefetch(from_addr=FROM, to_addr=USDC, data="0xdead", value=0)
+    # …and the lazy path still works afterwards.
+    assert reader.get_account(USDC)[1] == 1
+
+
 # --- revert-reason decoding ---------------------------------------------------
 
 from qeth.simulate import _decode_revert

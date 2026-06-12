@@ -78,15 +78,37 @@ class StateReader:
     def get_storage(self, address: str, slot: int) -> int:
         raise NotImplementedError
 
+    def prefetch(self, *, from_addr: str, to_addr: str, data: str,
+                 value: int) -> None:
+        """Optional warm-up hint before executing this call — purely an
+        optimization, NEVER a trust or correctness input (anything the
+        hint misses is fetched lazily; anything it returns is read
+        through the same verified/unverified channel as a lazy fetch).
+        Default: no-op."""
+
+
+# Don't prefetch absurd hint payloads (a runaway accessList) — the lazy
+# path covers anything beyond the cap.
+_PREFETCH_MAX_KEYS = 512
+
 
 class RpcStateReader(StateReader):
     """StateReader over the chain's JSON-RPC via ``EthClient`` — so
     fork-state reads inherit the UA header and read-failover for free.
     A per-instance memo keeps repeat lookups (State init probes, the
-    AccountDB's uncached ``from_journal=False`` paths) off the network."""
+    AccountDB's uncached ``from_journal=False`` paths) off the network.
+
+    ``prefetch`` collapses the lazy path's serial round-trips: one
+    ``eth_createAccessList`` (the "which accounts/slots will this call
+    touch" hint — Helios serves it natively and proof-fetches the whole
+    set concurrently as a side effect) + one BATCHED JSON-RPC POST that
+    seeds the memo for every hinted key. Per the probed lesson
+    (reference: chainlist.probe_access_list) the hint call carries no
+    fee fields. Best-effort: any failure leaves the lazy path intact."""
 
     def __init__(self, chain: Any, block_id: str) -> None:
         from .chain import EthClient
+        self._chain = chain
         self._client = EthClient(chain)
         self._block_id = block_id
         self._memo: dict[tuple, Any] = {}
@@ -109,6 +131,96 @@ class RpcStateReader(StateReader):
         addr = to_checksum_address(address)
         raw = self._rpc("eth_getStorageAt", [addr, hex(slot), self._block_id])
         return int(raw, 16) if raw and raw != "0x" else 0
+
+    # --- prefetch ------------------------------------------------------
+
+    def prefetch(self, *, from_addr: str, to_addr: str, data: str,
+                 value: int) -> None:
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            entries = self._access_list_hint(from_addr, to_addr, data, value)
+            if not entries:
+                return
+            n = self._batch_seed(entries, from_addr)
+        except Exception as e:
+            log.debug("prefetch skipped: %s", e)
+            return
+        log.debug("prefetched %d keys in %.2fs", n, _time.monotonic() - t0)
+
+    def _access_list_hint(self, from_addr: str, to_addr: str, data: str,
+                          value: int) -> "list[dict]":
+        call: dict[str, str] = {
+            "from": to_checksum_address(from_addr),
+            "to": to_checksum_address(to_addr),
+        }
+        if data and data not in ("0x", "0X"):
+            call["data"] = data
+        if value:
+            call["value"] = hex(int(value))
+        # Straight through the client (the memo can't hash the call dict,
+        # and the hint runs once per fork anyway). web3 wraps result
+        # objects in AttributeDict — a Mapping but NOT a dict subclass —
+        # so duck-type on .get(), never isinstance(x, dict).
+        res = self._client.rpc("eth_createAccessList", [call, self._block_id])
+        entries = res.get("accessList") if hasattr(res, "get") else None
+        return list(entries) if isinstance(entries, (list, tuple)) else []
+
+    def _batch_seed(self, entries: "list[dict]", from_addr: str) -> int:
+        """One batched JSON-RPC request seeding the memo with the account
+        triple for every hinted address (+ the sender) and every hinted
+        storage slot. Responses map back by request id."""
+        import json as _json
+        import urllib.request as _u
+        from . import USER_AGENT
+
+        payload: list[dict] = []
+        keys: list[tuple] = []
+
+        def add(method: str, params: list) -> None:
+            key = (method, tuple(params))
+            if key in self._memo or len(keys) >= _PREFETCH_MAX_KEYS:
+                return
+            keys.append(key)
+            payload.append({"jsonrpc": "2.0", "id": len(keys) - 1,
+                            "method": method, "params": params})
+
+        addresses = [to_checksum_address(from_addr)]
+        slot_lists: dict[str, list] = {addresses[0]: []}
+        for e in entries:
+            # AttributeDict-tolerant (see _access_list_hint).
+            if not hasattr(e, "get") or not e.get("address"):
+                continue
+            addr = to_checksum_address(e["address"])
+            addresses.append(addr)
+            slot_lists[addr] = list(e.get("storageKeys") or [])
+        for addr in addresses:
+            add("eth_getBalance", [addr, self._block_id])
+            add("eth_getTransactionCount", [addr, self._block_id])
+            add("eth_getCode", [addr, self._block_id])
+            for slot_hex in slot_lists.get(addr, []):
+                # Normalise to the exact form get_storage uses, so the
+                # memo key matches: hex(int) has no leading zeros.
+                add("eth_getStorageAt",
+                    [addr, hex(int(slot_hex, 16)), self._block_id])
+        if not payload:
+            return 0
+        req = _u.Request(
+            self._chain.rpc_url, data=_json.dumps(payload).encode(),
+            method="POST",
+            headers={"User-Agent": USER_AGENT,
+                     "Content-Type": "application/json"})
+        with _u.urlopen(req, timeout=30) as r:
+            responses = _json.loads(r.read())
+        seeded = 0
+        for resp in responses if isinstance(responses, list) else []:
+            if not isinstance(resp, dict) or "result" not in resp:
+                continue
+            idx = resp.get("id")
+            if isinstance(idx, int) and 0 <= idx < len(keys):
+                self._memo[keys[idx]] = resp["result"]
+                seeded += 1
+        return seeded
 
 
 def _fork_account_db_class() -> type:
@@ -270,6 +382,13 @@ def run_fork_call(reader: StateReader, block: dict, *, chain_id: int,
         base_fee_per_gas=block.get("basefee") or 0,
         excess_blob_gas=block.get("excess_blob_gas") or 0,
     )
+    # Warm the reader before execution: one accessList hint + one batched
+    # fetch replaces dozens of serial cold-read round-trips. Optional and
+    # best-effort (StateReader's default is a no-op; failures fall back
+    # to the lazy path).
+    reader.prefetch(from_addr=from_addr, to_addr=to_addr,
+                    data=data, value=int(value or 0))
+
     state = _configured_state_class(reader)(
         AtomicDB(), context, BLANK_ROOT_HASH)
 

@@ -190,7 +190,7 @@ def test_rpc_reader_prefetch_seeds_the_memo(monkeypatch):
     reader = RpcStateReader(
         SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
     reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
-    # sender (3) + token (3) account calls + 1 slot = 7 batched requests
+    # sender (3) + token (3, deduped with the hint's entry) + 1 slot = 7
     assert batch_seen["n"] == 7
 
     _Client.calls.clear()
@@ -199,6 +199,29 @@ def test_rpc_reader_prefetch_seeds_the_memo(monkeypatch):
     assert reader.get_storage(TOKEN, 5) == 42
     assert reader.get_account(FROM)[0] == 10**16
     assert _Client.calls == []      # everything came from the seeded memo
+
+
+def test_static_accounts_never_hit_the_network():
+    """Precompiles and the Cancun/Prague system contracts answer
+    (0, 0, b'') locally — py-evm overwrites system-contract code at
+    State init and executes precompiles natively, so fetching their
+    account fields was pure waste (profiled: ~9 round-trips, ~2s of
+    every warm simulation)."""
+    from qeth.pyevm_fork import RpcStateReader
+
+    class _Exploding:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            raise AssertionError("static account hit the network")
+
+    import unittest.mock as mock
+    with mock.patch("qeth.chain.EthClient", _Exploding):
+        reader = RpcStateReader(
+            SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x1")
+    for addr in ("0x" + "00" * 19 + "04",                       # identity
+                 "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02",  # 4788
+                 "0x0000F90827F1C53a10cb7A02335B175320002935"): # 2935
+        assert reader.get_account(addr) == (0, 0, b"")
 
 
 def test_rpc_reader_prefetch_failure_is_silent(monkeypatch):

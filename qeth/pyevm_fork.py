@@ -91,6 +91,37 @@ class StateReader:
 # path covers anything beyond the cap.
 _PREFETCH_MAX_KEYS = 512
 
+_static_accounts_cache: "Optional[frozenset[str]]" = None
+
+
+def _static_accounts() -> "frozenset[str]":
+    """Lowercase addresses whose ACCOUNT fields can never influence a
+    preview, so fetching them is pure waste (profiled at ~0.2 s each,
+    ~9 per simulation — they dominated warm-run latency):
+
+    - precompiles (0x01…0x11): executed natively by the EVM; their code
+      and balance are never read by the computation;
+    - the Cancun/Prague system contracts: py-evm's State init OVERWRITES
+      their code with its own canonical copies the moment the State is
+      built — only their STORAGE matters, and that still fetches lazily.
+
+    Addresses come from py-evm's own constants, not hardcoded."""
+    global _static_accounts_cache
+    if _static_accounts_cache is None:
+        from eth.vm.forks.cancun.constants import BEACON_ROOTS_ADDRESS
+        from eth.vm.forks.prague.constants import (
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
+            HISTORY_STORAGE_ADDRESS,
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+        )
+        addrs = {"0x" + "00" * 19 + f"{i:02x}" for i in range(1, 0x12)}
+        addrs |= {"0x" + bytes(a).hex() for a in (
+            BEACON_ROOTS_ADDRESS, HISTORY_STORAGE_ADDRESS,
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)}
+        _static_accounts_cache = frozenset(addrs)
+    return _static_accounts_cache
+
 
 class RpcStateReader(StateReader):
     """StateReader over the chain's JSON-RPC via ``EthClient`` — so
@@ -120,6 +151,8 @@ class RpcStateReader(StateReader):
         return self._memo[key]
 
     def get_account(self, address: str) -> "tuple[int, int, bytes]":
+        if address.lower() in _static_accounts():
+            return 0, 0, b""
         addr = to_checksum_address(address)
         balance = int(self._rpc("eth_getBalance", [addr, self._block_id]), 16)
         nonce = int(
@@ -142,7 +175,7 @@ class RpcStateReader(StateReader):
             entries = self._access_list_hint(from_addr, to_addr, data, value)
             if not entries:
                 return
-            n = self._batch_seed(entries, from_addr)
+            n = self._batch_seed(entries, from_addr, to_addr)
         except Exception as e:
             log.debug("prefetch skipped: %s", e)
             return
@@ -166,31 +199,40 @@ class RpcStateReader(StateReader):
         entries = res.get("accessList") if hasattr(res, "get") else None
         return list(entries) if isinstance(entries, (list, tuple)) else []
 
-    def _batch_seed(self, entries: "list[dict]", from_addr: str) -> int:
+    def _batch_seed(self, entries: "list[dict]", from_addr: str,
+                    to_addr: str) -> int:
         """One batched JSON-RPC request seeding the memo with the account
-        triple for every hinted address (+ the sender) and every hinted
-        storage slot. Responses map back by request id."""
+        triple for every hinted address (+ the sender and target, which
+        geth-style nodes omit from access lists as always-warm) and every
+        hinted storage slot. Responses map back by request id."""
         import json as _json
         import urllib.request as _u
         from . import USER_AGENT
 
         payload: list[dict] = []
         keys: list[tuple] = []
+        queued: set[tuple] = set()
 
         def add(method: str, params: list) -> None:
             key = (method, tuple(params))
-            if key in self._memo or len(keys) >= _PREFETCH_MAX_KEYS:
+            if (key in self._memo or key in queued
+                    or len(keys) >= _PREFETCH_MAX_KEYS):
                 return
+            queued.add(key)
             keys.append(key)
             payload.append({"jsonrpc": "2.0", "id": len(keys) - 1,
                             "method": method, "params": params})
 
-        addresses = [to_checksum_address(from_addr)]
-        slot_lists: dict[str, list] = {addresses[0]: []}
+        addresses = [to_checksum_address(from_addr),
+                     to_checksum_address(to_addr)]
+        slot_lists: dict[str, list] = {a: [] for a in addresses}
+        statics = _static_accounts()
         for e in entries:
             # AttributeDict-tolerant (see _access_list_hint).
             if not hasattr(e, "get") or not e.get("address"):
                 continue
+            if e["address"].lower() in statics:
+                continue   # get_account short-circuits these anyway
             addr = to_checksum_address(e["address"])
             addresses.append(addr)
             slot_lists[addr] = list(e.get("storageKeys") or [])

@@ -191,6 +191,8 @@ def test_simulate_logs_prefers_verified_fork(monkeypatch):
                             "0xdead", 0)
     assert out == ["verified"]
     assert seen["chain"] is shadow
+    # The marker type carries "this preview is proof-verified" to the UI.
+    assert isinstance(out, sim.VerifiedLogs)
 
 
 def test_simulate_logs_falls_back_without_helios(monkeypatch):

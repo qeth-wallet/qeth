@@ -2726,6 +2726,26 @@ class TestEventPreviewTab:
         dlg._on_sim_ready(("k",), SimulationNote("(target has no code…)"))
         assert "no code" in dlg._events.events_view.toPlainText()
 
+    def test_verified_badge_tracks_result_type(self, qtbot, tmp_qeth):
+        """VerifiedLogs (Helios-backed simulation) shows the ⚡ verified
+        badge; a plain unverified result hides it again; placeholders
+        (new sim starting, failures) clear it."""
+        from qeth.simulate import VerifiedLogs
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        ev = dlg._events
+        assert ev.verified_lbl.isHidden()              # default: off
+        dlg._sim_key, dlg._sim_done = ("k",), False
+        dlg._on_sim_ready(("k",), VerifiedLogs([]))
+        assert not ev.verified_lbl.isHidden()          # verified → badge
+        dlg._sim_key, dlg._sim_done = ("k2",), False
+        dlg._on_sim_ready(("k2",), [])                 # plain unverified
+        assert ev.verified_lbl.isHidden()
+        dlg._sim_key, dlg._sim_done = ("k3",), False
+        dlg._on_sim_ready(("k3",), VerifiedLogs([]))
+        ev.set_placeholder("(simulating…)")            # new sim starting
+        assert ev.verified_lbl.isHidden()
+
     def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
         import qeth.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)

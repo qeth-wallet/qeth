@@ -67,6 +67,14 @@ class SimulationNote:
         self.text = text
 
 
+class VerifiedLogs(list):
+    """Simulation logs produced over proof-verified state (a Helios
+    sidecar): every account/slot the execution touched was checked
+    against sync-committee-verified roots, so the RPC endpoint cannot
+    have faked this preview. A plain ``list`` everywhere it matters —
+    the type is the marker the UI uses to show the verified badge."""
+
+
 # Calldata sent to an address with no contract code: the EVM ignores it
 # (simulates as a clean no-op), but on chains with NATIVE system
 # contracts (e.g. TAC's 0x08xx precompile range) the node acts on it
@@ -389,9 +397,12 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         if helios_chain is not None:
             log.info("simulating on helios-verified state (%s)",
                      helios_chain.rpc_url)
-            return _simulate_via_fork(
+            out = _simulate_via_fork(
                 helios_chain, from_addr, to_addr, data, value,
                 retries=retries, sleep=sleep, deadline=deadline)
+            # Mark success (incl. an empty log list) as verified; None /
+            # SimulationNote pass through unchanged.
+            return VerifiedLogs(out) if isinstance(out, list) else out
     if fork_reader is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
         try:
             logs = _simulate_via_rpc(chain, from_addr, to_addr, data, value,

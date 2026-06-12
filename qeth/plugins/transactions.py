@@ -2667,6 +2667,17 @@ class _EventsView(QWidget):
         lay.setSpacing(6)
         header = QHBoxLayout()
         header.addWidget(QLabel("Events:"))
+        # Shown when the logs came from a simulation over proof-verified
+        # state (Helios sidecar) — see set_verified.
+        self.verified_lbl = QLabel("⚡ verified")
+        self.verified_lbl.setStyleSheet("color: gray;")
+        self.verified_lbl.setToolTip(
+            "Simulated on proof-verified chain state: every account and "
+            "storage slot this transaction touched was checked against "
+            "sync-committee-verified roots by a local Helios light "
+            "client. The RPC endpoint cannot fake this preview.")
+        self.verified_lbl.hide()
+        header.addWidget(self.verified_lbl)
         header.addStretch(1)
         self.show_all_events_btn = QPushButton("Show &all events")
         self.show_all_events_btn.setCheckable(True)
@@ -2686,6 +2697,12 @@ class _EventsView(QWidget):
     def set_placeholder(self, text: str) -> None:
         self.events_view.setPlainText(text)
         self.show_all_events_btn.setEnabled(False)
+        self.verified_lbl.hide()
+
+    def set_verified(self, on: bool) -> None:
+        """Show/hide the '⚡ verified' badge. Only the simulation path
+        sets it (receipt-log views never call this)."""
+        self.verified_lbl.setVisible(on)
 
     def set_logs(self, logs) -> None:
         self._logs = logs or []
@@ -2959,13 +2976,14 @@ class _EventPreviewMixin:
             return   # superseded by a newer sim, or already timed out
         self._sim_done = True
         self._detach_sim()
-        from ..simulate import SimulationNote
+        from ..simulate import SimulationNote, VerifiedLogs
         if isinstance(logs, SimulationNote):
             # Ran fine, but an (empty) events list would mislead — e.g.
             # calldata to a code-less target that the chain's node may
             # handle natively (TAC system contracts).
             self._events.set_placeholder(logs.text)
             return
+        self._events.set_verified(isinstance(logs, VerifiedLogs))
         if logs is None:
             # The worker may have just *learned* this endpoint can't
             # simulate (no eth_simulateV1, no py-evm) — distinguish that

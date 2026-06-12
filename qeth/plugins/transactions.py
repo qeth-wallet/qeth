@@ -2668,9 +2668,14 @@ class _EventsView(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel("Events:"))
         # Shown when the logs came from a simulation over proof-verified
-        # state (Helios sidecar) — see set_verified.
-        self.verified_lbl = QLabel("⚡ verified")
-        self.verified_lbl.setStyleSheet("color: gray;")
+        # state (Helios sidecar) — see set_verified. A self-consistent
+        # (bg, fg) success-green pill, same theme-safe approach as the
+        # _IDENTITY_TINT pills: carrying both colors reads on any
+        # palette, where a lone gray drowned on light themes.
+        self.verified_lbl = QLabel("✓ verified")
+        self.verified_lbl.setStyleSheet(
+            "background:#d1e7dd; color:#0f5132; "
+            "padding:1px 6px; border-radius:4px;")
         self.verified_lbl.setToolTip(
             "Simulated on proof-verified chain state: every account and "
             "storage slot this transaction touched was checked against "

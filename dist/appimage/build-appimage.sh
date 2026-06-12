@@ -83,6 +83,17 @@ if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&
 fi
 echo "DIAG: AppDir after install = $(du -sh "$APPDIR" | cut -f1)"
 
+# "verify" variant: bundle a Helios light client (path in QETH_BUNDLE_HELIOS)
+# so previews are proof-verified out of the box; AppRun points
+# QETH_HELIOS_BIN at it. NOTE: the official helios release needs glibc >= 2.39,
+# which raises this AppImage's floor above the usual 2.34 — the verify AppImage
+# therefore targets glibc >= 2.39 (Ubuntu 24.04+, Fedora 39+).
+if [ -n "${QETH_BUNDLE_HELIOS:-}" ]; then
+    [ -x "$QETH_BUNDLE_HELIOS" ] || { echo "QETH_BUNDLE_HELIOS not executable" >&2; exit 1; }
+    install -Dm0755 "$QETH_BUNDLE_HELIOS" "$APPDIR/usr/bin/helios"
+    echo "DIAG: bundled helios $("$QETH_BUNDLE_HELIOS" --version 2>/dev/null | head -1)"
+fi
+
 # 3b. Trim Qt modules qeth doesn't use. It's a pure QtWidgets app (only
 #     QtCore/QtGui/QtWidgets; QtSvg/QtNetwork/QtDBus stay as runtime deps), so
 #     the heavyweight Addons — WebEngine, the whole QML/Quick stack, 3D, Charts,

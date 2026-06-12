@@ -96,6 +96,12 @@ find "$VENDOR" -name '__pycache__' -type d -prune -exec rm -rf {} +
 # Launcher (sets PYTHONPATH to the vendor dir, runs python -m qeth).
 install -Dm0755 dist/rpm/qeth.launcher %{buildroot}%{_bindir}/%{name}
 
+# "verify" variant: bundle a Helios light client for proof-verified previews
+# out of the box. Build with: rpmbuild --define "bundle_helios /path/to/helios"
+%if %{defined bundle_helios}
+install -Dm0755 %{bundle_helios} %{buildroot}%{_prefix}/lib/%{name}/helios
+%endif
+
 # Desktop entry (Exec=qeth, StartupWMClass=qeth) + icon — native menu + dock.
 install -Dm0644 dist/flatpak/io.github.michwill.qeth.desktop \
         %{buildroot}%{_datadir}/applications/io.github.michwill.qeth.desktop

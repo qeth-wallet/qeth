@@ -25,4 +25,9 @@ for _c in "$HERE"/usr/python/lib/python3.*/site-packages/certifi/cacert.pem; do
     [ -f "$_c" ] && export SSL_CERT_FILE="$_c" && break
 done
 
+# Bundled Helios light client (present only in the "verify" AppImage) —
+# verified previews out of the box. Absent in the normal AppImage, where
+# qeth.helios.helios_binary() falls through to PATH / ~/.helios/bin.
+[ -x "$HERE/usr/bin/helios" ] && export QETH_HELIOS_BIN="$HERE/usr/bin/helios"
+
 exec "$HERE/usr/python/bin/python3" -m qeth "$@"

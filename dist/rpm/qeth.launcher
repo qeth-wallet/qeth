@@ -4,5 +4,9 @@
 # (native theming, unlike the flatpak/AppImage). The unpackaged or
 # version-pinned deps (web3, ledgereth, eth-utils, rlp, …) live in a private
 # vendor dir, prepended on PYTHONPATH so they shadow any newer system copy.
+# QETH_HELIOS_BIN points at the (optional) bundled Helios light client —
+# present only in the "verify" build. Absent (the normal package) →
+# qeth.helios.helios_binary() falls through to PATH / ~/.helios/bin.
 exec env PYTHONPATH="/usr/lib/qeth/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+     QETH_HELIOS_BIN="${QETH_HELIOS_BIN:-/usr/lib/qeth/helios}" \
      python3 -m qeth "$@"

@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QRect, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen,
                            QPixmap)
 
@@ -124,17 +124,55 @@ def _arrow_path(cx: float, cy: float, s: float, up: bool) -> QPainterPath:
     return path
 
 
+def _themed_arrow_white(name: str, px: int) -> "QPixmap | None":
+    """The desktop icon theme's ``name`` (e.g. ``go-up``) rendered to exactly
+    ``px``×``px`` at device-pixel-ratio 1 and tinted solid white, or ``None``
+    when the theme doesn't provide it (then the caller draws a triangle).
+
+    Rendering to an explicit dpr-1 pixmap is load-bearing: on a HiDPI screen
+    ``QIcon.pixmap(px)`` hands back a 2× physical pixmap whose ``width()`` is
+    ``2*px``, and placing it by that width drops the badge in the wrong spot.
+    """
+    if px <= 0:
+        return None
+    icon = QIcon.fromTheme(name)
+    if icon.isNull():
+        return None
+    src = icon.pixmap(px, px)
+    if src.isNull():
+        return None
+    out = QPixmap(px, px)
+    out.setDevicePixelRatio(1.0)
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    p.drawPixmap(QRect(0, 0, px, px), src)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(out.rect(), QColor(255, 255, 255))
+    p.end()
+    return out
+
+
 def _draw_direction_badge(
     painter: QPainter, cx: float, cy: float, r: float, outgoing: bool,
 ) -> None:
-    """A coloured disc with a white directional arrow, centred at (cx, cy),
-    radius ``r``. A thin white ring separates it from whatever's behind."""
+    """A coloured disc (green = received, blue = sent) with a white arrow,
+    centred at (cx, cy), radius ``r``; a thin white ring separates it from
+    whatever's behind. The arrow is the desktop theme's own ``go-up``/
+    ``go-down`` glyph when available (so it matches the user's icon set),
+    falling back to a hand-drawn triangle (portable Flatpak/AppImage runtimes
+    may not ship those names)."""
     painter.setPen(QPen(QColor(255, 255, 255), max(1.0, r * 0.12)))
     painter.setBrush(_SENT_COLOR if outgoing else _RECEIVED_COLOR)
     painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(255, 255, 255))
-    painter.drawPath(_arrow_path(cx, cy, r * 0.5, up=outgoing))
+    asz = int(r * 1.25)
+    arrow = _themed_arrow_white("go-up" if outgoing else "go-down", asz)
+    if arrow is not None:
+        painter.drawPixmap(int(cx - asz / 2), int(cy - asz / 2), arrow)
+    else:
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawPath(_arrow_path(cx, cy, r * 0.5, up=outgoing))
 
 
 def notification_icon(
@@ -153,8 +191,10 @@ def notification_icon(
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     if base is not None and not base.isNull():
         p.drawPixmap(0, 0, to_circular(base, size))
-        r = size * 0.28
-        off = size - r - size * 0.06
+        # Small badge flush in the bottom-right corner (minimal overlap with
+        # the coin/token logo).
+        r = size * 0.22
+        off = size - r - size * 0.015
         _draw_direction_badge(p, off, off, r, outgoing)
     else:
         _draw_direction_badge(p, size / 2.0, size / 2.0, size * 0.46, outgoing)

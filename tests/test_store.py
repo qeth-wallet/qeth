@@ -36,10 +36,13 @@ class TestRoundTrip:
         s1.window_geometry = "deadbeef"
         s1.splitter_state_main = "01020304"
         s1.notifications_enabled = False
+        s1.add_custom_token(1, "0xCAFE00000000000000000000000000000000CAFE")
         s1.save()
 
         s2 = Store.load()
         assert s2.notifications_enabled is False
+        assert s2.custom_tokens == {
+            (1, "0xcafe00000000000000000000000000000000cafe")}
         assert s2.accounts == s1.accounts
         assert s2.default_account == "0xAAA"
         assert s2.current_chain_id == 10
@@ -147,6 +150,28 @@ class TestHideShow:
         s.hide_token(1, "0xAAAA")
         assert s.is_hidden(1, "0xAAAA")
         assert not s.is_force_shown(1, "0xAAAA")
+
+    def test_custom_token_add_and_query(self, tmp_qeth):
+        s = Store()
+        s.add_custom_token(1, "0xAAAA")
+        assert s.is_custom_token(1, "0xaaaa")
+        assert not s.is_force_shown(1, "0xaaaa")   # tracked, NOT force-shown
+        s.remove_custom_token(1, "0xAAAA")
+        assert not s.is_custom_token(1, "0xaaaa")
+
+    def test_add_custom_unhides(self, tmp_qeth):
+        s = Store()
+        s.hide_token(1, "0xBBBB")
+        s.add_custom_token(1, "0xbbbb")
+        assert s.is_custom_token(1, "0xbbbb")
+        assert not s.is_hidden(1, "0xbbbb")
+
+    def test_hide_stops_tracking_custom(self, tmp_qeth):
+        s = Store()
+        s.add_custom_token(1, "0xCCCC")
+        s.hide_token(1, "0xcccc")
+        assert s.is_hidden(1, "0xcccc")
+        assert not s.is_custom_token(1, "0xcccc")   # hidden → no longer tracked
 
     def test_force_show_removes_from_hidden(self, tmp_qeth):
         s = Store()

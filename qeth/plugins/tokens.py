@@ -905,6 +905,10 @@ class TokensPlugin(Plugin):
             # inbound USDT without a separate metadata fetch.
             forced = {a for (cid, a) in self._store.shown_tokens
                       if cid == chain.chain_id}
+            # Custom-added tokens: always balance-checked (so they surface the
+            # moment they have a balance) even though they're not force-shown.
+            custom = {a for (cid, a) in self._store.custom_tokens
+                      if cid == chain.chain_id}
             siblings = self._sibling_held_contracts(chain.chain_id, address)
             # Drain receipt-derived contracts for THIS view — popped
             # so they don't permanently inflate the multicall set
@@ -923,7 +927,7 @@ class TokensPlugin(Plugin):
             contracts: list[str] = []
             for c in (
                 [b.contract for b in blockscout_tokens]
-                + sorted(forced) + sorted(siblings)
+                + sorted(forced) + sorted(custom) + sorted(siblings)
                 + sorted(receipt_extras)
                 + top
             ):
@@ -1158,6 +1162,12 @@ class TokensPlugin(Plugin):
             if self._store.is_force_shown(chain.chain_id, addr):
                 out.append(b)
                 continue
+            # Custom-added token with a non-zero balance: the user added it
+            # explicitly, so show any amount (exempt from the dust filter).
+            # It was already dropped at exactly-zero by the raw==0 filter.
+            if self._store.is_custom_token(chain.chain_id, addr):
+                out.append(b)
+                continue
             price = prices.get(addr)
             if price is None:
                 continue
@@ -1306,7 +1316,9 @@ class TokensPlugin(Plugin):
             )
             return
         self._token_metadata.put_many(chain.chain_id, meta)
-        self._store.force_show_token(chain.chain_id, addr)
+        # Track it (always balance-checked) but don't force-show: it appears
+        # only once it has a non-zero balance, then hides again at exactly 0.
+        self._store.add_custom_token(chain.chain_id, addr)
 
         m = next(iter(meta.values()))
         scam = self._token_lists.is_likely_scam(
@@ -1318,8 +1330,15 @@ class TokensPlugin(Plugin):
                 f"Added {m['symbol']!r} ({m['name']}). Heads up: it "
                 "matches our scam heuristic (URL or impersonating a "
                 "major symbol) and will be marked with an alarm icon. "
-                "Pinned anyway since you added it explicitly.",
+                "Tracked anyway since you added it explicitly.",
             )
+        elif self.host is not None:
+            # Feedback: a zero-balance custom token won't appear in the list,
+            # so confirm it's being tracked rather than leaving the user
+            # wondering why nothing changed.
+            self.host.status_message(
+                f"Tracking {m.get('symbol') or 'token'} — shows when it has a "
+                "balance", 4000)
         self._invalidate_view_and_refresh()
 
     def _invalidate_view_and_refresh(self) -> None:

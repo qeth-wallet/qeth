@@ -60,6 +60,10 @@ class Store:
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
         self.shown_tokens: set[tuple[int, str]] = set()
+        # Custom-added tokens (by contract): always balance-checked, but shown
+        # only when the balance is non-zero — unlike `shown_tokens` (pin),
+        # which force display even at zero. (chain_id, addr_lower).
+        self.custom_tokens: set[tuple[int, str]] = set()
         # Hex-encoded QByteArray from QMainWindow.saveGeometry(), so size +
         # position + maximized state all round-trip.
         self.window_geometry: Optional[str] = None
@@ -116,6 +120,11 @@ class Store:
                 for t in data.get("shown_tokens", [])
                 if t.get("address") and t.get("chain_id") is not None
             }
+            s.custom_tokens = {
+                (int(t["chain_id"]), str(t["address"]).lower())
+                for t in data.get("custom_tokens", [])
+                if t.get("address") and t.get("chain_id") is not None
+            }
             s.window_geometry = data.get("window_geometry")
             s.splitter_state_main = data.get("splitter_state_main")
             s.splitter_state_left = data.get("splitter_state_left")
@@ -146,6 +155,10 @@ class Store:
                 "shown_tokens": [
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.shown_tokens)
+                ],
+                "custom_tokens": [
+                    {"chain_id": cid, "address": addr}
+                    for (cid, addr) in sorted(self.custom_tokens)
                 ],
                 "window_geometry": self.window_geometry,
                 "splitter_state_main": self.splitter_state_main,
@@ -285,11 +298,29 @@ class Store:
     def is_force_shown(self, chain_id: int, address: str) -> bool:
         return (int(chain_id), address.lower()) in self.shown_tokens
 
+    def is_custom_token(self, chain_id: int, address: str) -> bool:
+        return (int(chain_id), address.lower()) in self.custom_tokens
+
+    def add_custom_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            key = (int(chain_id), address.lower())
+            self.custom_tokens.add(key)
+            self.hidden_tokens.discard(key)
+        self.save()
+
+    def remove_custom_token(self, chain_id: int, address: str) -> None:
+        with self._lock:
+            self.custom_tokens.discard((int(chain_id), address.lower()))
+        self.save()
+
     def hide_token(self, chain_id: int, address: str) -> None:
         with self._lock:
             key = (int(chain_id), address.lower())
             self.hidden_tokens.add(key)
             self.shown_tokens.discard(key)
+            # Hiding a custom token also stops tracking it (no point checking
+            # the balance of something the user explicitly hid).
+            self.custom_tokens.discard(key)
         self.save()
 
     def unhide_token(self, chain_id: int, address: str) -> None:

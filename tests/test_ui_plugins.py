@@ -1394,6 +1394,62 @@ class TestTokensPlugin:
         tokens_plugin._on_pin_token(1, good)
         assert tokens_plugin._store.is_force_shown(1, good)
 
+    def test_custom_token_zero_hidden_nonzero_kept(
+        self, tokens_plugin, monkeypatch,
+    ):
+        """A custom-added token is balance-checked, but shown only when its
+        balance is non-zero — hidden at exactly zero (unlike a pinned token)."""
+        host = _StubHost(address=ADDR)
+        tokens_plugin.attach(host)
+        tokens_plugin.widget()                       # build the panel
+        czero = "0x" + "c0" * 20
+        cnon = "0x" + "c1" * 20
+        tokens_plugin._store.add_custom_token(1, czero)
+        tokens_plugin._store.add_custom_token(1, cnon)
+        # custom tokens are NOT force-shown (that's what keeps zero ones hidden)
+        assert not tokens_plugin._store.is_force_shown(1, czero)
+
+        view_key = (1, ADDR.lower())
+        tokens_plugin._displayed_view = view_key
+        captured: dict = {}
+        monkeypatch.setattr(
+            tokens_plugin, "_compute_visible_tokens",
+            lambda chain, toks, prices, show_all=None: captured.update(t=toks) or [])
+        pv = {
+            "view_key": view_key, "chain": ETH, "address": ADDR, "native_wei": 0,
+            "metadata": {czero: ("CZ", "Zero", 18), cnon: ("CN", "NonZero", 18)},
+            "balances_raw": {czero: 0, cnon: 7},
+        }
+        tokens_plugin._on_combined_ready(pv, 1, {})
+        shown = {t.contract.lower() for t in captured["t"]}
+        assert cnon in shown        # non-zero custom token surfaces
+        assert czero not in shown   # exactly-zero custom token is dropped
+
+    def test_custom_token_exempt_from_dust_filter(self, tokens_plugin):
+        """A custom token with any non-zero balance shows even below the dust
+        threshold; an ordinary dust token is filtered."""
+        from decimal import Decimal
+        from qeth.tokens import TokenBalance
+        from qeth.prices import Price
+        host = _StubHost()
+        tokens_plugin.attach(host)
+        custom = "0x" + "ca" * 20
+        ordinary = "0x" + "0d" * 20
+        tokens_plugin._store.add_custom_token(1, custom)
+        toks = [
+            TokenBalance(contract=custom, symbol="CUS", name="Custom",
+                         decimals=18, balance_raw=1),
+            TokenBalance(contract=ordinary, symbol="ORD", name="Ordinary",
+                         decimals=18, balance_raw=1),
+        ]
+        tiny = Price(price_usd=Decimal("0.00000001"), timestamp=0,
+                     source="test")  # sub-dust value
+        prices = {custom: tiny, ordinary: tiny}
+        visible = {t.symbol
+                   for t in tokens_plugin._compute_visible_tokens(ETH, toks, prices)}
+        assert "CUS" in visible        # custom: shown despite dust value
+        assert "ORD" not in visible    # ordinary dust token: filtered
+
     def test_fresh_wallet_sets_displayed_view_before_discovery(
         self, tokens_plugin,
     ):

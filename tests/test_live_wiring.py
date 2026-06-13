@@ -138,10 +138,39 @@ def test_on_transfer_seen_notifies_with_symbol_and_amount(qtbot, monkeypatch):
     from PySide6.QtGui import QIcon
     assert isinstance(icon, QIcon) and not icon.isNull()
 
-    # unknown token: no decimals → no quantity
+    # unknown token: no decimals → no quantity (Mock store makes everything
+    # "recognised", so the scam filter is bypassed here — see the dedicated
+    # filtering test below for the real-store behaviour)
     tp.host.notify.reset_mock()
     tp.on_transfer_seen(_chain_ns(), "0xme", "0xunk", "0xto", True, 999)
     assert tp.host.notify.call_args.args[0] == "Sent a token"
+
+
+def test_on_transfer_seen_filters_scam_and_zero(qtbot, tmp_qeth, monkeypatch):
+    """No notification for the spam that dominates these logs: unrecognised
+    tokens (address poisoning) and zero-value transfers (a transferFrom-0
+    emits a Transfer event but moves nothing). A recognised token with real
+    value still notifies."""
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.store import Store
+    tp = TokensPlugin(Store())            # real store → is_custom_token works
+    tp.host = Mock()
+    monkeypatch.setattr(tp._token_metadata, "get",
+                        lambda cid, c: {"symbol": "TOK", "decimals": 18})
+    ch = _chain_ns()
+
+    # unrecognised token (in no list, not added by the user) → skipped
+    tp.on_transfer_seen(ch, "0xme", "0xscam", "0xpoison", False, 10**18)
+    assert tp.host.notify.call_count == 0
+
+    # recognise it (custom-add) but zero value → still skipped
+    tp._store.add_custom_token(1, "0xtok")
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 0)
+    assert tp.host.notify.call_count == 0
+
+    # recognised + non-zero → notifies
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 5 * 10**18)
+    assert tp.host.notify.call_count == 1
 
 
 def test_on_native_balance_notifies_received_on_increase(qtbot, monkeypatch):

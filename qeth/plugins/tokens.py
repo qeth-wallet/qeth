@@ -540,15 +540,35 @@ class TokensPlugin(Plugin):
         icon = notification_icon(bundled_native_icon(chain.symbol), False)
         self._notify(title, body, icon)
 
+    def _worth_notifying_token(self, chain_id: int, token: str) -> bool:
+        """Whether a token transfer deserves a desktop notification: only if we
+        recognise the token (it's in the curated lists or the user added it).
+        Filters out address-poisoning spam — scammers blast every active
+        address with in/out transfers of tokens that are in no list."""
+        addr = token.lower()
+        return (self._token_lists.get(chain_id, addr) is not None
+                or self._store.is_custom_token(chain_id, addr))
+
     def on_transfer_seen(
         self, chain, account: str, token: str, counterparty: str,
         outgoing: bool, raw_value,
     ) -> None:
         """A ws ERC-20 Transfer touching the on-screen account (LiveWatcher,
-        relayed). Format the amount from the token's cached symbol/decimals and
-        raise a sent/received desktop notification. Metadata is a sync in-memory
-        cache (safe on the main thread); an unknown token degrades to a symbol-
-        less, amount-less 'Received a token' rather than a wrong number."""
+        relayed). Raise a sent/received desktop notification — but skip the
+        scam/spam that dominates these logs:
+
+          - **zero value** moves nothing: a ``transferFrom(me, x, 0)`` still
+            emits a Transfer event (often on a stale/zero allowance) but isn't
+            a real transfer;
+          - **unrecognised tokens** are overwhelmingly address-poisoning spam —
+            only notify for tokens in the curated lists or that the user added.
+
+        (The balance still re-reads for every transfer via on_balance_dirty;
+        this only gates the *notification*.)"""
+        if int(raw_value) == 0:
+            return
+        if not self._worth_notifying_token(chain.chain_id, token):
+            return
         meta = self._token_metadata.get(chain.chain_id, token.lower())
         if meta and meta.get("symbol"):
             symbol = str(meta["symbol"])

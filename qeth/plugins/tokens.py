@@ -1100,11 +1100,12 @@ class TokensPlugin(Plugin):
 
         tokens: list[TokenBalance] = []
         for addr, raw in balances_raw.items():
-            # Drop zero balances unless force-shown or in spotlight mode.
-            if raw == 0:
-                if not (self._show_all
-                        or self._store.is_force_shown(chain.chain_id, addr)):
-                    continue
+            # Drop exactly-zero balances unless in spotlight mode. A pinned
+            # (force-shown) or custom token is still checked + kept in the set,
+            # but an empty one is noise — pin/custom mean "show when non-zero",
+            # not "show a zero forever". Only show_all reveals zero balances.
+            if raw == 0 and not self._show_all:
+                continue
             meta = metadata.get(addr)
             if meta is None:
                 continue
@@ -2038,14 +2039,18 @@ class TokenListPanel(QWidget):
                     cell.set_value(value)
 
             if apply_dust_filter:
-                # Dust hiding (display-time; doesn't touch the worker data).
-                # Show only: native, user-force-shown, or priced above dust.
-                if (is_native
-                        or self._store.is_force_shown(cid, addr)
-                        or (value is not None and value >= self.DUST_USD_THRESHOLD)):
-                    self.table.setRowHidden(row, False)
-                else:
-                    self.table.setRowHidden(row, True)
+                # Display-time hiding (doesn't touch the worker data):
+                #   - native always shows;
+                #   - an EXACTLY-zero balance never shows — even pinned/custom
+                #     ("pin"/"add" mean show-when-held, not show-a-zero);
+                #   - otherwise show if pinned, custom-added, or above the dust
+                #     USD threshold.
+                is_zero = balance is not None and balance == 0
+                show = is_native or (not is_zero and (
+                    self._store.is_force_shown(cid, addr)
+                    or self._store.is_custom_token(cid, addr)
+                    or (value is not None and value >= self.DUST_USD_THRESHOLD)))
+                self.table.setRowHidden(row, not show)
         self.table.setSortingEnabled(True)
 
     # ---- icon refresh ---------------------------------------------------

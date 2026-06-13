@@ -157,6 +157,44 @@ class TestTokenListPanel:
         # same handler as the Copy button — copying the contract address.
         assert _has_copy_shortcut(token_panel.table)
 
+    def test_zero_balance_never_shows_even_pinned(self, qtbot, tmp_qeth):
+        """A token at exactly zero balance is hidden even when pinned/custom
+        ('pin'/'add' mean show-when-held, not show-a-zero). A pinned or custom
+        token with any non-zero balance shows even below the dust threshold; an
+        ordinary dust token is hidden."""
+        from decimal import Decimal
+        from qeth.tokens import TokenBalance
+        from qeth.prices import Price
+        store = Store.load()
+        pin0 = "0x" + "a0" * 20      # pinned, zero balance
+        pinN = "0x" + "a1" * 20      # pinned, non-zero (sub-dust USD)
+        cusN = "0x" + "a2" * 20      # custom, non-zero (sub-dust USD)
+        ordy = "0x" + "a3" * 20      # ordinary, sub-dust
+        store.force_show_token(1, pin0)
+        store.force_show_token(1, pinN)
+        store.add_custom_token(1, cusN)
+        panel = TokenListPanel(IconCache(), store)
+        qtbot.addWidget(panel)
+        toks = [
+            TokenBalance(contract=pin0, symbol="P0", name="", decimals=18, balance_raw=0),
+            TokenBalance(contract=pinN, symbol="PN", name="", decimals=18, balance_raw=1),
+            TokenBalance(contract=cusN, symbol="CN", name="", decimals=18, balance_raw=1),
+            TokenBalance(contract=ordy, symbol="OR", name="", decimals=18, balance_raw=1),
+        ]
+        tiny = Price(price_usd=Decimal("0.00000001"), timestamp=0, source="t")
+        prices = {c: tiny for c in (pin0, pinN, cusN, ordy)}
+        panel.render_full(ETH, 0, toks, {}, prices, apply_dust_filter=True)
+        shown = {}
+        for row in range(panel.table.rowCount()):
+            it = panel.table.item(row, 0)
+            key = it.data(Qt.ItemDataRole.UserRole) if it else None
+            if key:
+                shown[key[1]] = not panel.table.isRowHidden(row)
+        assert shown[pin0] is False    # pinned but zero → hidden
+        assert shown[pinN] is True     # pinned, non-zero dust → shown
+        assert shown[cusN] is True     # custom, non-zero dust → shown
+        assert shown[ordy] is False    # ordinary dust → hidden
+
     def test_native_row_pinned_at_index_zero(self, token_panel):
         token_panel.show_balances(ETH, native_wei=10**18, tokens=[], list_entries={})
         assert token_panel.table.rowCount() == 1

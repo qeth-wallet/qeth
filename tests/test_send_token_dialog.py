@@ -574,6 +574,7 @@ class TestEnsRecipient:
 
 
 def test_resolve_ens_address(monkeypatch):
+    from types import SimpleNamespace
     from qeth import ens
 
     class _Ens:
@@ -583,6 +584,8 @@ def test_resolve_ens_address(monkeypatch):
     class _W3:
         def __init__(self, _provider):
             self.ens = _Ens()
+            # _make_w3 sets provider.global_ccip_read_enabled (strict toggle).
+            self.provider = SimpleNamespace(global_ccip_read_enabled=True)
 
     monkeypatch.setattr("web3.Web3", _W3)
     assert ens.resolve_ens_address("http://x", "vitalik.eth") == VITALIK
@@ -591,11 +594,13 @@ def test_resolve_ens_address(monkeypatch):
 
 def test_resolve_ens_address_degrades_on_rpc_error(monkeypatch):
     """The resolver promises never to raise — an RPC failure → None."""
+    from types import SimpleNamespace
     from qeth import ens
 
     class _W3:
         def __init__(self, _provider):
             self.ens = self
+            self.provider = SimpleNamespace(global_ccip_read_enabled=True)
 
         def address(self, name):
             raise RuntimeError("rpc down")
@@ -604,14 +609,46 @@ def test_resolve_ens_address_degrades_on_rpc_error(monkeypatch):
     assert ens.resolve_ens_address("http://x", "vitalik.eth") is None
 
 
-def test_ens_resolve_worker_emits_name_and_address(qtbot, monkeypatch):
+def test_resolve_ens_strict_disables_ccip(monkeypatch):
+    """ccip=False is threaded onto the provider so the verified path can't
+    follow an offchain (gateway) resolution."""
+    from types import SimpleNamespace
     from qeth import ens
-    monkeypatch.setattr(ens, "resolve_ens_address", lambda rpc, name: VITALIK)
-    worker = ens.EnsResolveWorker("http://x", "vitalik.eth")
+    seen = {}
+
+    class _W3:
+        def __init__(self, _provider):
+            self.ens = SimpleNamespace(address=lambda name: VITALIK.lower())
+            self.provider = SimpleNamespace(global_ccip_read_enabled=None)
+
+    monkeypatch.setattr("web3.Web3", _W3)
+    # capture what the provider flag ends up as
+    import web3
+    orig = web3.Web3
+
+    def _cap(p):
+        w = orig(p)
+        seen["w"] = w
+        return w
+    monkeypatch.setattr("web3.Web3", _cap)
+    ens.resolve_ens_address("http://x", "vitalik.eth", ccip=False)
+    assert seen["w"].provider.global_ccip_read_enabled is False
+
+
+def test_ens_resolve_worker_emits_name_and_address(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    from qeth import ens
+    # Stub the verified resolution (no Helios / network); worker just relays it.
+    monkeypatch.setattr(
+        ens, "verified_resolve_address",
+        lambda chain, name, wait_s: (VITALIK, False))
+    worker = ens.EnsResolveWorker(
+        SimpleNamespace(rpc_url="http://x", chain_id=1), "vitalik.eth",
+        wait_s=0.0)
     with qtbot.waitSignal(worker.resolved, timeout=2000) as blocker:
         worker.start()
     worker.wait()
-    assert blocker.args == ["vitalik.eth", VITALIK]
+    assert blocker.args == ["vitalik.eth", VITALIK, False]
 
 
 LEDGER1 = "0x7a16fF8270133F063aAb6C9977183D9e72835428"

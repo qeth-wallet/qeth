@@ -5188,23 +5188,39 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._ens_form.setRowVisible(self._ens_label, True)
         from ..chains import DEFAULT_CHAINS
         from ..ens import EnsResolveWorker
-        rpc = next((c.rpc_url for c in DEFAULT_CHAINS if c.chain_id == 1), None)
-        if rpc is None:
+        mainnet = next((c for c in DEFAULT_CHAINS if c.chain_id == 1), None)
+        if mainnet is None:
             return
-        worker = EnsResolveWorker(rpc, text)
+        worker = EnsResolveWorker(mainnet, text)
         worker.resolved.connect(
-            lambda _nm, addr, key=text.lower(): self._on_ens_resolved(key, addr))
+            lambda _nm, addr, verified, key=text.lower():
+            self._on_ens_resolved(key, addr, verified))
         self._start_worker(worker)
 
-    def _on_ens_resolved(self, key: str, address: str) -> None:
+    def _on_ens_resolved(
+        self, key: str, address: str, verified: bool = False,
+    ) -> None:
         if key != self._ens_input:
             return                     # recipient changed while in flight
         if address:
             self._ens_resolved = to_checksum_address(address)
-            self._ens_label.setText(f"↳ {self._ens_resolved}")
-            self._ens_label.setStyleSheet(            # theme-safe green pill
-                "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
-                " border-radius:4px;")
+            if verified:
+                # Green pill == proof-verified through Helios (same meaning as
+                # the Events tab badge). Neutral style otherwise, so green
+                # never overclaims a name we only trusted from a remote RPC.
+                self._ens_label.setText(f"↳ {self._ens_resolved}  ✓ verified")
+                self._ens_label.setStyleSheet(
+                    "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
+                    " border-radius:4px;")
+                self._ens_label.setToolTip(
+                    "Name → address resolved through a Helios light client and"
+                    " proof-verified against Ethereum consensus.")
+            else:
+                self._ens_label.setText(f"↳ {self._ens_resolved}")
+                self._ens_label.setStyleSheet("")
+                self._ens_label.setToolTip(
+                    "Resolved via RPC (not proof-verified). Install a Helios"
+                    " light client for verified ENS resolution.")
         else:
             self._ens_resolved = None
             self._ens_label.setText("⚠ name not found")

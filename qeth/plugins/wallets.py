@@ -221,6 +221,9 @@ class WalletsPlugin(Plugin):
         # here so Python's GC doesn't drop them mid-run (Qt's
         # QThread destructor aborts on a still-running thread).
         self._ens_workers: list[QThread] = []
+        # Lower-case addresses whose ENS label was resolved through Helios
+        # (proof-verified) — drives a "verified" tooltip on the tree row.
+        self._ens_verified: set[str] = set()
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -611,6 +614,10 @@ class WalletsPlugin(Plugin):
             it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
+                if addr.lower() in self._ens_verified:
+                    it.setToolTip(
+                        0,
+                        f"{label_text} — ENS name proof-verified via Helios.")
             it.setFont(0, QFont("monospace"))
             # Address leaf: selectable + draggable, NOT a drop target
             # (so an address can't be dropped onto another address —
@@ -644,6 +651,10 @@ class WalletsPlugin(Plugin):
             it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
+                if addr.lower() in self._ens_verified:
+                    it.setToolTip(
+                        0,
+                        f"{label_text} — ENS name proof-verified via Helios.")
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
@@ -673,6 +684,10 @@ class WalletsPlugin(Plugin):
             it.setData(0, Qt.ItemDataRole.UserRole, addr)
             if label_text:
                 it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
+                if addr.lower() in self._ens_verified:
+                    it.setToolTip(
+                        0,
+                        f"{label_text} — ENS name proof-verified via Helios.")
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
@@ -1033,7 +1048,9 @@ class WalletsPlugin(Plugin):
         if mainnet is None:
             return
         for addr in addresses:
-            w = EnsReverseWorker(mainnet.rpc_url, addr)
+            # wait_s=0.0: verify only when a mainnet Helios sidecar is already
+            # synced; never block a label on a cold sync (it's informational).
+            w = EnsReverseWorker(mainnet, addr, wait_s=0.0)
             w.resolved.connect(self._on_ens_label_resolved)
             self._ens_workers.append(w)
             w.finished.connect(
@@ -1043,15 +1060,22 @@ class WalletsPlugin(Plugin):
             w.finished.connect(w.deleteLater)
             w.start()
 
-    def _on_ens_label_resolved(self, address: str, name: str) -> None:
+    def _on_ens_label_resolved(
+        self, address: str, name: str, verified: bool = False,
+    ) -> None:
         """ENS worker came back. Overwrite the account's label IFF
         a real (forward-verified) name resolved AND the current
         label still looks auto-generated. We never clobber a
         user-typed label — only fill in empties and Frame's
-        ``deadbeef…`` / ``deadbeef… (key N/M)`` placeholders."""
+        ``deadbeef…`` / ``deadbeef… (key N/M)`` placeholders.
+
+        ``verified`` (resolved through Helios) is recorded so the tree row
+        gets a proof-verified tooltip."""
         if not name:
             return
         addr_lower = address.lower()
+        if verified:
+            self._ens_verified.add(addr_lower)
         for acct in self._store.accounts:
             if acct["address"].lower() != addr_lower:
                 continue
@@ -1488,10 +1512,10 @@ class AddLedgerDialog(QDialog):
         )
         if mainnet is None:
             return
-        w = EnsReverseWorker(mainnet.rpc_url, address)
+        w = EnsReverseWorker(mainnet, address, wait_s=0.0)
         w.resolved.connect(
-            lambda addr, name, _it=item: self._annotate_row_with_ens(
-                _it, addr, name,
+            lambda addr, name, verified, _it=item: self._annotate_row_with_ens(
+                _it, addr, name, verified,
             )
         )
         self._ens_workers.add(w)
@@ -1499,12 +1523,16 @@ class AddLedgerDialog(QDialog):
         w.finished.connect(w.deleteLater)
         w.start()
 
-    def _annotate_row_with_ens(self, item, address: str, name: str) -> None:
+    def _annotate_row_with_ens(
+        self, item, address: str, name: str, verified: bool = False,
+    ) -> None:
         """Append the verified ENS name to the row text. The
         DiscoveredAccount in UserRole is unchanged — selection +
         the eventual add_account call still see the bare address;
         the label gets re-resolved through the same ENS path
-        after Add (see ``WalletsPlugin._kick_ens_label_lookups``)."""
+        after Add (see ``WalletsPlugin._kick_ens_label_lookups``).
+
+        ``verified`` (resolved through Helios) shows a ✓ and a tooltip."""
         if not name:
             return
         # Defensive: confirm the item still belongs to this row's
@@ -1512,7 +1540,11 @@ class AddLedgerDialog(QDialog):
         acct = item.data(Qt.ItemDataRole.UserRole)
         if acct is None or acct.address.lower() != address.lower():
             return
-        item.setText(f"{item.text()}   ({name})")
+        mark = " ✓" if verified else ""
+        item.setText(f"{item.text()}   ({name}{mark})")
+        if verified:
+            item.setToolTip(
+                f"{name} — ENS name proof-verified via a Helios light client.")
 
     def _on_done(self) -> None:
         self.progress.setVisible(False)
@@ -1629,6 +1661,10 @@ class AddWatchOnlyDialog(QDialog):
     def _set_resolved(self, text: Optional[str]) -> None:
         self.resolved_lbl.setText(text or "")
         self.resolved_lbl.setVisible(bool(text))
+        # Reset to neutral; _on_ens_forward re-applies the verified pill. Stops
+        # a prior "✓ verified" green from lingering over a "resolving…" message.
+        self.resolved_lbl.setStyleSheet("")
+        self.resolved_lbl.setToolTip("")
 
     def _kick_ens_lookup(self) -> None:
         """Debounced ENS query against Ethereum mainnet (ENS lives on
@@ -1644,11 +1680,11 @@ class AddWatchOnlyDialog(QDialog):
         if mainnet is None:
             return
         if text.startswith("0x") and len(text) == 42:
-            rev = EnsReverseWorker(mainnet.rpc_url, text)
+            rev = EnsReverseWorker(mainnet, text)
             rev.resolved.connect(self._on_ens_reverse)
             worker: QThread = rev
         elif "." in text:
-            fwd = EnsResolveWorker(mainnet.rpc_url, text)
+            fwd = EnsResolveWorker(mainnet, text)
             fwd.resolved.connect(self._on_ens_forward)
             worker = fwd
         else:
@@ -1672,15 +1708,31 @@ class AddWatchOnlyDialog(QDialog):
         if name:
             self.label_edit.setText(name)
 
-    def _on_ens_forward(self, name: str, address: str) -> None:
+    def _on_ens_forward(
+        self, name: str, address: str, verified: bool = False,
+    ) -> None:
         """Forward result: a name → address. Show the resolved address,
         enable Add, and offer the name as the default Label. Ignored if
-        the user has since edited the field."""
+        the user has since edited the field. ``verified`` (resolved through
+        Helios) badges the address green ✓, same meaning as the Send dialog."""
         if self.address_edit.text().strip().lower() != name.lower():
             return
         if address:
             self._ens_forward_addr = address
-            self._set_resolved(f"→ {address}")
+            if verified:
+                self._set_resolved(f"→ {address}  ✓ verified")
+                self.resolved_lbl.setStyleSheet(
+                    "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
+                    " border-radius:4px;")
+                self.resolved_lbl.setToolTip(
+                    "Name → address proof-verified through a Helios light"
+                    " client.")
+            else:
+                self._set_resolved(f"→ {address}")
+                self.resolved_lbl.setStyleSheet("")
+                self.resolved_lbl.setToolTip(
+                    "Resolved via RPC (not proof-verified). Install Helios for"
+                    " verified ENS resolution.")
             self.add_btn.setEnabled(True)
             if not self.label_edit.text().strip():
                 self.label_edit.setText(name)

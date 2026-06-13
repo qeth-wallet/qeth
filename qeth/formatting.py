@@ -61,8 +61,9 @@ def transfer_notice(
 ) -> "tuple[str, str]":
     """Build the (title, body) for a sent/received desktop notification.
 
-    ``↑ Sent`` / ``↓ Received`` carries the direction (a theme-neutral glyph
-    — no colour to clash with the notification theme). ``amount`` is the
+    The direction is carried by the notification's *icon* (the token/coin
+    logo with a ↑/↓ badge — see ``icons.notification_icon``), so the title
+    text is glyph-free: just ``Sent``/``Received``. ``amount`` is the
     already-formatted quantity; pass ``""`` when it's unknown (a brand-new
     token with no cached decimals) and the title shows just the symbol.
 
@@ -70,14 +71,13 @@ def transfer_notice(
 
         transfer_notice(False, "5", "USDC", counterparty="0xabc…",
                         chain_name="Ethereum")
-            -> ("↓ Received 5 USDC", "from 0xabc… · Ethereum")
+            -> ("Received 5 USDC", "from 0xabc… · Ethereum")
         transfer_notice(True, "1.5", "ETH", chain_name="Ethereum")
-            -> ("↑ Sent 1.5 ETH", "Ethereum")
+            -> ("Sent 1.5 ETH", "Ethereum")
     """
-    glyph = "↑" if outgoing else "↓"
     verb = "Sent" if outgoing else "Received"
     qty = f"{amount} {symbol}".strip() if amount else symbol
-    title = f"{glyph} {verb} {qty}".rstrip()
+    title = f"{verb} {qty}".rstrip()
     parts: list[str] = []
     if counterparty:
         parts.append(f"{'to' if outgoing else 'from'} {short_addr(counterparty)}")

@@ -13,8 +13,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QObject, QRectF, Qt, QThread, Signal
+from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen,
+                           QPixmap)
 
 from . import QULONGLONG, USER_AGENT
 
@@ -98,6 +99,67 @@ def to_circular(src: QPixmap, size: int = CIRCULAR_RENDER_SIZE) -> QPixmap:
     painter.drawPixmap(-x, -y, scaled)
     painter.end()
     return out
+
+
+# Direction-badge colours for the notification icon. This is a standalone
+# graphic rendered into a freedesktop notification (outside the app's Qt
+# palette), so fixed colours are fine here — green = incoming, blue = outgoing.
+_RECEIVED_COLOR = QColor(34, 160, 70)
+_SENT_COLOR = QColor(40, 110, 210)
+
+
+def _arrow_path(cx: float, cy: float, s: float, up: bool) -> QPainterPath:
+    """A filled triangle centred at (cx, cy): apex up (sent) or down
+    (received), half-extent ``s``."""
+    path = QPainterPath()
+    if up:
+        path.moveTo(cx, cy - s)
+        path.lineTo(cx - s, cy + s * 0.7)
+        path.lineTo(cx + s, cy + s * 0.7)
+    else:
+        path.moveTo(cx, cy + s)
+        path.lineTo(cx - s, cy - s * 0.7)
+        path.lineTo(cx + s, cy - s * 0.7)
+    path.closeSubpath()
+    return path
+
+
+def _draw_direction_badge(
+    painter: QPainter, cx: float, cy: float, r: float, outgoing: bool,
+) -> None:
+    """A coloured disc with a white directional arrow, centred at (cx, cy),
+    radius ``r``. A thin white ring separates it from whatever's behind."""
+    painter.setPen(QPen(QColor(255, 255, 255), max(1.0, r * 0.12)))
+    painter.setBrush(_SENT_COLOR if outgoing else _RECEIVED_COLOR)
+    painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawPath(_arrow_path(cx, cy, r * 0.5, up=outgoing))
+
+
+def notification_icon(
+    base: "QPixmap | None", outgoing: bool, size: int = 64,
+) -> QIcon:
+    """Compose the icon for a sent/received desktop notification: the token /
+    coin icon (circular) with a small ↑/↓ direction badge in the lower-right
+    corner. When ``base`` is missing (a brand-new inbound token whose logo
+    isn't cached yet), the direction badge fills the icon on its own — so the
+    notification always carries the direction visually, never the generic
+    'i'."""
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    p = QPainter(canvas)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    if base is not None and not base.isNull():
+        p.drawPixmap(0, 0, to_circular(base, size))
+        r = size * 0.28
+        off = size - r - size * 0.06
+        _draw_direction_badge(p, off, off, r, outgoing)
+    else:
+        _draw_direction_badge(p, size / 2.0, size / 2.0, size * 0.46, outgoing)
+    p.end()
+    return QIcon(canvas)
 
 
 def bundled_native_icon(symbol: str) -> QPixmap | None:

@@ -77,7 +77,7 @@ from ..activity_cache import ActivityCache
 from ..tx_activity import (
     Activity, AssetLeg, fetch_activities, transfer_legs_from_logs,
 )
-from ..icons import IconCache, bundled_native_icon
+from ..icons import IconCache, bundled_native_icon, notification_icon
 from .tx_summary import Coin, TxSummary, coins_icon
 
 
@@ -1305,7 +1305,8 @@ class TransactionsPlugin(Plugin):
         title, body = transfer_notice(
             True, amount, chain.symbol,
             counterparty=tx.to_addr, chain_name=chain.name)
-        notify(title, body)
+        icon = notification_icon(bundled_native_icon(chain.symbol), True)
+        notify(title, body, icon)
 
     def _on_tx_still_pending(self, _chain, tx_hash: str) -> None:
         """A probe saw the tx still open — a contradicting reading, so cancel

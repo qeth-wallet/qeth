@@ -26,6 +26,25 @@ ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
 ADDR = "0x7a16ff8270133f063aab6c9977183d9e72835428"
 
 
+# --- notification_icon -----------------------------------------------------
+
+class TestNotificationIcon:
+    def test_returns_icon_with_base_pixmap(self, qtbot):
+        from PySide6.QtGui import QIcon, QPixmap
+        from qeth.icons import notification_icon
+        base = QPixmap(32, 32)
+        base.fill(Qt.GlobalColor.blue)
+        icon = notification_icon(base, outgoing=True)
+        assert isinstance(icon, QIcon) and not icon.isNull()
+
+    def test_returns_standalone_badge_without_base(self, qtbot):
+        from PySide6.QtGui import QIcon
+        from qeth.icons import notification_icon
+        # No token logo cached → the direction badge fills the icon itself.
+        icon = notification_icon(None, outgoing=False)
+        assert isinstance(icon, QIcon) and not icon.isNull()
+
+
 # --- DetailsPanel ----------------------------------------------------------
 
 class TestDetailsPanel:

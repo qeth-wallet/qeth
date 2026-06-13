@@ -40,7 +40,7 @@ from ..chain import EthClient, wei_to_ether
 from ..formatting import format_balance as _format_balance
 from ..formatting import format_usd as _format_usd
 from ..formatting import transfer_notice
-from ..icons import IconCache, bundled_native_icon
+from ..icons import IconCache, bundled_native_icon, notification_icon
 from ..plugin import Plugin
 from ..prices import DefiLlamaPrices, Price, PriceSource
 from ..risk import GoPlusRisk, RiskCache
@@ -537,7 +537,8 @@ class TokensPlugin(Plugin):
         amount = _format_balance(wei_to_ether(native_wei - prev))
         title, body = transfer_notice(
             False, amount, chain.symbol, chain_name=chain.name)
-        self._notify(title, body)
+        icon = notification_icon(bundled_native_icon(chain.symbol), False)
+        self._notify(title, body, icon)
 
     def on_transfer_seen(
         self, chain, account: str, token: str, counterparty: str,
@@ -559,13 +560,16 @@ class TokensPlugin(Plugin):
         title, body = transfer_notice(
             outgoing, amount, symbol,
             counterparty=counterparty, chain_name=chain.name)
-        self._notify(title, body)
+        # The token logo if it's cached (held tokens usually are); otherwise
+        # the badge stands alone. We don't block the notification on a fetch.
+        base = self._icon_cache.get(chain.chain_id, token.lower())
+        self._notify(title, body, notification_icon(base, outgoing))
 
-    def _notify(self, title: str, body: str) -> None:
+    def _notify(self, title: str, body: str, icon=None) -> None:
         host = self.host
         notify = getattr(host, "notify", None) if host is not None else None
         if callable(notify):
-            notify(title, body)
+            notify(title, body, icon)
 
     def _touch_cached_native(self, chain_id: int, address: str, native_wei) -> None:
         """Persist only the native balance to the wallet cache, leaving tokens

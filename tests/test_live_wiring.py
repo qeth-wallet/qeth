@@ -132,15 +132,16 @@ def test_on_transfer_seen_notifies_with_symbol_and_amount(qtbot, monkeypatch):
 
     # known token: 2_500_000 / 10**6 = 2.5 USDC, received
     tp.on_transfer_seen(_chain_ns(), "0xme", "0xtok", "0xfrom", False, 2_500_000)
-    title, body = tp.host.notify.call_args.args
-    assert title == "↓ Received 2.5 USDC"
-    assert body.startswith("from 0xfrom") or "0xfrom" in body
+    title, body, icon = tp.host.notify.call_args.args
+    assert title == "Received 2.5 USDC"           # glyph-free; direction is the icon
+    assert "0xfrom" in body
+    from PySide6.QtGui import QIcon
+    assert isinstance(icon, QIcon) and not icon.isNull()
 
     # unknown token: no decimals → no quantity
     tp.host.notify.reset_mock()
     tp.on_transfer_seen(_chain_ns(), "0xme", "0xunk", "0xto", True, 999)
-    title, _ = tp.host.notify.call_args.args
-    assert title == "↑ Sent a token"
+    assert tp.host.notify.call_args.args[0] == "Sent a token"
 
 
 def test_on_native_balance_notifies_received_on_increase(qtbot, monkeypatch):
@@ -158,8 +159,7 @@ def test_on_native_balance_notifies_received_on_increase(qtbot, monkeypatch):
 
     # increase by 2 ETH → notify received
     tp.on_native_balance(ch, "0xme", 12 * 10**18)
-    title, _ = tp.host.notify.call_args.args
-    assert title == "↓ Received 2 ETH"
+    assert tp.host.notify.call_args.args[0] == "Received 2 ETH"
 
     # decrease (our own send/gas) → no received notification
     tp.host.notify.reset_mock()
@@ -176,9 +176,11 @@ def test_maybe_notify_native_sent(qtbot):
 
     sent = SimpleNamespace(value_wei=3 * 10**18, success=True, to_addr="0xdest")
     plugin._maybe_notify_native_sent(ch, sent)
-    title, body = plugin.host.notify.call_args.args
-    assert title == "↑ Sent 3 xDAI"
+    title, body, icon = plugin.host.notify.call_args.args
+    assert title == "Sent 3 xDAI"
     assert "Gnosis" in body
+    from PySide6.QtGui import QIcon
+    assert isinstance(icon, QIcon) and not icon.isNull()
 
     plugin.host.notify.reset_mock()
     plugin._maybe_notify_native_sent(

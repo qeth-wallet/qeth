@@ -67,12 +67,18 @@ class _TrayController(QObject):
 
     # --- notifications ----------------------------------------
 
-    def show_message(self, title: str, body: str, msecs: int = 6000) -> None:
+    def show_message(
+        self, title: str, body: str, icon=None, msecs: int = 6000,
+    ) -> None:
         """Raise a native desktop notification via the tray. On Linux this
-        routes to the freedesktop notification daemon; the glyph in ``title``
-        ('↑'/'↓') carries the send/receive direction."""
-        self.tray.showMessage(
-            title, body, QSystemTrayIcon.MessageIcon.Information, msecs)
+        routes to the freedesktop notification daemon. ``icon`` is a custom
+        ``QIcon`` (the token/coin logo with a ↑/↓ direction badge); without
+        one we fall back to the generic Information icon."""
+        if icon is not None:
+            self.tray.showMessage(title, body, icon, msecs)
+        else:
+            self.tray.showMessage(
+                title, body, QSystemTrayIcon.MessageIcon.Information, msecs)
 
     def _store(self):
         return getattr(self._win, "store", None)

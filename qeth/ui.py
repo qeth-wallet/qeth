@@ -536,15 +536,16 @@ class MainWindow(QMainWindow):
         platform has no system tray."""
         self._tray = tray
 
-    def notify(self, title: str, body: str) -> None:
+    def notify(self, title: str, body: str, icon=None) -> None:
         """Raise a sent/received desktop notification (host protocol, called
-        by the Tokens / Transactions plugins). No-op when notifications are
-        disabled in the store or there's no tray to deliver them. Failures
-        are swallowed — a notification is never worth crashing a handler."""
+        by the Tokens / Transactions plugins). ``icon`` is the composed
+        token/coin + direction badge. No-op when notifications are disabled in
+        the store or there's no tray to deliver them. Failures are swallowed —
+        a notification is never worth crashing a handler."""
         if not self.store.notifications_enabled or self._tray is None:
             return
         try:
-            self._tray.show_message(title, body)
+            self._tray.show_message(title, body, icon)
         except Exception:
             import logging
             logging.getLogger("qeth.ui").exception("notification failed")

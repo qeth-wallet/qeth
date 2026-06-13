@@ -5204,7 +5204,27 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             return                     # recipient changed while in flight
         if address:
             self._ens_resolved = to_checksum_address(address)
-            if verified:
+            if self._recipient_is_token(self._ens_resolved):
+                # Danger dominates the reassurance: the name → address mapping
+                # may be verified, but the destination is a TOKEN CONTRACT —
+                # sending here almost always burns the funds. A green
+                # "✓ verified" pill right next to a token address reads as
+                # "safe to send", so for a token we show a red warning that
+                # names the token instead (the mapping's verified status moves
+                # to the tooltip).
+                entry = self._resolved_token_entry(self._ens_resolved)
+                sym = getattr(entry, "symbol", "") if entry is not None else ""
+                tag = f"⚠ {sym} token contract" if sym else "⚠ token contract"
+                self._ens_label.setText(f"↳ {self._ens_resolved}  {tag}")
+                self._ens_label.setStyleSheet(
+                    "background:#f8d7da; color:#842029; padding:1px 6px;"
+                    " border-radius:4px;")
+                self._ens_label.setToolTip(
+                    "This name resolves to a token contract — sending here "
+                    "usually burns the funds. The name → address mapping "
+                    "itself is " + ("proof-verified." if verified
+                                    else "from RPC (not verified)."))
+            elif verified:
                 # Green pill == proof-verified through Helios (same meaning as
                 # the Events tab badge). Neutral style otherwise, so green
                 # never overclaims a name we only trusted from a remote RPC.
@@ -5246,6 +5266,16 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             return self._ens_resolved
         return None
 
+    def _resolved_token_entry(self, recipient: str):
+        """The curated-list token entry for ``recipient`` (has ``.symbol`` /
+        ``.name``), or None — used to name the token in the recipient warning."""
+        if self._token_info is None:
+            return None
+        try:
+            return self._token_info(self.chain.chain_id, recipient)
+        except Exception:
+            return None
+
     def _recipient_is_token(self, recipient: str) -> bool:
         """True when the recipient address is itself a token contract —
         either the token we're about to send, or any token on the
@@ -5256,12 +5286,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         contract = self._asset.get("contract")
         if contract and contract.lower() == rl:
             return True
-        if self._token_info is not None:
-            try:
-                return self._token_info(self.chain.chain_id, recipient) is not None
-            except Exception:
-                return False
-        return False
+        return self._resolved_token_entry(recipient) is not None
 
     def _update_recipient_hint(self) -> None:
         """Tint the recipient field to flag two situations, each set as

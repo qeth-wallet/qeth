@@ -572,6 +572,34 @@ class TestEnsRecipient:
         assert dlg._ens_resolved == VITALIK
         assert dlg._parsed_recipient() == VITALIK
 
+    def test_ens_to_token_warns_instead_of_verified(self, qtbot, monkeypatch):
+        """A name resolving to a token contract must show the danger, not a
+        reassuring green 'verified' pill — even when the mapping IS verified
+        (the green pill next to a token address reads as 'safe to send')."""
+        from types import SimpleNamespace
+        crv = "0xD533a949740bb3306d119CC777fa900bA034cd52"
+        ti = (lambda cid, addr:
+              SimpleNamespace(symbol="CRV", name="Curve DAO Token")
+              if addr.lower() == crv.lower() else None)
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18,
+                           is_native=True, token_info=ti)
+        dlg.recipient_edit.setText("curve.eth")
+        dlg._on_ens_resolved("curve.eth", crv, True)     # verified=True
+        assert "token contract" in dlg._ens_label.text()
+        assert "CRV" in dlg._ens_label.text()
+        assert "verified" not in dlg._ens_label.text()   # no green reassurance
+        assert "842029" in dlg._ens_label.styleSheet()   # red warning pill
+        assert dlg._recipient_hint == "token"            # field flagged too
+
+    def test_ens_to_non_token_keeps_verified_pill(self, qtbot, monkeypatch):
+        """A normal wallet recipient still gets the green verified pill."""
+        dlg = _make_dialog(qtbot, monkeypatch, balance_raw=10**18,
+                           is_native=True, token_info=lambda cid, addr: None)
+        dlg.recipient_edit.setText("vitalik.eth")
+        dlg._on_ens_resolved("vitalik.eth", VITALIK, True)
+        assert "verified" in dlg._ens_label.text()
+        assert "0f5132" in dlg._ens_label.styleSheet()   # green pill
+
 
 def test_resolve_ens_address(monkeypatch):
     from types import SimpleNamespace

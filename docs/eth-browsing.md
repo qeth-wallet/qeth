@@ -124,7 +124,11 @@ stakes, already exists for ENS-name **sends** in the wallet.)
 - **Interim (~20 lines):** require a quorum of N independent RPC providers to
   agree on resolution reads — qeth's multi-RPC infrastructure already exists.
   Not cryptographic, but turns "hack one RPC" into "hack several at once".
-- **Endgame: Helios** as a localhost sidecar — follows the sync-committee
+- **Endgame: Helios** (since **built** — the sidecar + verified mode now ship
+  and back tx-preview simulation and verified ENS resolution; see
+  `docs/verified-reads.md`. What remains for `.eth` browsing specifically is
+  wiring contenthash resolution through it.) — a localhost sidecar that follows
+  the sync-committee
   light-client protocol from a weak-subjectivity checkpoint, then serves
   `eth_call` by fetching state from an untrusted RPC **with EIP-1186 proofs**
   verified against the verified state root. Light (single Rust binary, tens of

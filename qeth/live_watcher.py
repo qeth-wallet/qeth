@@ -34,6 +34,7 @@ so no lock is needed — see the wiring in the transactions plugin.
 import asyncio
 import logging
 import threading
+import time
 from typing import (TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional)
 
 import aiohttp
@@ -98,9 +99,17 @@ class LiveWatcher(QThread):
     dropped = Signal(object, str)            # (chain, hash) — nonce consumed
     still_pending = Signal(object, str)      # (chain, hash) — probe saw it open
     balance_dirty = Signal(object, str, str)  # (chain, account, token_address)
+    native_balance = Signal(object, str, object)  # (chain, account, wei)
 
     _POLL_S = 1.0          # supervisor reconcile / stop-poll cadence
     _MAX_BACKOFF_S = 30.0  # reconnect backoff ceiling
+    # How often to read the on-screen account's NATIVE balance over the live
+    # ws (piggybacked on newHeads, throttled to this). A plain ETH receive
+    # fires no Transfer log, so the log subscription misses it; this is the
+    # native counterpart. It doubles as a keep-alive — a free RPC may drop a
+    # client that sends nothing for minutes even while it streams us heads, so
+    # one eth_getBalance a minute keeps the socket warm. NOT per block.
+    NATIVE_POLL_S = 60.0
     # Re-broadcast a still-open pending tx at most this many times (an RPC
     # can ack a tx it never propagated), then give up but keep watching.
     REBROADCAST_MAX_ATTEMPTS = 30
@@ -243,12 +252,20 @@ class LiveWatcher(QThread):
                             log_subs.add(await w3.eth.subscribe(
                                 "logs", {"topics": topics}))
                     self.link_state.emit(chain, True)
+                    # last native read; 0.0 means "never" → the first head
+                    # reads immediately (so a reconnect re-primes native).
+                    last_native = 0.0
                     async for msg in w3.socket.process_subscriptions():
                         sub = msg["subscription"]
                         if sub == heads_sub:
                             self.head.emit(
                                 chain, _to_int(msg["result"]["number"]))
                             await self._probe_pending(chain, w3)
+                            if account is not None and (
+                                    time.monotonic() - last_native
+                                    >= self.NATIVE_POLL_S):
+                                last_native = time.monotonic()
+                                await self._emit_native(chain, account, w3)
                         elif account is not None and sub in log_subs:
                             self._handle_log(chain, account, msg["result"])
                 return
@@ -279,6 +296,23 @@ class LiveWatcher(QThread):
         token = log.get("address") if hasattr(log, "get") else log["address"]
         if token:
             self.balance_dirty.emit(chain, account, str(token))
+
+    async def _emit_native(self, chain: "Chain", account: str, w3: Any) -> None:
+        """Read ``account``'s native balance over the live ws and emit it.
+        Called ~once a minute (NATIVE_POLL_S) off the head loop — the inbound
+        side of the Transfer-log subscription, which a plain ETH send never
+        triggers. Failures are swallowed (retried next interval); the value is
+        the node's authoritative balance, so we emit it directly (unlike a log,
+        whose value we never trust)."""
+        try:
+            raw = await self._rpc(w3, "eth_getBalance", [account, "latest"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("[%s] native read: %s", chain.name, e)
+            return
+        if raw is not None:
+            self.native_balance.emit(chain, account, _to_int(raw))
 
     async def _probe_pending(self, chain: "Chain", w3: Any) -> None:
         """Probe every pending tx the provider reports for this chain over

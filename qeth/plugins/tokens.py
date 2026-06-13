@@ -244,9 +244,10 @@ class TokensPlugin(Plugin):
     # Coalesce a burst of ws Transfer logs (a swap's many legs) into one
     # balance refresh, fired this long after the first dirty event.
     LIVE_REFRESH_DEBOUNCE_MS = 1500
-    # When the on-screen chain has a live ws (Transfer logs carry token
-    # balances), the periodic sweep slows to this — still covers native and
-    # is the floor if ws drops, but stops the per-minute idle polling.
+    # When the on-screen chain has a live ws, Transfer logs carry token
+    # balances and the ws also reads native ~once a minute (on_native_balance),
+    # so the HTTP sweep slows to this deep backstop instead of polling every
+    # minute. Drops back to REFRESH_INTERVAL_MS the moment ws goes down.
     SLOW_REFRESH_INTERVAL_MS = 300_000  # 5 min
 
     def __init__(self, store):
@@ -499,6 +500,31 @@ class TokensPlugin(Plugin):
             return
         self._schedule_live_refresh(account)
 
+    def on_native_balance(self, chain, account: str, native_wei) -> None:
+        """The on-screen account's native balance, read over the live ws every
+        ~minute (LiveWatcher.native_balance, relayed by TransactionsPlugin).
+        Inbound ETH fires no Transfer log, so on_balance_dirty never sees it —
+        this is the native counterpart. Apply in place (no discovery) and
+        freshen the cached native so the slow ws-live sweep stays a backstop
+        and the nothing-changed short-circuit settles."""
+        if self._displayed_view != (chain.chain_id, account.lower()):
+            return
+        self._on_balance_refresh(chain.chain_id, native_wei, {})
+        self._touch_cached_native(chain.chain_id, account, native_wei)
+
+    def _touch_cached_native(self, chain_id: int, address: str, native_wei) -> None:
+        """Persist only the native balance to the wallet cache, leaving tokens
+        untouched. Without this a native-only ws refresh would update the panel
+        but not the cache, so the next full sweep's nothing_changed check (and
+        a cross-session reopen) would still see the stale native."""
+        import time
+        cached = self._wallet_cache.load(chain_id, address)
+        if cached is None or cached.native_balance_wei == int(native_wei):
+            return
+        cached.native_balance_wei = int(native_wei)
+        cached.native_balance_updated = int(time.time())
+        self._wallet_cache.save(cached)
+
     def _schedule_live_refresh(self, address: str) -> None:
         """Throttle: the first dirty event arms a one-shot timer; events
         arriving while it's pending fold in (no restart → no starvation under
@@ -519,9 +545,9 @@ class TokensPlugin(Plugin):
 
     def on_ws_link_state(self, chain, connected: bool) -> None:
         """ws link up/down for a chain (LiveWatcher, relayed). When the
-        on-screen chain's ws is live, Transfer logs carry token balances, so
-        the periodic sweep slows to a safety net (still covers native + is the
-        floor if ws drops)."""
+        on-screen chain's ws is live, Transfer logs carry token balances and
+        the ws polls native ~once a minute, so the HTTP sweep slows to a deep
+        backstop (and snaps back to the fast floor if ws drops)."""
         if connected:
             self._ws_live_chains.add(chain.chain_id)
         else:

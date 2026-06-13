@@ -291,3 +291,25 @@ def test_handle_log_emits_balance_dirty(qapp):
     # reorg-removed log re-reads too — we never trust the log's value
     w._handle_log(chain, "0xacc", {"address": "0xTok", "removed": True})
     assert got == [("0xacc", "0xTok"), ("0xacc", "0xTok")]
+
+
+def test_emit_native_emits_balance_from_hex(qapp):
+    """Native balance read over the ws → native_balance(chain, acct, wei),
+    hex normalised to int (the inbound-ETH path Transfer logs miss)."""
+    w = _watcher()
+    got: list = []
+    w.native_balance.connect(lambda c, acct, wei: got.append((acct, wei)))
+    w3 = _FakeW3(_FakeProvider({"eth_getBalance": hex(123 * 10**18)}))
+    asyncio.run(w._emit_native(_chain(100), "0xacc", w3))
+    assert got == [("0xacc", 123 * 10**18)]
+
+
+def test_emit_native_swallows_missing_result(qapp):
+    """A null result (RPC error / not ready) emits nothing — retried next
+    interval, never a bogus zero balance."""
+    w = _watcher()
+    got: list = []
+    w.native_balance.connect(lambda c, acct, wei: got.append(wei))
+    w3 = _FakeW3(_FakeProvider({}))   # eth_getBalance -> None
+    asyncio.run(w._emit_native(_chain(100), "0xacc", w3))
+    assert got == []

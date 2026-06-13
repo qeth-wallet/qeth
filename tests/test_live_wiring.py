@@ -107,6 +107,63 @@ def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
     plugin._on_balance_dirty(gnosis, "0xabc", "0xToken")
     tokens.on_balance_dirty.assert_called_once_with(gnosis, "0xabc", "0xToken")
 
+    plugin._on_native_balance(gnosis, "0xabc", 5 * 10**18)
+    tokens.on_native_balance.assert_called_once_with(gnosis, "0xabc", 5 * 10**18)
+
+
+def test_tokens_on_native_balance_applies_only_for_current_view(qtbot, monkeypatch):
+    """on_native_balance applies a lightweight native-only refresh + cache
+    touch, but only when it's the on-screen view (the inbound-ETH path)."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp._displayed_view = (100, "0xabc")
+    applied: list = []
+    touched: list = []
+    monkeypatch.setattr(
+        tp, "_on_balance_refresh",
+        lambda cid, wei, bals: applied.append((cid, wei, bals)))
+    monkeypatch.setattr(
+        tp, "_touch_cached_native",
+        lambda cid, addr, wei: touched.append((cid, addr, wei)))
+
+    # off-view: ignored
+    tp.on_native_balance(SimpleNamespace(chain_id=137), "0xABC", 7)
+    assert applied == [] and touched == []
+
+    # on-view: native-only apply (empty token map) + cache touch
+    tp.on_native_balance(SimpleNamespace(chain_id=100), "0xABC", 9 * 10**18)
+    assert applied == [(100, 9 * 10**18, {})]
+    assert touched == [(100, "0xABC", 9 * 10**18)]
+
+
+def test_touch_cached_native_updates_only_native(qtbot, tmp_path):
+    """_touch_cached_native persists the new native balance while leaving the
+    cached tokens intact (so the slow sweep + cross-session reopen stay sane)."""
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    tp = TokensPlugin(Mock())
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=100, address="0xabc", native_balance_wei=1,
+        tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
+                            decimals=18, balance_raw=42)]))
+
+    tp._touch_cached_native(100, "0xABC", 5 * 10**18)
+
+    reloaded = tp._wallet_cache.load(100, "0xabc")
+    assert reloaded is not None
+    assert reloaded.native_balance_wei == 5 * 10**18
+    assert [(t.contract, t.balance_raw) for t in reloaded.tokens] == [("0xtok", 42)]
+
+    # no-op when unchanged (load returns same value; nothing re-saved is fine)
+    tp._touch_cached_native(100, "0xabc", 5 * 10**18)
+    assert tp._wallet_cache.load(100, "0xabc").native_balance_wei == 5 * 10**18
+
+    # missing cache → silently ignored (no crash, nothing written)
+    tp._touch_cached_native(100, "0xdef", 3)
+    assert tp._wallet_cache.load(100, "0xdef") is None
+
 
 def test_tokens_on_balance_dirty_throttles_for_current_view(qtbot, monkeypatch):
     from types import SimpleNamespace

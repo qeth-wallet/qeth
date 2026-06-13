@@ -978,6 +978,7 @@ class TransactionsPlugin(Plugin):
             self._live_watcher.still_pending.connect(self._on_tx_still_pending)
             self._live_watcher.link_state.connect(self._on_ws_link_state)
             self._live_watcher.balance_dirty.connect(self._on_balance_dirty)
+            self._live_watcher.native_balance.connect(self._on_native_balance)
             self._update_live_account()
             app = QApplication.instance()
             if app is not None:
@@ -1079,6 +1080,18 @@ class TransactionsPlugin(Plugin):
                 tokens.on_balance_dirty(chain, account, token)
             except Exception:
                 log.exception("on_balance_dirty failed")
+
+    def _on_native_balance(self, chain, account: str, native_wei) -> None:
+        """The on-screen account's native balance, read over the live ws every
+        ~minute (LiveWatcher.native_balance) — the inbound-ETH counterpart to
+        _on_balance_dirty (a plain ETH send fires no Transfer log). Relay to
+        TokensPlugin for a lightweight native-only apply."""
+        tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
+        if tokens is not None and hasattr(tokens, "on_native_balance"):
+            try:
+                tokens.on_native_balance(chain, account, native_wei)
+            except Exception:
+                log.exception("on_native_balance failed")
 
     def _abi_read_storage(self, chain_id: int, address: str, slot: str):
         """``eth_getStorageAt`` for the ABI source's proxy-slot probing.

@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.12.0
+Version:        0.13.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -116,6 +116,20 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sat Jun 13 2026 Michael Egorov <michwill@yieldbasis.com> - 0.13.0-1
+- Desktop notifications for sent/received ETH and tokens, with the token/coin
+  icon and a direction badge. Delivered via the freedesktop notification
+  service so the icon renders (Qt's tray drops it on some daemons); needs no
+  system tray. Toggle in the tray menu.
+- Verified ENS resolution: when a Helios light client is available, ENS
+  name<->address resolution is proof-verified (strict, no offchain/CCIP) and
+  badged "verified" in the Send and Add-account dialogs.
+- Sending to an ENS name that resolves to a token contract now shows a red
+  "token contract" warning naming the token, instead of a reassuring
+  "verified" pill (the funds-burning destination wins over the mapping check).
+- Inbound ETH now refreshes the balance live (a once-a-minute read over the
+  WebSocket that also keeps the connection warm), not only on the slow sweep.
+
 * Sat Jun 13 2026 Michael Egorov <michwill@yieldbasis.com> - 0.12.0-1
 - Transaction event previews now run on a pure-Python py-evm engine (replaces
   the pyrevm fork) — so the preview works in every package, on every Python,

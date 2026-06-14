@@ -153,6 +153,31 @@ class TestEnsPanel:
         panel.tree.sortByColumn(_EXPIRES_COL, Qt.SortOrder.AscendingOrder)
         assert order() == ["zzz.eth", "aaa.eth", "mmm.eth"]
 
+    def test_records_sort_below_subdomains(self, qtbot):
+        from PySide6.QtCore import Qt
+        from qeth.plugins.ens import _NAME_COL
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([
+            EnsName("vitalik.eth"),
+            EnsName("zsub.vitalik.eth"),       # subdomain (late alphabetically)
+            EnsName("asub.vitalik.eth"),       # subdomain (early)
+        ]), NOW)
+        # record labels would otherwise interleave alphabetically with subs
+        panel.add_records("vitalik.eth",
+                          EnsRecords(texts={"url": "u", "com.github": "g"}))
+        root = panel.tree.topLevelItem(0)
+
+        def kinds():
+            return [bool(root.child(i).data(0, _NAME_ROLE) is not None)
+                    for i in range(root.childCount())]
+
+        panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.AscendingOrder)
+        # all subdomains (True) before all records (False)
+        assert kinds() == [True, True, False, False]
+        panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.DescendingOrder)
+        assert kinds() == [True, True, False, False]   # still subdomains first
+
     def test_verified_records_get_check_prefix(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

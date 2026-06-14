@@ -50,13 +50,27 @@ _EXPIRES_COL = 1
 _WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
 
 
+def _kind_rank(item: QTreeWidgetItem) -> int:
+    """Group a name's children: owned subdomains (a real EnsName) first, then
+    record / placeholder rows. So records sort below the subdomains."""
+    return 0 if item.data(0, _NAME_ROLE) is not None else 1
+
+
 class _SortItem(QTreeWidgetItem):
-    """Tree item with column-aware sorting: the Expires column orders by its
-    real expiry timestamp (not the displayed 'expiring soon' / date text), names
-    case-insensitively. Names with no expiry sort last."""
+    """Tree item with column-aware sorting: subdomains always group above records
+    (regardless of column or direction); within a group the Expires column orders
+    by real expiry timestamp (not the displayed 'expiring soon' / date text) and
+    names sort case-insensitively. Names with no expiry sort last."""
 
     def __lt__(self, other: "QTreeWidgetItem") -> bool:
         tree = self.treeWidget()
+        # Type grouping is primary and stays subdomains-first even when the
+        # column is sorted descending (Qt reverses the comparator, so flip).
+        ra, rb = _kind_rank(self), _kind_rank(other)
+        if ra != rb:
+            desc = (tree is not None and tree.header().sortIndicatorOrder()
+                    == Qt.SortOrder.DescendingOrder)
+            return (ra > rb) if desc else (ra < rb)
         col = tree.sortColumn() if tree is not None else _NAME_COL
         if col == _EXPIRES_COL:
             a = self.data(_EXPIRES_COL, _EXPIRY_SORT_ROLE)

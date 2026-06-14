@@ -237,3 +237,32 @@ class TestEnsPlugin:
         plugin._on_records_requested("alice.eth")
         assert len(host.started_workers) == 1
         assert host.started_workers[0]._name == "alice.eth"
+
+    def test_records_cache_paints_instantly(self, qtbot, tmp_qeth):
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().populate(build_tree([EnsName("alice.eth")]), NOW)
+        # prime the disk records cache
+        rec = EnsRecords(texts={"url": "https://alice.example"})
+        plugin._cache.save_records(1, "alice.eth", rec, verified=True)
+
+        plugin._on_records_requested("alice.eth")
+        # records rendered synchronously from cache (before any worker result)
+        root = plugin.widget().tree.topLevelItem(0)
+        labels = [root.child(i).text(0) for i in range(root.childCount())]
+        assert "url" in labels
+        # ...and a refresh worker still kicked off
+        assert len(host.started_workers) == 1
+
+    def test_records_ready_keeps_verified_over_late_unverified(self, qtbot, tmp_qeth):
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().populate(build_tree([EnsName("alice.eth")]), NOW)
+        verified_rec = EnsRecords(texts={"url": "verified"})
+        plugin._on_records_ready("alice.eth", verified_rec, True)
+        # a later unverified emit must not clobber the verified result
+        plugin._on_records_ready("alice.eth", EnsRecords(texts={"url": "stale"}), False)
+        assert plugin._rec_cache["alice.eth"] == (verified_rec, True)

@@ -526,26 +526,40 @@ def _read_records_via_client(
     return rec
 
 
+def read_records(
+    chain: "Chain", name: str, *, text_keys: tuple = TEXT_KEYS,
+) -> EnsRecords:
+    """Fast, UNVERIFIED record read — two multicalls against the chain's normal
+    RPC at ``latest``. This is the first-paint path: it shows records in ~1.5 s
+    instead of waiting several seconds for the verified read to proof-fetch
+    every touched slot through Helios. The ✓ comes later via
+    ``verified_read_records``."""
+    from .chain import EthClient
+    try:
+        return _read_records_via_client(EthClient(chain), name,
+                                        text_keys=text_keys, block="latest")
+    except Exception:
+        log.debug("ENS read_records failed", exc_info=True)
+        return EnsRecords()
+
+
 def verified_read_records(
     chain: "Chain", name: str, *,
     wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
 ) -> "Tuple[EnsRecords, bool]":
-    """Read a name's records, Helios-first → ``(records, verified)``.
-
-    When a mainnet Helios sidecar is ready the resolver reads route through it
-    and ``verified`` is True; otherwise they run against the chain's normal RPC,
-    marked unverified (records are data the indexer never had, so — unlike
-    ownership — we still read them without a sidecar: ``fallback=True``). Both
-    paths are the same two batched multicalls."""
+    """Verified-ONLY record read → ``(records, True)`` when a Helios sidecar
+    proves the reads, else ``(EnsRecords(), False)``. The unverified fast path
+    is ``read_records``; this is the background upgrade that earns the ✓, so it
+    never does a wasteful unverified re-read when no sidecar is available."""
     from .verified import verified_client
-    client, verified = verified_client(chain, wait_s=wait_s, fallback=True)
-    if client is None:
+    client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
+    if client is None or not verified:
         return EnsRecords(), False
     try:
-        return _read_records_via_client(client, name, text_keys=text_keys), verified
+        return _read_records_via_client(client, name, text_keys=text_keys), True
     except Exception:
-        log.debug("ENS read_records failed", exc_info=True)
-        return EnsRecords(), verified
+        log.debug("ENS verified_read_records failed", exc_info=True)
+        return EnsRecords(), False
 
 
 def _abi_bytes(raw) -> Optional[str]:
@@ -607,5 +621,43 @@ class EnsCache:
                  "owner": n.owner, "expiry_ts": n.expiry_ts, "source": n.source}
                 for n in names
             ],
+        }
+        atomic_write_text(p, json.dumps(data, indent=2))
+
+    # --- per-name records (keyed by name, not address) -------------------
+
+    def _records_path(self, chain_id: int, name: str) -> Path:
+        return self.cache_dir / str(chain_id) / "records" / f"{name.lower()}.json"
+
+    def load_records(
+        self, chain_id: int, name: str,
+    ) -> "Optional[Tuple[EnsRecords, bool]]":
+        """Cached ``(records, verified)`` for a name, or None. So re-expanding a
+        name (or reopening the app) paints its records instantly while a refresh
+        runs."""
+        p = self._records_path(chain_id, name)
+        if not p.exists():
+            return None
+        try:
+            d = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("ENS records cache parse failed %s: %s", p, e)
+            return None
+        rec = EnsRecords(
+            addresses=dict(d.get("addresses") or {}),
+            texts=dict(d.get("texts") or {}),
+            contenthash=d.get("contenthash"),
+        )
+        return rec, bool(d.get("verified"))
+
+    def save_records(self, chain_id: int, name: str, rec: EnsRecords,
+                     verified: bool) -> None:
+        from .fsatomic import atomic_write_text
+        p = self._records_path(chain_id, name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "chain_id": int(chain_id), "name": name.lower(),
+            "addresses": rec.addresses, "texts": rec.texts,
+            "contenthash": rec.contenthash, "verified": bool(verified),
         }
         atomic_write_text(p, json.dumps(data, indent=2))

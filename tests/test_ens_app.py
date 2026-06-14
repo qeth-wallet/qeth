@@ -134,6 +134,19 @@ def test_ens_cache_round_trip(tmp_path):
     assert back[1].source == "custom"
 
 
+def test_ens_cache_records_round_trip(tmp_path):
+    cache = ea.EnsCache(cache_dir=tmp_path)
+    assert cache.load_records(1, "vitalik.eth") is None
+    rec = ea.EnsRecords(texts={"url": "https://vitalik.ca"},
+                        contenthash="ipfs://bafy")
+    cache.save_records(1, "Vitalik.eth", rec, verified=True)
+    back = cache.load_records(1, "vitalik.eth")        # case-insensitive
+    assert back is not None
+    got, verified = back
+    assert got.texts == {"url": "https://vitalik.ca"}
+    assert got.contenthash == "ipfs://bafy" and verified is True
+
+
 # --- on-chain verification (namehash / decoders / multicall orchestration) --
 
 def test_namehash_known_vectors():

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from ..ens_app import (
     ENS_APP_URL, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode, EnsRecords,
     OwnershipCheck, build_tree, expiry_status, fetch_name, lookup_owned_names,
-    verified_read_records, verify_names,
+    read_records, verified_read_records, verify_names,
 )
 from ..plugin import Plugin
 
@@ -113,8 +113,11 @@ class EnsNamesWorker(QThread):
 
 
 class EnsRecordsWorker(QThread):
-    """Read one name's resolver records (lazy, on expand), Helios-verified when
-    a sidecar is ready. Emits ``ready(name, records, verified)``."""
+    """Read one name's resolver records (lazy, on expand) in two phases so the
+    UI never blocks on Helios: first a fast UNVERIFIED read (~1.5 s) for an
+    instant paint, then — if a sidecar can prove them — a verified re-read that
+    upgrades the rows to ✓. Emits ``ready(name, records, verified)`` once or
+    twice."""
 
     ready = Signal(str, object, bool)        # (name, EnsRecords, verified)
 
@@ -126,9 +129,11 @@ class EnsRecordsWorker(QThread):
         self._wait_s = wait_s
 
     def run(self) -> None:
-        rec, verified = verified_read_records(
+        self.ready.emit(self._name, read_records(self._chain, self._name), False)
+        vrec, verified = verified_read_records(
             self._chain, self._name, wait_s=self._wait_s)
-        self.ready.emit(self._name, rec, verified)
+        if verified:
+            self.ready.emit(self._name, vrec, True)
 
 
 class EnsVerifyWorker(QThread):
@@ -229,10 +234,12 @@ class EnsPanel(QWidget):
         if item is None:
             return
         item.setData(0, _LOADED_ROLE, True)
-        # drop the "…loading records" placeholder (a childless leaf with no name)
+        # Drop the placeholder AND any previously-rendered record rows (a re-emit
+        # — fast→verified upgrade, or a refresh — replaces them). Record rows and
+        # the placeholder carry no _NAME_ROLE; owned subdomains do, so they stay.
         for i in range(item.childCount() - 1, -1, -1):
             ch = item.child(i)
-            if ch.data(0, _NAME_ROLE) is None and ch.data(0, _VALUE_ROLE) is None:
+            if ch.data(0, _NAME_ROLE) is None:
                 item.removeChild(ch)
         rows = _record_rows(rec)
         if not rows:
@@ -328,6 +335,9 @@ class EnsPlugin(Plugin):
         self._panel: Optional[EnsPanel] = None
         self._loaded_for: Optional[str] = None
         self._add_btn: Optional[QPushButton] = None
+        # In-memory records cache (name → (records, verified)) layered over the
+        # disk cache, so re-expanding a name is instant within a session too.
+        self._rec_cache: "dict[str, tuple[EnsRecords, bool]]" = {}
 
     # --- plugin contract --------------------------------------------------
 
@@ -439,6 +449,16 @@ class EnsPlugin(Plugin):
     # --- records (lazy) ---------------------------------------------------
 
     def _on_records_requested(self, name: str) -> None:
+        if self._panel is None:
+            return
+        # Paint cached records instantly (memory → disk), then refresh.
+        cached = self._rec_cache.get(name.lower())
+        if cached is None:
+            cached = self._cache.load_records(ENS_CHAIN_ID, name)
+            if cached is not None:
+                self._rec_cache[name.lower()] = cached
+        if cached is not None:
+            self._panel.add_records(name, cached[0], cached[1])
         chain = self._mainnet()
         if chain is None:
             return
@@ -448,6 +468,14 @@ class EnsPlugin(Plugin):
 
     def _on_records_ready(self, name: str, rec: EnsRecords,
                           verified: bool) -> None:
+        # The two-phase worker emits unverified then (maybe) verified. Don't let
+        # the late unverified phase of a refresh clobber a cached verified
+        # result with a worse one; otherwise newest wins.
+        prev = self._rec_cache.get(name.lower())
+        if prev is not None and prev[1] and not verified:
+            return
+        self._rec_cache[name.lower()] = (rec, verified)
+        self._cache.save_records(ENS_CHAIN_ID, name, rec, verified)
         if self._panel is not None:
             self._panel.add_records(name, rec, verified)
 

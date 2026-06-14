@@ -153,15 +153,34 @@ class TestEnsPanel:
         assert root.text(0).endswith("✓")          # ownership confirmed
         assert root.text(2).startswith("✓ ")        # resolution confirmed
 
-    def test_mark_verified_flags_unowned(self, qtbot):
+    def test_mark_verified_removes_disowned_name(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)
         me, other = "0x" + "11" * 20, "0x" + "22" * 20
-        panel.populate(build_tree([EnsName("alice.eth")]), NOW)
-        # on-chain says someone else controls it → ⚠ on the name
-        panel.mark_verified(
-            {"alice.eth": OwnershipCheck(controller=other)}, me)
-        assert panel.tree.topLevelItem(0).text(0).endswith("⚠")
+        panel.populate(
+            build_tree([EnsName("alice.eth"), EnsName("mine.eth")]), NOW)
+        # chain says someone else owns alice.eth → it's an indexer lie → dropped
+        removed = panel.mark_verified({
+            "alice.eth": OwnershipCheck(controller=other),
+            "mine.eth": OwnershipCheck(controller=me),
+        }, me)
+        assert removed == ["alice.eth"]
+        labels = [panel.tree.topLevelItem(i).text(0)
+                  for i in range(panel.tree.topLevelItemCount())]
+        assert not any(l.startswith("alice.eth") for l in labels)
+        assert any(l.startswith("mine.eth") for l in labels)
+
+    def test_mark_verified_keeps_pinned_unowned_name(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me, other = "0x" + "11" * 20, "0x" + "22" * 20
+        # a custom-pinned (watched) name you don't own must NOT be removed
+        panel.populate(
+            build_tree([EnsName("watch.eth", source="custom")]), NOW)
+        removed = panel.mark_verified(
+            {"watch.eth": OwnershipCheck(controller=other)}, me)
+        assert removed == []
+        assert panel.tree.topLevelItemCount() == 1
 
     def test_mark_verified_corrects_resolution_mismatch(self, qtbot):
         panel = EnsPanel()
@@ -228,6 +247,25 @@ class TestEnsPlugin:
         # refresh fired with the pinned name carried into the worker
         assert len(host.started_workers) == 1
         assert "foo.eth" in host.started_workers[0]._custom
+
+    def test_disowned_name_stays_filtered_on_rerender(self, qtbot):
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        me, other = ADDR, "0x" + "22" * 20
+        names = [EnsName("alice.eth"), EnsName("mine.eth", resolved_address=me)]
+        plugin._render(names)
+        # verify proves alice.eth belongs to someone else → dropped + remembered
+        plugin._on_verified(me, {
+            "alice.eth": OwnershipCheck(controller=other),
+            "mine.eth": OwnershipCheck(controller=me),
+        }, True)
+        assert "alice.eth" in plugin._denied
+        # a refresh that re-lists alice.eth must not bring it back
+        plugin._render(names)
+        labels = [plugin.widget().tree.topLevelItem(i).text(0)
+                  for i in range(plugin.widget().tree.topLevelItemCount())]
+        assert not any(l.startswith("alice.eth") for l in labels)
 
     def test_records_request_starts_worker(self, qtbot):
         plugin = EnsPlugin(_StubStore())

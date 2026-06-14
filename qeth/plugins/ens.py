@@ -43,10 +43,6 @@ _OWNED_TIP = (
     "Ownership proof-verified on-chain via a Helios light client — your "
     "address is the controller or registrant of this name."
 )
-_UNOWNED_TIP = (
-    "⚠ On-chain state shows this name is NOT controlled by your address. "
-    "The indexer that listed it may be stale or wrong."
-)
 _RESOLVED_TIP = "Resolved address proof-verified on-chain via a Helios light client."
 _MISMATCH_TIP = (
     "⚠ The indexer's address differs from the proof-verified resolution — "
@@ -263,23 +259,33 @@ class EnsPanel(QWidget):
             item.addChild(ch)
 
     def mark_verified(self, states: "dict[str, OwnershipCheck]",
-                      address: str) -> None:
-        """Apply the batched on-chain verification to the rows: a ✓ / ⚠ on the
-        Name column for ownership, and a ✓ (or a ⚠ + corrected value) on the
-        Resolves-to column. Only called with proof-verified state, so trusting
-        it over the indexer's hint on a mismatch is sound."""
+                      address: str) -> "list[str]":
+        """Apply the batched on-chain verification to the rows and return the
+        names DROPPED as indexer lies.
+
+        Ownership is the chain's call: a name the chain proves you control gets a
+        ✓; a discovered name the chain says you DON'T own (controller and
+        registrant are someone else) isn't real — the indexer over-reported it —
+        so we remove it from the tree entirely. Pinned (custom) names are never
+        removed: watching a name you don't own is intentional. Resolution still
+        gets a ✓ / ⚠-corrected badge. Only ever called with proof-verified
+        state, so acting on it is sound."""
+        removed: list[str] = []
         for name_l, st in states.items():
             item = self._items_by_name.get(name_l)
             if item is None:
                 continue
             n = item.data(0, _NAME_ROLE)
+            is_custom = isinstance(n, EnsName) and n.source == "custom"
+            known = st.controller is not None or st.registrant is not None
+            if known and not st.owned_by(address) and not is_custom:
+                self._remove_item(item, name_l)
+                removed.append(name_l)
+                continue
             base = n.name if isinstance(n, EnsName) else item.text(0)
             if st.owned_by(address):
                 item.setText(0, f"{base}  ✓")
                 item.setToolTip(0, _OWNED_TIP + (_WRAPPED_NOTE if st.wrapped else ""))
-            elif st.controller is not None or st.registrant is not None:
-                item.setText(0, f"{base}  ⚠")
-                item.setToolTip(0, _UNOWNED_TIP)
             if st.resolved_address:
                 shown = n.resolved_address if isinstance(n, EnsName) else None
                 if shown and shown.lower() == st.resolved_address.lower():
@@ -292,6 +298,18 @@ class EnsPanel(QWidget):
                     glyph = "✓ " if not shown else "⚠ "
                     item.setText(2, glyph + st.resolved_address)
                     item.setToolTip(2, _RESOLVED_TIP if not shown else _MISMATCH_TIP)
+        return removed
+
+    def _remove_item(self, item: QTreeWidgetItem, name_l: str) -> None:
+        """Drop a row (top-level or subdomain) from the tree + the index."""
+        parent = item.parent()
+        if parent is not None:
+            parent.removeChild(item)
+        else:
+            idx = self.tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                self.tree.takeTopLevelItem(idx)
+        self._items_by_name.pop(name_l, None)
 
     # --- interaction ------------------------------------------------------
 
@@ -349,6 +367,10 @@ class EnsPlugin(Plugin):
         # so each expand doesn't pay a fresh TLS handshake.
         self._resolver_cache: "dict[str, str]" = {}
         self._read_client = None
+        # Names the chain proved this address does NOT own — indexer lies we
+        # drop and keep filtered out of re-renders this session. Reset per
+        # account; never persisted (a stale denial must never hide a real name).
+        self._denied: "set[str]" = set()
 
     # --- plugin contract --------------------------------------------------
 
@@ -398,6 +420,8 @@ class EnsPlugin(Plugin):
     def _load(self, address: Optional[str]) -> None:
         if self._panel is None:
             return
+        if address != self._loaded_for:
+            self._denied.clear()              # denials are per-account
         self._loaded_for = address
         if not address:
             self._panel.populate([], int(time.time()))
@@ -435,8 +459,14 @@ class EnsPlugin(Plugin):
         self._verify(address, [n.name for n in names])
 
     def _render(self, names: "list[EnsName]") -> None:
-        if self._panel is not None:
-            self._panel.populate(build_tree(names), int(time.time()))
+        if self._panel is None:
+            return
+        # Keep names the chain already disowned this session filtered out, so a
+        # refresh doesn't flash the dropped indexer lies back in. Pinned names
+        # are exempt (intentionally watched even when unowned).
+        names = [n for n in names
+                 if n.source == "custom" or n.name.lower() not in self._denied]
+        self._panel.populate(build_tree(names), int(time.time()))
 
     # --- verification (batched, Helios) -----------------------------------
 
@@ -458,7 +488,9 @@ class EnsPlugin(Plugin):
         for name_l, st in states.items():
             if st.resolver:
                 self._resolver_cache[name_l] = st.resolver
-        self._panel.mark_verified(states, address)
+            if st.owned_by(address):
+                self._denied.discard(name_l)     # self-heal if ownership changed
+        self._denied.update(self._panel.mark_verified(states, address))
 
     # --- records (lazy) ---------------------------------------------------
 

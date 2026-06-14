@@ -337,11 +337,14 @@ class EthClient:
 
     # --- batch helpers (built on Multicall context manager) ---------------
 
-    def multicall(self, *, batch_size: int = 100) -> "Multicall":
+    def multicall(self, *, batch_size: int = 100,
+                  block: str = "latest") -> "Multicall":
         """Open a batching context. Calls queued via ``mc.add(...)`` or the
         ERC-20 helpers (``balance_of``, ``name``, ``symbol``, ``decimals``)
-        are flushed as ``aggregate3`` batches when the context exits."""
-        return Multicall(self, batch_size=batch_size)
+        are flushed as ``aggregate3`` batches when the context exits. ``block``
+        pins the batch's block tag (default ``latest``; pass ``finalized`` for
+        verified reads against irreversible state)."""
+        return Multicall(self, batch_size=batch_size, block=block)
 
     def multicall_erc20_balances(
         self, tokens: list[str], holder: str, batch_size: int = 100,
@@ -429,9 +432,17 @@ class Multicall:
     directly for arbitrary call data + an optional decoder.
     """
 
-    def __init__(self, client: EthClient, *, batch_size: int = 100):
+    def __init__(self, client: EthClient, *, batch_size: int = 100,
+                 block: str = "latest"):
         self.client = client
         self.batch_size = batch_size
+        # Block tag the aggregate3 eth_calls run at. "latest" for the usual
+        # live reads; "finalized" pins to irreversible state — used for
+        # Helios-verified reads, where it both strengthens the trust guarantee
+        # and dodges the brief post-sync window in which the sidecar's
+        # optimistic head outruns the execution RPC ("header for hash not
+        # found").
+        self.block = block
         self._queued: list[tuple[str, bytes, _Pending]] = []
 
     def __enter__(self) -> "Multicall":
@@ -487,7 +498,8 @@ class Multicall:
             )
             try:
                 result_hex = self.client.call(
-                    {"to": MULTICALL3, "data": "0x" + calldata.hex()}
+                    {"to": MULTICALL3, "data": "0x" + calldata.hex()},
+                    self.block,
                 )
                 decoded = abi_decode(
                     ["(bool,bytes)[]"], bytes.fromhex(result_hex[2:])

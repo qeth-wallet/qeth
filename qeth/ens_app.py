@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -31,6 +32,11 @@ log = logging.getLogger("qeth.ens_app")
 # the unverified RPC. Mirrors ``ens._VERIFY_WAIT_S``; the records read is a
 # background, best-effort enrichment so a few seconds of warm-up is fine.
 VERIFY_WAIT_S = 8.0
+
+# Retry budget for the ownership/resolution batch against the transient
+# post-sync "header for hash not found" (see ``verify_names``).
+_VERIFY_RETRIES = 3
+_VERIFY_RETRY_DELAY_S = 2.0
 
 # Blockscout ENS (BENS) service — keyless, multichain. The chain id goes in the
 # path: ``/api/v1/{chain_id}/...``. ENS itself is mainnet (chain 1).
@@ -373,16 +379,30 @@ def verify_names(
     Offchain (CCIP) resolvers can't be proven on-chain: their ``addr`` reverts
     here, leaving ``resolved_address`` None — those are followed unverified
     elsewhere, never badged."""
-    from .helios import verified_chain          # the verified-state abstraction
-    vc = verified_chain(chain, wait_s=wait_s)    # None unless a sidecar is ready
-    if vc is None:
+    from .verified import verified_client
+    # fallback=False: ownership/resolution is re-read on-chain ONLY when we can
+    # prove it (the indexer already gave us a hint), so no sidecar → nothing.
+    client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
+    if client is None:
         return {}, False
-    try:
-        from .chain import EthClient
-        return _read_name_states(EthClient(vc), names), True
-    except Exception:
-        log.debug("ENS verify_names failed", exc_info=True)
-        return {}, False
+    # A just-synced sidecar can briefly fail the eth_call ("header for hash not
+    # found") while the execution RPC catches up, which surfaces as an all-empty
+    # read. Since BENS only handed us names this address owns, at least one
+    # controller must come back — so an entirely empty result means the transient
+    # bit, not the truth. Retry a few times before giving up (rows then just stay
+    # unbadged; the guard in the UI never shows a false ⚠).
+    states: "dict[str, OwnershipCheck]" = {}
+    for attempt in range(_VERIFY_RETRIES):
+        try:
+            states = _read_name_states(client, names)
+        except Exception:
+            log.debug("ENS verify_names read failed", exc_info=True)
+            states = {}
+        if any(st.controller for st in states.values()):
+            return states, verified
+        if attempt < _VERIFY_RETRIES - 1:
+            time.sleep(_VERIFY_RETRY_DELAY_S)
+    return states, verified
 
 
 def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]":
@@ -394,7 +414,10 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
     owner_p: dict = {}
     resolver_p: dict = {}
     registrant_p: dict = {}
-    with client.multicall() as mc:
+    # Read at "finalized": ENS ownership/resolution isn't second-sensitive, so
+    # irreversible state is the right (stronger) basis, and it avoids the brief
+    # post-sync window where a Helios sidecar's head outruns the execution RPC.
+    with client.multicall(block="finalized") as mc:
         for n in names:
             node = nodes[n]
             owner_p[n] = mc.add(ENS_REGISTRY, _SEL_OWNER + node,
@@ -421,7 +444,7 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
         coin_p: dict = {}
         legacy_p: dict = {}
         coin_arg = _ETH_COIN_TYPE.to_bytes(32, "big")
-        with client.multicall() as mc:
+        with client.multicall(block="finalized") as mc:
             for n, r in resolvers.items():
                 node = nodes[n]
                 coin_p[n] = mc.add(r, _SEL_ADDR_COIN + node + coin_arg,
@@ -482,11 +505,13 @@ def verified_read_records(
     with CCIP off, so the records are proof-verified on-chain reads and
     ``verified`` is True. Otherwise we fall back to the chain's normal RPC
     (CCIP allowed) marked unverified — same shape as ``ens.verified_*``."""
-    from .helios import verified_chain          # the verified-state abstraction
-    vc = verified_chain(chain, wait_s=wait_s)
-    if vc is not None:
-        return read_records(vc.rpc_url, name, text_keys=text_keys, ccip=False), True
-    return read_records(chain.rpc_url, name, text_keys=text_keys, ccip=True), False
+    from .verified import verified_or_plain
+    # Records use web3's CCIP-policy knob, so we read by rpc_url, not EthClient.
+    # ccip is the inverse of verified: strict on-chain when proven, gateway-
+    # following allowed on the unverified fallback (data the indexer never had).
+    target, verified = verified_or_plain(chain, wait_s=wait_s)
+    return (read_records(target.rpc_url, name, text_keys=text_keys,
+                         ccip=not verified), verified)
 
 
 def _abi_bytes(raw) -> Optional[str]:

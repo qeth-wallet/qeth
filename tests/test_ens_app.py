@@ -228,7 +228,43 @@ def test_read_name_states_orchestration():
 
 
 def test_verify_names_no_helios_returns_unverified(monkeypatch):
-    # No sidecar (the default in tests) → verified-only path yields nothing.
-    monkeypatch.setattr("qeth.helios.verified_chain", lambda *a, **k: None)
+    # No sidecar → the verified-only path (fallback=False) yields nothing.
+    monkeypatch.setattr("qeth.verified.verified_chain", lambda *a, **k: None)
     states, verified = ea.verify_names(object(), ["vitalik.eth"])
     assert states == {} and verified is False
+
+
+def _stub_sidecar(monkeypatch):
+    """A ready (fake) Helios sidecar + EthClient, no sleeps."""
+    monkeypatch.setattr("qeth.verified.verified_chain", lambda c, **k: object())
+    monkeypatch.setattr("qeth.chain.EthClient", lambda c: object())
+    monkeypatch.setattr(ea.time, "sleep", lambda s: None)
+
+
+def test_verify_names_retries_transient_empty(monkeypatch):
+    # First read comes back empty (post-sync transient), second has data.
+    _stub_sidecar(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_read(client, names):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return {n.lower(): ea.OwnershipCheck() for n in names}
+        return {n.lower(): ea.OwnershipCheck(controller="0xC") for n in names}
+
+    monkeypatch.setattr(ea, "_read_name_states", fake_read)
+    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+    assert verified is True
+    assert states["vitalik.eth"].controller == "0xC"
+    assert calls["n"] == 2                      # retried once, then succeeded
+
+
+def test_verify_names_gives_up_after_retries(monkeypatch):
+    # Persistently empty → best-effort empty (UI leaves rows unbadged, no ⚠).
+    _stub_sidecar(monkeypatch)
+    monkeypatch.setattr(
+        ea, "_read_name_states",
+        lambda client, names: {n.lower(): ea.OwnershipCheck() for n in names})
+    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+    assert verified is True
+    assert states["vitalik.eth"].controller is None

@@ -145,13 +145,9 @@ def name_warning(name: str) -> Optional[str]:
     try:
         norm = normalize_name(name)
     except Exception:
-        return ("Not a valid ENS name — it contains disallowed, invisible, or "
-                "mixed-script characters and may be a look-alike of another "
-                "name. Do not trust it.")
+        return "Look-alike — hidden or mixed-script characters"
     if norm != name:
-        return (f"This name is not in canonical form — it displays differently "
-                f"from how it normalizes (“{norm}”). Possible "
-                f"look-alike.")
+        return f"Look-alike — normalizes to “{norm}”"
     return None
 
 

@@ -2011,7 +2011,7 @@ class TransactionListPanel(QWidget):
             "document-properties",
             style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
         ))
-        self.btn_details.setToolTip("Show selected transaction's details")
+        self.btn_details.setToolTip("Details")
         self.btn_details.setEnabled(False)
 
         self.btn_explorer = QPushButton()
@@ -2027,7 +2027,7 @@ class TransactionListPanel(QWidget):
             self.btn_explorer.setText("🌐")
         else:
             self.btn_explorer.setIcon(_browser_icon)
-        self.btn_explorer.setToolTip("Open selected transaction in the block explorer")
+        self.btn_explorer.setToolTip("Open in explorer")
         self.btn_explorer.setEnabled(False)
 
         self.btn_copy_hash = QPushButton()
@@ -2035,7 +2035,7 @@ class TransactionListPanel(QWidget):
             "edit-copy",
             style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
         ))
-        self.btn_copy_hash.setToolTip("Copy selected transaction's hash")
+        self.btn_copy_hash.setToolTip("Copy hash")
         self.btn_copy_hash.setEnabled(False)
 
         for b in (self.btn_details, self.btn_explorer, self.btn_copy_hash):
@@ -2726,11 +2726,7 @@ class _EventsView(QWidget):
         self.verified_lbl.setStyleSheet(
             "background:#d1e7dd; color:#0f5132; "
             "padding:1px 6px; border-radius:4px;")
-        self.verified_lbl.setToolTip(
-            "Simulated on proof-verified chain state: every account and "
-            "storage slot this transaction touched was checked against "
-            "sync-committee-verified roots by a local Helios light "
-            "client. The RPC endpoint cannot fake this preview.")
+        self.verified_lbl.setToolTip("Cryptographically verified simulation")
         self.verified_lbl.hide()
         header.addWidget(self.verified_lbl)
         header.addStretch(1)
@@ -3368,14 +3364,12 @@ class TransactionDetailsDialog(QDialog):
         if tx.pending and tx.raw_signed:
             speedup_btn = QPushButton("&Speed up")
             speedup_btn.setIcon(_speedup_icon())
-            speedup_btn.setToolTip(
-                "Re-sign at the same nonce with higher gas to replace it")
+            speedup_btn.setToolTip("Replace with higher gas")
             speedup_btn.clicked.connect(lambda: self._emit_replace(False))
             buttons.addButton(speedup_btn, QDialogButtonBox.ButtonRole.ActionRole)
             cancel_btn = QPushButton("&Cancel tx")
             cancel_btn.setIcon(_cancel_tx_icon())
-            cancel_btn.setToolTip(
-                "Replace with a 0-value self-send so the original never lands")
+            cancel_btn.setToolTip("Cancel — 0-value self-send")
             cancel_btn.clicked.connect(lambda: self._emit_replace(True))
             buttons.addButton(cancel_btn, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(self.reject)
@@ -5219,11 +5213,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                 self._ens_label.setStyleSheet(
                     "background:#f8d7da; color:#842029; padding:1px 6px;"
                     " border-radius:4px;")
-                self._ens_label.setToolTip(
-                    "This name resolves to a token contract — sending here "
-                    "usually burns the funds. The name → address mapping "
-                    "itself is " + ("proof-verified." if verified
-                                    else "from RPC (not verified)."))
+                self._ens_label.setToolTip("⚠ Token contract — funds may burn")
             elif verified:
                 # Green pill == proof-verified through Helios (same meaning as
                 # the Events tab badge). Neutral style otherwise, so green
@@ -5232,15 +5222,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                 self._ens_label.setStyleSheet(
                     "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
                     " border-radius:4px;")
-                self._ens_label.setToolTip(
-                    "Name → address resolved through a Helios light client and"
-                    " proof-verified against Ethereum consensus.")
+                self._ens_label.setToolTip("Cryptographically verified")
             else:
                 self._ens_label.setText(f"↳ {self._ens_resolved}")
                 self._ens_label.setStyleSheet("")
-                self._ens_label.setToolTip(
-                    "Resolved via RPC (not proof-verified). Install a Helios"
-                    " light client for verified ENS resolution.")
+                self._ens_label.setToolTip("Unverified (no Helios)")
         else:
             self._ens_resolved = None
             self._ens_label.setText("⚠ name not found")
@@ -5315,15 +5301,12 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             self.recipient_edit.setStyleSheet(
                 "QLineEdit { background-color: #f6d4d7; color: #7f1d1d; }"
             )
-            self.recipient_edit.setToolTip(
-                "This is a token contract — sending here usually burns "
-                "the funds"
-            )
+            self.recipient_edit.setToolTip("⚠ Token contract — funds may burn")
         elif hint == "own":
             self.recipient_edit.setStyleSheet(
                 "QLineEdit { background-color: #d7f0db; color: #14532d; }"
             )
-            self.recipient_edit.setToolTip("This is one of your own wallets")
+            self.recipient_edit.setToolTip("Your own wallet")
         else:
             self.recipient_edit.setStyleSheet("")
             self.recipient_edit.setToolTip("")

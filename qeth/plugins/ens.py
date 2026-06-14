@@ -90,22 +90,12 @@ class _SortItem(QTreeWidgetItem):
 
 # Verified-via-Helios markers. On the address column a leading glyph (not
 # trailing) survives the tree's ElideMiddle, which keeps both ends visible.
-_OWNED_TIP = (
-    "Ownership proof-verified on-chain via a Helios light client — your "
-    "address is the controller or registrant of this name."
-)
-_CONTROL_TIP = (
-    "You control this subdomain (proof-verified) — its parent owner delegated "
-    "it to you and can reassign it unless the relevant NameWrapper fuses are "
-    "burned. A subdomain has no registrar NFT of its own."
-)
-_RESOLVED_TIP = "Resolved address proof-verified on-chain via a Helios light client."
-_MISMATCH_TIP = (
-    "⚠ The indexer's address differs from the proof-verified resolution — "
-    "showing (and copying) the verified address."
-)
-_RECORD_TIP = "Record proof-verified on-chain via a Helios light client."
-_WRAPPED_NOTE = "\nHeld via the ENS NameWrapper (ERC-1155)."
+_OWNED_TIP = "Owner — cryptographically verified"
+_CONTROL_TIP = "Subdomain you control — verified"
+_RESOLVED_TIP = "Address cryptographically verified"
+_MISMATCH_TIP = "⚠ Corrected to verified address"
+_RECORD_TIP = "Cryptographically verified"
+_WRAPPED_NOTE = " · wrapped"
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
 # a status chip, not palette-driven text.
@@ -513,8 +503,6 @@ class EnsPanel(QWidget):
                 tip = _CONTROL_TIP if is_sub else _OWNED_TIP
                 if st.wrapped:
                     tip += _WRAPPED_NOTE
-                if st.resolved_address:
-                    tip += "\n" + _RESOLVED_TIP
                 self._set_status(item, "ok", tip)
                 item.setToolTip(0, tip)
         return removed
@@ -626,7 +614,7 @@ class EnsPlugin(Plugin):
             btn.setIcon(QIcon.fromTheme(
                 "list-add",
                 btn.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)))
-            btn.setToolTip("Pin an ENS name to always show")
+            btn.setToolTip("Add a name")
             btn.setFlat(True)
             btn.setMaximumSize(28, 28)
             btn.setIconSize(QSize(16, 16))

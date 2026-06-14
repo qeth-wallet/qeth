@@ -1590,20 +1590,18 @@ class TokenListPanel(QWidget):
             self.btn_send.setText("➤ &Send")
         else:
             self.btn_send.setIcon(_send_icon)
-        self.btn_send.setToolTip(
-            "Send the selected token (or native asset) to a recipient"
-        )
+        self.btn_send.setToolTip("Send")
         self.btn_send.setEnabled(False)
 
         self.btn_add = QPushButton()
         self.btn_add.setIcon(QIcon.fromTheme("list-add",
                                              style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)))
-        self.btn_add.setToolTip("Add a custom token by contract address")
+        self.btn_add.setToolTip("Add custom token")
 
         self.btn_hide = QPushButton()
         self.btn_hide.setIcon(QIcon.fromTheme("list-remove",
                                               style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon)))
-        self.btn_hide.setToolTip("Hide selected token from this wallet")
+        self.btn_hide.setToolTip("Hide token")
         self.btn_hide.setEnabled(False)
 
         # Copy-contract button — mirrors the "Copy contract address"
@@ -1613,7 +1611,7 @@ class TokenListPanel(QWidget):
         self.btn_copy = QPushButton()
         self.btn_copy.setIcon(QIcon.fromTheme("edit-copy",
                                               style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)))
-        self.btn_copy.setToolTip("Copy selected token's contract address")
+        self.btn_copy.setToolTip("Copy address")
         self.btn_copy.setEnabled(False)
 
         self.btn_pin = QPushButton()
@@ -1623,10 +1621,7 @@ class TokenListPanel(QWidget):
             self.btn_pin.setText("★")    # Unicode star, reliable on any system
         else:
             self.btn_pin.setIcon(_pin_icon)
-        self.btn_pin.setToolTip(
-            "Pin selected token: always show it, even at zero balance "
-            "or below the dust threshold"
-        )
+        self.btn_pin.setToolTip("Pin — always show")
         self.btn_pin.setEnabled(False)
 
         self.btn_show_all = QPushButton()
@@ -1636,10 +1631,7 @@ class TokenListPanel(QWidget):
             self.btn_show_all.setText("👁")  # Unicode eye fallback
         else:
             self.btn_show_all.setIcon(_eye_icon)
-        self.btn_show_all.setToolTip(
-            "Show all tokens (including dust and hidden); suspected "
-            "scams stay hidden"
-        )
+        self.btn_show_all.setToolTip("Show all (incl. dust)")
         self.btn_show_all.setCheckable(True)
 
         for b in (self.btn_add, self.btn_copy, self.btn_hide,
@@ -1803,7 +1795,7 @@ class TokenListPanel(QWidget):
             )
             if scam:
                 sym.setIcon(alarm_icon)
-                sym.setToolTip(b.contract + "\n⚠ Looks like a scam token")
+                sym.setToolTip(b.contract + "\n⚠ Suspected scam")
             else:
                 pix = self._icons.get(chain.chain_id, b.contract)
                 if pix is not None:

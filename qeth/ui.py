@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
             f = btn.font()
             f.setPointSizeF(f.pointSizeF() * 1.15)
             btn.setFont(f)
-        btn.setToolTip("Edit the RPC endpoint for the current chain")
+        btn.setToolTip("Edit chain RPC")
         btn.setAutoRaise(True)
         btn.clicked.connect(self._on_edit_chain_rpc)
         return btn

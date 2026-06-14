@@ -420,7 +420,7 @@ class WalletsPlugin(Plugin):
                             style_proxy.standardIcon(QStyle.StandardPixmap.SP_FileIcon)),
             "&Add Account",
         )
-        self.act_add.setToolTip("Add a Ledger or watch-only account")
+        self.act_add.setToolTip("Add account")
         # Sub-actions used by both the toolbar dropdown and the
         # tree's right-click menu so the two entry points agree on
         # which dialogs they open.
@@ -617,7 +617,7 @@ class WalletsPlugin(Plugin):
                 if addr.lower() in self._ens_verified:
                     it.setToolTip(
                         0,
-                        f"{label_text} — ENS name proof-verified via Helios.")
+                        f"{label_text} — cryptographically verified")
             it.setFont(0, QFont("monospace"))
             # Address leaf: selectable + draggable, NOT a drop target
             # (so an address can't be dropped onto another address —
@@ -654,7 +654,7 @@ class WalletsPlugin(Plugin):
                 if addr.lower() in self._ens_verified:
                     it.setToolTip(
                         0,
-                        f"{label_text} — ENS name proof-verified via Helios.")
+                        f"{label_text} — cryptographically verified")
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
@@ -687,7 +687,7 @@ class WalletsPlugin(Plugin):
                 if addr.lower() in self._ens_verified:
                     it.setToolTip(
                         0,
-                        f"{label_text} — ENS name proof-verified via Helios.")
+                        f"{label_text} — cryptographically verified")
             it.setFont(0, QFont("monospace"))
             it.setFlags(
                 Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
@@ -1223,10 +1223,7 @@ class DetailsPanel(QWidget):
         )
         if not _conn_icon.isNull() and _conn_icon.availableSizes():
             self.set_default_btn.setIcon(_conn_icon)
-        self.set_default_btn.setToolTip(
-            "Make this the address dapps see (returned by eth_accounts "
-            "over the local JSON-RPC server)"
-        )
+        self.set_default_btn.setToolTip("Make default for dapps")
         self.set_default_btn.setEnabled(False)
         # Pin the height. With QSizePolicy.Policy.Fixed Qt re-queries sizeHint()
         # every time the text changes — and "Connected ✓" can come out
@@ -1253,10 +1250,7 @@ class DetailsPanel(QWidget):
         )
         if not _sig_icon.isNull() and _sig_icon.availableSizes():
             self.sign_message_btn.setIcon(_sig_icon)
-        self.sign_message_btn.setToolTip(
-            "Sign a text message or EIP-712 typed-data object with "
-            "this account's key. Watch-only accounts can't sign."
-        )
+        self.sign_message_btn.setToolTip("Sign a message")
         self.sign_message_btn.setEnabled(False)
         self.sign_message_btn.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
@@ -1303,20 +1297,14 @@ class DetailsPanel(QWidget):
         if is_watch_only:
             self.set_default_btn.setEnabled(False)
             self.set_default_btn.setText("Watch-only — Read-only")
-            self.set_default_btn.setToolTip(
-                "Watch-only accounts have no signing key — they "
-                "can't be the address dapps see."
-            )
+            self.set_default_btn.setToolTip("Watch-only — can't sign")
         else:
             self.set_default_btn.setEnabled(not is_default)
             self.set_default_btn.setText(
                 "Connected to Browser ✓" if is_default
                 else "Connect to &Browser"
             )
-            self.set_default_btn.setToolTip(
-                "Make this the address dapps see (returned by "
-                "eth_accounts over the local JSON-RPC server)"
-            )
+            self.set_default_btn.setToolTip("Make default for dapps")
         # Same key-bearing-account check as Connect-to-browser:
         # watch-only can't sign messages.
         self.sign_message_btn.setEnabled(not is_watch_only)
@@ -1544,7 +1532,7 @@ class AddLedgerDialog(QDialog):
         item.setText(f"{item.text()}   ({name}{mark})")
         if verified:
             item.setToolTip(
-                f"{name} — ENS name proof-verified via a Helios light client.")
+                f"{name} — cryptographically verified")
 
     def _on_done(self) -> None:
         self.progress.setVisible(False)
@@ -1724,15 +1712,11 @@ class AddWatchOnlyDialog(QDialog):
                 self.resolved_lbl.setStyleSheet(
                     "background:#d1e7dd; color:#0f5132; padding:1px 6px;"
                     " border-radius:4px;")
-                self.resolved_lbl.setToolTip(
-                    "Name → address proof-verified through a Helios light"
-                    " client.")
+                self.resolved_lbl.setToolTip("Cryptographically verified")
             else:
                 self._set_resolved(f"→ {address}")
                 self.resolved_lbl.setStyleSheet("")
-                self.resolved_lbl.setToolTip(
-                    "Resolved via RPC (not proof-verified). Install Helios for"
-                    " verified ENS resolution.")
+                self.resolved_lbl.setToolTip("Unverified (no Helios)")
             self.add_btn.setEnabled(True)
             if not self.label_edit.text().strip():
                 self.label_edit.setText(name)
@@ -1837,9 +1821,7 @@ class AddHotWalletDialog(QDialog):
         self.dice_btn = QToolButton()
         self.dice_btn.setText("🎲")
         self.dice_btn.setMinimumHeight(_input_min_h)
-        self.dice_btn.setToolTip(
-            "Generate a fresh random 32-byte private key"
-        )
+        self.dice_btn.setToolTip("New random key")
         self.dice_btn.clicked.connect(self._on_dice_clicked)
         pk_layout.addWidget(self.dice_btn)
         form.addRow("Pri&vate key:", pk_row)

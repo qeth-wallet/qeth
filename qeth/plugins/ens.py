@@ -16,11 +16,11 @@ import logging
 import time
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QInputDialog, QMenu, QPushButton, QStyle,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QHeaderView, QInputDialog, QMenu, QPushButton, QSizePolicy,
+    QStyle, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ens_app import (
@@ -258,9 +258,19 @@ class EnsPlugin(Plugin):
 
     def action_widgets(self) -> "list[QWidget]":
         if self._add_btn is None:
-            self._add_btn = QPushButton("+")
-            self._add_btn.setToolTip("Pin an ENS name to always show")
-            self._add_btn.clicked.connect(self._on_add_custom)
+            # Match the Tokens pane's add button exactly: a flat 28×28
+            # list-add ("+") icon button, not a framed text button.
+            btn = QPushButton()
+            btn.setIcon(QIcon.fromTheme(
+                "list-add",
+                btn.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)))
+            btn.setToolTip("Pin an ENS name to always show")
+            btn.setFlat(True)
+            btn.setMaximumSize(28, 28)
+            btn.setIconSize(QSize(16, 16))
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(self._on_add_custom)
+            self._add_btn = btn
         assert self._add_btn is not None
         return [self._add_btn]
 

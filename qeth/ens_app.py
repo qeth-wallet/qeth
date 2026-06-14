@@ -544,21 +544,21 @@ def _decode_abi_string(raw) -> Optional[str]:
 def _read_records_via_client(
     client, name: str, *, text_keys: tuple = TEXT_KEYS, block: str = "finalized",
     resolver: Optional[str] = None,
-) -> EnsRecords:
-    """Read a name's resolver records in TWO multicalls, not ~20 round-trips.
+) -> "Tuple[EnsRecords, bool]":
+    """Read a name's resolver records in TWO multicalls → ``(records, ok)``.
 
-    web3's ``w3.ens.get_text`` re-resolves the resolver and round-trips per key,
-    so the old path did roughly 2×(len(text_keys)) + 2 sequential calls — slow
-    even for a name with no records. Here: round 1 looks up the resolver once;
-    round 2 batches every ``text(node,key)`` + ``contenthash(node)`` into a
-    single ``aggregate3``. A name with no resolver costs one call; no records,
-    two.
+    ``ok`` is False when a read DIDN'T LAND (a transient multicall failure —
+    e.g. a just-synced sidecar's "header for hash not found") vs True for a read
+    that landed (even with no records). The caller must distinguish them: an
+    empty result with ``ok`` False is a glitch, NOT "this name has no records",
+    so it must never overwrite records already on screen.
 
-    ``resolver`` pre-supplies the (per-name) resolver address — when a caller
-    already knows it (the ownership pass reads it), round 1 is skipped and the
-    whole read is a single round-trip. The resolver is per-name and mutable, so
-    a pre-supplied one can be stale; the caller (``read_records``) re-reads on an
-    empty result to self-correct."""
+    web3's ``w3.ens.get_text`` re-resolves the resolver and round-trips per key
+    (~20 sequential calls); here round 1 looks up the resolver once and round 2
+    batches every ``text(node,key)`` + ``contenthash(node)`` into one
+    ``aggregate3``. ``resolver`` pre-supplies the (per-name, mutable) resolver to
+    skip round 1; ``read_records`` re-reads without it on an empty result to
+    self-correct a stale one."""
     from eth_abi import encode as abi_encode
     rec = EnsRecords()
     node = namehash(name)
@@ -566,9 +566,11 @@ def _read_records_via_client(
         with client.multicall(block=block) as mc:
             resolver_p = mc.add(ENS_REGISTRY, _SEL_RESOLVER + node,
                                 decoder=_decode_addr_word)
-        resolver = resolver_p.value if resolver_p.success else None
+        if not resolver_p.success:
+            return rec, False               # resolver lookup glitched
+        resolver = resolver_p.value         # None ⇒ zero ⇒ no resolver
     if not resolver:
-        return rec
+        return rec, True                    # landed: name has no resolver
     text_p: dict = {}
     with client.multicall(block=block) as mc:
         for key in text_keys:
@@ -577,55 +579,58 @@ def _read_records_via_client(
         content_p = mc.add(
             resolver, _SEL_CONTENTHASH + node,
             decoder=lambda raw: decode_contenthash(_abi_bytes(raw)))
+    if not any(p.success for p in (*text_p.values(), content_p)):
+        return rec, False                   # round-2 batch glitched entirely
     for key, p in text_p.items():
         if p.success and p.value:
             rec.texts[key] = str(p.value)
     if content_p.success and content_p.value:
         rec.contenthash = content_p.value
-    return rec
+    return rec, True
 
 
 def read_records(
     chain: "Chain", name: str, *, text_keys: tuple = TEXT_KEYS,
     client=None, resolver: Optional[str] = None,
-) -> EnsRecords:
-    """Fast, UNVERIFIED record read — multicalls against the chain's normal RPC
-    at ``latest``. The first-paint path: shows records in ~1 s instead of
-    waiting on the verified read to proof-fetch every slot through Helios; the ✓
-    comes later via ``verified_read_records``.
+) -> "Tuple[EnsRecords, bool]":
+    """Fast, UNVERIFIED record read → ``(records, ok)`` (see
+    ``_read_records_via_client`` for ``ok``). The first-paint path: shows records
+    in ~1 s instead of waiting on the verified read to proof-fetch every slot
+    through Helios; the ✓ comes later via ``verified_read_records``.
 
-    ``client`` reuses a warm ``EthClient`` (keep-alive connection) across expands
-    instead of paying a fresh TLS handshake each time. ``resolver`` pre-supplies
-    the name's resolver to skip the lookup round-trip; if that (possibly stale)
-    resolver yields nothing, we re-read without it to self-correct."""
+    ``client`` reuses a warm ``EthClient`` across expands; ``resolver``
+    pre-supplies the name's resolver to skip a round-trip — if that (possibly
+    stale) resolver lands empty, we re-read without it to self-correct."""
     from .chain import EthClient
     cl = client if client is not None else EthClient(chain)
     try:
-        rec = _read_records_via_client(cl, name, text_keys=text_keys,
-                                       block="latest", resolver=resolver)
-        if resolver is not None and not rec.texts and not rec.contenthash:
-            rec = _read_records_via_client(cl, name, text_keys=text_keys,
-                                           block="latest")   # resolver re-read
-        return rec
+        rec, ok = _read_records_via_client(cl, name, text_keys=text_keys,
+                                           block="latest", resolver=resolver)
+        if (resolver is not None and ok
+                and not rec.texts and not rec.contenthash):
+            rec, ok = _read_records_via_client(cl, name, text_keys=text_keys,
+                                               block="latest")   # resolver re-read
+        return rec, ok
     except Exception:
         log.debug("ENS read_records failed", exc_info=True)
-        return EnsRecords()
+        return EnsRecords(), False
 
 
 def verified_read_records(
     chain: "Chain", name: str, *,
     wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
 ) -> "Tuple[EnsRecords, bool]":
-    """Verified-ONLY record read → ``(records, True)`` when a Helios sidecar
-    proves the reads, else ``(EnsRecords(), False)``. The unverified fast path
-    is ``read_records``; this is the background upgrade that earns the ✓, so it
-    never does a wasteful unverified re-read when no sidecar is available."""
+    """Verified-ONLY record read → ``(records, verified)``. ``verified`` is True
+    only when a Helios sidecar proved the reads AND they LANDED — a glitch
+    (``ok`` False) returns ``(EnsRecords(), False)`` so the worker skips the
+    upgrade emit and a transient never wipes the records already shown."""
     from .verified import verified_client
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
     if client is None or not verified:
         return EnsRecords(), False
     try:
-        return _read_records_via_client(client, name, text_keys=text_keys), True
+        rec, ok = _read_records_via_client(client, name, text_keys=text_keys)
+        return (rec, True) if ok else (EnsRecords(), False)
     except Exception:
         log.debug("ENS verified_read_records failed", exc_info=True)
         return EnsRecords(), False

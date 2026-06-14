@@ -412,7 +412,22 @@ class TestEnsPlugin:
         qtbot.addWidget(plugin.widget())
         plugin.widget().populate(build_tree([EnsName("alice.eth")]), NOW)
         verified_rec = EnsRecords(texts={"url": "verified"})
-        plugin._on_records_ready("alice.eth", verified_rec, True)
+        plugin._on_records_ready("alice.eth", verified_rec, True, True)
         # a later unverified emit must not clobber the verified result
-        plugin._on_records_ready("alice.eth", EnsRecords(texts={"url": "stale"}), False)
+        plugin._on_records_ready(
+            "alice.eth", EnsRecords(texts={"url": "stale"}), False, True)
         assert plugin._rec_cache["alice.eth"] == (verified_rec, True)
+
+    def test_records_glitch_does_not_wipe(self, qtbot, tmp_qeth):
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().populate(build_tree([EnsName("alice.eth")]), NOW)
+        good = EnsRecords(texts={"url": "https://alice.example"})
+        plugin._on_records_ready("alice.eth", good, False, True)
+        # a glitchy read (ok=False, empty) must NOT overwrite the shown records
+        plugin._on_records_ready("alice.eth", EnsRecords(), True, False)
+        assert plugin._rec_cache["alice.eth"] == (good, False)
+        root = plugin.widget().tree.topLevelItem(0)
+        labels = [root.child(i).text(0) for i in range(root.childCount())]
+        assert "url" in labels and "no records" not in labels

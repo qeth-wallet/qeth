@@ -296,16 +296,37 @@ def test_read_records_via_client_batches():
             return True, "ipfs://bafy"
         return False, None
 
-    rec = ea._read_records_via_client(_FakeClient(resp), "vitalik.eth")
+    rec, ok = ea._read_records_via_client(_FakeClient(resp), "vitalik.eth")
+    assert ok is True
     assert rec.contenthash == "ipfs://bafy"
     assert rec.texts and all(v == "hello" for v in rec.texts.values())
 
 
-def test_read_records_via_client_no_resolver_is_empty():
-    # registry.resolver returns nothing → no second round, empty records.
-    rec = ea._read_records_via_client(
+def test_read_records_no_resolver_is_landed_empty():
+    # registry.resolver read LANDS but returns zero → no records, ok=True.
+    rec, ok = ea._read_records_via_client(
+        _FakeClient(lambda t, s: (True, None)), "x.eth")
+    assert ok is True and rec.texts == {} and rec.contenthash is None
+
+
+def test_read_records_resolver_glitch_is_not_ok():
+    # resolver lookup read FAILED (multicall slot) → ok=False (don't trust it).
+    rec, ok = ea._read_records_via_client(
         _FakeClient(lambda t, s: (False, None)), "x.eth")
-    assert rec.texts == {} and rec.contenthash is None
+    assert ok is False and rec.texts == {}
+
+
+def test_read_records_round2_glitch_is_not_ok():
+    # resolver found, but the whole round-2 batch failed → ok=False.
+    RESOLVER = "0x" + "ab" * 20
+
+    def resp(target, sel):
+        if sel == ea._SEL_RESOLVER:
+            return True, RESOLVER
+        return False, None                            # all text/content fail
+
+    rec, ok = ea._read_records_via_client(_FakeClient(resp), "x.eth")
+    assert ok is False
 
 
 def test_read_records_skips_resolver_lookup_when_supplied():
@@ -318,15 +339,15 @@ def test_read_records_skips_resolver_lookup_when_supplied():
             return True, "hi"
         return False, None
 
-    rec = ea._read_records_via_client(
+    rec, ok = ea._read_records_via_client(
         _FakeClient(resp), "vitalik.eth", resolver=RESOLVER)
-    assert rec.texts                                  # records came back
+    assert ok is True and rec.texts                   # records came back
     assert ea._SEL_RESOLVER not in seen               # round 1 was skipped
 
 
 def test_read_records_self_heals_stale_resolver():
-    # A pre-supplied (stale) resolver returns nothing → read_records re-reads
-    # without it, picks up the real resolver, and recovers the records.
+    # A pre-supplied (stale) resolver lands empty → read_records re-reads without
+    # it, picks up the real resolver, and recovers the records.
     RIGHT = "0x" + "ab" * 20
 
     def resp(target, sel):
@@ -334,11 +355,13 @@ def test_read_records_self_heals_stale_resolver():
             return True, RIGHT
         if sel == ea._SEL_TEXT and target == RIGHT:
             return True, "hi"
-        return False, None                            # stale resolver → empty
+        if sel == ea._SEL_CONTENTHASH:
+            return True, None             # content call lands (empty) so ok=True
+        return False, None                # stale resolver's text lands empty
 
-    rec = ea.read_records(object(), "x.eth",
-                          client=_FakeClient(resp), resolver="0x" + "99" * 20)
-    assert rec.texts and all(v == "hi" for v in rec.texts.values())
+    rec, ok = ea.read_records(object(), "x.eth",
+                              client=_FakeClient(resp), resolver="0x" + "99" * 20)
+    assert ok is True and rec.texts and all(v == "hi" for v in rec.texts.values())
 
 
 def test_verify_names_no_helios_returns_unverified(monkeypatch):

@@ -252,10 +252,11 @@ class EnsRecordsWorker(QThread):
     """Read one name's resolver records (lazy, on expand) in two phases so the
     UI never blocks on Helios: first a fast UNVERIFIED read (~1.5 s) for an
     instant paint, then — if a sidecar can prove them — a verified re-read that
-    upgrades the rows to ✓. Emits ``ready(name, records, verified)`` once or
-    twice."""
+    upgrades the rows to ✓. Emits ``ready(name, records, verified, ok)`` once or
+    twice — ``ok`` False means the read didn't land (a glitch), so the consumer
+    must keep what's already shown rather than wipe it."""
 
-    ready = Signal(str, object, bool)        # (name, EnsRecords, verified)
+    ready = Signal(str, object, bool, bool)  # (name, EnsRecords, verified, ok)
 
     def __init__(self, chain, name: str, parent=None,
                  *, wait_s: float = VERIFY_WAIT_S, client=None,
@@ -268,13 +269,13 @@ class EnsRecordsWorker(QThread):
         self._resolver = resolver      # cached per-name resolver (skips a round)
 
     def run(self) -> None:
-        rec = read_records(self._chain, self._name,
-                           client=self._client, resolver=self._resolver)
-        self.ready.emit(self._name, rec, False)
+        rec, ok = read_records(self._chain, self._name,
+                               client=self._client, resolver=self._resolver)
+        self.ready.emit(self._name, rec, False, ok)
         vrec, verified = verified_read_records(
             self._chain, self._name, wait_s=self._wait_s)
-        if verified:
-            self.ready.emit(self._name, vrec, True)
+        if verified:                   # verified ⇒ the read landed (ok)
+            self.ready.emit(self._name, vrec, True, True)
 
 
 class EnsVerifyWorker(QThread):
@@ -741,7 +742,12 @@ class EnsPlugin(Plugin):
         self._start(worker)
 
     def _on_records_ready(self, name: str, rec: EnsRecords,
-                          verified: bool) -> None:
+                          verified: bool, ok: bool) -> None:
+        # A read that didn't land (transient RPC/sidecar glitch) comes back empty
+        # but is NOT authoritative — keep whatever's already shown rather than
+        # wipe good records. (This was the "records vanished on a glitch" bug.)
+        if not ok:
+            return
         # The two-phase worker emits unverified then (maybe) verified. Don't let
         # the late unverified phase of a refresh clobber a cached verified
         # result with a worse one; otherwise newest wins.

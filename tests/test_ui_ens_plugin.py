@@ -153,7 +153,7 @@ class TestEnsPanel:
         panel.tree.sortByColumn(_EXPIRES_COL, Qt.SortOrder.AscendingOrder)
         assert order() == ["zzz.eth", "aaa.eth", "mmm.eth"]
 
-    def test_records_sort_below_subdomains(self, qtbot):
+    def test_records_sort_by_tier_then_alpha(self, qtbot):
         from PySide6.QtCore import Qt
         from qeth.plugins.ens import _NAME_COL
         panel = EnsPanel()
@@ -163,20 +163,23 @@ class TestEnsPanel:
             EnsName("zsub.vitalik.eth"),       # subdomain (late alphabetically)
             EnsName("asub.vitalik.eth"),       # subdomain (early)
         ]), NOW)
-        # record labels would otherwise interleave alphabetically with subs
-        panel.add_records("vitalik.eth",
-                          EnsRecords(texts={"url": "u", "com.github": "g"}))
+        panel.add_records("vitalik.eth", EnsRecords(
+            addresses={"60": "0xabc"},          # "address" — other record
+            texts={"url": "u", "com.github": "g"},
+            contenthash="ipfs://x"))            # "content" — its own tier
         root = panel.tree.topLevelItem(0)
 
-        def kinds():
-            return [bool(root.child(i).data(0, _NAME_ROLE) is not None)
-                    for i in range(root.childCount())]
+        def labels():
+            return [root.child(i).text(0) for i in range(root.childCount())]
 
+        # tiers: subdomains, then content, then other records (alpha within each)
         panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.AscendingOrder)
-        # all subdomains (True) before all records (False)
-        assert kinds() == [True, True, False, False]
+        assert labels() == ["asub.vitalik.eth", "zsub.vitalik.eth",
+                            "content", "address", "com.github", "url"]
+        # descending reverses WITHIN each tier; the tier order is preserved
         panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.DescendingOrder)
-        assert kinds() == [True, True, False, False]   # still subdomains first
+        assert labels() == ["zsub.vitalik.eth", "asub.vitalik.eth",
+                            "content", "url", "com.github", "address"]
 
     def test_verified_records_get_check_prefix(self, qtbot):
         panel = EnsPanel()

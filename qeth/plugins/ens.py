@@ -43,17 +43,25 @@ _VALUE_ROLE = Qt.ItemDataRole.UserRole + 2     # copyable value on a record row
 _UNSAFE_ROLE = Qt.ItemDataRole.UserRole + 3    # confusable / non-normalized name
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 4    # "ok" | "warn" — the line's status
 _EXPIRY_SORT_ROLE = Qt.ItemDataRole.UserRole + 5  # expiry timestamp for sorting
+_TYPE_RANK_ROLE = Qt.ItemDataRole.UserRole + 6    # sort tier (see _RANK_*)
 
 _NAME_COL = 0
 _EXPIRES_COL = 1
+
+# A name's children sort by type tier first: owned subdomains, then the
+# contenthash, then the other records — alphabetically within each tier.
+_RANK_SUBDOMAIN = 0
+_RANK_CONTENT = 1
+_RANK_RECORD = 2
 
 _WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
 
 
 def _kind_rank(item: QTreeWidgetItem) -> int:
-    """Group a name's children: owned subdomains (a real EnsName) first, then
-    record / placeholder rows. So records sort below the subdomains."""
-    return 0 if item.data(0, _NAME_ROLE) is not None else 1
+    """A name's children sort by tier: subdomains, then contenthash, then other
+    records (the _RANK_* set, stored per item). Unset → sorts with the records."""
+    r = item.data(0, _TYPE_RANK_ROLE)
+    return r if r is not None else _RANK_RECORD
 
 
 class _SortItem(QTreeWidgetItem):
@@ -383,6 +391,7 @@ class EnsPanel(QWidget):
         item.setIcon(0, self._sub_icon if is_sub else self._domain_icon)
         item.setData(0, _NAME_ROLE, n)
         item.setData(0, _LOADED_ROLE, False)
+        item.setData(0, _TYPE_RANK_ROLE, _RANK_SUBDOMAIN)
         item.setData(_EXPIRES_COL, _EXPIRY_SORT_ROLE, n.expiry_ts)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
@@ -422,11 +431,14 @@ class EnsPanel(QWidget):
         rows = _record_rows(rec)
         if not rows:
             note = _SortItem(["no records", "", ""])
+            note.setData(0, _TYPE_RANK_ROLE, _RANK_RECORD)
             note.setForeground(0, QBrush(QColor(120, 120, 120)))
             item.addChild(note)
             return
         for icon_key, label, value in rows:
             ch = _SortItem([label, "", value])
+            ch.setData(0, _TYPE_RANK_ROLE,
+                       _RANK_CONTENT if icon_key == "content" else _RANK_RECORD)
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
             ch.setToolTip(2, value)

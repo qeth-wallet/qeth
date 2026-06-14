@@ -40,8 +40,28 @@ _LOADED_ROLE = Qt.ItemDataRole.UserRole + 1    # records-loaded flag
 _VALUE_ROLE = Qt.ItemDataRole.UserRole + 2     # copyable value on a record row
 _UNSAFE_ROLE = Qt.ItemDataRole.UserRole + 3    # confusable / non-normalized name
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 4    # "ok" | "warn" — the line's status
+_EXPIRY_SORT_ROLE = Qt.ItemDataRole.UserRole + 5  # expiry timestamp for sorting
+
+_NAME_COL = 0
+_EXPIRES_COL = 1
 
 _WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
+
+
+class _SortItem(QTreeWidgetItem):
+    """Tree item with column-aware sorting: the Expires column orders by its
+    real expiry timestamp (not the displayed 'expiring soon' / date text), names
+    case-insensitively. Names with no expiry sort last."""
+
+    def __lt__(self, other: "QTreeWidgetItem") -> bool:
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else _NAME_COL
+        if col == _EXPIRES_COL:
+            a = self.data(_EXPIRES_COL, _EXPIRY_SORT_ROLE)
+            b = other.data(_EXPIRES_COL, _EXPIRY_SORT_ROLE)
+            return (a if a is not None else float("inf")) < \
+                   (b if b is not None else float("inf"))
+        return self.text(col).casefold() < other.text(col).casefold()
 
 # Verified-via-Helios markers. On the address column a leading glyph (not
 # trailing) survives the tree's ElideMiddle, which keeps both ends visible.
@@ -233,6 +253,10 @@ class EnsPanel(QWidget):
         hdr.resizeSection(self._STATUS_COL, 22)
         self.tree.setItemDelegateForColumn(
             self._STATUS_COL, _RightIconDelegate(self.tree))
+        # Click headers to sort by name / expiry (either direction); the
+        # Expires column sorts by real timestamp via _SortItem. Default: name A→Z.
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(_NAME_COL, Qt.SortOrder.AscendingOrder)
         self.tree.itemExpanded.connect(self._on_expanded)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_menu)
@@ -254,20 +278,25 @@ class EnsPanel(QWidget):
     # --- rendering --------------------------------------------------------
 
     def populate(self, roots: "list[EnsNode]", now_ts: int) -> None:
+        # Bulk-insert with sorting off (else the tree re-sorts on every add),
+        # then re-enable — which applies the user's current sort column/order.
+        self.tree.setSortingEnabled(False)
         self.tree.clear()
         self._items_by_name.clear()
         for node in roots:
             self.tree.addTopLevelItem(self._build(node, now_ts, is_sub=False))
+        self.tree.setSortingEnabled(True)
 
     def _build(self, node: EnsNode, now_ts: int, *, is_sub: bool) -> QTreeWidgetItem:
         n = node.name
         status = expiry_status(n.expiry_ts, now_ts)
         text, colour = _EXPIRY_STYLE.get(status, (None, None))
         exp_col = text or (_fmt_expiry(n.expiry_ts) if n.expiry_ts else "")
-        item = QTreeWidgetItem([n.name, exp_col, n.resolved_address or ""])
+        item = _SortItem([n.name, exp_col, n.resolved_address or ""])
         item.setIcon(0, self._sub_icon if is_sub else self._domain_icon)
         item.setData(0, _NAME_ROLE, n)
         item.setData(0, _LOADED_ROLE, False)
+        item.setData(_EXPIRES_COL, _EXPIRY_SORT_ROLE, n.expiry_ts)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
         # Confusable / non-normalized name → a warning status (shown immediately,
@@ -287,7 +316,7 @@ class EnsPanel(QWidget):
         # A name with no owned subdomains still needs to be expandable so the
         # user can pull its records — give it a lazy placeholder.
         if not node.children:
-            item.addChild(QTreeWidgetItem(["…loading records"]))
+            item.addChild(_SortItem(["…loading records"]))
         return item
 
     def add_records(self, name: str, rec: EnsRecords,
@@ -305,12 +334,12 @@ class EnsPanel(QWidget):
                 item.removeChild(ch)
         rows = _record_rows(rec)
         if not rows:
-            note = QTreeWidgetItem(["no records", "", ""])
+            note = _SortItem(["no records", "", ""])
             note.setForeground(0, QBrush(QColor(120, 120, 120)))
             item.addChild(note)
             return
         for icon_key, label, value in rows:
-            ch = QTreeWidgetItem([label, "", value])
+            ch = _SortItem([label, "", value])
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
             ch.setToolTip(2, value)

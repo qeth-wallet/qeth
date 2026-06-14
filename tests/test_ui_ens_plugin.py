@@ -129,6 +129,30 @@ class TestEnsPanel:
         root.setExpanded(True)
         assert seen == ["alice.eth"]   # guarded against re-emit
 
+    def test_sortable_by_name_and_expiry(self, qtbot):
+        from PySide6.QtCore import Qt
+        from qeth.plugins.ens import _NAME_COL, _EXPIRES_COL
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([
+            EnsName("zzz.eth", expiry_ts=NOW + 10 * 86400),    # expires soonest
+            EnsName("aaa.eth", expiry_ts=NOW + 400 * 86400),   # expires latest
+            EnsName("mmm.eth"),                                # no expiry
+        ]), NOW)
+
+        def order():
+            return [panel.tree.topLevelItem(i).text(0)
+                    for i in range(panel.tree.topLevelItemCount())]
+
+        panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.AscendingOrder)
+        assert order() == ["aaa.eth", "mmm.eth", "zzz.eth"]
+        panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.DescendingOrder)
+        assert order() == ["zzz.eth", "mmm.eth", "aaa.eth"]
+        # Expires sorts by real timestamp (not the 'expiring soon' text); names
+        # with no expiry sort last.
+        panel.tree.sortByColumn(_EXPIRES_COL, Qt.SortOrder.AscendingOrder)
+        assert order() == ["zzz.eth", "aaa.eth", "mmm.eth"]
+
     def test_verified_records_get_check_prefix(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

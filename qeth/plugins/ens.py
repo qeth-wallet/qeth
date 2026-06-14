@@ -37,6 +37,7 @@ _NAME_ROLE = Qt.ItemDataRole.UserRole          # stores the EnsName on a row
 _LOADED_ROLE = Qt.ItemDataRole.UserRole + 1    # records-loaded flag
 _VALUE_ROLE = Qt.ItemDataRole.UserRole + 2     # copyable value on a record row
 _UNSAFE_ROLE = Qt.ItemDataRole.UserRole + 3    # confusable / non-normalized name
+_STATUS_ROLE = Qt.ItemDataRole.UserRole + 4    # "ok" | "warn" — the line's status
 
 _WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
 
@@ -170,7 +171,12 @@ class EnsPanel(QWidget):
     add_custom_requested = Signal()
     records_requested = Signal(str)    # name → load its records (lazy)
 
-    COLS = ["Name", "Expires", "Resolves to"]
+    # Trailing column = verification status, shown as a fixed-size icon (a text
+    # ✓/⚠ glyph gets emoji presentation on some themes and changes the row
+    # height). The one icon covers the whole line — name ownership and the
+    # resolved value together.
+    COLS = ["Name", "Expires", "Resolves to", ""]
+    _STATUS_COL = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -178,10 +184,11 @@ class EnsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(3)
+        self.tree.setColumnCount(len(self.COLS))
         self.tree.setHeaderLabels(self.COLS)
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
+        self.tree.setIconSize(QSize(16, 16))
         # Resolved addresses are full 42-char strings shown in the stretch
         # column; let Qt middle-elide them as the tab narrows (same as the
         # wallet address list) instead of pre-shortening to 0x…tail.
@@ -189,6 +196,8 @@ class EnsPanel(QWidget):
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(
+            self._STATUS_COL, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemExpanded.connect(self._on_expanded)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_menu)
@@ -196,6 +205,11 @@ class EnsPanel(QWidget):
 
         self._domain_icon = _icon("emblem-web", QStyle.StandardPixmap.SP_DriveNetIcon)
         self._sub_icon = _icon("folder", QStyle.StandardPixmap.SP_DirIcon)
+        # Status-column icons: verified-ok vs warning.
+        self._ok_icon = _icon("emblem-ok",
+                              QStyle.StandardPixmap.SP_DialogApplyButton)
+        self._warn_icon = _icon("dialog-warning",
+                                QStyle.StandardPixmap.SP_MessageBoxWarning)
         self._rec_icons = {
             "address": _icon("avatar-default", QStyle.StandardPixmap.SP_FileIcon),
             "content": _icon("folder-remote", QStyle.StandardPixmap.SP_FileLinkIcon),
@@ -221,14 +235,14 @@ class EnsPanel(QWidget):
         item.setData(0, _LOADED_ROLE, False)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
-        # Confusable / non-normalized name → a prominent ⚠ shown immediately (no
-        # wait on verification), red, with an explaining tooltip. Flagged so
-        # verification never lends it a legitimizing ✓.
+        # Confusable / non-normalized name → a warning status (shown immediately,
+        # no wait on verification) + a red name, with an explaining tooltip.
+        # Flagged so verification never lends it a legitimizing ✓.
         warn = name_warning(n.name)
         if warn is not None:
             item.setData(0, _UNSAFE_ROLE, True)
-            item.setText(0, f"⚠ {n.name}")
             item.setForeground(0, QBrush(_WARN_COLOR))
+            self._set_status(item, "warn", warn)
             item.setToolTip(0, f"⚠ {warn}")
         elif n.source == "custom":
             item.setToolTip(0, f"{n.name} — pinned")
@@ -261,13 +275,12 @@ class EnsPanel(QWidget):
             item.addChild(note)
             return
         for icon_key, label, value in rows:
-            # ✓ prefix (not suffix) so it survives ElideMiddle. The raw value
-            # — not the badged text — is stored for the copy action.
-            shown = ("✓ " + value) if verified else value
-            ch = QTreeWidgetItem([label, "", shown])
+            ch = QTreeWidgetItem([label, "", value])
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
-            ch.setToolTip(2, _RECORD_TIP if verified else value)
+            ch.setToolTip(2, value)
+            if verified:                # status icon, same as the name rows
+                self._set_status(ch, "ok", _RECORD_TIP)
             item.addChild(ch)
 
     def mark_verified(self, states: "dict[str, OwnershipCheck]",
@@ -296,23 +309,39 @@ class EnsPanel(QWidget):
                 continue
             if item.data(0, _UNSAFE_ROLE):
                 continue          # keep the ⚠; never add a ✓ to a look-alike
-            base = n.name if isinstance(n, EnsName) else item.text(0)
-            if st.owned_by(address):
-                item.setText(0, f"{base}  ✓")
-                item.setToolTip(0, _OWNED_TIP + (_WRAPPED_NOTE if st.wrapped else ""))
+            # Resolved-to: trust the proof — replace (and make copyable) the
+            # verified address on a difference; flag a true mismatch.
+            mismatch = False
             if st.resolved_address:
                 shown = n.resolved_address if isinstance(n, EnsName) else None
-                if shown and shown.lower() == st.resolved_address.lower():
-                    item.setText(2, "✓ " + st.resolved_address)
-                    item.setToolTip(2, _RESOLVED_TIP)
-                else:
-                    # Trust the proof: show (and copy) the verified address.
+                if shown and shown.lower() != st.resolved_address.lower():
+                    mismatch = True
+                if shown is None or mismatch:
                     if isinstance(n, EnsName):
                         n.resolved_address = st.resolved_address
-                    glyph = "✓ " if not shown else "⚠ "
-                    item.setText(2, glyph + st.resolved_address)
-                    item.setToolTip(2, _RESOLVED_TIP if not shown else _MISMATCH_TIP)
+                    item.setText(2, st.resolved_address)
+                    item.setToolTip(2, _MISMATCH_TIP if mismatch else _RESOLVED_TIP)
+            # One status icon for the whole line (ownership + resolution).
+            owned = st.owned_by(address)
+            if mismatch:
+                self._set_status(item, "warn", _MISMATCH_TIP)
+            elif owned:
+                tip = _OWNED_TIP + (_WRAPPED_NOTE if st.wrapped else "")
+                if st.resolved_address:
+                    tip += "\n" + _RESOLVED_TIP
+                self._set_status(item, "ok", tip)
+                item.setToolTip(0, tip)
         return removed
+
+    def _set_status(self, item: QTreeWidgetItem, status: str,
+                    tooltip: str) -> None:
+        """Set the trailing status column's icon + tooltip for a line, ``status``
+        in ``{"ok", "warn"}``. An icon (not a text ✓/⚠) keeps the row height
+        uniform regardless of the theme's emoji rendering."""
+        item.setIcon(self._STATUS_COL,
+                     self._ok_icon if status == "ok" else self._warn_icon)
+        item.setData(0, _STATUS_ROLE, status)
+        item.setToolTip(self._STATUS_COL, tooltip)
 
     def _remove_item(self, item: QTreeWidgetItem, name_l: str) -> None:
         """Drop a row (top-level or subdomain) from the tree + the index."""

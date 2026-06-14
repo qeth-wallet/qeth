@@ -15,7 +15,8 @@ from qeth.ens_app import (
     EnsName, EnsNode, EnsRecords, OwnershipCheck, build_tree,
 )
 from qeth.plugins.ens import (
-    _EXPIRY_STYLE, _NAME_ROLE, _UNSAFE_ROLE, _VALUE_ROLE, EnsPanel, EnsPlugin,
+    _EXPIRY_STYLE, _NAME_ROLE, _STATUS_ROLE, _UNSAFE_ROLE, _VALUE_ROLE,
+    EnsPanel, EnsPlugin,
 )
 
 
@@ -137,8 +138,9 @@ class TestEnsPanel:
         root = panel.tree.topLevelItem(0)
         url_row = next(root.child(i) for i in range(root.childCount())
                        if root.child(i).text(0) == "url")
-        assert url_row.text(2).startswith("✓ ")
-        # the copyable value stays raw (no ✓)
+        # verified status lives in the icon column, value stays raw
+        assert url_row.data(0, _STATUS_ROLE) == "ok"
+        assert url_row.text(2) == "https://alice.example"
         assert url_row.data(0, _VALUE_ROLE) == "https://alice.example"
 
     def test_mark_verified_badges_ownership_and_resolution(self, qtbot):
@@ -150,8 +152,9 @@ class TestEnsPanel:
         states = {"alice.eth": OwnershipCheck(controller=me, resolved_address=me)}
         panel.mark_verified(states, me)
         root = panel.tree.topLevelItem(0)
-        assert root.text(0).endswith("✓")          # ownership confirmed
-        assert root.text(2).startswith("✓ ")        # resolution confirmed
+        assert root.data(0, _STATUS_ROLE) == "ok"   # line verified (icon column)
+        assert root.text(0) == "alice.eth"          # no glyph in the name
+        assert root.text(2) == me                   # no glyph on the value
 
     def test_mark_verified_removes_disowned_name(self, qtbot):
         panel = EnsPanel()
@@ -190,14 +193,13 @@ class TestEnsPanel:
         me = "0x" + "11" * 20
         panel.populate(build_tree([EnsName(scam, resolved_address=me)]), NOW)
         root = panel.tree.topLevelItem(0)
-        # ⚠ shown immediately (before any verification)
-        assert root.text(0).startswith("⚠")
+        # warning shown immediately (before any verification), in the icon column
         assert root.data(0, _UNSAFE_ROLE) is True
-        # even if the chain says it's "owned" (poisoned controller), no ✓ added
+        assert root.data(0, _STATUS_ROLE) == "warn"
+        # even if the chain says it's "owned" (poisoned controller), stays "warn"
         panel.mark_verified(
             {scam.lower(): OwnershipCheck(controller=me, resolved_address=me)}, me)
-        assert "✓" not in panel.tree.topLevelItem(0).text(0)
-        assert panel.tree.topLevelItem(0).text(0).startswith("⚠")
+        assert panel.tree.topLevelItem(0).data(0, _STATUS_ROLE) == "warn"
 
     def test_mark_verified_corrects_resolution_mismatch(self, qtbot):
         panel = EnsPanel()
@@ -210,7 +212,8 @@ class TestEnsPanel:
             {"alice.eth": OwnershipCheck(controller=me, resolved_address=real)},
             me)
         root = panel.tree.topLevelItem(0)
-        assert root.text(2).startswith("⚠ ") and real in root.text(2)
+        assert root.data(0, _STATUS_ROLE) == "warn"   # mismatch flagged
+        assert root.text(2) == real                   # corrected value, no glyph
         # the proof-verified address replaces the indexer's, so copy yields it
         assert root.data(0, _NAME_ROLE).resolved_address == real
 

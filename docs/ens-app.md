@@ -101,6 +101,8 @@ which under-reports ENS). Don't confuse the two.
 | **ENS subgraph** (`domains(where:{owner})`) | **Yes** — native, complete, fast | **Yes** — Graph key (hosted endpoint sunset 2024) | the "fuller/faster" upgrade, key-gated |
 | **ENS metadata service** (`/.../{tokenId}`) | tokenId → name/avatar/**expiry** (NOT enum) | **No** — keyless (verified) | names a tokenId; not an enumerator |
 | **`eth_getLogs`** (BaseRegistrar/NameWrapper `Transfer`, tokenId in indexed topic) | on-chain truth | **No** — but needs a getLogs-friendly RPC | **DRPC 400'd every query**; impractical on DRPC, fine on a getLogs-capable RPC + chunking ([[reference_drpc_limit_shape]]) — the permanent fallback |
+| **Envio HyperRPC / HyperSync** | on-chain truth, *fast* | **Yes** — free API token (probed: public HyperRPC → 401) | the **best keyed pick**: HyperRPC is a drop-in fast `eth_getLogs` endpoint → makes the on-chain getLogs path practical, **lowest lock-in** (plain getLogs, swappable for any RPC) |
+| **Dune** (Query API over decoded ENS tables, or Sim APIs) | yes — very rich (registrant+controller+expiry+records) | **Yes** — API key (free tier) | SQL query API is async/slow + schema-coupled; Sim APIs are fast REST. Good for analytics-heavy needs; more lock-in |
 | Alchemy `getNFTsForOwner` / Reservoir / SimpleHash | yes (also getLogs-friendly RPCs) | **Yes** — API key (Alchemy free tier) | keyed; same rot risk as any hosted service |
 | **Blockscout** generic NFT-by-owner (`/addresses/{a}/nft`) | **No — verified gap** | **No** | under-reports ENS — use BENS, not this |
 
@@ -108,10 +110,13 @@ which under-reports ENS). Don't confuse the two.
 (`owned_by` + `resolved_to`), then per name: **scam-filter** the poison
 subdomains (reuse the notification scam heuristic) and **verify on-chain**
 (`namehash`, `registry.owner`/`ownerOf`, resolver records, expiry). Seed also
-from the **primary name** + manual pin (both keyless, zero-trust). The **ENS
-subgraph** is the opt-in keyed upgrade (fuller + the registrant/cold-storage
-names BENS's controller-view misses); **`getLogs`** is the permanent fallback
-for anyone on a getLogs-capable RPC. BENS is still a hosted service (rot
+from the **primary name** + manual pin (both keyless, zero-trust). Opt-in keyed
+upgrades (all pluggable `NameSource`s, all on-chain-verified): the **ENS
+subgraph** (fuller + the registrant/cold-storage names BENS's controller-view
+misses), **Envio HyperRPC** (a free-token fast `eth_getLogs` endpoint that makes
+the on-chain-truth path practical — lowest lock-in), or **Dune/Alchemy** for
+analytics/general-NFT needs. **`getLogs`** stays the permanent fallback for
+anyone on any getLogs-capable RPC. BENS is still a hosted service (rot
 principle, §2.1c) — but keyless, Blockscout-operated, self-hostable, and
 already a qeth dependency, so it's a sound *swappable* default, never a hard
 dependency (on-chain verification keeps it honest).

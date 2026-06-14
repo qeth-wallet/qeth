@@ -331,6 +331,12 @@ class MainWindow(QMainWindow):
         self.right_slot.add_shared_widget(self.chain_combo)
         self.chain_rpc_btn = self._build_chain_rpc_button()
         self.right_slot.add_shared_widget(self.chain_rpc_btn)
+        # The chain selector is meaningless on the ENS tab — ENS lives only on
+        # Ethereum mainnet, so the plugin pins to chain 1 regardless of the
+        # selected network. Hide it there (showing it just invites a switch
+        # that does nothing, which reads as a bug).
+        self.right_slot.active_plugin_changed.connect(self._on_right_plugin_changed)
+        self._on_right_plugin_changed(self.right_slot.active())   # sync initial
         outer.addWidget(self.right_slot)
 
         outer.setStretchFactor(0, 1)
@@ -1127,6 +1133,13 @@ class MainWindow(QMainWindow):
     @property
     def act_remove(self):
         return self.wallets_plugin.act_remove
+
+    def _on_right_plugin_changed(self, plugin) -> None:
+        """Hide the shared chain controls on tabs where a network choice is
+        meaningless — currently the ENS tab (mainnet-only)."""
+        show = plugin is not self.ens_plugin
+        self.chain_combo.setVisible(show)
+        self.chain_rpc_btn.setVisible(show)
 
     def _on_chain_changed(self, idx: int) -> None:
         cid = self.chain_combo.itemData(idx)

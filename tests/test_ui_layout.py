@@ -98,6 +98,17 @@ def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
     assert mainwindow.right_slot.active() is mainwindow.tokens_plugin
 
 
+def test_chain_controls_hidden_on_ens_tab(qtbot, mainwindow):
+    """ENS is mainnet-only, so the network selector is meaningless there and
+    is hidden — restored on any other tab."""
+    mw = mainwindow
+    assert not mw.chain_combo.isHidden()          # Tokens active initially
+    mw.right_slot.set_active(mw.ens_plugin)
+    assert mw.chain_combo.isHidden() and mw.chain_rpc_btn.isHidden()
+    mw.right_slot.set_active(mw.tokens_plugin)
+    assert not mw.chain_combo.isHidden() and not mw.chain_rpc_btn.isHidden()
+
+
 # --- Bottom-of-right: single shared row -------------------------------------
 
 def test_chain_combo_and_token_actions_share_one_row(mainwindow):

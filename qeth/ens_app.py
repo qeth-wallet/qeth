@@ -75,6 +75,8 @@ _SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
 _SEL_OWNER_OF = bytes.fromhex("6352211e")   # ERC721.ownerOf(uint256)
 _SEL_ADDR = bytes.fromhex("3b3b57de")       # resolver.addr(bytes32) — legacy
 _SEL_ADDR_COIN = bytes.fromhex("f1cb7e06")  # resolver.addr(bytes32,uint256)
+_SEL_TEXT = bytes.fromhex("59d1d43c")       # resolver.text(bytes32,string)
+_SEL_CONTENTHASH = bytes.fromhex("bc1c58d1")  # resolver.contenthash(bytes32)
 _ETH_COIN_TYPE = 60                         # ENSIP-9 coin type for ETH
 
 
@@ -481,40 +483,46 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
     return out
 
 
-def read_records(rpc_url: str, name: str, *,
-                 text_keys: tuple = TEXT_KEYS, ccip: bool = True) -> EnsRecords:
-    """Read a name's resolver records on-chain: a curated set of text records
-    plus the contenthash. Best-effort per record — a resolver that lacks one
-    just omits it; any hard failure returns whatever was gathered. ``rpc_url``
-    should be mainnet (or a verified Helios sidecar — same as ``ens.py``).
-    ``ccip=False`` forbids offchain gateway hops, so over a Helios sidecar the
-    records are fully proof-verified on-chain reads."""
+def _decode_abi_string(raw) -> Optional[str]:
+    """Decode an ABI ``string`` return (resolver.text). None when empty."""
+    from eth_abi import decode as abi_decode
+    s = abi_decode(["string"], bytes(raw))[0]
+    return s or None
+
+
+def _read_records_via_client(
+    client, name: str, *, text_keys: tuple = TEXT_KEYS, block: str = "finalized",
+) -> EnsRecords:
+    """Read a name's resolver records in TWO multicalls, not ~20 round-trips.
+
+    web3's ``w3.ens.get_text`` re-resolves the resolver and round-trips per key,
+    so the old path did roughly 2×(len(text_keys)) + 2 sequential calls — slow
+    even for a name with no records. Here: round 1 looks up the resolver once;
+    round 2 batches every ``text(node,key)`` + ``contenthash(node)`` into a
+    single ``aggregate3``. A name with no resolver costs one call; no records,
+    two."""
+    from eth_abi import encode as abi_encode
     rec = EnsRecords()
-    try:
-        from .ens import _make_w3
-    except ImportError:
+    node = namehash(name)
+    with client.multicall(block=block) as mc:
+        resolver_p = mc.add(ENS_REGISTRY, _SEL_RESOLVER + node,
+                            decoder=_decode_addr_word)
+    resolver = resolver_p.value if resolver_p.success else None
+    if not resolver:
         return rec
-    try:
-        w3 = _make_w3(rpc_url, ccip=ccip)
-    except Exception:
-        return rec
-    node = namehash(name)        # for the raw contenthash call
-    for key in text_keys:
-        try:
-            v = w3.ens.get_text(name, key)
-            if v:
-                rec.texts[key] = str(v)
-        except Exception:
-            pass
-    # contenthash: resolver.contenthash(node) — selector 0xbc1c58d1
-    try:
-        resolver = w3.ens.resolver(name)
-        if resolver is not None:
-            data = "0xbc1c58d1" + node.hex()
-            raw = w3.eth.call({"to": resolver.address, "data": data})
-            rec.contenthash = decode_contenthash(_abi_bytes(raw))
-    except Exception:
-        pass
+    text_p: dict = {}
+    with client.multicall(block=block) as mc:
+        for key in text_keys:
+            data = _SEL_TEXT + abi_encode(["bytes32", "string"], [node, key])
+            text_p[key] = mc.add(resolver, data, decoder=_decode_abi_string)
+        content_p = mc.add(
+            resolver, _SEL_CONTENTHASH + node,
+            decoder=lambda raw: decode_contenthash(_abi_bytes(raw)))
+    for key, p in text_p.items():
+        if p.success and p.value:
+            rec.texts[key] = str(p.value)
+    if content_p.success and content_p.value:
+        rec.contenthash = content_p.value
     return rec
 
 
@@ -524,17 +532,20 @@ def verified_read_records(
 ) -> "Tuple[EnsRecords, bool]":
     """Read a name's records, Helios-first → ``(records, verified)``.
 
-    When a mainnet Helios sidecar is ready, the resolver reads route through it
-    with CCIP off, so the records are proof-verified on-chain reads and
-    ``verified`` is True. Otherwise we fall back to the chain's normal RPC
-    (CCIP allowed) marked unverified — same shape as ``ens.verified_*``."""
-    from .verified import verified_or_plain
-    # Records use web3's CCIP-policy knob, so we read by rpc_url, not EthClient.
-    # ccip is the inverse of verified: strict on-chain when proven, gateway-
-    # following allowed on the unverified fallback (data the indexer never had).
-    target, verified = verified_or_plain(chain, wait_s=wait_s)
-    return (read_records(target.rpc_url, name, text_keys=text_keys,
-                         ccip=not verified), verified)
+    When a mainnet Helios sidecar is ready the resolver reads route through it
+    and ``verified`` is True; otherwise they run against the chain's normal RPC,
+    marked unverified (records are data the indexer never had, so — unlike
+    ownership — we still read them without a sidecar: ``fallback=True``). Both
+    paths are the same two batched multicalls."""
+    from .verified import verified_client
+    client, verified = verified_client(chain, wait_s=wait_s, fallback=True)
+    if client is None:
+        return EnsRecords(), False
+    try:
+        return _read_records_via_client(client, name, text_keys=text_keys), verified
+    except Exception:
+        log.debug("ENS read_records failed", exc_info=True)
+        return EnsRecords(), verified
 
 
 def _abi_bytes(raw) -> Optional[str]:

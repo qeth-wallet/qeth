@@ -248,6 +248,30 @@ def test_read_name_states_unwraps_namewrapper():
     assert st.owned_by(REAL)
 
 
+def test_read_records_via_client_batches():
+    RESOLVER = "0x" + "ab" * 20
+
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RESOLVER:
+            return True, RESOLVER
+        if target == RESOLVER and sel == ea._SEL_TEXT:
+            return True, "hello"
+        if target == RESOLVER and sel == ea._SEL_CONTENTHASH:
+            return True, "ipfs://bafy"
+        return False, None
+
+    rec = ea._read_records_via_client(_FakeClient(resp), "vitalik.eth")
+    assert rec.contenthash == "ipfs://bafy"
+    assert rec.texts and all(v == "hello" for v in rec.texts.values())
+
+
+def test_read_records_via_client_no_resolver_is_empty():
+    # registry.resolver returns nothing → no second round, empty records.
+    rec = ea._read_records_via_client(
+        _FakeClient(lambda t, s: (False, None)), "x.eth")
+    assert rec.texts == {} and rec.contenthash is None
+
+
 def test_verify_names_no_helios_returns_unverified(monkeypatch):
     # No sidecar → the verified-only path (fallback=False) yields nothing.
     monkeypatch.setattr("qeth.verified.verified_chain", lambda *a, **k: None)

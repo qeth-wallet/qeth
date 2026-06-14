@@ -21,9 +21,10 @@ from PySide6.QtGui import (
     QAction, QBrush, QColor, QDesktopServices, QIcon, QPalette,
 )
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QInputDialog, QMenu, QPushButton, QSizePolicy,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHeaderView, QInputDialog, QMenu,
+    QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..ens_app import (
@@ -144,10 +145,25 @@ def _table_row_height() -> int:
     return _TABLE_ROW_H
 
 
+def _selection_color(palette: QPalette, focused: bool) -> QColor:
+    """The row-selection fill: the full highlight when the list is focused, a
+    quieter highlight↔base blend when not (so an inactive panel recedes)."""
+    hl = palette.color(QPalette.ColorRole.Highlight)
+    if focused:
+        return hl
+    base = palette.color(QPalette.ColorRole.Base)
+    return QColor((hl.red() * 11 + base.red() * 9) // 20,
+                  (hl.green() * 11 + base.green() * 9) // 20,
+                  (hl.blue() * 11 + base.blue() * 9) // 20)
+
+
 class _EnsItemDelegate(QStyledItemDelegate):
     """Make the ENS tree look like the wallet / token / tx lists: table-height
     rows, focus-aware selection (full highlight when focused, a quieter blend
     when not — so an inactive panel recedes), and no hover/focus-rect tint.
+
+    Paints only the cell rect; the branch (+/-) column's highlight is handled by
+    ``_EnsTree.drawBranches`` so the indicator stays drawn on top of it.
 
     Self-contained on purpose: the main window's delegate reads wallet-only
     roles (and paints account pills), and its label role collides with this
@@ -163,20 +179,7 @@ class _EnsItemDelegate(QStyledItemDelegate):
             return None
         view = self.parent()
         focused = isinstance(view, QWidget) and view.hasFocus()
-        hl = option.palette.color(QPalette.ColorRole.Highlight)
-        if focused:
-            return hl
-        base = option.palette.color(QPalette.ColorRole.Base)
-        return QColor((hl.red() * 11 + base.red() * 9) // 20,
-                      (hl.green() * 11 + base.green() * 9) // 20,
-                      (hl.blue() * 11 + base.blue() * 9) // 20)
-
-    def _row_fill_rect(self, option, index):
-        # On the tree column, extend the fill left over the indent so the
-        # selection reaches the edge (a no-op on the other columns).
-        if index.column() == 0:
-            return option.rect.adjusted(-option.rect.left(), 0, 0, 0)
-        return option.rect
+        return _selection_color(option.palette, focused)
 
     def paint(self, painter, option, index) -> None:
         opt = QStyleOptionViewItem(option)
@@ -184,7 +187,7 @@ class _EnsItemDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.StateFlag.State_HasFocus    # no dotted focus rect
         fill = self._selection_fill(option)
         if fill is not None:
-            painter.fillRect(self._row_fill_rect(option, index), fill)
+            painter.fillRect(option.rect, fill)
             tc = option.palette.color(
                 QPalette.ColorRole.HighlightedText if fill.lightness() < 140
                 else QPalette.ColorRole.Text)
@@ -194,6 +197,18 @@ class _EnsItemDelegate(QStyledItemDelegate):
             for role in (QPalette.ColorRole.Base, QPalette.ColorRole.AlternateBase):
                 opt.palette.setColor(role, fill)
         super().paint(painter, opt, index)
+
+
+class _EnsTree(QTreeWidget):
+    """Tree that highlights the branch (+/-) gutter to match a selected row,
+    then lets Qt draw the indicator on top — so the +/- stays visible on the
+    highlight instead of being painted over."""
+
+    def drawBranches(self, painter, rect, index) -> None:
+        model = self.selectionModel()
+        if model is not None and model.isSelected(index):
+            painter.fillRect(rect, _selection_color(self.palette(), self.hasFocus()))
+        super().drawBranches(painter, rect, index)
 
 
 class _RightIconDelegate(_EnsItemDelegate):
@@ -320,11 +335,13 @@ class EnsPanel(QWidget):
         self._items_by_name: dict[str, QTreeWidgetItem] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.tree = QTreeWidget()
+        self.tree = _EnsTree()
         self.tree.setColumnCount(len(self.COLS))
         self.tree.setHeaderLabels(self.COLS)
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
         self.tree.setIconSize(QSize(16, 16))
         # Resolved addresses are full 42-char strings shown in the stretch
         # column; let Qt middle-elide them as the tab narrows (same as the

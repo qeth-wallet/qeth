@@ -156,6 +156,18 @@ def test_namehash_known_vectors():
         "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae")
 
 
+def test_name_warning_flags_confusables():
+    zwj = "‍"
+    # clean names (incl. valid emoji) → no warning
+    assert ea.name_warning("vitalik.eth") is None
+    assert ea.name_warning("\U0001F680.eth") is None          # 🚀.eth
+    # invisible zero-width joiners between letters → flagged
+    zname = "v" + zwj + "i" + zwj + "t" + zwj + "a" + zwj + "l" + zwj + "ik.eth"
+    assert ea.name_warning(zname) is not None
+    # mixed-script homoglyph (Cyrillic 'а' U+0430) → flagged
+    assert ea.name_warning("vitаlik.eth") is not None
+
+
 def test_is_eth_2ld():
     assert ea._is_eth_2ld("vitalik.eth")
     assert not ea._is_eth_2ld("blog.vitalik.eth")   # subdomain

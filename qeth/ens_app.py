@@ -125,6 +125,36 @@ class EnsNode:
     children: "list[EnsNode]" = field(default_factory=list)
 
 
+def name_warning(name: str) -> Optional[str]:
+    """A look-alike/confusable warning for ``name`` per ENSIP-15 normalization —
+    the same check the ENS app uses — or None when the name is clean.
+
+    Scammers register names that *render* like a trusted one but contain
+    invisible joiners (``v‍i‍t‍a‍l‍i‍k‍.eth``) or mixed-script homoglyphs (a
+    Cyrillic ``а`` for the Latin ``a``); both are disallowed by normalization,
+    which raises. A name that normalizes to a *different* string isn't in
+    canonical form and displays deceptively. (ENSIP-15 still allows valid emoji
+    names, so this doesn't false-positive on those.)
+
+    Uses web3's ``ens`` normalizer; if it's unavailable, returns None rather
+    than guessing."""
+    try:
+        from ens.utils import normalize_name
+    except ImportError:
+        return None
+    try:
+        norm = normalize_name(name)
+    except Exception:
+        return ("Not a valid ENS name — it contains disallowed, invisible, or "
+                "mixed-script characters and may be a look-alike of another "
+                "name. Do not trust it.")
+    if norm != name:
+        return (f"This name is not in canonical form — it displays differently "
+                f"from how it normalizes (“{norm}”). Possible "
+                f"look-alike.")
+    return None
+
+
 @dataclass
 class OwnershipCheck:
     """On-chain (Helios-verifiable) state for one name — the ground truth the

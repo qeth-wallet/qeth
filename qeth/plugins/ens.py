@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from ..ens_app import (
     ENS_APP_URL, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode, EnsRecords,
     OwnershipCheck, build_tree, expiry_status, fetch_name, lookup_owned_names,
-    read_records, verified_read_records, verify_names,
+    name_warning, read_records, verified_read_records, verify_names,
 )
 from ..plugin import Plugin
 
@@ -36,6 +36,9 @@ ENS_CHAIN_ID = 1                       # ENS lives on Ethereum mainnet
 _NAME_ROLE = Qt.ItemDataRole.UserRole          # stores the EnsName on a row
 _LOADED_ROLE = Qt.ItemDataRole.UserRole + 1    # records-loaded flag
 _VALUE_ROLE = Qt.ItemDataRole.UserRole + 2     # copyable value on a record row
+_UNSAFE_ROLE = Qt.ItemDataRole.UserRole + 3    # confusable / non-normalized name
+
+_WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
 
 # Verified-via-Helios markers. On the address column a leading glyph (not
 # trailing) survives the tree's ElideMiddle, which keeps both ends visible.
@@ -218,7 +221,16 @@ class EnsPanel(QWidget):
         item.setData(0, _LOADED_ROLE, False)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
-        if n.source == "custom":
+        # Confusable / non-normalized name → a prominent ⚠ shown immediately (no
+        # wait on verification), red, with an explaining tooltip. Flagged so
+        # verification never lends it a legitimizing ✓.
+        warn = name_warning(n.name)
+        if warn is not None:
+            item.setData(0, _UNSAFE_ROLE, True)
+            item.setText(0, f"⚠ {n.name}")
+            item.setForeground(0, QBrush(_WARN_COLOR))
+            item.setToolTip(0, f"⚠ {warn}")
+        elif n.source == "custom":
             item.setToolTip(0, f"{n.name} — pinned")
         self._items_by_name[n.name.lower()] = item
         for child in node.children:
@@ -282,6 +294,8 @@ class EnsPanel(QWidget):
                 self._remove_item(item, name_l)
                 removed.append(name_l)
                 continue
+            if item.data(0, _UNSAFE_ROLE):
+                continue          # keep the ⚠; never add a ✓ to a look-alike
             base = n.name if isinstance(n, EnsName) else item.text(0)
             if st.owned_by(address):
                 item.setText(0, f"{base}  ✓")

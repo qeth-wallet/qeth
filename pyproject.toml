@@ -138,6 +138,7 @@ module = [
     "eth_typing.*",
     "segno.*",
     "web3.*",
+    "ens.*",
     "eth_abi.*",
     "eth_utils.*",
     "hexbytes.*",

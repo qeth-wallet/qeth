@@ -15,7 +15,7 @@ from qeth.ens_app import (
     EnsName, EnsNode, EnsRecords, OwnershipCheck, build_tree,
 )
 from qeth.plugins.ens import (
-    _EXPIRY_STYLE, _NAME_ROLE, _VALUE_ROLE, EnsPanel, EnsPlugin,
+    _EXPIRY_STYLE, _NAME_ROLE, _UNSAFE_ROLE, _VALUE_ROLE, EnsPanel, EnsPlugin,
 )
 
 
@@ -181,6 +181,23 @@ class TestEnsPanel:
             {"watch.eth": OwnershipCheck(controller=other)}, me)
         assert removed == []
         assert panel.tree.topLevelItemCount() == 1
+
+    def test_confusable_name_flagged_and_never_gets_check(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        zwj = "‍"
+        scam = "v" + zwj + "i" + zwj + "t" + zwj + "alik.eth"
+        me = "0x" + "11" * 20
+        panel.populate(build_tree([EnsName(scam, resolved_address=me)]), NOW)
+        root = panel.tree.topLevelItem(0)
+        # ⚠ shown immediately (before any verification)
+        assert root.text(0).startswith("⚠")
+        assert root.data(0, _UNSAFE_ROLE) is True
+        # even if the chain says it's "owned" (poisoned controller), no ✓ added
+        panel.mark_verified(
+            {scam.lower(): OwnershipCheck(controller=me, resolved_address=me)}, me)
+        assert "✓" not in panel.tree.topLevelItem(0).text(0)
+        assert panel.tree.topLevelItem(0).text(0).startswith("⚠")
 
     def test_mark_verified_corrects_resolution_mismatch(self, qtbot):
         panel = EnsPanel()

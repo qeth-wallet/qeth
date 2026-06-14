@@ -27,7 +27,6 @@ from ..ens_app import (
     ENS_APP_URL, EnsCache, EnsName, EnsNode, EnsRecords, build_tree,
     expiry_status, fetch_name, lookup_owned_names, read_records,
 )
-from ..formatting import short_addr
 from ..plugin import Plugin
 
 log = logging.getLogger("qeth.plugins.ens")
@@ -113,7 +112,6 @@ class EnsPanel(QWidget):
     """The tree widget: names → owned subdomains → records."""
 
     add_custom_requested = Signal()
-    refresh_requested = Signal()
     records_requested = Signal(str)    # name → load its records (lazy)
 
     COLS = ["Name", "Expires", "Resolves to"]
@@ -128,6 +126,10 @@ class EnsPanel(QWidget):
         self.tree.setHeaderLabels(self.COLS)
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
+        # Resolved addresses are full 42-char strings shown in the stretch
+        # column; let Qt middle-elide them as the tab narrows (same as the
+        # wallet address list) instead of pre-shortening to 0x…tail.
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -157,8 +159,7 @@ class EnsPanel(QWidget):
         status = expiry_status(n.expiry_ts, now_ts)
         text, colour = _EXPIRY_STYLE.get(status, (None, None))
         exp_col = text or (_fmt_expiry(n.expiry_ts) if n.expiry_ts else "")
-        item = QTreeWidgetItem([n.name, exp_col,
-                                short_addr(n.resolved_address) if n.resolved_address else ""])
+        item = QTreeWidgetItem([n.name, exp_col, n.resolved_address or ""])
         item.setIcon(0, self._sub_icon if is_sub else self._domain_icon)
         item.setData(0, _NAME_ROLE, n)
         item.setData(0, _LOADED_ROLE, False)
@@ -245,7 +246,6 @@ class EnsPlugin(Plugin):
         self._panel: Optional[EnsPanel] = None
         self._loaded_for: Optional[str] = None
         self._add_btn: Optional[QPushButton] = None
-        self._refresh_btn: Optional[QPushButton] = None
 
     # --- plugin contract --------------------------------------------------
 
@@ -254,18 +254,22 @@ class EnsPlugin(Plugin):
             self._panel = EnsPanel()
             self._panel.records_requested.connect(self._on_records_requested)
             self._panel.add_custom_requested.connect(self._on_add_custom)
-            self._panel.refresh_requested.connect(self._on_refresh)
         return self._panel
 
     def action_widgets(self) -> "list[QWidget]":
         if self._add_btn is None:
-            self._add_btn = QPushButton("Add name")
+            # Themed "+" icon, matching the Tokens pane's add button.
+            app = QApplication.instance()
+            fallback = QIcon()
+            if isinstance(app, QApplication):
+                fallback = app.style().standardIcon(
+                    QStyle.StandardPixmap.SP_FileDialogNewFolder)
+            self._add_btn = QPushButton()
+            self._add_btn.setIcon(QIcon.fromTheme("list-add", fallback))
             self._add_btn.setToolTip("Pin an ENS name to always show")
             self._add_btn.clicked.connect(self._on_add_custom)
-            self._refresh_btn = QPushButton("Refresh")
-            self._refresh_btn.clicked.connect(self._on_refresh)
-        assert self._add_btn is not None and self._refresh_btn is not None
-        return [self._add_btn, self._refresh_btn]
+        assert self._add_btn is not None
+        return [self._add_btn]
 
     def on_account_changed(self, address: Optional[str]) -> None:
         self._load(address)

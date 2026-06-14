@@ -53,6 +53,7 @@ _MISMATCH_TIP = (
     "showing (and copying) the verified address."
 )
 _RECORD_TIP = "Record proof-verified on-chain via a Helios light client."
+_WRAPPED_NOTE = "\nHeld via the ENS NameWrapper (ERC-1155)."
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
 # a status chip, not palette-driven text.
@@ -263,7 +264,7 @@ class EnsPanel(QWidget):
             base = n.name if isinstance(n, EnsName) else item.text(0)
             if st.owned_by(address):
                 item.setText(0, f"{base}  ✓")
-                item.setToolTip(0, _OWNED_TIP)
+                item.setToolTip(0, _OWNED_TIP + (_WRAPPED_NOTE if st.wrapped else ""))
             elif st.controller is not None or st.registrant is not None:
                 item.setText(0, f"{base}  ⚠")
                 item.setToolTip(0, _UNOWNED_TIP)

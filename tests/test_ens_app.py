@@ -227,6 +227,27 @@ def test_read_name_states_orchestration():
     assert sub.resolved_address == "0xReso1ved"
 
 
+def test_read_name_states_unwraps_namewrapper():
+    # Wrapped name: registry.owner and registrar.ownerOf both point at the
+    # NameWrapper; the real owner is NameWrapper.ownerOf(node).
+    REAL = "0xReal0wnerReal0wnerReal0wnerReal0wner00"
+
+    def resp(target, sel):
+        if target == ea.ENS_NAME_WRAPPER and sel == ea._SEL_OWNER_OF:
+            return True, REAL
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_OWNER:
+            return True, ea.ENS_NAME_WRAPPER
+        if target == ea.ENS_ETH_REGISTRAR and sel == ea._SEL_OWNER_OF:
+            return True, ea.ENS_NAME_WRAPPER
+        return False, None
+
+    states = ea._read_name_states(_FakeClient(resp), ["curvefi.eth"])
+    st = states["curvefi.eth"]
+    assert st.wrapped is True
+    assert st.controller == REAL and st.registrant == REAL
+    assert st.owned_by(REAL)
+
+
 def test_verify_names_no_helios_returns_unverified(monkeypatch):
     # No sidecar → the verified-only path (fallback=False) yields nothing.
     monkeypatch.setattr("qeth.verified.verified_chain", lambda *a, **k: None)

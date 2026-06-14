@@ -63,6 +63,12 @@ TEXT_KEYS = (
 # *registrant* (the real owner; the controller may be a delegate).
 ENS_REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
 ENS_ETH_REGISTRAR = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+# The NameWrapper holds wrapped names as ERC-1155s keyed by uint256(namehash).
+# For a wrapped name BOTH registry.owner(node) and registrar.ownerOf(tokenId)
+# return THIS address (the wrapper holds them) — the real owner is
+# NameWrapper.ownerOf(uint256(namehash)). Without unwrapping, every wrapped name
+# (which the ENS app shows as yours) would read as "not owned".
+ENS_NAME_WRAPPER = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401"
 
 _SEL_OWNER = bytes.fromhex("02571be3")      # registry.owner(bytes32)
 _SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
@@ -129,6 +135,7 @@ class OwnershipCheck:
     controller: Optional[str] = None
     registrant: Optional[str] = None
     resolved_address: Optional[str] = None
+    wrapped: bool = False               # held by the ENS NameWrapper
 
     def owned_by(self, address: str) -> bool:
         """True when ``address`` is the controller or the registrant."""
@@ -414,6 +421,7 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
     owner_p: dict = {}
     resolver_p: dict = {}
     registrant_p: dict = {}
+    wrapped_p: dict = {}
     # Read at "finalized": ENS ownership/resolution isn't second-sensitive, so
     # irreversible state is the right (stronger) basis, and it avoids the brief
     # post-sync window where a Helios sidecar's head outruns the execution RPC.
@@ -424,19 +432,34 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
                                 decoder=_decode_addr_word)
             resolver_p[n] = mc.add(ENS_REGISTRY, _SEL_RESOLVER + node,
                                    decoder=_decode_addr_word)
+            # NameWrapper.ownerOf(uint256(node)) — the real owner when wrapped;
+            # zero (→ None) for unwrapped names.
+            wrapped_p[n] = mc.add(ENS_NAME_WRAPPER, _SEL_OWNER_OF + node,
+                                  decoder=_decode_addr_word)
             if _is_eth_2ld(n):
                 tid = _labelhash(n.split(".")[0])
                 registrant_p[n] = mc.add(ENS_ETH_REGISTRAR, _SEL_OWNER_OF + tid,
                                          decoder=_decode_addr_word)
 
+    wrapper = ENS_NAME_WRAPPER.lower()
     resolvers: dict = {}
     for n in names:
         st = out[n.lower()]
-        if owner_p[n].success:
-            st.controller = owner_p[n].value
-        rp = registrant_p.get(n)
-        if rp is not None and rp.success:
-            st.registrant = rp.value
+        wrapped_owner = wrapped_p[n].value if wrapped_p[n].success else None
+        controller = owner_p[n].value if owner_p[n].success else None
+        registrant = registrant_p[n].value if (
+            n in registrant_p and registrant_p[n].success) else None
+        # A wrapped name reads as owned-by-the-wrapper in both roles; the real
+        # owner is the ERC-1155 holder. Substitute it and flag the wrap.
+        if (controller or "").lower() == wrapper or \
+                (registrant or "").lower() == wrapper:
+            st.wrapped = True
+            if (controller or "").lower() == wrapper:
+                controller = wrapped_owner
+            if (registrant or "").lower() == wrapper:
+                registrant = wrapped_owner
+        st.controller = controller
+        st.registrant = registrant
         if resolver_p[n].success and resolver_p[n].value:
             resolvers[n] = resolver_p[n].value
 

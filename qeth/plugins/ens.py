@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..ens_app import (
-    ENS_APP_URL, EnsCache, EnsName, EnsNode, EnsRecords, build_tree,
-    expiry_status, fetch_name, lookup_owned_names, read_records,
+    ENS_APP_URL, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode, EnsRecords,
+    OwnershipCheck, build_tree, expiry_status, fetch_name, lookup_owned_names,
+    verified_read_records, verify_names,
 )
 from ..plugin import Plugin
 
@@ -35,6 +36,23 @@ ENS_CHAIN_ID = 1                       # ENS lives on Ethereum mainnet
 _NAME_ROLE = Qt.ItemDataRole.UserRole          # stores the EnsName on a row
 _LOADED_ROLE = Qt.ItemDataRole.UserRole + 1    # records-loaded flag
 _VALUE_ROLE = Qt.ItemDataRole.UserRole + 2     # copyable value on a record row
+
+# Verified-via-Helios markers. On the address column a leading glyph (not
+# trailing) survives the tree's ElideMiddle, which keeps both ends visible.
+_OWNED_TIP = (
+    "Ownership proof-verified on-chain via a Helios light client — your "
+    "address is the controller or registrant of this name."
+)
+_UNOWNED_TIP = (
+    "⚠ On-chain state shows this name is NOT controlled by your address. "
+    "The indexer that listed it may be stale or wrong."
+)
+_RESOLVED_TIP = "Resolved address proof-verified on-chain via a Helios light client."
+_MISMATCH_TIP = (
+    "⚠ The indexer's address differs from the proof-verified resolution — "
+    "showing (and copying) the verified address."
+)
+_RECORD_TIP = "Record proof-verified on-chain via a Helios light client."
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
 # a status chip, not palette-driven text.
@@ -94,18 +112,46 @@ class EnsNamesWorker(QThread):
 
 
 class EnsRecordsWorker(QThread):
-    """Read one name's resolver records on-chain (lazy, on expand). Emits
-    ``ready(name, records)``."""
+    """Read one name's resolver records (lazy, on expand), Helios-verified when
+    a sidecar is ready. Emits ``ready(name, records, verified)``."""
 
-    ready = Signal(str, object)        # (name, EnsRecords)
+    ready = Signal(str, object, bool)        # (name, EnsRecords, verified)
 
-    def __init__(self, rpc_url: str, name: str, parent=None):
+    def __init__(self, chain, name: str, parent=None,
+                 *, wait_s: float = VERIFY_WAIT_S):
         super().__init__(parent)
-        self._rpc = rpc_url
+        self._chain = chain
         self._name = name
+        self._wait_s = wait_s
 
     def run(self) -> None:
-        self.ready.emit(self._name, read_records(self._rpc, self._name))
+        rec, verified = verified_read_records(
+            self._chain, self._name, wait_s=self._wait_s)
+        self.ready.emit(self._name, rec, verified)
+
+
+class EnsVerifyWorker(QThread):
+    """Verify the displayed names against on-chain state through Helios — in two
+    batched multicalls (ownership + resolved-address), not per-name. Emits
+    ``ready(address, states, verified)`` where ``states`` is
+    ``{name_lower: OwnershipCheck}``. ``verified`` is True only when a Helios
+    sidecar proved the reads; otherwise ``states`` is empty and the rows stay
+    unbadged (never blocked, never trusting an unverified re-read)."""
+
+    ready = Signal(str, object, bool)        # (address, states, verified)
+
+    def __init__(self, chain, address: str, names: "list[str]", parent=None,
+                 *, wait_s: float = VERIFY_WAIT_S):
+        super().__init__(parent)
+        self._chain = chain
+        self._address = address
+        self._names = list(names)
+        self._wait_s = wait_s
+
+    def run(self) -> None:
+        states, verified = verify_names(
+            self._chain, self._names, wait_s=self._wait_s)
+        self.ready.emit(self._address, states, verified)
 
 
 class EnsPanel(QWidget):
@@ -176,7 +222,8 @@ class EnsPanel(QWidget):
             item.addChild(QTreeWidgetItem(["…loading records"]))
         return item
 
-    def add_records(self, name: str, rec: EnsRecords) -> None:
+    def add_records(self, name: str, rec: EnsRecords,
+                    verified: bool = False) -> None:
         item = self._items_by_name.get(name.lower())
         if item is None:
             return
@@ -193,11 +240,45 @@ class EnsPanel(QWidget):
             item.addChild(note)
             return
         for icon_key, label, value in rows:
-            ch = QTreeWidgetItem([label, "", value])
+            # ✓ prefix (not suffix) so it survives ElideMiddle. The raw value
+            # — not the badged text — is stored for the copy action.
+            shown = ("✓ " + value) if verified else value
+            ch = QTreeWidgetItem([label, "", shown])
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
-            ch.setToolTip(2, value)
+            ch.setToolTip(2, _RECORD_TIP if verified else value)
             item.addChild(ch)
+
+    def mark_verified(self, states: "dict[str, OwnershipCheck]",
+                      address: str) -> None:
+        """Apply the batched on-chain verification to the rows: a ✓ / ⚠ on the
+        Name column for ownership, and a ✓ (or a ⚠ + corrected value) on the
+        Resolves-to column. Only called with proof-verified state, so trusting
+        it over the indexer's hint on a mismatch is sound."""
+        for name_l, st in states.items():
+            item = self._items_by_name.get(name_l)
+            if item is None:
+                continue
+            n = item.data(0, _NAME_ROLE)
+            base = n.name if isinstance(n, EnsName) else item.text(0)
+            if st.owned_by(address):
+                item.setText(0, f"{base}  ✓")
+                item.setToolTip(0, _OWNED_TIP)
+            elif st.controller is not None or st.registrant is not None:
+                item.setText(0, f"{base}  ⚠")
+                item.setToolTip(0, _UNOWNED_TIP)
+            if st.resolved_address:
+                shown = n.resolved_address if isinstance(n, EnsName) else None
+                if shown and shown.lower() == st.resolved_address.lower():
+                    item.setText(2, "✓ " + st.resolved_address)
+                    item.setToolTip(2, _RESOLVED_TIP)
+                else:
+                    # Trust the proof: show (and copy) the verified address.
+                    if isinstance(n, EnsName):
+                        n.resolved_address = st.resolved_address
+                    glyph = "✓ " if not shown else "⚠ "
+                    item.setText(2, glyph + st.resolved_address)
+                    item.setToolTip(2, _RESOLVED_TIP if not shown else _MISMATCH_TIP)
 
     # --- interaction ------------------------------------------------------
 
@@ -299,6 +380,16 @@ class EnsPlugin(Plugin):
         if not address:
             self._panel.populate([], int(time.time()))
             return
+        # Warm a mainnet Helios sidecar now so on-chain verification of the
+        # names is ready (or close) by the time discovery returns. Cheap (one
+        # Popen) and a no-op when Helios is absent/disabled.
+        chain = self._mainnet()
+        if chain is not None:
+            try:
+                from ..helios import prewarm
+                prewarm(chain)
+            except Exception:
+                log.debug("helios prewarm failed", exc_info=True)
         cached = self._cache.load(ENS_CHAIN_ID, address)
         if cached is not None:
             self._render(cached)
@@ -319,10 +410,30 @@ class EnsPlugin(Plugin):
             return                                  # view moved on
         self._cache.save(ENS_CHAIN_ID, address, names)
         self._render(names)
+        self._verify(address, [n.name for n in names])
 
     def _render(self, names: "list[EnsName]") -> None:
         if self._panel is not None:
             self._panel.populate(build_tree(names), int(time.time()))
+
+    # --- verification (batched, Helios) -----------------------------------
+
+    def _verify(self, address: str, names: "list[str]") -> None:
+        chain = self._mainnet()
+        if chain is None or not names:
+            return
+        worker = EnsVerifyWorker(chain, address, names)
+        worker.ready.connect(self._on_verified)
+        self._start(worker)
+
+    def _on_verified(self, address: str, states: "dict[str, OwnershipCheck]",
+                     verified: bool) -> None:
+        host = self.host
+        if not verified or self._panel is None:
+            return
+        if host is not None and host.selected_address != address:
+            return                                  # view moved on
+        self._panel.mark_verified(states, address)
 
     # --- records (lazy) ---------------------------------------------------
 
@@ -330,13 +441,14 @@ class EnsPlugin(Plugin):
         chain = self._mainnet()
         if chain is None:
             return
-        worker = EnsRecordsWorker(chain.rpc_url, name)
+        worker = EnsRecordsWorker(chain, name)
         worker.ready.connect(self._on_records_ready)
         self._start(worker)
 
-    def _on_records_ready(self, name: str, rec: EnsRecords) -> None:
+    def _on_records_ready(self, name: str, rec: EnsRecords,
+                          verified: bool) -> None:
         if self._panel is not None:
-            self._panel.add_records(name, rec)
+            self._panel.add_records(name, rec, verified)
 
     # --- add custom -------------------------------------------------------
 

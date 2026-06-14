@@ -18,11 +18,19 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 from . import USER_AGENT
 
+if TYPE_CHECKING:
+    from .chains import Chain
+
 log = logging.getLogger("qeth.ens_app")
+
+# How long to wait for a Helios sidecar to become ready before falling back to
+# the unverified RPC. Mirrors ``ens._VERIFY_WAIT_S``; the records read is a
+# background, best-effort enrichment so a few seconds of warm-up is fine.
+VERIFY_WAIT_S = 8.0
 
 # Blockscout ENS (BENS) service — keyless, multichain. The chain id goes in the
 # path: ``/api/v1/{chain_id}/...``. ENS itself is mainnet (chain 1).
@@ -42,6 +50,20 @@ TEXT_KEYS = (
     "avatar", "description", "url", "email", "com.twitter", "com.github",
     "com.discord", "org.telegram", "location",
 )
+
+# ENS core contracts (mainnet). The registry is the root of truth for who
+# *controls* a node (can set its records); the .eth BaseRegistrar is the
+# ERC-721 whose tokenId is the 2LD's labelhash — the "NFT id" — giving the
+# *registrant* (the real owner; the controller may be a delegate).
+ENS_REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+ENS_ETH_REGISTRAR = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+
+_SEL_OWNER = bytes.fromhex("02571be3")      # registry.owner(bytes32)
+_SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
+_SEL_OWNER_OF = bytes.fromhex("6352211e")   # ERC721.ownerOf(uint256)
+_SEL_ADDR = bytes.fromhex("3b3b57de")       # resolver.addr(bytes32) — legacy
+_SEL_ADDR_COIN = bytes.fromhex("f1cb7e06")  # resolver.addr(bytes32,uint256)
+_ETH_COIN_TYPE = 60                         # ENSIP-9 coin type for ETH
 
 
 @dataclass
@@ -87,6 +109,26 @@ class EnsNode:
 
     name: EnsName
     children: "list[EnsNode]" = field(default_factory=list)
+
+
+@dataclass
+class OwnershipCheck:
+    """On-chain (Helios-verifiable) state for one name — the ground truth the
+    BENS hint is checked against. ``controller`` (registry owner) and, for .eth
+    2LDs, ``registrant`` (registrar NFT owner) answer "is this really yours";
+    ``resolved_address`` answers "does it point where the indexer claims". Any
+    field is None when the call reverted or the name uses an offchain (CCIP)
+    resolver we can't prove on-chain."""
+
+    controller: Optional[str] = None
+    registrant: Optional[str] = None
+    resolved_address: Optional[str] = None
+
+    def owned_by(self, address: str) -> bool:
+        """True when ``address`` is the controller or the registrant."""
+        a = address.lower()
+        return ((self.controller or "").lower() == a
+                or (self.registrant or "").lower() == a)
 
 
 # --- expiry ---------------------------------------------------------------
@@ -260,28 +302,157 @@ def decode_contenthash(raw: Optional[str]) -> Optional[str]:
         return "contenthash:" + raw
 
 
-# --- on-chain records -----------------------------------------------------
+# --- on-chain reads -------------------------------------------------------
+
+def namehash(name: str) -> bytes:
+    """EIP-137 namehash of an ENS name — the 32-byte node used as the key in
+    the registry and resolvers."""
+    from eth_utils import keccak
+    node = b"\x00" * 32
+    if name:
+        for part in reversed(name.split(".")):
+            node = keccak(node + keccak(text=part))
+    return node
+
+
+def _labelhash(label: str) -> bytes:
+    """keccak256 of a single label — the .eth registrar's tokenId (as bytes)."""
+    from eth_utils import keccak
+    return keccak(text=label)
+
+
+def _is_eth_2ld(name: str) -> bool:
+    """True for a second-level ``label.eth`` — the only names that are .eth
+    registrar NFTs (subdomains and other TLDs aren't)."""
+    return name.endswith(".eth") and name.count(".") == 1
+
+
+def _decode_addr_word(raw) -> Optional[str]:
+    """Decode a 32-byte address word (registry.owner / ownerOf / legacy addr).
+    None for the zero address or short/empty data."""
+    b = bytes(raw) if not isinstance(raw, (bytes, bytearray)) else raw
+    if len(b) < 32:
+        return None
+    word = b[:32]
+    if not any(word[12:32]):
+        return None
+    from eth_utils import to_checksum_address
+    return to_checksum_address("0x" + word[12:32].hex())
+
+
+def _decode_addr_bytes(raw) -> Optional[str]:
+    """Decode ``addr(bytes32,uint256)``'s dynamic-bytes return (a 20-byte
+    address payload) to a checksummed address, or None."""
+    h = _abi_bytes(raw)
+    if not h:
+        return None
+    payload = bytes.fromhex(h[2:])
+    if len(payload) != 20 or not any(payload):
+        return None
+    from eth_utils import to_checksum_address
+    return to_checksum_address("0x" + payload.hex())
+
+
+def verify_names(
+    chain: "Chain", names: "list[str]", *, wait_s: float = VERIFY_WAIT_S,
+) -> "Tuple[dict[str, OwnershipCheck], bool]":
+    """Batch on-chain check of controller + registrant + resolved-address for
+    ``names`` → ``({name_lower: OwnershipCheck}, verified)``.
+
+    Two ``aggregate3`` multicalls total — round 1 reads registry.owner +
+    registry.resolver (+ registrar.ownerOf for .eth 2LDs); round 2 reads each
+    resolver's ``addr`` — so a whole wallet's names verify in two round-trips,
+    not 2N. Everything runs through a Helios sidecar, so the reads are proof-
+    verified against light-client state.
+
+    **Verified-only.** Returns ``({}, False)`` when no Helios sidecar is ready:
+    the resolved-address this confirms already came from the indexer, so we
+    re-read on-chain only when we can actually PROVE it. (Records, by contrast,
+    fall back to an unverified read — they're data the indexer never had.)
+
+    Offchain (CCIP) resolvers can't be proven on-chain: their ``addr`` reverts
+    here, leaving ``resolved_address`` None — those are followed unverified
+    elsewhere, never badged."""
+    from .helios import verified_chain          # the verified-state abstraction
+    vc = verified_chain(chain, wait_s=wait_s)    # None unless a sidecar is ready
+    if vc is None:
+        return {}, False
+    try:
+        from .chain import EthClient
+        return _read_name_states(EthClient(vc), names), True
+    except Exception:
+        log.debug("ENS verify_names failed", exc_info=True)
+        return {}, False
+
+
+def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]":
+    """The multicall body of ``verify_names``, factored out so it can be tested
+    against a fake client without a live chain."""
+    nodes = {n: namehash(n) for n in names}
+    out = {n.lower(): OwnershipCheck() for n in names}
+
+    owner_p: dict = {}
+    resolver_p: dict = {}
+    registrant_p: dict = {}
+    with client.multicall() as mc:
+        for n in names:
+            node = nodes[n]
+            owner_p[n] = mc.add(ENS_REGISTRY, _SEL_OWNER + node,
+                                decoder=_decode_addr_word)
+            resolver_p[n] = mc.add(ENS_REGISTRY, _SEL_RESOLVER + node,
+                                   decoder=_decode_addr_word)
+            if _is_eth_2ld(n):
+                tid = _labelhash(n.split(".")[0])
+                registrant_p[n] = mc.add(ENS_ETH_REGISTRAR, _SEL_OWNER_OF + tid,
+                                         decoder=_decode_addr_word)
+
+    resolvers: dict = {}
+    for n in names:
+        st = out[n.lower()]
+        if owner_p[n].success:
+            st.controller = owner_p[n].value
+        rp = registrant_p.get(n)
+        if rp is not None and rp.success:
+            st.registrant = rp.value
+        if resolver_p[n].success and resolver_p[n].value:
+            resolvers[n] = resolver_p[n].value
+
+    if resolvers:
+        coin_p: dict = {}
+        legacy_p: dict = {}
+        coin_arg = _ETH_COIN_TYPE.to_bytes(32, "big")
+        with client.multicall() as mc:
+            for n, r in resolvers.items():
+                node = nodes[n]
+                coin_p[n] = mc.add(r, _SEL_ADDR_COIN + node + coin_arg,
+                                   decoder=_decode_addr_bytes)
+                legacy_p[n] = mc.add(r, _SEL_ADDR + node,
+                                     decoder=_decode_addr_word)
+        for n in resolvers:
+            addr = (coin_p[n].value if coin_p[n].success else None) \
+                or (legacy_p[n].value if legacy_p[n].success else None)
+            out[n.lower()].resolved_address = addr
+    return out
+
 
 def read_records(rpc_url: str, name: str, *,
-                 text_keys: tuple = TEXT_KEYS) -> EnsRecords:
+                 text_keys: tuple = TEXT_KEYS, ccip: bool = True) -> EnsRecords:
     """Read a name's resolver records on-chain: a curated set of text records
     plus the contenthash. Best-effort per record — a resolver that lacks one
     just omits it; any hard failure returns whatever was gathered. ``rpc_url``
-    should be mainnet (or a verified Helios sidecar — same as ``ens.py``)."""
+    should be mainnet (or a verified Helios sidecar — same as ``ens.py``).
+    ``ccip=False`` forbids offchain gateway hops, so over a Helios sidecar the
+    records are fully proof-verified on-chain reads."""
     rec = EnsRecords()
     try:
         from .ens import _make_w3
-        from eth_utils import keccak
     except ImportError:
         return rec
     try:
-        w3 = _make_w3(rpc_url, ccip=True)
+        w3 = _make_w3(rpc_url, ccip=ccip)
     except Exception:
         return rec
-    # namehash for the raw contenthash call
-    node = b"\x00" * 32
-    for part in reversed(name.split(".")):
-        node = keccak(node + keccak(text=part))
+    node = namehash(name)        # for the raw contenthash call
     for key in text_keys:
         try:
             v = w3.ens.get_text(name, key)
@@ -299,6 +470,23 @@ def read_records(rpc_url: str, name: str, *,
     except Exception:
         pass
     return rec
+
+
+def verified_read_records(
+    chain: "Chain", name: str, *,
+    wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
+) -> "Tuple[EnsRecords, bool]":
+    """Read a name's records, Helios-first → ``(records, verified)``.
+
+    When a mainnet Helios sidecar is ready, the resolver reads route through it
+    with CCIP off, so the records are proof-verified on-chain reads and
+    ``verified`` is True. Otherwise we fall back to the chain's normal RPC
+    (CCIP allowed) marked unverified — same shape as ``ens.verified_*``."""
+    from .helios import verified_chain          # the verified-state abstraction
+    vc = verified_chain(chain, wait_s=wait_s)
+    if vc is not None:
+        return read_records(vc.rpc_url, name, text_keys=text_keys, ccip=False), True
+    return read_records(chain.rpc_url, name, text_keys=text_keys, ccip=True), False
 
 
 def _abi_bytes(raw) -> Optional[str]:

@@ -115,6 +115,11 @@ def _build_session():
     _ensure_heavy_imports()
     s = requests.Session()
     s.headers["User-Agent"] = USER_AGENT
+    # Set Content-Type explicitly so reads can be pointed at a Helios sidecar:
+    # its strict JSON-RPC server 415s a POST without "application/json" (DRPC is
+    # lenient, which masks this on the public path). Harmless for every other
+    # endpoint. Same fix as ``ens._make_w3``.
+    s.headers["Content-Type"] = "application/json"
     return s
 
 

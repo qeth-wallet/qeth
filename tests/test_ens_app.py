@@ -132,3 +132,103 @@ def test_ens_cache_round_trip(tmp_path):
     assert back[0].name == "vitalik.eth" and back[0].expiry_ts == 123
     assert back[0].resolved_address == "0xRES"
     assert back[1].source == "custom"
+
+
+# --- on-chain verification (namehash / decoders / multicall orchestration) --
+
+def test_namehash_known_vectors():
+    assert ea.namehash("") == b"\x00" * 32
+    # EIP-137 reference value for "eth"
+    assert ea.namehash("eth").hex() == (
+        "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae")
+
+
+def test_is_eth_2ld():
+    assert ea._is_eth_2ld("vitalik.eth")
+    assert not ea._is_eth_2ld("blog.vitalik.eth")   # subdomain
+    assert not ea._is_eth_2ld("foo.xyz")            # other TLD
+
+
+def test_decode_addr_word():
+    addr = "d8da6bf26964af9d7eed9e03e53415d37aa96045"
+    word = b"\x00" * 12 + bytes.fromhex(addr)
+    assert ea._decode_addr_word(word).lower() == "0x" + addr
+    assert ea._decode_addr_word(b"\x00" * 32) is None     # zero address
+    assert ea._decode_addr_word(b"\x00" * 10) is None     # too short
+
+
+def test_decode_addr_bytes():
+    addr = "d8da6bf26964af9d7eed9e03e53415d37aa96045"
+    # ABI `bytes` return: offset(0x20), length(0x14=20), payload padded to 32
+    blob = ((32).to_bytes(32, "big") + (20).to_bytes(32, "big")
+            + bytes.fromhex(addr) + b"\x00" * 12)
+    assert ea._decode_addr_bytes(blob).lower() == "0x" + addr
+    empty = (32).to_bytes(32, "big") + (0).to_bytes(32, "big")
+    assert ea._decode_addr_bytes(empty) is None
+
+
+def test_ownership_check_owned_by():
+    st = ea.OwnershipCheck(controller="0xAaA", registrant="0xBbB")
+    assert st.owned_by("0xaaa") and st.owned_by("0xBBB")
+    assert not st.owned_by("0xccc")
+
+
+class _FakePending:
+    def __init__(self, success, value):
+        self.success, self.value = success, value
+
+
+class _FakeMC:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def add(self, target, data, *, decoder=None):
+        ok, val = self._resp(target, data[:4])
+        return _FakePending(ok, val)
+
+
+class _FakeClient:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def multicall(self, **kw):
+        return _FakeMC(self._resp)
+
+
+def test_read_name_states_orchestration():
+    RESOLVER = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41"
+
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_OWNER:
+            return True, "0xC0ntr0ller"
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RESOLVER:
+            return True, RESOLVER
+        if target == ea.ENS_ETH_REGISTRAR and sel == ea._SEL_OWNER_OF:
+            return True, "0xReg1strant"
+        if target == RESOLVER and sel == ea._SEL_ADDR_COIN:
+            return True, "0xReso1ved"
+        return False, None        # legacy addr + everything else
+
+    states = ea._read_name_states(
+        _FakeClient(resp), ["vitalik.eth", "blog.vitalik.eth"])
+    vit = states["vitalik.eth"]
+    assert vit.controller == "0xC0ntr0ller"
+    assert vit.registrant == "0xReg1strant"     # 2LD → registrar queried
+    assert vit.resolved_address == "0xReso1ved"
+    sub = states["blog.vitalik.eth"]
+    assert sub.controller == "0xC0ntr0ller"
+    assert sub.registrant is None               # subdomain → not an NFT
+    assert sub.resolved_address == "0xReso1ved"
+
+
+def test_verify_names_no_helios_returns_unverified(monkeypatch):
+    # No sidecar (the default in tests) → verified-only path yields nothing.
+    monkeypatch.setattr("qeth.helios.verified_chain", lambda *a, **k: None)
+    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+    assert states == {} and verified is False

@@ -11,7 +11,9 @@ from typing import Optional
 from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
-from qeth.ens_app import EnsName, EnsNode, EnsRecords, build_tree
+from qeth.ens_app import (
+    EnsName, EnsNode, EnsRecords, OwnershipCheck, build_tree,
+)
 from qeth.plugins.ens import (
     _EXPIRY_STYLE, _NAME_ROLE, _VALUE_ROLE, EnsPanel, EnsPlugin,
 )
@@ -125,6 +127,56 @@ class TestEnsPanel:
         root.setExpanded(False)
         root.setExpanded(True)
         assert seen == ["alice.eth"]   # guarded against re-emit
+
+    def test_verified_records_get_check_prefix(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([EnsName("alice.eth")]), NOW)
+        rec = EnsRecords(texts={"url": "https://alice.example"})
+        panel.add_records("alice.eth", rec, verified=True)
+        root = panel.tree.topLevelItem(0)
+        url_row = next(root.child(i) for i in range(root.childCount())
+                       if root.child(i).text(0) == "url")
+        assert url_row.text(2).startswith("✓ ")
+        # the copyable value stays raw (no ✓)
+        assert url_row.data(0, _VALUE_ROLE) == "https://alice.example"
+
+    def test_mark_verified_badges_ownership_and_resolution(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        panel.populate(
+            build_tree([EnsName("alice.eth", resolved_address=me)]), NOW)
+        states = {"alice.eth": OwnershipCheck(controller=me, resolved_address=me)}
+        panel.mark_verified(states, me)
+        root = panel.tree.topLevelItem(0)
+        assert root.text(0).endswith("✓")          # ownership confirmed
+        assert root.text(2).startswith("✓ ")        # resolution confirmed
+
+    def test_mark_verified_flags_unowned(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me, other = "0x" + "11" * 20, "0x" + "22" * 20
+        panel.populate(build_tree([EnsName("alice.eth")]), NOW)
+        # on-chain says someone else controls it → ⚠ on the name
+        panel.mark_verified(
+            {"alice.eth": OwnershipCheck(controller=other)}, me)
+        assert panel.tree.topLevelItem(0).text(0).endswith("⚠")
+
+    def test_mark_verified_corrects_resolution_mismatch(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        stale, real = "0x" + "33" * 20, "0x" + "44" * 20
+        item_name = EnsName("alice.eth", resolved_address=stale)
+        panel.populate(build_tree([item_name]), NOW)
+        panel.mark_verified(
+            {"alice.eth": OwnershipCheck(controller=me, resolved_address=real)},
+            me)
+        root = panel.tree.topLevelItem(0)
+        assert root.text(2).startswith("⚠ ") and real in root.text(2)
+        # the proof-verified address replaces the indexer's, so copy yields it
+        assert root.data(0, _NAME_ROLE).resolved_address == real
 
 
 # --- EnsPlugin -------------------------------------------------------------

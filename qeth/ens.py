@@ -131,30 +131,20 @@ def resolve_ens_address(
         return None
 
 
-def _verified_mainnet(chain: "Chain", wait_s: float):
-    """The Helios-backed shadow of ``chain`` if a sidecar is ready (or becomes
-    ready within ``wait_s``), else None. Resolved here, off the Qt thread."""
-    try:
-        from .helios import verified_chain
-        return verified_chain(chain, wait_s=wait_s)
-    except Exception:
-        log.debug("verified_chain unavailable", exc_info=True)
-        return None
-
-
 def verified_resolve_address(
     chain: "Chain", name: str, wait_s: float = _VERIFY_WAIT_S,
 ) -> Tuple[Optional[str], bool]:
     """Forward-resolve ``name`` → (address, verified). Tries the Helios path
     first (strict, no CCIP); on success the mapping is proof-verified. Falls
     back to the normal RPC (CCIP allowed) marked unverified — so an offchain
-    name still resolves, just without the badge."""
-    vc = _verified_mainnet(chain, wait_s)
-    if vc is not None:
-        addr = resolve_ens_address(vc.rpc_url, name, ccip=False)
-        if addr:
-            return addr, True
-    return resolve_ens_address(chain.rpc_url, name, ccip=True), False
+    name still resolves, just without the badge. The Helios-first / fallback
+    orchestration is the shared ``verified.verified_or_fallback`` policy; this
+    only supplies the ENS read (strict ⇔ ccip off)."""
+    from .verified import verified_or_fallback
+    return verified_or_fallback(
+        chain,
+        lambda url, strict: resolve_ens_address(url, name, ccip=not strict),
+        wait_s=wait_s)
 
 
 def verified_lookup_name(
@@ -162,12 +152,11 @@ def verified_lookup_name(
 ) -> Tuple[Optional[str], bool]:
     """Reverse-resolve ``address`` → (name, verified), Helios-first (strict),
     falling back to the normal RPC marked unverified."""
-    vc = _verified_mainnet(chain, wait_s)
-    if vc is not None:
-        name = lookup_ens_name(vc.rpc_url, address, ccip=False)
-        if name:
-            return name, True
-    return lookup_ens_name(chain.rpc_url, address, ccip=True), False
+    from .verified import verified_or_fallback
+    return verified_or_fallback(
+        chain,
+        lambda url, strict: lookup_ens_name(url, address, ccip=not strict),
+        wait_s=wait_s)
 
 
 class EnsResolveWorker(QThread):

@@ -48,3 +48,40 @@ def test_verified_client_no_fallback_suppresses_unverified(monkeypatch):
     monkeypatch.setattr(v, "verified_chain", lambda c, **k: None)
     client, verified = v.verified_client(_FakeChain("eth"), fallback=False)
     assert client is None and verified is False
+
+
+def test_verified_or_fallback_prefers_strict_verified(monkeypatch):
+    monkeypatch.setattr(v, "verified_chain",
+                        lambda c, **k: _FakeChain("helios"))
+    seen = []
+
+    def read(url, strict):
+        seen.append((url, strict))
+        return "0xVERIFIED"            # truthy verified result → no fallback
+
+    result, verified = v.verified_or_fallback(_FakeChain("eth"), read)
+    assert (result, verified) == ("0xVERIFIED", True)
+    assert seen == [("http://helios", True)]
+
+
+def test_verified_or_fallback_falls_back_on_empty(monkeypatch):
+    # Sidecar ready but the strict read is empty (e.g. offchain name) → fall
+    # back to the plain chain, unverified.
+    monkeypatch.setattr(v, "verified_chain",
+                        lambda c, **k: _FakeChain("helios"))
+    seen = []
+
+    def read(url, strict):
+        seen.append((url, strict))
+        return None if strict else "0xUNVERIFIED"
+
+    result, verified = v.verified_or_fallback(_FakeChain("eth"), read)
+    assert (result, verified) == ("0xUNVERIFIED", False)
+    assert seen == [("http://helios", True), ("http://eth", False)]
+
+
+def test_verified_or_fallback_no_sidecar(monkeypatch):
+    monkeypatch.setattr(v, "verified_chain", lambda c, **k: None)
+    result, verified = v.verified_or_fallback(
+        _FakeChain("eth"), lambda url, strict: "0xPLAIN")
+    assert (result, verified) == ("0xPLAIN", False)

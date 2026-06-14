@@ -51,7 +51,7 @@ The whole read model is the token-discovery model with names swapped in:
 
 | | Tokens (today) | Names (this plugin) |
 |---|---|---|
-| **Discover** (untrusted) | `TokenSource` → Blockscout / Etherscan v2 give held-token contracts per address | `NameSource` → ENS subgraph / NFT-ownership indexer / **the same Blockscout-Etherscan** (their NFT + token-transfer endpoints surface BaseRegistrar ERC-721 + NameWrapper ERC-1155 holdings — qeth's discovery already sees 721/1155 and just filters them out) |
+| **Discover** (untrusted) | `TokenSource` → Blockscout / Etherscan v2 give held-token contracts per address | `NameSource` → ENS subgraph (keyed) / chunked `eth_getLogs` (keyless) / Etherscan. **NB:** Blockscout's NFT-by-owner is *not* reliable for ENS — see §2.1b. |
 | **Verify** (no trust) | multicall `balanceOf(contract, owner)` | `namehash(name) == tokenId` (**pure local hash** — proves the name string) **+** `ownerOf(tokenId)` / `registry.owner(node)` (`eth_call`, Helios) **+** resolver record reads (`eth_call`, Helios) |
 
 So build a pluggable **`NameSource`** abstract base mirroring `TokenSource`
@@ -62,11 +62,98 @@ the tree only ever shows names whose `ownerOf` re-confirmed on-chain. Names
 verify **more** than tokens do — you check both the name↔tokenId mapping
 (locally, free) and ownership (on-chain).
 
+### 2.1a "Owns" is three roles — and an NFT indexer sees only one
+
+A name has **three independent addresses** that can all differ (verified
+on-chain with `vitalik.eth`: resolves-to / controller = `0xd8dA…6045`, but the
+registration NFT is owned by `0x2208…3a9d` — a separate vault):
+
+| Role | Read | Grants | NFT indexer sees it? |
+|---|---|---|---|
+| **Registrant** (NFT owner) | `BaseRegistrar.ownerOf` · NameWrapper | transfer, renew, fuses | **Yes** — it *is* the NFT |
+| **Controller** | `registry.owner(node)` | set records/resolver, subdomains | **No** — needs subgraph / registry events |
+| **Resolved-to** | `resolver.addr(node)` | nothing (just where it points) | **No** (unrelated to ownership) |
+
+So an NFT indexer keyed on the wallet account gives the **registrant** set only.
+A name managed from a hot wallet whose NFT sits in cold storage (vitalik's
+setup) won't appear via an NFT indexer on the hot wallet — that's the
+controller-only gap. v1 accepts it (rare; cover with manual pin); full coverage
+wants the subgraph.
+
+### 2.1b Indexer choices — and why Blockscout is the WRONG keyless pick here
+
+Probed live (2026-06-14). **Blockscout's address→NFT-holdings index is
+incomplete for ENS** and must not be the enumerator: querying the real
+registrant of `vitalik.eth` (`0x2208…`, confirmed via `ownerOf`) returned
+**zero** ENS across all its collections — even though Blockscout *does* know
+the contract (`tokens/{BaseRegistrar}` → ERC-721 "Ethereum Name Service") and
+has the correct *per-instance* owner (`instances/{tokenId}` → `0x2208…`). Its
+generic NFT-by-owner aggregation just drops ENS. So unlike token discovery,
+Blockscout can't be trusted to *list* an address's names.
+
+There **is** a keyless, working `address → names` enumerator: **BENS**
+(Blockscout's *dedicated* ENS microservice — not the generic NFT endpoint,
+which under-reports ENS). Don't confuse the two.
+
+| Source (address → names) | Reliable for ENS? | Key required? | Reality (probed 2026-06-14) |
+|---|---|---|---|
+| **BENS** `addresses:lookup?address=&owned_by=&resolved_to=&only_active=` (`bens.services.blockscout.com`) | **Yes** — purpose-built ENS index | **No** — keyless | **Works.** `owned_by(0xd8dA)` → 47 names incl `vitalik.eth`; `resolved_to` → names pointing here. Both flags **required**. `owned_by` = registry **controller** (not NFT registrant — `owned_by(0x2208 vault)` missed `vitalik.eth`). Lists include poison subdomains → filter for scam + verify on-chain. |
+| **ENS subgraph** (`domains(where:{owner})`) | **Yes** — native, complete, fast | **Yes** — Graph key (hosted endpoint sunset 2024) | the "fuller/faster" upgrade, key-gated |
+| **ENS metadata service** (`/.../{tokenId}`) | tokenId → name/avatar/**expiry** (NOT enum) | **No** — keyless (verified) | names a tokenId; not an enumerator |
+| **`eth_getLogs`** (BaseRegistrar/NameWrapper `Transfer`, tokenId in indexed topic) | on-chain truth | **No** — but needs a getLogs-friendly RPC | **DRPC 400'd every query**; impractical on DRPC, fine on a getLogs-capable RPC + chunking ([[reference_drpc_limit_shape]]) — the permanent fallback |
+| Alchemy `getNFTsForOwner` / Reservoir / SimpleHash | yes (also getLogs-friendly RPCs) | **Yes** — API key (Alchemy free tier) | keyed; same rot risk as any hosted service |
+| **Blockscout** generic NFT-by-owner (`/addresses/{a}/nft`) | **No — verified gap** | **No** | under-reports ENS — use BENS, not this |
+
+**Recommended v1 (keyless):** **BENS** as the default `NameSource`
+(`owned_by` + `resolved_to`), then per name: **scam-filter** the poison
+subdomains (reuse the notification scam heuristic) and **verify on-chain**
+(`namehash`, `registry.owner`/`ownerOf`, resolver records, expiry). Seed also
+from the **primary name** + manual pin (both keyless, zero-trust). The **ENS
+subgraph** is the opt-in keyed upgrade (fuller + the registrant/cold-storage
+names BENS's controller-view misses); **`getLogs`** is the permanent fallback
+for anyone on a getLogs-capable RPC. BENS is still a hosted service (rot
+principle, §2.1c) — but keyless, Blockscout-operated, self-hostable, and
+already a qeth dependency, so it's a sound *swappable* default, never a hard
+dependency (on-chain verification keeps it honest).
+
+### 2.1c Design principle: indexers are swappable, the chain is the index
+
+**Never hard-depend on a hosted backend for enumeration — they rot.** This is
+the load-bearing principle, and it's not hypothetical:
+
+- **The Graph's hosted ENS subgraph** — sunset 2024.
+- **Reservoir** — wound down.
+- **Frame's Pylon** (the hosted NFT/data backend that powers Frame's NFT
+  inventory) — Frame itself is effectively defunct: repo `floating/frame` last
+  released **v0.6.11 (Feb 2025)**, last commit **Mar 2025**, ~16 months dark.
+  A hosted backend whose parent has gone quiet is on borrowed time.
+
+Other wallets "just show your NFTs/names" by *being* the hosted, keyed party
+(MetaMask's NFT API, Rainbow API, Rabby→DeBank, Frame→Pylon). That UX is bought
+with a dependency that **will** eventually break. qeth is local-first with no
+backend, so it can't (and shouldn't) take that bet.
+
+The hedge — and qeth's real advantage — is **discover-then-verify**: the
+candidate-set indexer is a swappable, best-effort `NameSource`; *trust* lives in
+on-chain reads (`ownerOf`, `namehash`, resolver, `getLogs`) which **never
+sunset**. So a worse/dead indexer only costs *completeness*, never
+*correctness* — unlike Pylon, whose data Frame must trust outright. Concretely:
+make every source pluggable + fault-tolerant (like `TokenSource` already is),
+keep **getLogs as the permanent fallback** (works with any getLogs-capable RPC,
+forever), and never let a single indexer's death break the feature.
+
+> **Project aside (not ENS-specific):** Frame being defunct also means qeth's
+> "Frame-compatible JSON-RPC server" (`:1248`) targets a dormant client. The
+> *protocol* (localhost EIP-1193 + open CORS) is still useful to other tools, so
+> the feature keeps value — but it's worth **reframing it as a generic
+> local-wallet RPC bridge** rather than "Frame compatibility" in the project's
+> framing/README. Tracked here since it surfaced during this analysis.
+
 ### Reads
 
 | Read | How | Verifiable? |
 |---|---|---|
-| Names owned by an address (the tree roots) | An indexer. ENS names ARE NFTs (`.eth` 2LDs = ERC-721 in BaseRegistrar; wrapped names/subdomains = ERC-1155 in NameWrapper) — but **neither contract is enumerable** (verified on-chain: BaseRegistrar `supportsInterface(ERC721Enumerable)` = false; NameWrapper is ERC-1155), so there's no on-chain `tokenOfOwnerByIndex`. Use the **ENS subgraph** or a **generic NFT-ownership indexer** (Alchemy/Reservoir — covers 2LDs + wrapped in one query), or scan `Transfer`/`TransferSingle` logs. | **No** (indexer/logs) |
+| Names owned by an address (the tree roots) | An indexer. ENS names ARE NFTs but **neither contract is enumerable** (verified on-chain), so no on-chain `tokenOfOwnerByIndex`. **Keyless: BENS** (`addresses:lookup`, §2.1b) — the dedicated Blockscout ENS service, returns owned + resolved-to names. Keyed upgrade: the ENS subgraph. (NOT Blockscout's generic NFT endpoint — it under-reports ENS.) | **No** (indexer) |
 | Subdomains of a name | Subgraph (`domain.subdomains`) or `NewOwner` events. NB **unwrapped subdomains are NOT tokens** (registry `owner(node)` only) — an NFT indexer misses them; only the subgraph / registry events surface them. | **No** |
 | tokenId → name | tokenId is labelhash/namehash (**irreversible**) — recover the string via the ENS metadata service (`tokenURI`) or the subgraph. | n/a |
 | Ownership of a *known* name | `BaseRegistrar.ownerOf(labelhash)` · `NameWrapper.ownerOf(namehash)` · `registry.owner(node)` — `eth_call` | **Yes** (Helios) |
@@ -185,8 +272,9 @@ calls if the resolver ABI is known — good free UX.)
 
 ## 5. Phasing
 
-1. **Read-only v1, expiry-first.** Plugin + tab; tree roots from primary name +
-   manual pin (no indexer yet); per-name **expiry status** (§2.2) and records
+1. **Read-only v1, expiry-first.** Plugin + tab; tree roots from **BENS**
+   (keyless `addresses:lookup`) + primary name + manual pin, scam-filtered and
+   on-chain-verified; per-name **expiry status** (§2.2) and records
    (addr, text set, contenthash, owner/resolver) via registrar/resolver
    `eth_call`, Helios-verified. Expiry is the headline value and needs no
    indexer, so it lands in v1. Zero write risk.

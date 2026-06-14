@@ -81,7 +81,7 @@ def test_tab_bar_has_tokens_and_transactions(mainwindow):
     tab_bar = mainwindow.findChild(QTabBar)
     assert tab_bar is not None
     labels = [tab_bar.tabText(i) for i in range(tab_bar.count())]
-    assert labels == ["Tokens", "Transactions"]
+    assert labels == ["Tokens", "Transactions", "ENS"]
 
 
 def test_tab_bar_starts_on_tokens(mainwindow):

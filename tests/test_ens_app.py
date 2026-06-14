@@ -74,6 +74,21 @@ def test_lookup_tolerates_errors():
     assert ea.lookup_owned_names(1, "0xabc", get_json=boom) == []
 
 
+def test_fetch_name_marks_custom():
+    def fake_get(url):
+        assert "domains/vitalik.eth" in url
+        return {"name": "vitalik.eth", "resolved_address": {"hash": "0xRES"}}
+    n = ea.fetch_name(1, "vitalik.eth", get_json=fake_get)
+    assert n is not None and n.resolved_address == "0xRES"
+    assert n.source == "custom"
+
+
+def test_fetch_name_none_on_error():
+    def boom(url):
+        raise RuntimeError("404")
+    assert ea.fetch_name(1, "nope.eth", get_json=boom) is None
+
+
 # --- tree ------------------------------------------------------------------
 
 def test_build_tree_nests_owned_subdomains():

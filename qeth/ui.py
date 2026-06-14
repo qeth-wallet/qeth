@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from .icons import ChainIconCache, bundled_chain_icon
 from .notify import DesktopNotifier
 from .plugin import Slot
+from .plugins.ens import EnsPlugin
 from .plugins.tokens import TokensPlugin
 from .plugins.transactions import (
     SignTransactionDialog, TransactionsPlugin,
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         # Topic plugins. Each owns its sources/caches/workers/widgets.
         self.wallets_plugin = WalletsPlugin(self.store)
         self.tokens_plugin = TokensPlugin(self.store)
+        self.ens_plugin = EnsPlugin(self.store)
         self.transactions_plugin = TransactionsPlugin(store=self.store)
 
         # Signing bridge: the RPC server hands incoming signing
@@ -324,6 +326,7 @@ class MainWindow(QMainWindow):
         self.right_slot = Slot()
         self.right_slot.add_plugin(self.tokens_plugin, self)
         self.right_slot.add_plugin(self.transactions_plugin, self)
+        self.right_slot.add_plugin(self.ens_plugin, self)
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
         self.chain_rpc_btn = self._build_chain_rpc_button()

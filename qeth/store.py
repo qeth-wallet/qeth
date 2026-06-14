@@ -64,6 +64,9 @@ class Store:
         # only when the balance is non-zero — unlike `shown_tokens` (pin),
         # which force display even at zero. (chain_id, addr_lower).
         self.custom_tokens: set[tuple[int, str]] = set()
+        # Custom-pinned ENS names (lower-case) for the ENS plugin — shown in
+        # addition to whatever the indexer discovers. ENS is mainnet-only.
+        self.custom_ens_names: set[str] = set()
         # Hex-encoded QByteArray from QMainWindow.saveGeometry(), so size +
         # position + maximized state all round-trip.
         self.window_geometry: Optional[str] = None
@@ -139,6 +142,10 @@ class Store:
                 s.etherscan_api_key = etherscan_key.strip()
             if "notifications_enabled" in data:
                 s.notifications_enabled = bool(data["notifications_enabled"])
+            s.custom_ens_names = {
+                str(n).lower() for n in data.get("custom_ens_names", [])
+                if isinstance(n, str) and n
+            }
         return s
 
     def save(self) -> None:
@@ -166,6 +173,7 @@ class Store:
                 "header_states": dict(self.header_states),
                 "etherscan_api_key": self.etherscan_api_key,
                 "notifications_enabled": self.notifications_enabled,
+                "custom_ens_names": sorted(self.custom_ens_names),
             }
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         # Atomic: a crash mid-write must not torch the accounts list.
@@ -311,6 +319,16 @@ class Store:
     def remove_custom_token(self, chain_id: int, address: str) -> None:
         with self._lock:
             self.custom_tokens.discard((int(chain_id), address.lower()))
+        self.save()
+
+    def add_custom_ens_name(self, name: str) -> None:
+        with self._lock:
+            self.custom_ens_names.add(name.strip().lower())
+        self.save()
+
+    def remove_custom_ens_name(self, name: str) -> None:
+        with self._lock:
+            self.custom_ens_names.discard(name.strip().lower())
         self.save()
 
     def hide_token(self, chain_id: int, address: str) -> None:

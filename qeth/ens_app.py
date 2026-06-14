@@ -183,6 +183,26 @@ def lookup_owned_names(
     return out
 
 
+def fetch_name(
+    chain_id: int, name: str, *,
+    base_url: str = BENS_BASE,
+    get_json: Callable[[str], dict] = _http_get_json,
+) -> Optional[EnsName]:
+    """One name's details via BENS ``domains/{name}`` (owner / resolved-address
+    / expiry) — for a custom-pinned name we didn't get from the owner sweep.
+    None on any failure (or a name BENS doesn't know)."""
+    url = f"{base_url}/{chain_id}/domains/{urllib.parse.quote(name)}"
+    try:
+        d = get_json(url)
+    except Exception as e:
+        log.debug("BENS fetch_name failed (%s): %s", name, e)
+        return None
+    n = _parse_name_item(d)        # the detail object shares the item fields
+    if n is not None:
+        n.source = "custom"
+    return n
+
+
 # --- tree building (pure) -------------------------------------------------
 
 def build_tree(names: list[EnsName]) -> list[EnsNode]:

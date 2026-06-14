@@ -55,6 +55,7 @@ if _dotenv.exists():
 def tmp_qeth(tmp_path, monkeypatch) -> Path:
     """Redirect all qeth on-disk locations under ``tmp_path``."""
     import qeth.abi_cache
+    import qeth.ens_app
     import qeth.hot_wallet
     import qeth.store
     import qeth.token_metadata
@@ -72,6 +73,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.transactions_cache, "CACHE_DIR",
                         tmp_path / "transactions")
     monkeypatch.setattr(qeth.abi_cache, "CACHE_DIR", tmp_path / "abi")
+    monkeypatch.setattr(qeth.ens_app, "CACHE_DIR", tmp_path / "ens")
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
                         tmp_path / "keystores")
     return tmp_path
@@ -114,6 +116,7 @@ def hermetic_mainwindow(monkeypatch):
     they still get ``start()``'d and emit ``finished``, so the
     self-eviction wiring stays exercised.
     """
+    from qeth.plugins import ens as ens_plugin
     from qeth.plugins import tokens as tokens_plugin
     from qeth.plugins import transactions as transactions_plugin
 
@@ -126,6 +129,7 @@ def hermetic_mainwindow(monkeypatch):
             "PricesWorker", "RiskWorker", "MetadataWorker",
         ]),
         (transactions_plugin, ["TransactionsWorker"]),
+        (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker"]),
     ):
         for cls_name in cls_names:
             cls = getattr(mod, cls_name, None)

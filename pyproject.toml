@@ -107,6 +107,7 @@ files = [
     "qeth/plugin.py",
     "qeth/plugins/wallets.py",
     "qeth/plugins/tokens.py",
+    "qeth/plugins/ens.py",
     "qeth/plugins/transactions.py",
     "qeth/plugins/tx_summary.py",
     "qeth/plugins/sign_message.py",

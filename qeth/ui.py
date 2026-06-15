@@ -780,6 +780,49 @@ class MainWindow(QMainWindow):
                 f"{verb} failed: {msg}", 6000),
         )
 
+    def request_transaction(self, req, chain, label: str,
+                            on_broadcast=None) -> None:
+        """Open the review + sign + broadcast flow for an arbitrary locally-built
+        transaction (used by the ENS plugin's record/subdomain writes). Same
+        pipeline as Send / Speed-up: the dialog estimates gas + fees + nonce and
+        simulates, then the worker signs (Ledger / hot wallet) and broadcasts and
+        the pending watcher tracks it. ``on_broadcast(tx_hash)`` fires after a
+        successful broadcast so the caller can refresh."""
+        from .plugins.transactions import SignTransactionDialog
+        dialog = SignTransactionDialog(
+            req, chain,
+            abi_source=self.transactions_plugin._abi_source,
+            abi_cache=self.transactions_plugin._abi_cache,
+            identity_source=self.transactions_plugin._identity_source,
+            identity_cache=self.transactions_plugin._identity_cache,
+            tx_cache=self.transactions_plugin._disk_cache,
+            start_worker=self.start_worker,
+            token_info=self.token_info,
+            icon_cache=self.icon_cache(),
+            native_price_usd=self.native_price_usd(chain.chain_id, req.from_addr),
+            known_addresses=self.account_addresses(),
+            nonce_floor_provider=self.transactions_plugin.pending_nonce_floor,
+            replace_label=label,
+            parent=self,
+        )
+
+        def _bcast(h: str) -> None:
+            self.status_message(f"{label}: {h[:12]}…", 6000)
+            if on_broadcast is not None:
+                try:
+                    on_broadcast(h)
+                except Exception:
+                    import logging
+                    logging.getLogger("qeth.ui").debug(
+                        "request_transaction on_broadcast failed", exc_info=True)
+
+        self._launch_sign_flow(
+            dialog, chain,
+            on_broadcast=_bcast,
+            on_cancel=lambda: None,
+            on_fail=lambda msg: self.status_message(f"{label} failed: {msg}", 6000),
+        )
+
     def _begin_sign(self, dialog, chain, on_broadcast, on_fail) -> None:
         """Start one sign-and-broadcast attempt. Called every time
         the user clicks Confirm — including retries after a

@@ -71,6 +71,16 @@ class Host(Protocol):
         transactions dialogs to annotate fees with their dollar
         value without re-fetching prices."""
 
+    def request_transaction(self, req, chain, label: str,
+                            on_broadcast=None) -> None:
+        """Open the review + sign + broadcast flow for a locally-built
+        transaction (``req`` is a ``signing.SigningRequest`` with
+        ``to_addr`` / ``data`` set). Reuses the Send / Speed-up
+        pipeline: gas + fee + nonce estimation, simulation preview,
+        Ledger / hot-wallet signing, and pending-tx tracking.
+        ``on_broadcast(tx_hash)`` fires after a successful broadcast.
+        Used by the ENS plugin's record / subdomain writes."""
+
 
 class Plugin(QObject):
     """One topic in the UI. Subclasses define a ``name`` class attribute

@@ -96,6 +96,7 @@ files = [
     "qeth/tx_activity.py",
     "qeth/wallet_cache.py",
     "qeth/ens_app.py",
+    "qeth/ens_write.py",
     "qeth/risk.py",
     "qeth/hot_wallet.py",
     "qeth/import_sources.py",

@@ -21,16 +21,17 @@ from PySide6.QtGui import (
     QAction, QBrush, QColor, QDesktopServices, QIcon, QPalette,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHeaderView, QInputDialog, QMenu,
-    QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
+    QFormLayout, QHeaderView, QInputDialog, QLineEdit, QMenu, QPushButton,
+    QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTableWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ens_app import (
-    ENS_APP_URL, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode, EnsRecords,
-    OwnershipCheck, build_tree, expiry_status, fetch_name, lookup_owned_names,
-    name_warning, read_records, verified_read_records, verify_names,
+    ENS_APP_URL, TEXT_KEYS, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode,
+    EnsRecords, OwnershipCheck, build_tree, expiry_status, fetch_name,
+    lookup_owned_names, name_warning, read_records, verified_read_records,
+    verify_names,
 )
 from ..plugin import Plugin
 
@@ -314,6 +315,8 @@ class EnsPanel(QWidget):
 
     add_custom_requested = Signal()
     records_requested = Signal(str)    # name → load its records (lazy)
+    write_requested = Signal(str, str)  # (name, kind) — kind: addr|content|text|record|subdomain
+    edit_record_requested = Signal(str, str, str)  # (name, label, value)
 
     # Trailing column = verification status, shown as a fixed-size icon (a text
     # ✓/⚠ glyph gets emoji presentation on some themes and changes the row
@@ -325,6 +328,7 @@ class EnsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items_by_name: dict[str, QTreeWidgetItem] = {}
+        self._writable: "set[str]" = set()   # names the user can sign writes for
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = _EnsTree()
@@ -551,6 +555,11 @@ class EnsPanel(QWidget):
             item.setData(0, _LOADED_ROLE, True)   # guard against re-emit
             self.records_requested.emit(n.name)
 
+    def set_writable(self, names: "set[str]") -> None:
+        """Names (lower-case) the user can sign writes for — gates the edit
+        actions in the context menu."""
+        self._writable = set(names)
+
     def _on_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if item is None:
@@ -565,8 +574,29 @@ class EnsPanel(QWidget):
             if n.resolved_address:
                 menu.addAction("Copy resolved address",
                                lambda: _clip(n.resolved_address))
+            if n.name.lower() in self._writable:
+                menu.addSeparator()
+                nm = n.name
+                menu.addAction("Set ETH address…",
+                               lambda: self.write_requested.emit(nm, "addr"))
+                menu.addAction("Set content (IPFS)…",
+                               lambda: self.write_requested.emit(nm, "content"))
+                menu.addAction("Set text record…",
+                               lambda: self.write_requested.emit(nm, "text"))
+                menu.addAction("Add / change record…",
+                               lambda: self.write_requested.emit(nm, "record"))
+                menu.addSeparator()
+                menu.addAction("Add subdomain…",
+                               lambda: self.write_requested.emit(nm, "subdomain"))
         elif value:
             menu.addAction("Copy value", lambda: _clip(str(value)))
+            # Record row → offer to edit it (the parent name must be writable).
+            parent = item.parent()
+            pn = parent.data(0, _NAME_ROLE) if parent is not None else None
+            if (isinstance(pn, EnsName) and pn.name.lower() in self._writable):
+                label = item.text(0)
+                menu.addAction("Edit…", lambda: self.edit_record_requested.emit(
+                    pn.name, label, str(value)))
         if not menu.isEmpty():
             menu.exec(self.tree.viewport().mapToGlobal(pos))
 
@@ -575,9 +605,106 @@ def _clip(text: str) -> None:
     QApplication.clipboard().setText(text)
 
 
+def _checksum(text: str) -> "Optional[str]":
+    """Checksum a 0x address, or None if it isn't a valid address."""
+    from eth_utils import is_address, to_checksum_address
+    s = (text or "").strip()
+    if not s or not is_address(s):
+        return None
+    return to_checksum_address(s)
+
+
 def _fmt_expiry(ts: int) -> str:
     from datetime import datetime
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+# Record types in the general chooser → (label, needs-key, needs-coin).
+_RECORD_KINDS = ["ETH address", "Content (IPFS)", "Text record",
+                 "Other-chain address"]
+
+
+class _RecordDialog(QDialog):
+    """Choose a record type and enter its value. ``preset`` locks the type
+    (used by the quick 'Set text record…' entry); otherwise the type combo is
+    shown (the general 'Add / change record…')."""
+
+    def __init__(self, name: str, *, preset: "Optional[str]" = None,
+                 key: str = "", coin: str = "", value: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Record · {name}")
+        self._form = form = QFormLayout(self)
+        self.kind = QComboBox()
+        self.kind.addItems(_RECORD_KINDS)
+        if preset:
+            self.kind.setCurrentText(preset)
+            self.kind.setEnabled(False)
+        else:
+            form.addRow("Type", self.kind)
+        from .. import ens_write
+        self.key = QComboBox()
+        self.key.setEditable(True)
+        self.key.addItems(TEXT_KEYS)
+        if key:
+            self.key.setCurrentText(key)
+        self.coin = QComboBox()
+        # Only coins whose address is a 20-byte 0x value (ETC + the ENSIP-11 EVM
+        # chains) — we can encode those from a plain address; BTC/LTC/DOGE need
+        # chain-specific encoders we don't ship.
+        self.coin.addItems([c for c, t in ens_write.COIN_TYPES.items()
+                            if c != "ETH" and (t == 61 or t >= 0x80000000)])
+        if coin:
+            self.coin.setCurrentText(coin)
+        self.value = QLineEdit(value)
+        self.value.setMinimumWidth(360)
+        form.addRow("Key", self.key)
+        form.addRow("Coin", self.coin)
+        form.addRow("Value", self.value)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.kind.currentTextChanged.connect(self._sync)
+        self._sync(self.kind.currentText())
+
+    def _sync(self, kind: str) -> None:
+        self._form.setRowVisible(self.key, kind == "Text record")
+        self._form.setRowVisible(self.coin, kind == "Other-chain address")
+        hint = {"ETH address": "0x…", "Content (IPFS)": "ipfs://…",
+                "Text record": "value", "Other-chain address": "0x…"}
+        self.value.setPlaceholderText(hint.get(kind, ""))
+
+    def result_values(self) -> "tuple[str, str, str]":
+        """(kind, key-or-coin, value)."""
+        kind = self.kind.currentText()
+        extra = (self.key.currentText() if kind == "Text record"
+                 else self.coin.currentText() if kind == "Other-chain address"
+                 else "")
+        return kind, extra, self.value.text().strip()
+
+
+class _SubnodeDialog(QDialog):
+    """Add a subdomain: label + owner."""
+
+    def __init__(self, parent_name: str, self_addr: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Add subdomain of {parent_name}")
+        form = QFormLayout(self)
+        self.label = QLineEdit()
+        self.label.setPlaceholderText("label  (→ label." + parent_name + ")")
+        self.owner = QLineEdit(self_addr or "")
+        self.owner.setMinimumWidth(360)
+        form.addRow("Subdomain", self.label)
+        form.addRow("Owner", self.owner)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self) -> "tuple[str, str]":
+        return self.label.text().strip(), self.owner.text().strip()
 
 
 class EnsPlugin(Plugin):
@@ -603,6 +730,11 @@ class EnsPlugin(Plugin):
         # drop and keep filtered out of re-renders this session. Reset per
         # account; never persisted (a stale denial must never hide a real name).
         self._denied: "set[str]" = set()
+        # Write state: the EnsName + on-chain ownership facts per name, so the
+        # write actions know the resolver, wrapped flag, and parent expiry.
+        self._names_by_l: "dict[str, EnsName]" = {}
+        self._owned: "set[str]" = set()      # owned by the selected address
+        self._wrapped: "set[str]" = set()    # held by the NameWrapper
 
     # --- plugin contract --------------------------------------------------
 
@@ -611,6 +743,8 @@ class EnsPlugin(Plugin):
             self._panel = EnsPanel()
             self._panel.records_requested.connect(self._on_records_requested)
             self._panel.add_custom_requested.connect(self._on_add_custom)
+            self._panel.write_requested.connect(self._on_write_requested)
+            self._panel.edit_record_requested.connect(self._on_edit_record)
         return self._panel
 
     def action_widgets(self) -> "list[QWidget]":
@@ -654,6 +788,10 @@ class EnsPlugin(Plugin):
             return
         if address != self._loaded_for:
             self._denied.clear()              # denials are per-account
+            self._owned.clear()
+            self._wrapped.clear()
+            if self._panel is not None:
+                self._panel.set_writable(set())
         self._loaded_for = address
         if not address:
             self._panel.populate([], int(time.time()))
@@ -698,6 +836,7 @@ class EnsPlugin(Plugin):
         # are exempt (intentionally watched even when unowned).
         names = [n for n in names
                  if n.source == "custom" or n.name.lower() not in self._denied]
+        self._names_by_l = {n.name.lower(): n for n in names}
         self._panel.populate(build_tree(names), int(time.time()))
 
     # --- verification (batched, Helios) -----------------------------------
@@ -726,7 +865,29 @@ class EnsPlugin(Plugin):
                 self._resolver_cache[name_l] = st.resolver
             if st.owned_by(address):
                 self._denied.discard(name_l)     # self-heal if ownership changed
+                self._owned.add(name_l)
+            else:
+                self._owned.discard(name_l)
+            if st.wrapped:
+                self._wrapped.add(name_l)
+            else:
+                self._wrapped.discard(name_l)
         self._denied.update(self._panel.mark_verified(states, address))
+        self._refresh_writable(address)
+
+    def _can_sign(self, address: str) -> bool:
+        """True when the selected account can sign (hot or ledger, not watch-only)."""
+        a = (address or "").lower()
+        return any(acc.get("address", "").lower() == a
+                   and acc.get("source") in ("hot", "ledger")
+                   for acc in self._store.accounts)
+
+    def _refresh_writable(self, address: str) -> None:
+        # Writable = names the chain proved this address owns, AND the account
+        # can actually sign. (Watch-only → read-only.)
+        writable = self._owned if self._can_sign(address) else set()
+        if self._panel is not None:
+            self._panel.set_writable(writable)
 
     # --- records (lazy) ---------------------------------------------------
 
@@ -783,6 +944,242 @@ class EnsPlugin(Plugin):
             return
         self._store.add_custom_ens_name(name)
         self._on_refresh()
+
+    # --- writes (records + subdomains) ------------------------------------
+
+    def _on_write_requested(self, name: str, kind: str) -> None:
+        if self._panel is None:
+            return
+        if kind == "addr":
+            self._write_addr(name)
+        elif kind == "content":
+            self._write_content(name)
+        elif kind == "text":
+            self._write_text(name)
+        elif kind == "record":
+            self._write_record(name)
+        elif kind == "subdomain":
+            self._add_subdomain(name)
+
+    def _on_edit_record(self, name: str, label: str, value: str) -> None:
+        """Re-open the matching editor for an existing record row, prefilled.
+        Row labels come from ``_record_rows``: ``address`` / ``address (BTC)`` /
+        ``content`` / a text key."""
+        lab = label.strip()
+        if lab == "address":
+            self._write_addr(name, prefill=value)
+        elif lab.startswith("address (") and lab.endswith(")"):
+            self._write_record(name, preset="Other-chain address",
+                               coin=lab[len("address ("):-1], value=value)
+        elif lab == "content":
+            self._write_content(name, prefill=value)
+        else:
+            self._write_text(name, key=lab, value=value)
+
+    # --- per-kind editors --------------------------------------------------
+
+    def _cur_records(self, name: str) -> "Optional[EnsRecords]":
+        c = self._rec_cache.get(name.lower())
+        return c[0] if c is not None else None
+
+    def _write_addr(self, name: str, prefill: str = "") -> None:
+        if self._panel is None:
+            return
+        cur = prefill
+        if not cur:
+            n = self._names_by_l.get(name.lower())
+            cur = (n.resolved_address or "") if n is not None else ""
+        text, ok = QInputDialog.getText(
+            self._panel, "Set ETH address", f"ETH address for {name}:",
+            QLineEdit.EchoMode.Normal, cur or "")
+        if not ok:
+            return
+        from .. import ens_write
+        addr = _checksum(text)
+        if text.strip() and addr is None:
+            self._warn("That doesn't look like a valid 0x address.")
+            return
+        res = self._ensure_resolver(name)
+        if res is None:
+            return
+        to, data = ens_write.set_addr(res, name, addr or ens_write.ZERO_ADDRESS)
+        self._submit_tx(name, to, data, f"Set address · {name}")
+
+    def _write_content(self, name: str, prefill: str = "") -> None:
+        if self._panel is None:
+            return
+        cur = prefill
+        if not cur:
+            rec = self._cur_records(name)
+            cur = (rec.contenthash or "") if rec is not None else ""
+        text, ok = QInputDialog.getText(
+            self._panel, "Set content", f"IPFS / IPNS URL for {name}:",
+            QLineEdit.EchoMode.Normal, cur or "")
+        if not ok:
+            return
+        res = self._ensure_resolver(name)
+        if res is None:
+            return
+        from .. import ens_write
+        try:
+            to, data = ens_write.set_contenthash(res, name, text.strip())
+        except ValueError as e:
+            self._warn(str(e))
+            return
+        self._submit_tx(name, to, data, f"Set content · {name}")
+
+    def _write_text(self, name: str, key: str = "", value: str = "") -> None:
+        if self._panel is None:
+            return
+        dlg = _RecordDialog(name, preset="Text record", key=key, value=value,
+                            parent=self._panel)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        _, k, val = dlg.result_values()
+        k = k.strip()
+        if not k:
+            return
+        res = self._ensure_resolver(name)
+        if res is None:
+            return
+        from .. import ens_write
+        to, data = ens_write.set_text(res, name, k, val)
+        self._submit_tx(name, to, data, f"Set {k} · {name}")
+
+    def _write_record(self, name: str, *, preset: "Optional[str]" = None,
+                      coin: str = "", value: str = "") -> None:
+        if self._panel is None:
+            return
+        dlg = _RecordDialog(name, preset=preset, coin=coin, value=value,
+                            parent=self._panel)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        kind, extra, val = dlg.result_values()
+        res = self._ensure_resolver(name)
+        if res is None:
+            return
+        from .. import ens_write
+        if kind == "ETH address":
+            addr = _checksum(val)
+            if val and addr is None:
+                self._warn("That doesn't look like a valid 0x address.")
+                return
+            to, data = ens_write.set_addr(res, name, addr or ens_write.ZERO_ADDRESS)
+            label = f"Set address · {name}"
+        elif kind == "Content (IPFS)":
+            try:
+                to, data = ens_write.set_contenthash(res, name, val)
+            except ValueError as e:
+                self._warn(str(e))
+                return
+            label = f"Set content · {name}"
+        elif kind == "Text record":
+            if not extra:
+                return
+            to, data = ens_write.set_text(res, name, extra, val)
+            label = f"Set {extra} · {name}"
+        else:                                    # Other-chain address
+            coin_type = ens_write.COIN_TYPES.get(extra)
+            if coin_type is None:
+                return
+            addr = _checksum(val)
+            if val and addr is None:
+                self._warn("That doesn't look like a valid 0x address.")
+                return
+            payload = ens_write.eth_addr_bytes(addr) if addr else b""
+            to, data = ens_write.set_coin_addr(res, name, coin_type, payload)
+            label = f"Set {extra} address · {name}"
+        self._submit_tx(name, to, data, label)
+
+    def _add_subdomain(self, name: str) -> None:
+        if self._panel is None:
+            return
+        host = self.host
+        self_addr = host.selected_address if host is not None else ""
+        dlg = _SubnodeDialog(name, _checksum(self_addr or "") or "",
+                             parent=self._panel)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        label, owner_in = dlg.values()
+        label = label.strip().lower()
+        if not label or "." in label:
+            if label:
+                self._warn("A subdomain label can't contain a dot.")
+            return
+        owner = _checksum(owner_in)
+        if owner is None:
+            self._warn("The owner must be a valid 0x address.")
+            return
+        from .. import ens_write
+        to, data = ens_write.add_subnode(
+            name, label, owner, wrapped=name.lower() in self._wrapped)
+        self._submit_tx(name, to, data,
+                        f"Add {label}.{name}", subdomain=True)
+
+    # --- write plumbing ----------------------------------------------------
+
+    def _resolver_for(self, name: str) -> "Optional[str]":
+        res = self._resolver_cache.get(name.lower())
+        if res and int(res, 16) != 0:
+            return res
+        return None
+
+    def _ensure_resolver(self, name: str) -> "Optional[str]":
+        """The name's resolver, or None — in which case offer to point the name
+        at the default public resolver first (records can't be stored without
+        one). The user then re-issues the record write after that confirms."""
+        res = self._resolver_for(name)
+        if res is not None:
+            return res
+        if self._panel is None:
+            return None
+        from PySide6.QtWidgets import QMessageBox
+        ans = QMessageBox.question(
+            self._panel, "No resolver set",
+            f"{name} has no resolver, so records can't be stored yet.\n\n"
+            "Point it at the default public resolver first? You can set the "
+            "record again once that transaction confirms.")
+        if ans == QMessageBox.StandardButton.Yes:
+            from .. import ens_write
+            to, data = ens_write.set_resolver(name)
+            self._submit_tx(name, to, data, f"Set resolver · {name}")
+        return None
+
+    def _warn(self, text: str) -> None:
+        if self._panel is None:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(self._panel, "ENS", text)
+
+    def _submit_tx(self, name: str, to: str, data: str, label: str,
+                   *, subdomain: bool = False) -> None:
+        host = self.host
+        chain = self._mainnet()
+        addr = host.selected_address if host is not None else None
+        if (host is None or chain is None or not addr
+                or not hasattr(host, "request_transaction")):
+            return
+        from eth_utils import to_checksum_address
+        from ..signing import SigningRequest
+        req = SigningRequest(
+            chain_id=ENS_CHAIN_ID,
+            from_addr=to_checksum_address(addr),
+            to_addr=to_checksum_address(to),
+            value_wei=0, data=data)
+        nm = name
+
+        def _after(_tx_hash: object) -> None:
+            # Broadcast ≠ mined, so the new value isn't readable yet. Drop the
+            # cache so the next manual expand re-fetches, and schedule one
+            # courtesy re-read once it's likely confirmed.
+            if subdomain:
+                self._on_refresh()
+                return
+            self._rec_cache.pop(nm.lower(), None)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(30000, lambda: self._on_records_requested(nm))
+
+        host.request_transaction(req, chain, label, on_broadcast=_after)
 
     # --- worker lifetime --------------------------------------------------
 

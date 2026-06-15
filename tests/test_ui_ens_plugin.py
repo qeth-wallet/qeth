@@ -30,6 +30,7 @@ class _StubHost:
         self._chain = chain
         self.selected_address = address
         self.started_workers: list = []
+        self.tx_requests: list = []
 
     def current_chain(self):
         return self._chain
@@ -40,10 +41,15 @@ class _StubHost:
     def start_worker(self, worker):
         self.started_workers.append(worker)
 
+    def request_transaction(self, req, chain, label, on_broadcast=None):
+        self.tx_requests.append((req, chain, label, on_broadcast))
+
 
 class _StubStore:
     def __init__(self):
         self.custom_ens_names: set[str] = set()
+        # Accounts the wallet can sign for; _can_sign() reads source.
+        self.accounts: list[dict] = []
 
     def add_custom_ens_name(self, name: str) -> None:
         self.custom_ens_names.add(name.strip().lower())
@@ -448,3 +454,159 @@ class TestEnsPlugin:
         root = plugin.widget().tree.topLevelItem(0)
         labels = [root.child(i).text(0) for i in range(root.childCount())]
         assert "url" in labels and "no records" not in labels
+
+
+# --- EnsPlugin: write actions ----------------------------------------------
+
+class TestEnsWriteActions:
+    RESOLVER = "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63"
+    OTHER = "0x" + "cd" * 20
+
+    def _plugin(self, qtbot, *, signable=True, owned=("vitalik.eth",)):
+        from qeth.plugins.ens import ENS_CHAIN_ID  # noqa: F401
+        store = _StubStore()
+        if signable:
+            store.accounts = [{"address": ADDR, "source": "hot"}]
+        else:
+            store.accounts = [{"address": ADDR, "source": "watch_only"}]
+        plugin = EnsPlugin(store)
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._render([EnsName(n) for n in owned])
+        for n in owned:
+            plugin._resolver_cache[n.lower()] = self.RESOLVER
+            plugin._owned.add(n.lower())
+        return plugin, host, store
+
+    def test_owned_signable_name_is_writable(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=ADDR, owner_known=True, resolver=self.RESOLVER),
+        }, True)
+        assert "vitalik.eth" in plugin.widget()._writable
+
+    def test_watch_only_is_not_writable(self, qtbot):
+        plugin, host, store = self._plugin(qtbot, signable=False)
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=ADDR, owner_known=True, resolver=self.RESOLVER),
+        }, True)
+        assert plugin.widget()._writable == set()
+
+    def test_set_text_builds_request_to_resolver(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        from qeth.plugins.ens import _RecordDialog
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(_RecordDialog, "exec",
+                            lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(_RecordDialog, "result_values",
+                            lambda self: ("Text record", "url", "https://x"))
+        plugin._write_text("vitalik.eth")
+        assert len(host.tx_requests) == 1
+        req, chain, label, cb = host.tx_requests[0]
+        assert req.chain_id == 1
+        assert req.from_addr.lower() == ADDR.lower()
+        assert req.to_addr.lower() == self.RESOLVER.lower()
+        assert req.data[2:10] == "10f13a8c"        # setText
+        assert callable(cb)
+
+    def test_set_addr_validates_and_builds(self, qtbot, monkeypatch):
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(
+            "qeth.plugins.ens.QInputDialog.getText",
+            staticmethod(lambda *a, **k: (self.OTHER, True)))
+        plugin._write_addr("vitalik.eth")
+        req, *_ = host.tx_requests[0]
+        assert req.to_addr.lower() == self.RESOLVER.lower()
+        assert req.data[2:10] == "d5fa2b00"         # setAddr(node,address)
+
+    def test_set_addr_rejects_garbage(self, qtbot, monkeypatch):
+        warned: list = []
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(
+            "qeth.plugins.ens.QInputDialog.getText",
+            staticmethod(lambda *a, **k: ("not-an-address", True)))
+        monkeypatch.setattr(plugin, "_warn", lambda t: warned.append(t))
+        plugin._write_addr("vitalik.eth")
+        assert host.tx_requests == []               # nothing submitted
+        assert warned                               # user told why
+
+    def test_no_resolver_offers_to_set_one_first(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+        from qeth.ens_app import ENS_REGISTRY
+        plugin, host, store = self._plugin(qtbot)
+        plugin._resolver_cache.clear()              # name has no resolver
+        monkeypatch.setattr(
+            "qeth.plugins.ens.QInputDialog.getText",
+            staticmethod(lambda *a, **k: (self.OTHER, True)))
+        monkeypatch.setattr(
+            "PySide6.QtWidgets.QMessageBox.question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+        plugin._write_addr("vitalik.eth")
+        # only the resolver-setting tx is submitted (the addr write is deferred)
+        assert len(host.tx_requests) == 1
+        req, *_ = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_REGISTRY.lower()
+        assert req.data[2:10] == "1896f70a"         # setResolver
+
+    def test_add_subdomain_unwrapped_targets_registry(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        from qeth.ens_app import ENS_REGISTRY
+        from qeth.plugins.ens import _SubnodeDialog
+        owner = self.OTHER
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(_SubnodeDialog, "exec",
+                            lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(_SubnodeDialog, "values",
+                            lambda self: ("blog", owner))
+        plugin._add_subdomain("vitalik.eth")
+        req, _c, _l, cb = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_REGISTRY.lower()
+        assert req.data[2:10] == "5ef2c7f0"         # registry.setSubnodeRecord
+
+    def test_add_subdomain_wrapped_targets_namewrapper(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        from qeth.ens_app import ENS_NAME_WRAPPER
+        from qeth.plugins.ens import _SubnodeDialog
+        owner = self.OTHER
+        plugin, host, store = self._plugin(qtbot)
+        plugin._wrapped.add("vitalik.eth")
+        monkeypatch.setattr(_SubnodeDialog, "exec",
+                            lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(_SubnodeDialog, "values",
+                            lambda self: ("blog", owner))
+        plugin._add_subdomain("vitalik.eth")
+        req, *_ = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
+        assert req.data[2:10] == "24c1af44"         # NameWrapper.setSubnodeRecord
+
+    def test_subdomain_rejects_dotted_label(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        from qeth.plugins.ens import _SubnodeDialog
+        owner = self.OTHER
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(plugin, "_warn", lambda t: None)
+        monkeypatch.setattr(_SubnodeDialog, "exec",
+                            lambda self: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(_SubnodeDialog, "values",
+                            lambda self: ("a.b", owner))
+        plugin._add_subdomain("vitalik.eth")
+        assert host.tx_requests == []
+
+    def test_edit_record_routes_by_label(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        calls: list = []
+        plugin._write_addr = lambda name, prefill="": calls.append(("addr", prefill))
+        plugin._write_content = lambda name, prefill="": calls.append(("content", prefill))
+        plugin._write_text = lambda name, key="", value="": calls.append(("text", key, value))
+        plugin._write_record = lambda name, **kw: calls.append(("record", kw))
+        plugin._on_edit_record("vitalik.eth", "address", "0xabc")
+        plugin._on_edit_record("vitalik.eth", "content", "ipfs://x")
+        plugin._on_edit_record("vitalik.eth", "url", "https://x")
+        plugin._on_edit_record("vitalik.eth", "address (OP)", "0xdef")
+        assert calls[0] == ("addr", "0xabc")
+        assert calls[1] == ("content", "ipfs://x")
+        assert calls[2] == ("text", "url", "https://x")
+        assert calls[3][0] == "record" and calls[3][1]["coin"] == "OP"

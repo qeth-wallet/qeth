@@ -399,8 +399,8 @@ class EnsPanel(QWidget):
         exp_col = text or (_fmt_expiry(n.expiry_ts) if n.expiry_ts else "")
         item = _SortItem([n.name, exp_col, n.resolved_address or ""])
         # A subdomain (structurally — even an orphan surfacing at the top level)
-        # reads differently from a real 2LD: italic name, folder icon, and it
-        # sorts after the domains.
+        # reads differently from a real 2LD: a folder icon, and it sorts after
+        # the domains.
         sub = n.is_subdomain
         item.setIcon(0, self._sub_icon if sub else self._domain_icon)
         item.setData(0, _NAME_ROLE, n)
@@ -408,10 +408,6 @@ class EnsPanel(QWidget):
         item.setData(0, _TYPE_RANK_ROLE,
                      _RANK_SUBDOMAIN if sub else _RANK_DOMAIN)
         item.setData(_EXPIRES_COL, _EXPIRY_SORT_ROLE, n.expiry_ts)
-        if sub:
-            f = item.font(0)
-            f.setItalic(True)
-            item.setFont(0, f)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
         # Confusable / non-normalized name → a warning status (shown immediately,

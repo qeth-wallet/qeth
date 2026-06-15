@@ -414,8 +414,13 @@ class MainWindow(QMainWindow):
         # outline-only. Delegate handles the cell-by-cell paint;
         # the table stylesheets no longer carry a ``:selected``
         # rule so they don't beat us.
+        # The ENS tree paints its own focus-aware selection (custom
+        # delegate + multi-column status icons), so don't overlay the
+        # generic one — just give it the FocusIn repaint + selection.
+        ens_tree = getattr(
+            getattr(self.ens_plugin, "_panel", None), "tree", None)
         for w in tab_stops:
-            _apply_focus_aware_selection(w)
+            _apply_focus_aware_selection(w, with_delegate=(w is not ens_tree))
         # Initial focus on the wallet tree so arrow keys work
         # immediately.
         tab_stops[0].setFocus(Qt.FocusReason.OtherFocusReason)
@@ -445,6 +450,9 @@ class MainWindow(QMainWindow):
         xpanel = getattr(self.transactions_plugin, "_panel", None)
         if xpanel is not None and hasattr(xpanel, "table"):
             out.append(xpanel.table)
+        epanel = getattr(self.ens_plugin, "_panel", None)
+        if epanel is not None and hasattr(epanel, "tree"):
+            out.append(epanel.tree)
         return out
 
     # Idle hints rotated through the status bar — keyboard / navigation
@@ -456,7 +464,7 @@ class MainWindow(QMainWindow):
     _STATUS_HINTS = (
         "Hold Alt to reveal each button's underlined shortcut letter.",
         "Tab moves between the Wallets list and the right panel; "
-        "←/→ switch the Tokens ↔ Transactions tabs.",
+        "←/→ cycle the Tokens / Transactions / ENS tabs.",
         "In a dialog, Tab / Shift+Tab move between fields; Enter confirms.",
         "Ctrl+C copies the selected address, token, or tx hash.",
         "Del removes the selected account.",
@@ -1310,9 +1318,9 @@ class _TabCycleFilter(QObject):
     def _handle_left_right(self, obj, go_right: bool) -> bool:
         if obj not in self._right_tables():
             return False
-        plugins = [
-            self._mw.tokens_plugin, self._mw.transactions_plugin,
-        ]
+        # Cycle over EVERY plugin mounted in the right slot (Tokens,
+        # Transactions, ENS, …) — in tab-bar order — not a hardcoded pair.
+        plugins = self._mw.right_slot.plugins()
         current = self._mw.right_slot.active()
         try:
             idx = plugins.index(current)
@@ -1342,16 +1350,19 @@ class _TabCycleFilter(QObject):
 
     def _right_tables(self) -> list:
         out = []
-        for plugin in (self._mw.tokens_plugin,
-                        self._mw.transactions_plugin):
+        for plugin in self._mw.right_slot.plugins():
             t = self._table_for_plugin(plugin)
             if t is not None:
                 out.append(t)
         return out
 
     def _table_for_plugin(self, plugin):
+        # A right-slot plugin's focusable list: Tokens/Transactions expose a
+        # QTableWidget as ``.table``, ENS a QTreeWidget as ``.tree``.
         panel = getattr(plugin, "_panel", None)
-        return getattr(panel, "table", None) if panel is not None else None
+        if panel is None:
+            return None
+        return getattr(panel, "table", None) or getattr(panel, "tree", None)
 
     def _active_right_table(self):
         active = self._mw.right_slot.active()
@@ -1385,7 +1396,7 @@ def _is_descendant(child, ancestor) -> bool:
     return False
 
 
-def _apply_focus_aware_selection(widget) -> None:
+def _apply_focus_aware_selection(widget, *, with_delegate: bool = True) -> None:
     """Norton-Commander-style cursor: hand-paint the selection
     via an item delegate. Qt's stylesheet engine on the user's
     theme (qt6ct + system Qt) defers style refreshes after
@@ -1393,10 +1404,16 @@ def _apply_focus_aware_selection(widget) -> None:
     FocusIn on a panel paint with the stale (unfocused) rule
     until the user nudges the cursor. The delegate path queries
     view.hasFocus() at paint time, so a viewport().repaint() on
-    FocusIn IS enough to get the new state on screen."""
-    delegate = _FocusAwareSelectionDelegate(widget)
-    widget.setItemDelegate(delegate)
-    widget._focus_aware_delegate = delegate
+    FocusIn IS enough to get the new state on screen.
+
+    ``with_delegate`` False for a list that already paints its own
+    focus-aware selection (the ENS tree) — it still gets the
+    FocusIn repaint + ensure-a-row-is-selected behaviour, just not
+    our generic delegate over its custom one."""
+    if with_delegate:
+        delegate = _FocusAwareSelectionDelegate(widget)
+        widget.setItemDelegate(delegate)
+        widget._focus_aware_delegate = delegate
     repainter = _FocusRepainter(widget)
     widget.installEventFilter(repainter)
     widget._focus_repainter = repainter

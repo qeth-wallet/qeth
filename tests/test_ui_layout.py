@@ -98,6 +98,38 @@ def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
     assert mainwindow.right_slot.active() is mainwindow.tokens_plugin
 
 
+def test_ens_tree_is_a_keyboard_tab_stop(mainwindow):
+    # The ENS tree must be a focus tab-stop like the tokens/transactions
+    # tables, so Tab reaches it and arrow keys navigate it.
+    stops = mainwindow._collect_tab_stops()
+    assert mainwindow.ens_plugin._panel.tree in stops
+
+
+def test_left_right_cycles_through_all_right_tabs_including_ens(qtbot, mainwindow):
+    mw = mainwindow
+    flt = mw._tab_cycle_filter
+    mw.right_slot.set_active(mw.tokens_plugin)
+    # Right: Tokens → Transactions → ENS → wrap to Tokens
+    assert flt._handle_left_right(mw.tokens_plugin._panel.table, True) is True
+    assert mw.right_slot.active() is mw.transactions_plugin
+    assert flt._handle_left_right(mw.transactions_plugin._panel.table, True) is True
+    assert mw.right_slot.active() is mw.ens_plugin           # was excluded before
+    # the ENS tree counts as a "right table", so ←/→ work while it's focused
+    ens_tree = mw.ens_plugin._panel.tree
+    assert ens_tree in flt._right_tables()
+    assert flt._handle_left_right(ens_tree, True) is True
+    assert mw.right_slot.active() is mw.tokens_plugin
+
+
+def test_tab_reaches_ens_tree_when_ens_active(qtbot, mainwindow):
+    mw = mainwindow
+    mw.right_slot.set_active(mw.ens_plugin)
+    flt = mw._tab_cycle_filter
+    # Tab from the wallet tree lands on the active right list — the ENS tree.
+    assert flt._active_right_table() is mw.ens_plugin._panel.tree
+    assert flt._handle_tab(mw.wallets_plugin._tree) is True
+
+
 def test_chain_controls_hidden_on_ens_tab(qtbot, mainwindow):
     """ENS is mainnet-only, so the network selector is meaningless there and
     is hidden — restored on any other tab."""

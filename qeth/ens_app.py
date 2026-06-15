@@ -232,13 +232,25 @@ def _http_get_json(url: str, timeout: float = 20.0) -> dict:
         return json.load(f)
 
 
+ZERO_ADDRESS = "0x" + "00" * 20
+
+
+def nonzero_addr(addr: Optional[str]) -> Optional[str]:
+    """The address, or None when it's empty / the zero address. A cleared ENS
+    record reads back as the zero address (and indexers report it that way); we
+    treat that as "no address" rather than showing a literal zero."""
+    if not addr or addr == ZERO_ADDRESS:
+        return None
+    return addr
+
+
 def _parse_name_item(it: dict) -> Optional[EnsName]:
     name = it.get("name")
     if not name:
         return None
     return EnsName(
         name=str(name),
-        resolved_address=(it.get("resolved_address") or {}).get("hash"),
+        resolved_address=nonzero_addr((it.get("resolved_address") or {}).get("hash")),
         owner=(it.get("owner") or {}).get("hash"),
         expiry_ts=_iso_to_unix(it.get("expiry_date")),
     )
@@ -768,7 +780,7 @@ class EnsCache:
             if d.get("name"):
                 out.append(EnsName(
                     name=str(d["name"]),
-                    resolved_address=d.get("resolved_address"),
+                    resolved_address=nonzero_addr(d.get("resolved_address")),
                     owner=d.get("owner"),
                     expiry_ts=d.get("expiry_ts"),
                     source=d.get("source", "owned"),

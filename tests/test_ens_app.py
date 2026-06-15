@@ -51,6 +51,10 @@ def test_parse_name_item():
     assert n.name == "vitalik.eth" and n.resolved_address == "0xRES"
     assert n.owner == "0xOWN" and n.expiry_ts == _utc(2048, 3, 27, 13, 25, 30)
     assert ea._parse_name_item({"name": ""}) is None
+    # a cleared record reads back as the zero address → shown as "no address"
+    cleared = ea._parse_name_item(
+        {"name": "x.eth", "resolved_address": {"hash": ea.ZERO_ADDRESS}})
+    assert cleared.resolved_address is None
 
 
 def test_lookup_owned_names_paginates_and_dedupes():

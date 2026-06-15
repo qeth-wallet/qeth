@@ -689,21 +689,32 @@ def verified_read_records(
     wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
 ) -> "Tuple[EnsRecords, bool]":
     """Verified-ONLY record read → ``(records, verified)``. ``verified`` is True
-    only when a Helios sidecar proved on-chain reads that LANDED. A glitch
-    (``ok`` False) OR an offchain/CCIP resolver (``extended`` — gateway answers
-    can't be proof-checked) returns ``(EnsRecords(), False)`` so the worker skips
-    the upgrade emit; the unverified ``read_records`` keeps what it showed."""
+    when a Helios sidecar proved the on-chain reads that LANDED — including a
+    name whose records are served on-chain even though its resolver ALSO
+    implements the extended (CCIP) interface for subnames. ``(EnsRecords(),
+    False)`` (no upgrade emit) only when nothing verifiable came back: a glitch
+    (``ok`` False), or a resolver that served NOTHING on-chain and is
+    extended — i.e. the records exist only offchain, which ``read_records``
+    already fetched via the gateway and which can't be proof-checked."""
     from .verified import verified_client
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
     if client is None or not verified:
         return EnsRecords(), False
-    try:
-        rec, ok, extended, _ = _read_records_via_client(
-            client, name, text_keys=text_keys)
-        return (rec, True) if (ok and not extended) else (EnsRecords(), False)
-    except Exception:
-        log.debug("ENS verified_read_records failed", exc_info=True)
-        return EnsRecords(), False
+    # Retry the just-synced-sidecar transient (same as verify_names) so on-chain
+    # records reliably earn their ✓ instead of intermittently missing it.
+    for attempt in range(_VERIFY_RETRIES):
+        try:
+            rec, ok, extended, _ = _read_records_via_client(
+                client, name, text_keys=text_keys)
+        except Exception:
+            log.debug("ENS verified_read_records failed", exc_info=True)
+            rec, ok, extended = EnsRecords(), False, False
+        if ok:
+            offchain_only = extended and not rec.texts and not rec.contenthash
+            return (EnsRecords(), False) if offchain_only else (rec, True)
+        if attempt < _VERIFY_RETRIES - 1:
+            time.sleep(_VERIFY_RETRY_DELAY_S)
+    return EnsRecords(), False
 
 
 def _abi_bytes(raw) -> Optional[str]:

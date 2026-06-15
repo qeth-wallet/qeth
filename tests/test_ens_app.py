@@ -401,6 +401,47 @@ def test_read_records_self_heals_stale_resolver():
     assert ok is True and rec.texts and all(v == "hi" for v in rec.texts.values())
 
 
+def test_verified_read_records_onchain_extended_is_verified(monkeypatch):
+    # An extended (CCIP) resolver that ALSO serves records on-chain → those
+    # records are Helios-provable → verified ✓ (the base.eth case).
+    monkeypatch.setattr("qeth.verified.verified_chain", lambda c, **k: object())
+    monkeypatch.setattr("qeth.chain.EthClient", lambda c: object())
+    rec = ea.EnsRecords(texts={"url": "base.org"})
+    monkeypatch.setattr(ea, "_read_records_via_client",
+                        lambda *a, **k: (rec, True, True, "0xR"))
+    out, verified = ea.verified_read_records(object(), "base.eth")
+    assert verified is True and out.texts == {"url": "base.org"}
+
+
+def test_verified_read_records_offchain_only_is_unverified(monkeypatch):
+    # Extended resolver, nothing on-chain → records live offchain → not verified
+    # (the gateway answer can't be proof-checked).
+    monkeypatch.setattr("qeth.verified.verified_chain", lambda c, **k: object())
+    monkeypatch.setattr("qeth.chain.EthClient", lambda c: object())
+    monkeypatch.setattr(ea, "_read_records_via_client",
+                        lambda *a, **k: (ea.EnsRecords(), True, True, "0xR"))
+    _out, verified = ea.verified_read_records(object(), "uni.eth")
+    assert verified is False
+
+
+def test_verified_read_records_retries_transient(monkeypatch):
+    monkeypatch.setattr("qeth.verified.verified_chain", lambda c, **k: object())
+    monkeypatch.setattr("qeth.chain.EthClient", lambda c: object())
+    monkeypatch.setattr(ea.time, "sleep", lambda s: None)
+    rec = ea.EnsRecords(texts={"url": "x"})
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return ea.EnsRecords(), False, False, None     # glitch
+        return rec, True, False, "0xR"
+
+    monkeypatch.setattr(ea, "_read_records_via_client", flaky)
+    out, verified = ea.verified_read_records(object(), "vitalik.eth")
+    assert verified is True and out.texts == {"url": "x"} and calls["n"] == 2
+
+
 def test_verify_names_no_helios_returns_unverified(monkeypatch):
     # No sidecar → the verified-only path (fallback=False) yields nothing.
     monkeypatch.setattr("qeth.verified.verified_chain", lambda *a, **k: None)

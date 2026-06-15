@@ -816,3 +816,15 @@ class EnsCache:
             "contenthash": rec.contenthash, "verified": bool(verified),
         }
         atomic_write_text(p, json.dumps(data, indent=2))
+
+    def forget_records(self, chain_id: int, name: str) -> None:
+        """Drop a name's cached records — so a refresh after the user CHANGED
+        them won't paint the now-stale (possibly verified) old value before the
+        fresh read lands."""
+        p = self._records_path(chain_id, name)
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("ENS records cache unlink failed %s: %s", p, e)

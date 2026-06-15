@@ -781,13 +781,15 @@ class MainWindow(QMainWindow):
         )
 
     def request_transaction(self, req, chain, label: str,
-                            on_broadcast=None) -> None:
+                            on_broadcast=None, on_confirmed=None) -> None:
         """Open the review + sign + broadcast flow for an arbitrary locally-built
         transaction (used by the ENS plugin's record/subdomain writes). Same
         pipeline as Send / Speed-up: the dialog estimates gas + fees + nonce and
         simulates, then the worker signs (Ledger / hot wallet) and broadcasts and
         the pending watcher tracks it. ``on_broadcast(tx_hash)`` fires after a
-        successful broadcast so the caller can refresh."""
+        successful broadcast; ``on_confirmed(receipt)`` fires once when that tx
+        mines (so the caller can refresh against confirmed — not finalized —
+        state)."""
         from .plugins.transactions import SignTransactionDialog
         dialog = SignTransactionDialog(
             req, chain,
@@ -808,6 +810,8 @@ class MainWindow(QMainWindow):
 
         def _bcast(h: str) -> None:
             self.status_message(f"{label}: {h[:12]}…", 6000)
+            if on_confirmed is not None:
+                self._call_on_confirm(chain.chain_id, h, on_confirmed)
             if on_broadcast is not None:
                 try:
                     on_broadcast(h)
@@ -822,6 +826,30 @@ class MainWindow(QMainWindow):
             on_cancel=lambda: None,
             on_fail=lambda msg: self.status_message(f"{label} failed: {msg}", 6000),
         )
+
+    def _call_on_confirm(self, chain_id: int, tx_hash: str, callback) -> None:
+        """Fire ``callback(receipt)`` once, when the pending tx with this hash
+        mines. Subscribes to the transactions plugin's ``tx_confirmed`` and
+        self-disconnects on the first match — the watcher already polls the
+        receipt, so we just piggy-back on its confirmation."""
+        plugin = self.transactions_plugin
+        want = tx_hash.lower()
+
+        def _on(chain, h: str, receipt) -> None:
+            if h.lower() != want or chain.chain_id != chain_id:
+                return
+            try:
+                plugin.tx_confirmed.disconnect(_on)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                callback(receipt)
+            except Exception:
+                import logging
+                logging.getLogger("qeth.ui").debug(
+                    "request_transaction on_confirmed failed", exc_info=True)
+
+        plugin.tx_confirmed.connect(_on)
 
     def _begin_sign(self, dialog, chain, on_broadcast, on_fail) -> None:
         """Start one sign-and-broadcast attempt. Called every time

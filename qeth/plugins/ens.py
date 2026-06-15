@@ -98,7 +98,18 @@ _CONTROL_TIP = "Subdomain you control — verified"
 _RESOLVED_TIP = "Address cryptographically verified"
 _MISMATCH_TIP = "⚠ Corrected to verified address"
 _RECORD_TIP = "Cryptographically verified"
+# A record we read at the chain head (confirmed) but the finalized state Helios
+# proves against hasn't caught up to yet — e.g. right after you change it. Shows
+# the new value immediately with a distinct mark; upgrades to the ✓ once final.
+_CONFIRMED_TIP = "Confirmed on-chain — awaiting finality"
 _WRAPPED_NOTE = " · wrapped"
+
+# Record display status. "unverified" = read at head, no proof yet (no icon).
+# "confirmed" = read at head, but the finalized proof still shows an older value
+# (distinct icon). "verified" = finalized proof matches what's shown (the ✓).
+_ST_UNVERIFIED = "unverified"
+_ST_CONFIRMED = "confirmed"
+_ST_VERIFIED = "verified"
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
 # a status chip, not palette-driven text.
@@ -378,6 +389,9 @@ class EnsPanel(QWidget):
                               QStyle.StandardPixmap.SP_DialogApplyButton)
         self._warn_icon = _icon("dialog-warning",
                                 QStyle.StandardPixmap.SP_MessageBoxWarning)
+        # Confirmed-but-not-yet-final: a "syncing" glyph distinct from the ✓.
+        self._confirmed_icon = _icon(
+            "emblem-synchronizing", QStyle.StandardPixmap.SP_BrowserReload)
         self._rec_icons = {
             "address": _icon("avatar-default", QStyle.StandardPixmap.SP_FileIcon),
             "content": _icon("folder-remote", QStyle.StandardPixmap.SP_FileLinkIcon),
@@ -435,7 +449,7 @@ class EnsPanel(QWidget):
         return item
 
     def add_records(self, name: str, rec: EnsRecords,
-                    verified: bool = False) -> None:
+                    status: str = _ST_UNVERIFIED) -> None:
         item = self._items_by_name.get(name.lower())
         if item is None:
             return
@@ -461,8 +475,10 @@ class EnsPanel(QWidget):
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
             ch.setToolTip(2, value)
-            if verified:                # status icon, same as the name rows
+            if status == _ST_VERIFIED:           # ✓ — finalized proof matches
                 self._set_status(ch, "ok", _RECORD_TIP)
+            elif status == _ST_CONFIRMED:        # confirmed, not yet final
+                self._set_status(ch, "confirmed", _CONFIRMED_TIP)
             item.addChild(ch)
 
     def mark_verified(self, states: "dict[str, OwnershipCheck]",
@@ -521,10 +537,11 @@ class EnsPanel(QWidget):
     def _set_status(self, item: QTreeWidgetItem, status: str,
                     tooltip: str) -> None:
         """Set the trailing status column's icon + tooltip for a line, ``status``
-        in ``{"ok", "warn"}``. An icon (not a text ✓/⚠) keeps the row height
-        uniform regardless of the theme's emoji rendering."""
-        item.setIcon(self._STATUS_COL,
-                     self._ok_icon if status == "ok" else self._warn_icon)
+        in ``{"ok", "confirmed", "warn"}``. An icon (not a text ✓/⚠) keeps the
+        row height uniform regardless of the theme's emoji rendering."""
+        icon = {"ok": self._ok_icon,
+                "confirmed": self._confirmed_icon}.get(status, self._warn_icon)
+        item.setIcon(self._STATUS_COL, icon)
         item.setData(0, _STATUS_ROLE, status)
         item.setToolTip(self._STATUS_COL, tooltip)
 
@@ -717,9 +734,16 @@ class EnsPlugin(Plugin):
         self._panel: Optional[EnsPanel] = None
         self._loaded_for: Optional[str] = None
         self._add_btn: Optional[QPushButton] = None
-        # In-memory records cache (name → (records, verified)) layered over the
-        # disk cache, so re-expanding a name is instant within a session too.
-        self._rec_cache: "dict[str, tuple[EnsRecords, bool]]" = {}
+        # In-memory records cache (name → (displayed records, status)) layered
+        # over the disk cache, so re-expanding a name is instant within a
+        # session too. ``status`` is one of _ST_UNVERIFIED/_CONFIRMED/_VERIFIED.
+        self._rec_cache: "dict[str, tuple[EnsRecords, str]]" = {}
+        # The two reads behind the displayed value: ``_rec_latest`` is the chain
+        # head (block=latest, what we always SHOW); ``_rec_final`` is the last
+        # finalized-proven read. They agree → ✓ (verified); they differ → the
+        # head is ahead of finality (confirmed, awaiting the ✓).
+        self._rec_latest: "dict[str, EnsRecords]" = {}
+        self._rec_final: "dict[str, EnsRecords]" = {}
         # Per-name resolver (from the ownership pass) — lets a record read skip
         # its resolver-lookup round-trip. Refreshed every load (self-heals a
         # re-pointed resolver). And a warm EthClient reused across record reads
@@ -891,17 +915,32 @@ class EnsPlugin(Plugin):
 
     # --- records (lazy) ---------------------------------------------------
 
-    def _on_records_requested(self, name: str) -> None:
+    def _on_records_requested(self, name: str, *, force: bool = False) -> None:
         if self._panel is None:
             return
-        # Paint cached records instantly (memory → disk), then refresh.
-        cached = self._rec_cache.get(name.lower())
-        if cached is None:
-            cached = self._cache.load_records(ENS_CHAIN_ID, name)
+        nl = name.lower()
+        if force:
+            # A write to this name just CONFIRMED. Drop the stale value so the
+            # fresh head read becomes what's shown — don't let the prior cache
+            # (or a finalized-lagged verified read) keep painting the old value.
+            self._rec_cache.pop(nl, None)
+            self._rec_latest.pop(nl, None)
+            self._rec_final.pop(nl, None)
+            self._cache.forget_records(ENS_CHAIN_ID, name)
+        else:
+            # Paint cached records instantly (memory → disk), then refresh.
+            cached = self._rec_cache.get(nl)
+            if cached is None:
+                disk = self._cache.load_records(ENS_CHAIN_ID, name)
+                if disk is not None:
+                    self._rec_latest[nl] = disk[0]
+                    if disk[1]:
+                        self._rec_final[nl] = disk[0]
+                    cached = (disk[0],
+                              _ST_VERIFIED if disk[1] else _ST_UNVERIFIED)
+                    self._rec_cache[nl] = cached
             if cached is not None:
-                self._rec_cache[name.lower()] = cached
-        if cached is not None:
-            self._panel.add_records(name, cached[0], cached[1])
+                self._panel.add_records(name, cached[0], cached[1])
         chain = self._mainnet()
         if chain is None:
             return
@@ -910,7 +949,7 @@ class EnsPlugin(Plugin):
             self._read_client = EthClient(chain)
         worker = EnsRecordsWorker(
             chain, name, client=self._read_client,
-            resolver=self._resolver_cache.get(name.lower()))
+            resolver=self._resolver_cache.get(nl))
         worker.ready.connect(self._on_records_ready)
         self._start(worker)
 
@@ -921,16 +960,31 @@ class EnsPlugin(Plugin):
         # wipe good records. (This was the "records vanished on a glitch" bug.)
         if not ok:
             return
-        # The two-phase worker emits unverified then (maybe) verified. Don't let
-        # the late unverified phase of a refresh clobber a cached verified
-        # result with a worse one; otherwise newest wins.
-        prev = self._rec_cache.get(name.lower())
-        if prev is not None and prev[1] and not verified:
-            return
-        self._rec_cache[name.lower()] = (rec, verified)
-        self._cache.save_records(ENS_CHAIN_ID, name, rec, verified)
+        nl = name.lower()
+        # The worker emits the head read (verified False) then, if a sidecar
+        # could prove it, the finalized read (verified True). We always SHOW the
+        # head value; the finalized read only decides whether it earns the ✓.
+        if verified:
+            self._rec_final[nl] = rec
+        else:
+            self._rec_latest[nl] = rec
+        latest = self._rec_latest.get(nl)
+        final = self._rec_final.get(nl)
+        if latest is not None:
+            display = latest
+            if final is not None and final == latest:
+                status = _ST_VERIFIED        # finality has caught up → ✓
+            elif final is not None:
+                status = _ST_CONFIRMED       # head is ahead of finality
+            else:
+                status = _ST_UNVERIFIED      # no proof yet
+        else:
+            display, status = rec, (_ST_VERIFIED if verified else _ST_UNVERIFIED)
+        self._rec_cache[nl] = (display, status)
+        self._cache.save_records(
+            ENS_CHAIN_ID, name, display, status == _ST_VERIFIED)
         if self._panel is not None:
-            self._panel.add_records(name, rec, verified)
+            self._panel.add_records(name, display, status)
 
     # --- add custom -------------------------------------------------------
 
@@ -1168,18 +1222,18 @@ class EnsPlugin(Plugin):
             value_wei=0, data=data)
         nm = name
 
-        def _after(_tx_hash: object) -> None:
-            # Broadcast ≠ mined, so the new value isn't readable yet. Drop the
-            # cache so the next manual expand re-fetches, and schedule one
-            # courtesy re-read once it's likely confirmed.
+        def _on_confirmed(_receipt: object) -> None:
+            # The write mined: refresh against CONFIRMED (chain-head) state right
+            # away — a subdomain add re-discovers names; a record write force-
+            # re-reads so the new value shows now, marked "confirmed" until
+            # finality earns it the ✓ (rather than waiting on finality to show
+            # it at all).
             if subdomain:
                 self._on_refresh()
-                return
-            self._rec_cache.pop(nm.lower(), None)
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(30000, lambda: self._on_records_requested(nm))
+            else:
+                self._on_records_requested(nm, force=True)
 
-        host.request_transaction(req, chain, label, on_broadcast=_after)
+        host.request_transaction(req, chain, label, on_confirmed=_on_confirmed)
 
     # --- worker lifetime --------------------------------------------------
 

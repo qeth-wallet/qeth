@@ -810,6 +810,12 @@ class ReceiptScanWorker(QThread):
 class TransactionsPlugin(Plugin):
     name = "Transactions"
 
+    # Fires when a tracked pending tx mines (chain, tx_hash, receipt). Lets
+    # sibling plugins react to their own broadcasts confirming — the ENS plugin
+    # re-reads a name's records the moment its record/subdomain write lands,
+    # rather than guessing with a timer.
+    tx_confirmed = Signal(object, str, object)
+
     # How many cached rows to materialise into the table on first
     # open, and how many more to reveal on each scroll-to-bottom
     # while the in-memory cache still has unrevealed entries below
@@ -1250,6 +1256,10 @@ class TransactionsPlugin(Plugin):
         chain_id = chain.chain_id
         # Confirmed → cancel any tentative drop-readings for this hash.
         self._drop_readings.pop(tx_hash, None)
+        # Let sibling plugins react to this exact tx confirming. Emitted
+        # unconditionally (even when no pending row matches — e.g. a Blockscout
+        # race already swapped it) so a one-shot listener never misses it.
+        self.tx_confirmed.emit(chain, tx_hash, receipt)
         # Forward to TokensPlugin regardless of whether we still
         # have a matching pending entry — the tokens scan only
         # cares about the logs, not the local cache state.

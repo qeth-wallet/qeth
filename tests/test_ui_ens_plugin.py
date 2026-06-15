@@ -153,6 +153,26 @@ class TestEnsPanel:
         panel.tree.sortByColumn(_EXPIRES_COL, Qt.SortOrder.AscendingOrder)
         assert order() == ["zzz.eth", "aaa.eth", "mmm.eth"]
 
+    def test_subdomains_italic_and_after_domains(self, qtbot):
+        from PySide6.QtCore import Qt
+        from qeth.plugins.ens import _NAME_COL
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        # top-level mix: real 2LDs + orphan subdomains (parent not owned)
+        panel.populate(build_tree([
+            EnsName("zeta.eth"), EnsName("alpha.eth"),
+            EnsName("dao.curvefi.eth"), EnsName("aaa.somedao.eth"),
+        ]), NOW)
+        panel.tree.sortByColumn(_NAME_COL, Qt.SortOrder.AscendingOrder)
+        rows = [(panel.tree.topLevelItem(i).text(0),
+                 panel.tree.topLevelItem(i).font(0).italic())
+                for i in range(panel.tree.topLevelItemCount())]
+        # domains first (roman), then subdomains (italic), alpha within each
+        assert rows == [
+            ("alpha.eth", False), ("zeta.eth", False),
+            ("aaa.somedao.eth", True), ("dao.curvefi.eth", True),
+        ]
+
     def test_records_sort_by_tier_then_alpha(self, qtbot):
         from PySide6.QtCore import Qt
         from qeth.plugins.ens import _NAME_COL

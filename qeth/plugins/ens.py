@@ -49,11 +49,13 @@ _TYPE_RANK_ROLE = Qt.ItemDataRole.UserRole + 6    # sort tier (see _RANK_*)
 _NAME_COL = 0
 _EXPIRES_COL = 1
 
-# A name's children sort by type tier first: owned subdomains, then the
-# contenthash, then the other records — alphabetically within each tier.
-_RANK_SUBDOMAIN = 0
-_RANK_CONTENT = 1
-_RANK_RECORD = 2
+# Rows sort by type tier first (alphabetically within each tier): real domains
+# (2LDs), then subdomains — including orphan subdomains that surface at the top
+# level — then a name's contenthash, then its other records.
+_RANK_DOMAIN = 0
+_RANK_SUBDOMAIN = 1
+_RANK_CONTENT = 2
+_RANK_RECORD = 3
 
 _WARN_COLOR = QColor(176, 0, 32)               # red — scam/look-alike marker
 
@@ -396,11 +398,20 @@ class EnsPanel(QWidget):
         text, colour = _EXPIRY_STYLE.get(status, (None, None))
         exp_col = text or (_fmt_expiry(n.expiry_ts) if n.expiry_ts else "")
         item = _SortItem([n.name, exp_col, n.resolved_address or ""])
-        item.setIcon(0, self._sub_icon if is_sub else self._domain_icon)
+        # A subdomain (structurally — even an orphan surfacing at the top level)
+        # reads differently from a real 2LD: italic name, folder icon, and it
+        # sorts after the domains.
+        sub = n.is_subdomain
+        item.setIcon(0, self._sub_icon if sub else self._domain_icon)
         item.setData(0, _NAME_ROLE, n)
         item.setData(0, _LOADED_ROLE, False)
-        item.setData(0, _TYPE_RANK_ROLE, _RANK_SUBDOMAIN)
+        item.setData(0, _TYPE_RANK_ROLE,
+                     _RANK_SUBDOMAIN if sub else _RANK_DOMAIN)
         item.setData(_EXPIRES_COL, _EXPIRY_SORT_ROLE, n.expiry_ts)
+        if sub:
+            f = item.font(0)
+            f.setItalic(True)
+            item.setFont(0, f)
         if colour is not None:
             item.setForeground(1, QBrush(colour))
         # Confusable / non-normalized name → a warning status (shown immediately,

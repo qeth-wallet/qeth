@@ -420,7 +420,9 @@ def verify_names(
     registry.resolver (+ registrar.ownerOf for .eth 2LDs); round 2 reads each
     resolver's ``addr`` — so a whole wallet's names verify in two round-trips,
     not 2N. Everything runs through a Helios sidecar, so the reads are proof-
-    verified against light-client state.
+    verified against light-client state — at the chain head (``latest``), so a
+    just-changed owner / resolved address shows immediately instead of lagging
+    finality.
 
     **Verified-only.** Returns ``({}, False)`` when no Helios sidecar is ready:
     the resolved-address this confirms already came from the indexer, so we
@@ -468,10 +470,11 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
     resolver_p: dict = {}
     registrant_p: dict = {}
     wrapped_p: dict = {}
-    # Read at "finalized": ENS ownership/resolution isn't second-sensitive, so
-    # irreversible state is the right (stronger) basis, and it avoids the brief
-    # post-sync window where a Helios sidecar's head outruns the execution RPC.
-    with client.multicall(block="finalized") as mc:
+    # Read at "latest": show the MOST RECENT on-chain state (Helios still proves
+    # it — the chain head is sync-committee-verified, just not finalized), so a
+    # just-changed owner/record appears at once instead of lagging ~2 epochs
+    # behind finality and surfacing the obsolete value.
+    with client.multicall(block="latest") as mc:
         for n in names:
             node = nodes[n]
             owner_p[n] = mc.add(ENS_REGISTRY, _SEL_OWNER + node,
@@ -521,7 +524,7 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
         coin_p: dict = {}
         legacy_p: dict = {}
         coin_arg = _ETH_COIN_TYPE.to_bytes(32, "big")
-        with client.multicall(block="finalized") as mc:
+        with client.multicall(block="latest") as mc:
             for n, r in resolvers.items():
                 node = nodes[n]
                 coin_p[n] = mc.add(r, _SEL_ADDR_COIN + node + coin_arg,
@@ -596,7 +599,7 @@ def _read_records_ccip(
 
 
 def _read_records_via_client(
-    client, name: str, *, text_keys: tuple = TEXT_KEYS, block: str = "finalized",
+    client, name: str, *, text_keys: tuple = TEXT_KEYS, block: str = "latest",
     resolver: Optional[str] = None,
 ) -> "Tuple[EnsRecords, bool, bool, Optional[str]]":
     """Read a name's resolver records on-chain → ``(records, ok, extended,
@@ -694,13 +697,15 @@ def verified_read_records(
     chain: "Chain", name: str, *,
     wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
 ) -> "Tuple[EnsRecords, bool]":
-    """Verified-ONLY record read → ``(records, verified)``. ``verified`` is True
-    when a Helios sidecar proved the on-chain reads that LANDED — including a
-    name whose records are served on-chain even though its resolver ALSO
-    implements the extended (CCIP) interface for subnames. ``(EnsRecords(),
-    False)`` (no upgrade emit) only when nothing verifiable came back: a glitch
-    (``ok`` False), or a resolver that served NOTHING on-chain and is
-    extended — i.e. the records exist only offchain, which ``read_records``
+    """Verified-ONLY record read at the chain HEAD → ``(records, verified)``.
+    Reads at ``latest`` (sync-committee-verified by Helios, not finalized) so the
+    ✓ reflects the MOST RECENT on-chain records, not the ~2-epoch-stale finalized
+    ones. ``verified`` is True when a Helios sidecar proved the on-chain reads
+    that LANDED — including a name whose records are served on-chain even though
+    its resolver ALSO implements the extended (CCIP) interface for subnames.
+    ``(EnsRecords(), False)`` (no upgrade emit) only when nothing verifiable came
+    back: a glitch (``ok`` False), or a resolver that served NOTHING on-chain and
+    is extended — i.e. the records exist only offchain, which ``read_records``
     already fetched via the gateway and which can't be proof-checked."""
     from .verified import verified_client
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
@@ -711,7 +716,7 @@ def verified_read_records(
     for attempt in range(_VERIFY_RETRIES):
         try:
             rec, ok, extended, _ = _read_records_via_client(
-                client, name, text_keys=text_keys)
+                client, name, text_keys=text_keys, block="latest")
         except Exception:
             log.debug("ENS verified_read_records failed", exc_info=True)
             rec, ok, extended = EnsRecords(), False, False

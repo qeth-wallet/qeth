@@ -210,7 +210,7 @@ class TestEnsPanel:
         qtbot.addWidget(panel)
         panel.populate(build_tree([EnsName("alice.eth")]), NOW)
         rec = EnsRecords(texts={"url": "https://alice.example"})
-        panel.add_records("alice.eth", rec, status="verified")
+        panel.add_records("alice.eth", rec, verified=True)
         root = panel.tree.topLevelItem(0)
         url_row = next(root.child(i) for i in range(root.childCount())
                        if root.child(i).text(0) == "url")
@@ -317,7 +317,10 @@ class TestEnsPanel:
             {scam.lower(): OwnershipCheck(controller=me, resolved_address=me)}, me)
         assert panel.tree.topLevelItem(0).data(0, _STATUS_ROLE) == "warn"
 
-    def test_mark_verified_corrects_resolution_mismatch(self, qtbot):
+    def test_mark_verified_replaces_stale_indexer_address(self, qtbot):
+        # The verify pass reads at the chain head, so its address IS the truth:
+        # a difference from the indexer's hint is just lag — replace it silently
+        # (no "mismatch" alarm) and badge the line verified.
         panel = EnsPanel()
         qtbot.addWidget(panel)
         me = "0x" + "11" * 20
@@ -328,9 +331,8 @@ class TestEnsPanel:
             {"alice.eth": OwnershipCheck(controller=me, resolved_address=real)},
             me)
         root = panel.tree.topLevelItem(0)
-        assert root.data(0, _STATUS_ROLE) == "warn"   # mismatch flagged
-        assert root.text(2) == real                   # corrected value, no glyph
-        # the proof-verified address replaces the indexer's, so copy yields it
+        assert root.data(0, _STATUS_ROLE) == "ok"     # verified, NOT an alarm
+        assert root.text(2) == real                   # proven head value shown
         assert root.data(0, _NAME_ROLE).resolved_address == real
 
 
@@ -430,23 +432,22 @@ class TestEnsPlugin:
         # ...and a refresh worker still kicked off
         assert len(host.started_workers) == 1
 
-    def test_head_value_displayed_finalized_proof_decides_check(self, qtbot, tmp_qeth):
+    def test_head_read_shows_then_verified_upgrades(self, qtbot, tmp_qeth):
+        # Both reads are at the chain head: the fast unverified read paints the
+        # value, the Helios read upgrades it to verified ✓ — and a late
+        # unverified re-emit must not downgrade it back.
         plugin = EnsPlugin(_StubStore())
         plugin.attach(_StubHost(address=ADDR))
         qtbot.addWidget(plugin.widget())
         plugin.widget().populate(build_tree([EnsName("alice.eth")]), NOW)
-        v1 = EnsRecords(texts={"url": "v1"})
-        # head read lands first (no proof yet) → shown, unverified
-        plugin._on_records_ready("alice.eth", v1, False, True)
-        assert plugin._rec_cache["alice.eth"] == (v1, "unverified")
-        # finalized proof matches the head → earns the ✓
-        plugin._on_records_ready("alice.eth", v1, True, True)
-        assert plugin._rec_cache["alice.eth"] == (v1, "verified")
-        # the user changes it: the new head read is ahead of the finalized proof
-        # → show the NEW value, marked confirmed (not the stale finalized one)
-        v2 = EnsRecords(texts={"url": "v2"})
-        plugin._on_records_ready("alice.eth", v2, False, True)
-        assert plugin._rec_cache["alice.eth"] == (v2, "confirmed")
+        rec = EnsRecords(texts={"url": "v1"})
+        plugin._on_records_ready("alice.eth", rec, False, True)
+        assert plugin._rec_cache["alice.eth"] == (rec, False)
+        plugin._on_records_ready("alice.eth", rec, True, True)
+        assert plugin._rec_cache["alice.eth"] == (rec, True)
+        # a stale late unverified emit for the same value can't downgrade the ✓
+        plugin._on_records_ready("alice.eth", rec, False, True)
+        assert plugin._rec_cache["alice.eth"] == (rec, True)
 
     def test_records_glitch_does_not_wipe(self, qtbot, tmp_qeth):
         plugin = EnsPlugin(_StubStore())
@@ -457,7 +458,7 @@ class TestEnsPlugin:
         plugin._on_records_ready("alice.eth", good, False, True)
         # a glitchy read (ok=False, empty) must NOT overwrite the shown records
         plugin._on_records_ready("alice.eth", EnsRecords(), True, False)
-        assert plugin._rec_cache["alice.eth"] == (good, "unverified")
+        assert plugin._rec_cache["alice.eth"] == (good, False)
         root = plugin.widget().tree.topLevelItem(0)
         labels = [root.child(i).text(0) for i in range(root.childCount())]
         assert "url" in labels and "no records" not in labels
@@ -640,19 +641,16 @@ class TestEnsWriteActions:
         plugin, host, store = self._plugin(qtbot)
         old = EnsRecords(texts={"url": "old"})
         # a previously-verified value sits in memory + on disk
-        plugin._rec_cache["vitalik.eth"] = (old, "verified")
-        plugin._rec_latest["vitalik.eth"] = old
-        plugin._rec_final["vitalik.eth"] = old
+        plugin._rec_cache["vitalik.eth"] = (old, True)
         plugin._cache.save_records(1, "vitalik.eth", old, verified=True)
         plugin._on_records_requested("vitalik.eth", force=True)
         # forcing wipes the stale state so the fresh head read becomes the truth
         assert "vitalik.eth" not in plugin._rec_cache
-        assert "vitalik.eth" not in plugin._rec_final
         assert plugin._cache.load_records(1, "vitalik.eth") is None
         # the new head read then shows immediately, marked unverified (no proof)
         new = EnsRecords(texts={"url": "new"})
         plugin._on_records_ready("vitalik.eth", new, False, True)
-        assert plugin._rec_cache["vitalik.eth"] == (new, "unverified")
+        assert plugin._rec_cache["vitalik.eth"] == (new, False)
 
     def test_subdomain_confirmation_rediscovers(self, qtbot, monkeypatch):
         from PySide6.QtWidgets import QDialog

@@ -96,20 +96,8 @@ class _SortItem(QTreeWidgetItem):
 _OWNED_TIP = "Owner — cryptographically verified"
 _CONTROL_TIP = "Subdomain you control — verified"
 _RESOLVED_TIP = "Address cryptographically verified"
-_MISMATCH_TIP = "⚠ Corrected to verified address"
 _RECORD_TIP = "Cryptographically verified"
-# A record we read at the chain head (confirmed) but the finalized state Helios
-# proves against hasn't caught up to yet — e.g. right after you change it. Shows
-# the new value immediately with a distinct mark; upgrades to the ✓ once final.
-_CONFIRMED_TIP = "Confirmed on-chain — awaiting finality"
 _WRAPPED_NOTE = " · wrapped"
-
-# Record display status. "unverified" = read at head, no proof yet (no icon).
-# "confirmed" = read at head, but the finalized proof still shows an older value
-# (distinct icon). "verified" = finalized proof matches what's shown (the ✓).
-_ST_UNVERIFIED = "unverified"
-_ST_CONFIRMED = "confirmed"
-_ST_VERIFIED = "verified"
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
 # a status chip, not palette-driven text.
@@ -389,9 +377,6 @@ class EnsPanel(QWidget):
                               QStyle.StandardPixmap.SP_DialogApplyButton)
         self._warn_icon = _icon("dialog-warning",
                                 QStyle.StandardPixmap.SP_MessageBoxWarning)
-        # Confirmed-but-not-yet-final: a "syncing" glyph distinct from the ✓.
-        self._confirmed_icon = _icon(
-            "emblem-synchronizing", QStyle.StandardPixmap.SP_BrowserReload)
         self._rec_icons = {
             "address": _icon("avatar-default", QStyle.StandardPixmap.SP_FileIcon),
             "content": _icon("folder-remote", QStyle.StandardPixmap.SP_FileLinkIcon),
@@ -449,7 +434,7 @@ class EnsPanel(QWidget):
         return item
 
     def add_records(self, name: str, rec: EnsRecords,
-                    status: str = _ST_UNVERIFIED) -> None:
+                    verified: bool = False) -> None:
         item = self._items_by_name.get(name.lower())
         if item is None:
             return
@@ -475,10 +460,8 @@ class EnsPanel(QWidget):
             ch.setIcon(0, self._rec_icons.get(icon_key, self._rec_icons["text"]))
             ch.setData(0, _VALUE_ROLE, value)
             ch.setToolTip(2, value)
-            if status == _ST_VERIFIED:           # ✓ — finalized proof matches
+            if verified:                # status icon, same as the name rows
                 self._set_status(ch, "ok", _RECORD_TIP)
-            elif status == _ST_CONFIRMED:        # confirmed, not yet final
-                self._set_status(ch, "confirmed", _CONFIRMED_TIP)
             item.addChild(ch)
 
     def update_resolved(self, name: str, address: "Optional[str]") -> None:
@@ -504,9 +487,10 @@ class EnsPanel(QWidget):
         ✓; a discovered name the chain says you DON'T own (controller and
         registrant are someone else) isn't real — the indexer over-reported it —
         so we remove it from the tree entirely. Pinned (custom) names are never
-        removed: watching a name you don't own is intentional. Resolution still
-        gets a ✓ / ⚠-corrected badge. Only ever called with proof-verified
-        state, so acting on it is sound."""
+        removed: watching a name you don't own is intentional. The resolved
+        address is replaced with the proven head value (no mismatch alarm — the
+        indexer just lagged). Only ever called with proof-verified state, so
+        acting on it is sound."""
         removed: list[str] = []
         for name_l, st in states.items():
             item = self._items_by_name.get(name_l)
@@ -523,23 +507,17 @@ class EnsPanel(QWidget):
                 continue
             if item.data(0, _UNSAFE_ROLE):
                 continue          # keep the ⚠; never add a ✓ to a look-alike
-            # Resolved-to: trust the proof — replace (and make copyable) the
-            # verified address on a difference; flag a true mismatch.
-            mismatch = False
+            # Resolved-to: the proof is read at the chain head, so it IS the
+            # current truth — replace the indexer's hint with it (and make it
+            # copyable). No "mismatch" alarm: a difference just means the indexer
+            # lagged; we simply show the proven, most-recent value.
             if st.resolved_address:
-                shown = n.resolved_address if isinstance(n, EnsName) else None
-                if shown and shown.lower() != st.resolved_address.lower():
-                    mismatch = True
-                if shown is None or mismatch:
-                    if isinstance(n, EnsName):
-                        n.resolved_address = st.resolved_address
-                    item.setText(2, st.resolved_address)
-                    item.setToolTip(2, _MISMATCH_TIP if mismatch else _RESOLVED_TIP)
+                if isinstance(n, EnsName):
+                    n.resolved_address = st.resolved_address
+                item.setText(2, st.resolved_address)
+                item.setToolTip(2, _RESOLVED_TIP)
             # One status icon for the whole line (ownership + resolution).
-            owned = st.owned_by(address)
-            if mismatch:
-                self._set_status(item, "warn", _MISMATCH_TIP)
-            elif owned:
+            if st.owned_by(address):
                 is_sub = isinstance(n, EnsName) and n.is_subdomain
                 tip = _CONTROL_TIP if is_sub else _OWNED_TIP
                 if st.wrapped:
@@ -551,11 +529,10 @@ class EnsPanel(QWidget):
     def _set_status(self, item: QTreeWidgetItem, status: str,
                     tooltip: str) -> None:
         """Set the trailing status column's icon + tooltip for a line, ``status``
-        in ``{"ok", "confirmed", "warn"}``. An icon (not a text ✓/⚠) keeps the
-        row height uniform regardless of the theme's emoji rendering."""
-        icon = {"ok": self._ok_icon,
-                "confirmed": self._confirmed_icon}.get(status, self._warn_icon)
-        item.setIcon(self._STATUS_COL, icon)
+        in ``{"ok", "warn"}``. An icon (not a text ✓/⚠) keeps the row height
+        uniform regardless of the theme's emoji rendering."""
+        item.setIcon(self._STATUS_COL,
+                     self._ok_icon if status == "ok" else self._warn_icon)
         item.setData(0, _STATUS_ROLE, status)
         item.setToolTip(self._STATUS_COL, tooltip)
 
@@ -748,16 +725,11 @@ class EnsPlugin(Plugin):
         self._panel: Optional[EnsPanel] = None
         self._loaded_for: Optional[str] = None
         self._add_btn: Optional[QPushButton] = None
-        # In-memory records cache (name → (displayed records, status)) layered
-        # over the disk cache, so re-expanding a name is instant within a
-        # session too. ``status`` is one of _ST_UNVERIFIED/_CONFIRMED/_VERIFIED.
-        self._rec_cache: "dict[str, tuple[EnsRecords, str]]" = {}
-        # The two reads behind the displayed value: ``_rec_latest`` is the chain
-        # head (block=latest, what we always SHOW); ``_rec_final`` is the last
-        # finalized-proven read. They agree → ✓ (verified); they differ → the
-        # head is ahead of finality (confirmed, awaiting the ✓).
-        self._rec_latest: "dict[str, EnsRecords]" = {}
-        self._rec_final: "dict[str, EnsRecords]" = {}
+        # In-memory records cache (name → (records, verified)) layered over the
+        # disk cache, so re-expanding a name is instant within a session too.
+        # Both the fast (unverified RPC) and the Helios reads are at the chain
+        # HEAD, so ``verified`` True means "proven at latest".
+        self._rec_cache: "dict[str, tuple[EnsRecords, bool]]" = {}
         # Names whose records we're re-reading because a write to them just
         # confirmed. For these the head read is authoritative enough to also
         # CLEAR the name-row address (a setAddr to 0x0) — outside this set a
@@ -941,24 +913,17 @@ class EnsPlugin(Plugin):
         nl = name.lower()
         if force:
             # A write to this name just CONFIRMED. Drop the stale value so the
-            # fresh head read becomes what's shown — don't let the prior cache
-            # (or a finalized-lagged verified read) keep painting the old value.
+            # fresh head read becomes what's shown, rather than re-painting the
+            # old cached one first.
             self._force_reread.add(nl)
             self._rec_cache.pop(nl, None)
-            self._rec_latest.pop(nl, None)
-            self._rec_final.pop(nl, None)
             self._cache.forget_records(ENS_CHAIN_ID, name)
         else:
             # Paint cached records instantly (memory → disk), then refresh.
             cached = self._rec_cache.get(nl)
             if cached is None:
-                disk = self._cache.load_records(ENS_CHAIN_ID, name)
-                if disk is not None:
-                    self._rec_latest[nl] = disk[0]
-                    if disk[1]:
-                        self._rec_final[nl] = disk[0]
-                    cached = (disk[0],
-                              _ST_VERIFIED if disk[1] else _ST_UNVERIFIED)
+                cached = self._cache.load_records(ENS_CHAIN_ID, name)
+                if cached is not None:
                     self._rec_cache[nl] = cached
             if cached is not None:
                 self._panel.add_records(name, cached[0], cached[1])
@@ -982,35 +947,22 @@ class EnsPlugin(Plugin):
         if not ok:
             return
         nl = name.lower()
-        # The worker emits the head read (verified False) then, if a sidecar
-        # could prove it, the finalized read (verified True). We always SHOW the
-        # head value; the finalized read only decides whether it earns the ✓.
-        if verified:
-            self._rec_final[nl] = rec
-        else:
-            self._rec_latest[nl] = rec
-        latest = self._rec_latest.get(nl)
-        final = self._rec_final.get(nl)
-        if latest is not None:
-            display = latest
-            if final is not None and final == latest:
-                status = _ST_VERIFIED        # finality has caught up → ✓
-            elif final is not None:
-                status = _ST_CONFIRMED       # head is ahead of finality
-            else:
-                status = _ST_UNVERIFIED      # no proof yet
-        else:
-            display, status = rec, (_ST_VERIFIED if verified else _ST_UNVERIFIED)
-        self._rec_cache[nl] = (display, status)
-        self._cache.save_records(
-            ENS_CHAIN_ID, name, display, status == _ST_VERIFIED)
+        # The worker emits the fast unverified read first, then (if a sidecar
+        # could prove it) the Helios read — both at the chain head. Don't let the
+        # late unverified phase of a refresh clobber a verified result with a
+        # worse one; otherwise newest wins.
+        prev = self._rec_cache.get(nl)
+        if prev is not None and prev[1] and not verified:
+            return
+        self._rec_cache[nl] = (rec, verified)
+        self._cache.save_records(ENS_CHAIN_ID, name, rec, verified)
         if self._panel is not None:
-            self._panel.add_records(name, display, status)
+            self._panel.add_records(name, rec, verified)
             # Reflect the head ETH address on the name row's "Resolves to" too.
             # A forced re-read (a just-confirmed write) is authoritative, so it
             # also clears a now-empty address; a normal expand only sets a
             # present one (an absent addr may just be served offchain).
-            head_addr = display.addresses.get("60")
+            head_addr = rec.addresses.get("60")
             forced = nl in self._force_reread
             if head_addr or forced:
                 self._panel.update_resolved(name, head_addr)

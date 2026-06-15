@@ -629,6 +629,10 @@ def _read_records_via_client(
     iface = _IFACE_EXTENDED + b"\x00" * 28      # supportsInterface(bytes4) arg
     with client.multicall(block=block) as mc:
         supports_p = mc.add(resolver, _SEL_SUPPORTS + iface, decoder=_decode_bool)
+        # The ETH address record (where the name points). Read it here at the
+        # chain head alongside text/contenthash so a setAddr shows the moment it
+        # confirms — not only via the finalized ownership pass (~2 epochs late).
+        addr_p = mc.add(resolver, _SEL_ADDR + node, decoder=_decode_addr_word)
         for key in text_keys:
             data = _SEL_TEXT + abi_encode(["bytes32", "string"], [node, key])
             text_p[key] = mc.add(resolver, data, decoder=_decode_abi_string)
@@ -636,7 +640,9 @@ def _read_records_via_client(
             resolver, _SEL_CONTENTHASH + node,
             decoder=lambda raw: decode_contenthash(_abi_bytes(raw)))
     extended = bool(supports_p.success and supports_p.value)
-    if any(p.success for p in (*text_p.values(), content_p)):
+    if any(p.success for p in (addr_p, *text_p.values(), content_p)):
+        if addr_p.success and addr_p.value:
+            rec.addresses[str(_ETH_COIN_TYPE)] = addr_p.value
         for key, p in text_p.items():
             if p.success and p.value:
                 rec.texts[key] = str(p.value)

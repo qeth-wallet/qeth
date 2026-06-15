@@ -669,3 +669,44 @@ class TestEnsWriteActions:
         _req, _chain, _label, on_confirmed = host.tx_requests[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
+
+
+# --- EnsPlugin: name-row resolution follows the head address read ----------
+
+class TestResolvedAddressFollowsRecords:
+    OLD = "0x" + "99" * 20
+    NEW = "0x" + "22" * 20
+
+    def _plugin(self, qtbot):
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().populate(
+            build_tree([EnsName("curvelend.eth", resolved_address=self.OLD)]), NOW)
+        return plugin
+
+    def _row_addr(self, plugin):
+        return plugin.widget().tree.topLevelItem(0).text(2)
+
+    def test_records_read_updates_name_row_address(self, qtbot, tmp_qeth):
+        plugin = self._plugin(qtbot)
+        assert self._row_addr(plugin) == self.OLD
+        # a head read carrying the new addr updates the prominent name-row column
+        rec = EnsRecords(addresses={"60": self.NEW})
+        plugin._on_records_ready("curvelend.eth", rec, False, True)
+        assert self._row_addr(plugin) == self.NEW
+
+    def test_normal_read_does_not_clear_address(self, qtbot, tmp_qeth):
+        # An ordinary expand whose head read has no addr (e.g. CCIP/offchain)
+        # must NOT blank a resolution the name row already shows.
+        plugin = self._plugin(qtbot)
+        plugin._on_records_ready("curvelend.eth", EnsRecords(), False, True)
+        assert self._row_addr(plugin) == self.OLD
+
+    def test_forced_read_clears_address_on_zero(self, qtbot, tmp_qeth):
+        # A just-confirmed write (force) IS authoritative — an empty head read
+        # means the addr was set to 0x0, so the name row clears.
+        plugin = self._plugin(qtbot)
+        plugin._on_records_requested("curvelend.eth", force=True)
+        plugin._on_records_ready("curvelend.eth", EnsRecords(), False, True)
+        assert self._row_addr(plugin) == ""

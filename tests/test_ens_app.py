@@ -303,6 +303,42 @@ def test_read_records_via_client_batches():
     assert rec.texts and all(v == "hello" for v in rec.texts.values())
 
 
+def test_read_records_includes_eth_address():
+    # The ETH address record is read at the chain head alongside text/content,
+    # so a setAddr shows the moment it confirms (not only via the finalized
+    # ownership pass). Keyed by ENSIP-9 coin type 60.
+    RESOLVER = "0x" + "ab" * 20
+    ADDR = "0x" + "cd" * 20
+
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RESOLVER:
+            return True, RESOLVER
+        if target == RESOLVER and sel == ea._SEL_ADDR:
+            return True, ADDR
+        return False, None
+
+    rec, ok, ext, res = ea._read_records_via_client(
+        _FakeClient(resp), "vitalik.eth")
+    assert ok is True
+    assert rec.addresses == {"60": ADDR}
+
+
+def test_read_records_zero_address_is_absent():
+    # addr(node) returning zero (decoder → None) leaves no address record, so
+    # the UI can clear a name's resolution when it's set to 0x0.
+    RESOLVER = "0x" + "ab" * 20
+
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RESOLVER:
+            return True, RESOLVER
+        if target == RESOLVER and sel == ea._SEL_TEXT:
+            return True, "hi"
+        return False, None              # addr (+ everything else) absent
+
+    rec, ok, ext, res = ea._read_records_via_client(_FakeClient(resp), "x.eth")
+    assert ok is True and rec.addresses == {}
+
+
 def test_read_records_no_resolver_is_landed_empty():
     # registry.resolver read LANDS but returns zero → no records, ok=True.
     rec, ok, ext, res = ea._read_records_via_client(

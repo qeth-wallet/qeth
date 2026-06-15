@@ -481,6 +481,20 @@ class EnsPanel(QWidget):
                 self._set_status(ch, "confirmed", _CONFIRMED_TIP)
             item.addChild(ch)
 
+    def update_resolved(self, name: str, address: "Optional[str]") -> None:
+        """Update a name row's 'Resolves to' column from a fresh head read of its
+        ETH address record — so a setAddr change shows on the (possibly
+        collapsed) name row, not just in the expanded records. ``None`` clears
+        it. Keeps the stored EnsName in sync for copy / sort / mismatch checks."""
+        item = self._items_by_name.get(name.lower())
+        if item is None:
+            return
+        n = item.data(0, _NAME_ROLE)
+        if isinstance(n, EnsName):
+            n.resolved_address = address
+        item.setText(2, address or "")
+        item.setToolTip(2, _RESOLVED_TIP if address else "")
+
     def mark_verified(self, states: "dict[str, OwnershipCheck]",
                       address: str) -> "list[str]":
         """Apply the batched on-chain verification to the rows and return the
@@ -744,6 +758,12 @@ class EnsPlugin(Plugin):
         # head is ahead of finality (confirmed, awaiting the ✓).
         self._rec_latest: "dict[str, EnsRecords]" = {}
         self._rec_final: "dict[str, EnsRecords]" = {}
+        # Names whose records we're re-reading because a write to them just
+        # confirmed. For these the head read is authoritative enough to also
+        # CLEAR the name-row address (a setAddr to 0x0) — outside this set a
+        # records read only sets a present address, never clears one (an absent
+        # on-chain addr can just mean the name resolves offchain via CCIP).
+        self._force_reread: "set[str]" = set()
         # Per-name resolver (from the ownership pass) — lets a record read skip
         # its resolver-lookup round-trip. Refreshed every load (self-heals a
         # re-pointed resolver). And a warm EthClient reused across record reads
@@ -923,6 +943,7 @@ class EnsPlugin(Plugin):
             # A write to this name just CONFIRMED. Drop the stale value so the
             # fresh head read becomes what's shown — don't let the prior cache
             # (or a finalized-lagged verified read) keep painting the old value.
+            self._force_reread.add(nl)
             self._rec_cache.pop(nl, None)
             self._rec_latest.pop(nl, None)
             self._rec_final.pop(nl, None)
@@ -985,6 +1006,16 @@ class EnsPlugin(Plugin):
             ENS_CHAIN_ID, name, display, status == _ST_VERIFIED)
         if self._panel is not None:
             self._panel.add_records(name, display, status)
+            # Reflect the head ETH address on the name row's "Resolves to" too.
+            # A forced re-read (a just-confirmed write) is authoritative, so it
+            # also clears a now-empty address; a normal expand only sets a
+            # present one (an absent addr may just be served offchain).
+            head_addr = display.addresses.get("60")
+            forced = nl in self._force_reread
+            if head_addr or forced:
+                self._panel.update_resolved(name, head_addr)
+        if not verified:
+            self._force_reread.discard(nl)   # head applied — back to normal
 
     # --- add custom -------------------------------------------------------
 

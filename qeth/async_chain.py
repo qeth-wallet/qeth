@@ -167,10 +167,4 @@ def ws_urls_for(chain: Chain) -> list[str]:
                 candidates.append("wss://" + u[len("https://"):])
             elif u.startswith("http://"):
                 candidates.append("ws://" + u[len("http://"):])
-    seen: set[str] = set()
-    out: list[str] = []
-    for ws in candidates:
-        if ws and ws not in seen:
-            seen.add(ws)
-            out.append(ws)
-    return out
+    return list(dict.fromkeys(ws for ws in candidates if ws))

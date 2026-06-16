@@ -1388,11 +1388,10 @@ def _is_descendant(child, ancestor) -> bool:
     inside list views — their internal focus-proxy chain can
     feed a demote-to-ClickFocus call back up to the list
     itself."""
-    p = child
-    while p is not None:
-        if p is ancestor:
+    while child is not None:
+        if child is ancestor:
             return True
-        p = p.parent()
+        child = child.parent()
     return False
 
 

@@ -233,6 +233,7 @@ def _http_get_json(url: str, timeout: float = 20.0) -> dict:
 
 
 ZERO_ADDRESS = "0x" + "00" * 20
+ZERO_ADDR_BYTES = b"\x00" * 20   # the zero address as a raw 20-byte word
 
 
 def nonzero_addr(addr: Optional[str]) -> Optional[str]:
@@ -403,7 +404,7 @@ def _decode_addr_word(raw) -> Optional[str]:
     if len(b) < 32:
         return None
     word = b[:32]
-    if not any(word[12:32]):
+    if word[12:32] == ZERO_ADDR_BYTES:
         return None
     from eth_utils import to_checksum_address
     return to_checksum_address("0x" + word[12:32].hex())
@@ -416,7 +417,7 @@ def _decode_addr_bytes(raw) -> Optional[str]:
     if not h:
         return None
     payload = bytes.fromhex(h[2:])
-    if len(payload) != 20 or not any(payload):
+    if len(payload) != 20 or payload == ZERO_ADDR_BYTES:
         return None
     from eth_utils import to_checksum_address
     return to_checksum_address("0x" + payload.hex())

@@ -208,6 +208,13 @@ def probe_rpc(
 
 _DEAD = "0x000000000000000000000000000000000000dEaD"
 
+# Error-message needles that mean "this endpoint doesn't implement the
+# method" (vs. a transient rate-limit/odd error, which stays inconclusive).
+_METHOD_MISSING_NEEDLES = (
+    "not found", "not support", "not available", "unsupport",
+    "not whitelisted", "does not exist", "disabled",
+)
+
 
 def _probe_method(url: str, method: str, params: list,
                   timeout: float) -> Optional[bool]:
@@ -251,9 +258,7 @@ def _probe_method(url: str, method: str, params: list,
     code = err.get("code") if isinstance(err, dict) else None
     msg = (err.get("message") if isinstance(err, dict) else "") or ""
     m = msg.lower()
-    if (code == -32601 or "not found" in m or "not support" in m
-            or "not available" in m or "unsupport" in m or "not whitelisted" in m
-            or "does not exist" in m or "disabled" in m):
+    if code == -32601 or any(n in m for n in _METHOD_MISSING_NEEDLES):
         return False
     return None   # rate-limit / other error → unknown
 

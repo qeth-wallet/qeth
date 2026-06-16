@@ -132,13 +132,7 @@ def _rpc_urls(chain: Chain) -> list[str]:
         default = next((c for c in DEFAULT_CHAINS
                         if c.chain_id == chain.chain_id), None)
         fallbacks = default.fallback_rpcs if default else ()
-    seen: set[str] = set()
-    out: list[str] = []
-    for url in (chain.rpc_url, *fallbacks):
-        if url and url not in seen:
-            seen.add(url)
-            out.append(url)
-    return out
+    return list(dict.fromkeys(u for u in (chain.rpc_url, *fallbacks) if u))
 
 
 # JSON-RPC error objects that mean the PROVIDER is refusing/limiting rather

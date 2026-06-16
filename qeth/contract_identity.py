@@ -201,13 +201,11 @@ class ContractIdentitySource:
         out: dict = {}
         entries = data.get("addresses") if isinstance(data, dict) else None
         for addr, info in (entries or {}).items():
-            best = None
-            for tag in (info.get("tags") or []):
-                if tag.get("tagType") == "name" and tag.get("name"):
-                    if best is None or (tag.get("ordinal") or 0) > (best.get("ordinal") or 0):
-                        best = tag
-            if best:
-                out[addr.lower()] = best["name"]
+            tags = [t for t in (info.get("tags") or [])
+                    if t.get("tagType") == "name" and t.get("name")]
+            if tags:
+                out[addr.lower()] = max(
+                    tags, key=lambda t: t.get("ordinal") or 0)["name"]
         return out
 
     def fetch(self, chain_id: int, address: str) -> Optional[ContractIdentity]:

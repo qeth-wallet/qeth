@@ -352,13 +352,11 @@ class TokenLists:
         if risk is not None and risk.is_high_risk():
             return True
         blob = f" {(name or '').lower()} {(symbol or '').lower()} "
-        if any(n in blob for n in _SCAM_URL_NEEDLES):
-            return True
-        if any(k in blob for k in _SCAM_KEYWORDS):
-            return True
-        if (symbol or "").strip().lower() in _CANONICAL_SYMBOLS:
-            return True
-        return False
+        return (
+            any(n in blob for n in _SCAM_URL_NEEDLES)
+            or any(k in blob for k in _SCAM_KEYWORDS)
+            or (symbol or "").strip().lower() in _CANONICAL_SYMBOLS
+        )
 
     def get(self, chain_id: int, address: str) -> TokenListEntry | None:
         return self._index.get((chain_id, address.lower()))

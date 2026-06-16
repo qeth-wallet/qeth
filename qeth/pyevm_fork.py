@@ -114,7 +114,7 @@ def _static_accounts() -> "frozenset[str]":
             HISTORY_STORAGE_ADDRESS,
             WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
         )
-        addrs = {"0x" + "00" * 19 + f"{i:02x}" for i in range(1, 0x12)}
+        addrs = {f"0x{i:040x}" for i in range(1, 0x12)}
         addrs |= {"0x" + bytes(a).hex() for a in (
             BEACON_ROOTS_ADDRESS, HISTORY_STORAGE_ADDRESS,
             WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,

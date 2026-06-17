@@ -227,25 +227,30 @@ class MainWindow(QMainWindow):
         self.tokens_plugin.on_chain_icon_ready(chain_id, pix)
 
     def _on_chain_added(self, chain_id: int) -> None:
-        """A dapp called ``wallet_addEthereumChain``. Append the
-        new entry to the chain combo and kick icon discovery so it
-        gets a logo if Curve / TrustWallet ship one. No-op if the
-        combo already has it (race with a parallel add)."""
-        if self.chain_combo.findData(chain_id) >= 0:
-            return
-        chain = next(
-            (c for c in self.store.chains if c.chain_id == chain_id),
-            None,
-        )
-        if chain is None:
-            return
-        label = f"{chain.name} ({chain.chain_id})"
-        pix = self._chain_icon_cache.get(chain.chain_id)
-        if pix is not None:
-            self.chain_combo.addItem(QIcon(pix), label, chain.chain_id)
-        else:
-            self.chain_combo.addItem(label, chain.chain_id)
-            self._chain_icon_cache.request(chain.chain_id)
+        """A dapp's ``wallet_addEthereumChain`` was approved. Append the
+        new entry to the chain combo (kicking icon discovery so it gets a
+        logo if Curve / TrustWallet ship one), then switch the wallet to
+        it — approving an add is implicitly a request to use the network.
+        Append is skipped if the combo already has it (race with a
+        parallel add); the switch still runs."""
+        idx = self.chain_combo.findData(chain_id)
+        if idx < 0:
+            chain = next(
+                (c for c in self.store.chains if c.chain_id == chain_id),
+                None,
+            )
+            if chain is None:
+                return
+            label = f"{chain.name} ({chain.chain_id})"
+            pix = self._chain_icon_cache.get(chain.chain_id)
+            if pix is not None:
+                self.chain_combo.addItem(QIcon(pix), label, chain.chain_id)
+            else:
+                self.chain_combo.addItem(label, chain.chain_id)
+                self._chain_icon_cache.request(chain.chain_id, chain.name)
+            idx = self.chain_combo.findData(chain_id)
+        if idx >= 0 and idx != self.chain_combo.currentIndex():
+            self.chain_combo.setCurrentIndex(idx)
 
     def _on_chain_add_requested(self, info: dict, fut) -> None:
         """Slot for ``SignerBridge.chain_add_requested`` — a dapp asked

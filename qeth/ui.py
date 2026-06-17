@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
                 combo.addItem(QIcon(pix), label, c.chain_id)
             else:
                 combo.addItem(label, c.chain_id)
-                self._chain_icon_cache.request(c.chain_id)
+                self._chain_icon_cache.request(c.chain_id, c.name)
         idx = combo.findData(self.store.current_chain_id)
         if idx >= 0:
             combo.setCurrentIndex(idx)
@@ -205,7 +205,9 @@ class MainWindow(QMainWindow):
         the chain's own logo."""
         pix = self._chain_icon_cache.get(chain_id)
         if pix is None:
-            self._chain_icon_cache.request(chain_id)
+            name = next((c.name for c in self.store.chains
+                         if c.chain_id == chain_id), None)
+            self._chain_icon_cache.request(chain_id, name)
         return pix
 
     def _on_chain_icon_ready(self, chain_id: int) -> None:

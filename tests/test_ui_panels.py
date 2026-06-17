@@ -26,6 +26,39 @@ ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
 ADDR = "0x7a16ff8270133f063aab6c9977183d9e72835428"
 
 
+# --- chain icon URL derivation ---------------------------------------------
+
+class TestChainIconUrls:
+    """Curve names chain logos by the chain name lowercased
+    (hyperliquid.png, fraxtal.png), so a dapp-added chain not in the
+    hardcoded id→slug map should still resolve a Curve URL from its
+    name — that's how new chains get icons without a code change."""
+
+    def test_name_derives_curve_url_for_unmapped_chain(self):
+        from qeth.icons import _chain_icon_urls
+        # Hyperliquid (999) isn't in _CURVE_CHAIN_SLUGS.
+        urls = _chain_icon_urls(999, "Hyperliquid")
+        assert any(u.endswith("/chains/hyperliquid.png") for u in urls)
+
+    def test_multiword_name_tries_compact_and_hyphenated(self):
+        from qeth.icons import _chain_icon_urls
+        urls = _chain_icon_urls(196, "X Layer")
+        assert any(u.endswith("/chains/xlayer.png") for u in urls)
+        assert any(u.endswith("/chains/x-layer.png") for u in urls)
+
+    def test_mapped_alias_still_wins_first(self):
+        from qeth.icons import _chain_icon_urls
+        # Gnosis' Curve file is "xdai", which the display name can't
+        # yield — the id→slug map must still be tried, and first.
+        urls = _chain_icon_urls(100, "Gnosis")
+        curve = [u for u in urls if "curve-assets" in u]
+        assert curve and curve[0].endswith("/chains/xdai.png")
+
+    def test_no_name_no_map_yields_nothing(self):
+        from qeth.icons import _chain_icon_urls
+        assert _chain_icon_urls(123456789) == []
+
+
 # --- notification_icon -----------------------------------------------------
 
 class TestNotificationIcon:

@@ -8,6 +8,7 @@ and refreshes the affected row when each one lands.
 """
 
 import logging
+import re
 import threading
 import urllib.parse
 import urllib.request
@@ -47,23 +48,53 @@ _TRUSTWALLET_CHAIN_SLUGS: dict[int, str] = {
 }
 
 
-def _chain_icon_urls(chain_id: int) -> list[str]:
+def _name_slug_candidates(name: str) -> list[str]:
+    """Plausible Curve-assets filename slugs derived from a chain's
+    display name. Curve names most files by the chain name lowercased
+    with separators removed or hyphenated ("Hyperliquid" → hyperliquid,
+    "X Layer" → x-layer), so try both forms. The id→slug map still wins
+    for chains Curve names by an alias the display name can't yield
+    (Gnosis → xdai, BNB Smart Chain → bsc). A wrong guess just 404s and
+    is swallowed by the fetch worker."""
+    base = name.strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", base)
+    hyphen = re.sub(r"[^a-z0-9]+", "-", base).strip("-")
+    out: list[str] = []
+    for s in (compact, hyphen):
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _chain_icon_urls(chain_id: int, name: str | None = None) -> list[str]:
     """Ordered list of upstream URLs to try for a chain logo.
     Curve first — their set covers TAC and matches the wallet's
     visual style (Curve also supplies our token-list source).
-    TrustWallet second as a long-established backup."""
+    TrustWallet second as a long-established backup.
+
+    ``name`` (the chain's display name, when known) lets a chain that
+    isn't in the hardcoded id→slug map still resolve a Curve logo by
+    deriving the slug from its name — that's how dapp-added chains
+    (Fraxtal, Hyperliquid, …) get an icon without a code change."""
     urls: list[str] = []
-    slug = _CURVE_CHAIN_SLUGS.get(int(chain_id))
-    if slug:
+    curve_slugs: list[str] = []
+    mapped = _CURVE_CHAIN_SLUGS.get(int(chain_id))
+    if mapped:
+        curve_slugs.append(mapped)
+    if name:
+        for s in _name_slug_candidates(name):
+            if s not in curve_slugs:
+                curve_slugs.append(s)
+    for slug in curve_slugs:
         urls.append(
             "https://raw.githubusercontent.com/curvefi/curve-assets/main/"
             f"chains/{slug}.png"
         )
-    slug = _TRUSTWALLET_CHAIN_SLUGS.get(int(chain_id))
-    if slug:
+    tw_slug = _TRUSTWALLET_CHAIN_SLUGS.get(int(chain_id))
+    if tw_slug:
         urls.append(
             "https://raw.githubusercontent.com/trustwallet/assets/master/"
-            f"blockchains/{slug}/info/logo.png"
+            f"blockchains/{tw_slug}/info/logo.png"
         )
     return urls
 
@@ -293,11 +324,11 @@ class ChainIconCache(QObject):
                 return pix
         return None
 
-    def request(self, chain_id: int) -> None:
+    def request(self, chain_id: int, name: str | None = None) -> None:
         cid = int(chain_id)
         if cid in self._mem:
             return
-        urls = _chain_icon_urls(cid)
+        urls = _chain_icon_urls(cid, name)
         if not urls:
             return
         with self._lock:

@@ -87,6 +87,10 @@ class MainWindow(QMainWindow):
             self._on_chain_added,
             type=Qt.ConnectionType.QueuedConnection,
         )
+        self.signer_bridge.chain_add_requested.connect(
+            self._on_chain_add_requested,
+            type=Qt.ConnectionType.QueuedConnection,
+        )
         if self.rpc is not None:
             self.rpc.signer_bridge = self.signer_bridge
 
@@ -242,6 +246,44 @@ class MainWindow(QMainWindow):
         else:
             self.chain_combo.addItem(label, chain.chain_id)
             self._chain_icon_cache.request(chain.chain_id)
+
+    def _on_chain_add_requested(self, info: dict, fut) -> None:
+        """Slot for ``SignerBridge.chain_add_requested`` — a dapp asked
+        to add a network qeth doesn't know yet
+        (``wallet_addEthereumChain``). The site supplied the RPC URL, and
+        once persisted qeth uses it for every balance read, simulation,
+        and broadcast on that chain — for *all* apps, not just this one.
+        So confirm with the user before the endpoint lands; declining
+        returns a 4001 to the dapp. Runs on the Qt main thread (queued
+        connection); the modal's answer resolves the bridge future."""
+        from PySide6.QtWidgets import QMessageBox
+        origin = info.get("origin") or "A connected site"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Add network?")
+        box.setText(f"{origin} wants to add a network to qeth.")
+        box.setInformativeText(
+            f"Network: {info['name']} (chain {info['chain_id']})\n"
+            f"Currency: {info['symbol']}\n"
+            f"RPC URL: {info['rpc_url']}\n\n"
+            "This RPC endpoint is provided by the site. If you add it, "
+            "qeth will use it for all balances, previews, and transaction "
+            "broadcasts on this network — including for other apps. Only "
+            "add networks from sources you trust."
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        # The prompt fires while the user is in the browser (driving the
+        # dapp), so qeth's window is usually backgrounded — without this
+        # the first click only raises/focuses the window and the button
+        # needs a second click. Raise + activate so one click suffices.
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        approved = box.exec() == QMessageBox.StandardButton.Yes
+        self.signer_bridge.resolve_chain(fut, approved)
 
     def _build_chain_rpc_button(self):
         """Little ⋯ button next to the chain combo: opens the

@@ -356,6 +356,16 @@ class SignerBridge(QObject):
     # ``int``: the id is dapp-supplied and real chains exceed qint32
     # (Palm = 11297108109) — Signal(int) would overflow at emit.
     chain_added = Signal(QULONGLONG)
+    # (info, future) — a dapp asked to add a *new* network we don't
+    # already know (``wallet_addEthereumChain``). The site supplies the
+    # RPC URL, which qeth would then trust for every read / preview /
+    # broadcast on that chain (for all apps, not just this one), so the
+    # UI must ask the user before persisting it. Same cross-thread
+    # pattern as ``request_received``: emit, await the future, which the
+    # slot resolves True (approved) / False (declined). ``info`` is a
+    # dict carrying chain_id / name / rpc_url / symbol / explorer /
+    # origin for the confirmation dialog.
+    chain_add_requested = Signal(object, object)
 
     async def submit_async(self, req) -> str:
         """Called from the aiohttp event loop. Emits the signal
@@ -378,9 +388,30 @@ class SignerBridge(QObject):
                 raise
             raise SignerError(str(e)) from e
 
+    async def confirm_chain_async(self, info: dict) -> bool:
+        """Called from the aiohttp loop when a dapp wants to add a
+        network qeth doesn't know yet. Emits ``chain_add_requested``
+        (queued onto the Qt main loop) and awaits the user's decision.
+        Returns True to add, False to decline. A rejected future (the
+        dialog torn down without an answer) counts as a decline — a
+        site must never get a chain added by *failing* to answer."""
+        fut: Future = Future()
+        self.chain_add_requested.emit(info, fut)
+        try:
+            return bool(await asyncio.wrap_future(fut))
+        except Exception:
+            return False
+
     def resolve(self, fut: Future, tx_hash: str) -> None:
         if not fut.done():
             fut.set_result(tx_hash)
+
+    def resolve_chain(self, fut: Future, approved: bool) -> None:
+        """Deliver the user's add-network decision to the awaiting
+        ``confirm_chain_async``. Separate from ``resolve`` (which carries
+        a hex string) so the bool result stays well-typed."""
+        if not fut.done():
+            fut.set_result(approved)
 
     def reject(self, fut: Future, error: Exception) -> None:
         if not fut.done():

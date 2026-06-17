@@ -1299,6 +1299,140 @@ class TestRpcDispatchSendTransaction:
         assert "cancelled" in ei.value.message.lower()
 
 
+class TestRpcDispatchAddChain:
+    """wallet_addEthereumChain for an UNKNOWN chain must ask the user
+    (via the bridge) before persisting the site-supplied RPC. A chain
+    we already know is a silent no-op (we keep our own RPC); with no
+    bridge wired (headless / tests) the old silent-add is preserved."""
+
+    def _make_server(self, bridge=None, known=None):
+        from unittest.mock import MagicMock
+        from qeth.rpc import RpcServer
+        from qeth.chains import DEFAULT_CHAINS
+        store = MagicMock()
+        chains = list(known if known is not None else [])
+        store.chains = chains
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+
+        def _add(chain):   # mirror store.add_chain's id-dedupe
+            if not any(c.chain_id == chain.chain_id for c in chains):
+                chains.append(chain)
+        store.add_chain.side_effect = _add
+        return RpcServer(store, signer_bridge=bridge), chains
+
+    def _add_params(self):
+        return [{
+            "chainId": "0x5ca1ab1e",
+            "chainName": "Sketchy L2",
+            "rpcUrls": ["https://rpc.sketchy.example"],
+            "nativeCurrency": {"symbol": "SKT"},
+            "blockExplorerUrls": ["https://scan.sketchy.example"],
+        }]
+
+    def test_unknown_chain_added_when_user_approves(self, qtbot):
+        bridge = SignerBridge()
+        seen: list = []
+
+        def on_add(info, fut):
+            seen.append(info)
+            bridge.resolve_chain(fut, True)
+        bridge.chain_add_requested.connect(on_add)
+        server, chains = self._make_server(bridge=bridge)
+
+        async def go():
+            return await server._dispatch(
+                "wallet_addEthereumChain", self._add_params(),
+                origin="https://dapp.example")
+
+        assert asyncio.run(go()) is None
+        assert len(chains) == 1
+        assert chains[0].chain_id == 0x5ca1ab1e
+        assert chains[0].rpc_url == "https://rpc.sketchy.example"
+        assert chains[0].symbol == "SKT"
+        # The user was actually asked, with the site origin + the URL
+        # it's being asked to trust.
+        assert seen[0]["origin"] == "https://dapp.example"
+        assert seen[0]["rpc_url"] == "https://rpc.sketchy.example"
+
+    def test_unknown_chain_rejected_returns_4001_and_not_added(self, qtbot):
+        from qeth.rpc import RpcError
+        bridge = SignerBridge()
+        bridge.chain_add_requested.connect(
+            lambda info, fut: bridge.resolve_chain(fut, False))
+        server, chains = self._make_server(bridge=bridge)
+
+        async def go():
+            await server._dispatch(
+                "wallet_addEthereumChain", self._add_params())
+
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(go())
+        assert ei.value.code == 4001
+        assert chains == []
+
+    def test_known_chain_is_silent_noop_without_prompt(self, qtbot):
+        from qeth.chains import DEFAULT_CHAINS
+        bridge = SignerBridge()
+        asked: list = []
+        bridge.chain_add_requested.connect(lambda i, f: asked.append(i))
+        server, chains = self._make_server(
+            bridge=bridge, known=[DEFAULT_CHAINS[0]])
+
+        async def go():
+            # Re-add Ethereum (chain id 1) with a hostile RPC.
+            return await server._dispatch(
+                "wallet_addEthereumChain",
+                [{"chainId": "0x1", "rpcUrls": ["https://evil.example"]}])
+
+        assert asyncio.run(go()) is None
+        assert asked == []                       # never prompted
+        assert len(chains) == 1                  # no second entry
+        assert chains[0].rpc_url == DEFAULT_CHAINS[0].rpc_url  # our RPC kept
+
+    def test_concurrent_adds_for_same_chain_share_one_prompt(self, qtbot):
+        """A dapp re-firing wallet_addEthereumChain while the first
+        prompt is still open must NOT stack a second modal — both
+        requests share one prompt and one decision."""
+        bridge = SignerBridge()
+        prompts: list = []
+        futures: list = []
+
+        def on_add(info, fut):     # record, defer the decision
+            prompts.append(info)
+            futures.append(fut)
+        bridge.chain_add_requested.connect(on_add)
+        server, chains = self._make_server(bridge=bridge)
+
+        async def go():
+            async def one():
+                return await server._dispatch(
+                    "wallet_addEthereumChain", self._add_params())
+            t1 = asyncio.create_task(one())
+            t2 = asyncio.create_task(one())
+            for _ in range(4):     # let both reach their await
+                await asyncio.sleep(0)
+            assert len(prompts) == 1   # one prompt despite two requests
+            bridge.resolve_chain(futures[0], True)
+            return await asyncio.gather(t1, t2)
+
+        r1, r2 = asyncio.run(go())
+        assert r1 is None and r2 is None
+        assert len(prompts) == 1
+        assert len(chains) == 1     # added exactly once
+
+    def test_no_bridge_silently_adds(self):
+        # Headless / tests: no user to ask, so the old behaviour stands.
+        server, chains = self._make_server(bridge=None)
+
+        async def go():
+            return await server._dispatch(
+                "wallet_addEthereumChain", self._add_params())
+
+        assert asyncio.run(go()) is None
+        assert len(chains) == 1
+        assert chains[0].chain_id == 0x5ca1ab1e
+
+
 class TestRpcProxyFailFast:
     """_proxy's per-host fail-fast cooldown. When an upstream RPC times
     out or drops the connection, the host is marked and subsequent

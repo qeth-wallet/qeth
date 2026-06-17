@@ -107,6 +107,13 @@ class RpcServer:
         self._ws_origin: dict[web.WebSocketResponse, Optional[str]] = {}
         # Per-upstream-host fail-fast cool-down. See _proxy below.
         self._host_last_fail: dict[str, float] = {}
+        # In-flight wallet_addEthereumChain approvals, keyed by chain id.
+        # A new chain isn't persisted until the user approves, so a dapp
+        # (or Frame) re-firing the add while the prompt is open would
+        # otherwise pass the "already known?" check and spawn a second
+        # modal — the user then has to dismiss a stack of identical
+        # dialogs. Concurrent requests for the same id share one prompt.
+        self._pending_chain_add: dict[int, "asyncio.Future[bool]"] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -504,13 +511,34 @@ class RpcServer:
             # be a no-op when we already have a working entry.
             if any(c.chain_id == cid for c in self.store.chains):
                 return None
-            self.store.add_chain(Chain(
+            new_chain = Chain(
                 name=p.get("chainName", "Custom"),
                 chain_id=cid,
                 rpc_url=p["rpcUrls"][0],
                 symbol=(p.get("nativeCurrency") or {}).get("symbol", "ETH"),
                 explorer=(p.get("blockExplorerUrls") or [""])[0],
-            ))
+            )
+            # Adding a genuinely new chain means trusting the
+            # *site-supplied* RPC URL for every future read, preview,
+            # and broadcast on it — and not just for this dapp: once
+            # persisted, the endpoint serves whatever app later uses
+            # that chain. A matching chain id is no protection (the id
+            # can be honest while the node lies or front-runs). So ask
+            # the user before the endpoint lands; declining returns the
+            # EIP-1193 user-rejected code. No bridge wired up (headless
+            # / tests) keeps the old silent add — there's no one to ask.
+            if self.signer_bridge is not None:
+                approved = await self._confirm_new_chain(cid, {
+                    "chain_id": cid,
+                    "name": new_chain.name,
+                    "rpc_url": new_chain.rpc_url,
+                    "symbol": new_chain.symbol,
+                    "explorer": new_chain.explorer,
+                    "origin": origin,
+                })
+                if not approved:
+                    raise RpcError(4001, "User rejected adding the network")
+            self.store.add_chain(new_chain)
             # Notify the UI so the new chain appears in the
             # toolbar combo (with icon discovery kicked off) and
             # the user isn't stuck restarting just to switch to it.
@@ -595,6 +623,31 @@ class RpcServer:
                                      broadcast=True)
 
         return await self._proxy(method, params, origin=origin)
+
+    async def _confirm_new_chain(self, cid: int, info: dict) -> bool:
+        """Ask the user (via the signer bridge) to approve adding a new
+        chain, coalescing duplicate in-flight requests for the same chain
+        id onto a single prompt. ``_dispatch`` runs on the one asyncio
+        loop, so the dict read/insert needs no lock. ``asyncio.shield``
+        keeps a second dapp's disconnect from cancelling the shared
+        future out from under the first."""
+        assert self.signer_bridge is not None
+        pending = self._pending_chain_add.get(cid)
+        if pending is not None:
+            return await asyncio.shield(pending)
+        fut: "asyncio.Future[bool]" = asyncio.get_event_loop().create_future()
+        self._pending_chain_add[cid] = fut
+        try:
+            approved = await self.signer_bridge.confirm_chain_async(info)
+            if not fut.done():
+                fut.set_result(approved)
+            return approved
+        except BaseException as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            self._pending_chain_add.pop(cid, None)
 
     # Recent transient failures per upstream host. When a host has
     # failed within the last ``_FAIL_FAST_S`` seconds we short-

@@ -524,11 +524,17 @@ class TestRpcFailover:
         assert p2.make_request("eth_call", [])["error"]["code"] == -32005
 
     def test_is_provider_limit_error_classification(self):
-        """Limiter shapes → True; request-level answers → False. The DRPC
-        free-tier shapes (probed live 2026-06-11: HTTP 408 + code 30, HTTP
-        500 + code 19) are deliberately NOT matched — they always arrive on
-        an HTTP error status, which both failover layers already treat as a
-        host failure."""
+        """Limiter shapes → True; request-level answers → False.
+
+        DRPC's load balancer surfaces upstream throttling in several shapes.
+        Some arrive on an HTTP error status (probed 2026-06-11: 408 + code 30,
+        500 + code 19) and are handled by the HTTP-error path in both failover
+        layers, so they need no message match. But the free-tier "usage limit"
+        (probed 2026-06: HTTP 200 + code -32001 + "You've reached the usage
+        limit for your current plan…", routed from a throttled upstream like
+        1rpc.io) arrives on a 200 — only this classifier makes failover rotate
+        off it, so it MUST match. Missing it dropped the whole multicall batch
+        and flapped the token list."""
         from qeth.chain import is_provider_limit_error
         assert is_provider_limit_error(
             {"code": -32005, "message": "limit exceeded"})       # EIP-1474
@@ -536,6 +542,12 @@ class TestRpcFailover:
             {"code": 429, "message": "Too Many Requests"})
         assert is_provider_limit_error(
             {"code": -32603, "message": "Rate limit reached"})   # generic code
+        # DRPC free-tier "usage limit" — HTTP 200, both by code and message.
+        assert is_provider_limit_error(
+            {"code": -32001, "message": "anything"})
+        assert is_provider_limit_error(
+            {"code": -32603, "message": "You've reached the usage limit for "
+             "your current plan. To continue ... please upgrade here: ..."})
         assert not is_provider_limit_error(
             {"code": 3, "message": "execution reverted"})
         assert not is_provider_limit_error(

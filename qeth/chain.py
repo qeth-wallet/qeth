@@ -142,9 +142,17 @@ def _rpc_urls(chain: Chain) -> list[str]:
 # the error code. The message check catches providers using generic codes
 # for their limiter (DRPC under load); kept narrow so nothing matches a
 # real node answer like "exceeds block gas limit".
-_LIMIT_CODES = frozenset({-32005, 429})
+# -32005: common "limit exceeded" code. 429: HTTP-status-as-code.
+# -32001: DRPC's free-tier "usage limit" (observed 2026-06: HTTP 200 +
+# {"code":-32001,"message":"You've reached the usage limit for your current
+# plan…"} — its load balancer routes some eth_calls to a throttled upstream
+# like 1rpc.io). It arrives on a 200, so only this classification (not the
+# HTTP-error path) makes _failover_provider rotate off it; without it the
+# whole multicall batch was dropped and the token list flapped.
+_LIMIT_CODES = frozenset({-32005, -32001, 429})
 _LIMIT_MSG_RE = re.compile(
-    r"rate.?limit|too many request|request limit|over.?capacity|quota|throttl",
+    r"rate.?limit|too many request|request limit|usage limit|"
+    r"upgrade (your|here|to)|over.?capacity|quota|throttl",
     re.IGNORECASE,
 )
 

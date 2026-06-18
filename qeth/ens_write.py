@@ -14,7 +14,6 @@ permitted to make simply reverts, which the sign dialog's simulation surfaces).
 from __future__ import annotations
 
 from base64 import b32decode
-from typing import Tuple
 
 from .ens_app import (
     ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, namehash,
@@ -39,16 +38,16 @@ ZERO_ADDRESS = "0x" + "00" * 20
 
 # ENSIP-9 coin types (SLIP-44). EVM chains use ENSIP-11: 0x80000000 | chain_id.
 ETH_COIN_TYPE = 60
-COIN_TYPES: "dict[str, int]" = {
+COIN_TYPES: dict[str, int] = {
     "ETH": 60, "BTC": 0, "LTC": 2, "DOGE": 3, "ETC": 61,
     "OP": 0x80000000 | 10, "ARB": 0x80000000 | 42161,
     "BASE": 0x80000000 | 8453, "MATIC": 0x80000000 | 137,
 }
 
-Tx = Tuple[str, str]   # (to_addr, data_hex)
+Tx = tuple[str, str]   # (to_addr, data_hex)
 
 
-def _abi(types: "list[str]", args: list) -> bytes:
+def _abi(types: list[str], args: list) -> bytes:
     from eth_abi import encode as abi_encode
     return abi_encode(types, args)
 

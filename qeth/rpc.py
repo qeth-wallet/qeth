@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from aiohttp import (
     ClientConnectorError, ClientOSError, ClientSession, TCPConnector,
@@ -60,19 +60,19 @@ class RpcServer:
     Runs on its own asyncio loop in a background thread."""
 
     def __init__(self, store, host: str = "127.0.0.1", port: int = 1248,
-                 signer_bridge: Optional[SignerBridge] = None):
+                 signer_bridge: SignerBridge | None = None):
         self.store = store
         self.host = host
         self.port = port
         # Optional: when None, signing methods still return -32601
         # (keeps tests that don't need a UI bridge working).
         self.signer_bridge = signer_bridge
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._runner: Optional[web.AppRunner] = None
-        self._client: Optional[ClientSession] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._runner: web.AppRunner | None = None
+        self._client: ClientSession | None = None
         self._ready = threading.Event()
-        self._error: Optional[str] = None
+        self._error: str | None = None
         # Live WS clients — used to push EIP-1193 events
         # (accountsChanged, chainChanged) to connected dapps when
         # the user changes them in the qeth UI. Lives on the
@@ -104,7 +104,7 @@ class RpcServer:
         # an override-driven chainChanged goes only to that
         # origin's sockets, while a UI-driven one goes only to
         # sockets whose origin doesn't carry an override.
-        self._ws_origin: dict[web.WebSocketResponse, Optional[str]] = {}
+        self._ws_origin: dict[web.WebSocketResponse, str | None] = {}
         # Per-upstream-host fail-fast cool-down. See _proxy below.
         self._host_last_fail: dict[str, float] = {}
         # In-flight wallet_addEthereumChain approvals, keyed by chain id.
@@ -113,7 +113,7 @@ class RpcServer:
         # otherwise pass the "already known?" check and spawn a second
         # modal — the user then has to dismiss a stack of identical
         # dialogs. Concurrent requests for the same id share one prompt.
-        self._pending_chain_add: dict[int, "asyncio.Future[bool]"] = {}
+        self._pending_chain_add: dict[int, asyncio.Future[bool]] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -125,7 +125,7 @@ class RpcServer:
             asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
 
     @property
-    def error(self) -> Optional[str]:
+    def error(self) -> str | None:
         return self._error
 
     async def _shutdown(self) -> None:
@@ -240,7 +240,7 @@ class RpcServer:
 
     # --- event push (Qt-thread → asyncio loop) ----------------------------
 
-    def _chain_for_origin(self, origin: Optional[str]) -> int:
+    def _chain_for_origin(self, origin: str | None) -> int:
         """The chain id this origin should see. Per-origin override
         if it has one, otherwise the wallet UI's current chain.
         ``None`` and ``""`` share the same "origin-less" slot so
@@ -288,7 +288,7 @@ class RpcServer:
 
     def _schedule_event(
         self, sub_type: str, result,
-        *, only_origin: Optional[str] = None,
+        *, only_origin: str | None = None,
         only_unscoped: bool = False,
     ) -> None:
         """Schedule an eth_subscription notification to every WS
@@ -329,7 +329,7 @@ class RpcServer:
 
     async def _broadcast_event(
         self, sub_type: str, result,
-        *, only_origin: Optional[str] = None,
+        *, only_origin: str | None = None,
         only_unscoped: bool = False,
     ) -> None:
         """Send an ``eth_subscription`` notification to subscribed
@@ -377,8 +377,8 @@ class RpcServer:
             self._ws_clients.discard(ws)
 
     async def _handle_one(self, req: dict,
-                           origin: Optional[str] = None,
-                           ws: Optional[web.WebSocketResponse] = None,
+                           origin: str | None = None,
+                           ws: web.WebSocketResponse | None = None,
                            ) -> dict:
         method = req.get("method")
         params = req.get("params") or []
@@ -438,8 +438,8 @@ class RpcServer:
                     "error": {"code": -32603, "message": str(e)}}
 
     async def _dispatch(self, method: str, params: list,
-                         origin: Optional[str] = None,
-                         ws: Optional[web.WebSocketResponse] = None,
+                         origin: str | None = None,
+                         ws: web.WebSocketResponse | None = None,
                          ) -> Any:
         if method == "eth_subscribe":
             # Frame extends eth_subscribe with wallet-event types
@@ -635,7 +635,7 @@ class RpcServer:
         pending = self._pending_chain_add.get(cid)
         if pending is not None:
             return await asyncio.shield(pending)
-        fut: "asyncio.Future[bool]" = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
         self._pending_chain_add[cid] = fut
         try:
             approved = await self.signer_bridge.confirm_chain_async(info)
@@ -668,7 +668,7 @@ class RpcServer:
 
     async def _proxy(
         self, method: str, params: list,
-        origin: Optional[str] = None,
+        origin: str | None = None,
         broadcast: bool = False,
     ) -> Any:
         # Route reads to the requesting origin's chain (per
@@ -692,7 +692,7 @@ class RpcServer:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         assert self._client is not None  # set in _serve() before any request is handled
         now = asyncio.get_event_loop().time()
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         for url in urls:
             last_fail = self._host_last_fail.get(url)
             if (not broadcast and last_fail is not None

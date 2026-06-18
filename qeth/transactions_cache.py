@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 from .fsatomic import atomic_write_text
 from .transactions import Transaction
@@ -28,7 +27,7 @@ _TRANSFER = "0xa9059cbb"      # transfer(address,uint256)         → arg0
 _TRANSFER_FROM = "0x23b872dd"  # transferFrom(address,address,uint256) → arg1
 
 
-def _erc20_transfer_recipient(data: str) -> Optional[str]:
+def _erc20_transfer_recipient(data: str) -> str | None:
     """The destination address of an ERC-20 transfer/transferFrom, decoded
     from raw calldata (``0x`` + 8-hex selector + 32-byte-padded args), or
     ``None`` if it isn't one of those calls. Used to tell that a token send
@@ -73,7 +72,7 @@ class TransactionCache:
     newest txs, so the saved file always represents the most recent
     window. A paginated-history feature can add a merge step later."""
 
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Path | None = None):
         # Look up CACHE_DIR at instantiation so tests that monkeypatch
         # the module-level constant (via the tmp_qeth fixture) see the
         # redirected path without having to construct with an explicit root.
@@ -82,7 +81,7 @@ class TransactionCache:
     def _path(self, chain_id: int, address: str) -> Path:
         return self.root / str(chain_id) / f"{address.lower()}.json"
 
-    def load(self, chain_id: int, address: str) -> Optional[list[Transaction]]:
+    def load(self, chain_id: int, address: str) -> list[Transaction] | None:
         p = self._path(chain_id, address)
         if not p.exists():
             return None

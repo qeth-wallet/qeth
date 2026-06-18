@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 from PySide6.QtCore import QEvent, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
@@ -81,7 +81,7 @@ class _SortItem(QTreeWidgetItem):
     by real expiry timestamp (not the displayed 'expiring soon' / date text) and
     names sort case-insensitively. Names with no expiry sort last."""
 
-    def __lt__(self, other: "QTreeWidgetItem") -> bool:
+    def __lt__(self, other: QTreeWidgetItem) -> bool:
         tree = self.treeWidget()
         # Type grouping is primary and stays subdomains-first even when the
         # column is sorted descending (Qt reverses the comparator, so flip).
@@ -173,7 +173,7 @@ class _EnsItemDelegate(QStyledItemDelegate):
         size.setHeight(max(size.height(), _table_row_height()))
         return size
 
-    def _selection_fill(self, option) -> "Optional[QColor]":
+    def _selection_fill(self, option) -> QColor | None:
         if not (option.state & QStyle.StateFlag.State_Selected):
             return None
         view = self.parent()
@@ -228,7 +228,7 @@ class _RightIconDelegate(_EnsItemDelegate):
             ic.paint(painter, x, y, sz.width(), sz.height())
 
 
-def _record_rows(rec: EnsRecords) -> "list[tuple[str, str, str]]":
+def _record_rows(rec: EnsRecords) -> list[tuple[str, str, str]]:
     """Flatten records to (icon-key, label, value) rows for the tree."""
     rows: list[tuple[str, str, str]] = []
     for coin, addr in rec.addresses.items():
@@ -246,7 +246,7 @@ class EnsNamesWorker(QThread):
 
     ready = Signal(str, object)        # (address, list[EnsName])
 
-    def __init__(self, address: str, custom_names: "list[str]", parent=None):
+    def __init__(self, address: str, custom_names: list[str], parent=None):
         super().__init__(parent)
         self._address = address
         self._custom = list(custom_names)
@@ -274,7 +274,7 @@ class EnsRecordsWorker(QThread):
 
     def __init__(self, chain, name: str, parent=None,
                  *, wait_s: float = VERIFY_WAIT_S, client=None,
-                 resolver: "Optional[str]" = None, catchup: bool = False):
+                 resolver: str | None = None, catchup: bool = False):
         super().__init__(parent)
         self._chain = chain
         self._name = name
@@ -315,7 +315,7 @@ class EnsVerifyWorker(QThread):
 
     ready = Signal(str, object, bool)        # (address, states, verified)
 
-    def __init__(self, chain, address: str, names: "list[str]", parent=None,
+    def __init__(self, chain, address: str, names: list[str], parent=None,
                  *, wait_s: float = VERIFY_WAIT_S):
         super().__init__(parent)
         self._chain = chain
@@ -347,7 +347,7 @@ class EnsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items_by_name: dict[str, QTreeWidgetItem] = {}
-        self._writable: "set[str]" = set()   # names the user can sign writes for
+        self._writable: set[str] = set()   # names the user can sign writes for
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = _EnsTree()
@@ -405,7 +405,7 @@ class EnsPanel(QWidget):
 
     # --- rendering --------------------------------------------------------
 
-    def populate(self, roots: "list[EnsNode]", now_ts: int) -> None:
+    def populate(self, roots: list[EnsNode], now_ts: int) -> None:
         # Bulk-insert with sorting off (else the tree re-sorts on every add),
         # then re-enable — which applies the user's current sort column/order.
         self.tree.setSortingEnabled(False)
@@ -484,7 +484,7 @@ class EnsPanel(QWidget):
                 self._set_status(ch, "ok", _RECORD_TIP)
             item.addChild(ch)
 
-    def update_resolved(self, name: str, address: "Optional[str]") -> None:
+    def update_resolved(self, name: str, address: str | None) -> None:
         """Update a name row's 'Resolves to' column from a fresh head read of its
         ETH address record — so a setAddr change shows on the (possibly
         collapsed) name row, not just in the expanded records. ``None`` clears
@@ -498,8 +498,8 @@ class EnsPanel(QWidget):
         item.setText(2, address or "")
         item.setToolTip(2, _RESOLVED_TIP if address else "")
 
-    def mark_verified(self, states: "dict[str, OwnershipCheck]",
-                      address: str) -> "list[str]":
+    def mark_verified(self, states: dict[str, OwnershipCheck],
+                      address: str) -> list[str]:
         """Apply the batched on-chain verification to the rows and return the
         names DROPPED as indexer lies.
 
@@ -583,7 +583,7 @@ class EnsPanel(QWidget):
             item.setData(0, _LOADED_ROLE, True)   # guard against re-emit
             self.records_requested.emit(n.name)
 
-    def set_writable(self, names: "set[str]") -> None:
+    def set_writable(self, names: set[str]) -> None:
         """Names (lower-case) the user can sign writes for — gates the edit
         actions in the context menu."""
         self._writable = set(names)
@@ -633,7 +633,7 @@ def _clip(text: str) -> None:
     QApplication.clipboard().setText(text)
 
 
-def _checksum(text: str) -> "Optional[str]":
+def _checksum(text: str) -> str | None:
     """Checksum a 0x address, or None if it isn't a valid address."""
     from eth_utils import is_address, to_checksum_address
     s = (text or "").strip()
@@ -657,7 +657,7 @@ class _RecordDialog(QDialog):
     (used by the quick 'Set text record…' entry); otherwise the type combo is
     shown (the general 'Add / change record…')."""
 
-    def __init__(self, name: str, *, preset: "Optional[str]" = None,
+    def __init__(self, name: str, *, preset: str | None = None,
                  key: str = "", coin: str = "", value: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Record · {name}")
@@ -703,7 +703,7 @@ class _RecordDialog(QDialog):
                 "Text record": "value", "Other-chain address": "0x…"}
         self.value.setPlaceholderText(hint.get(kind, ""))
 
-    def result_values(self) -> "tuple[str, str, str]":
+    def result_values(self) -> tuple[str, str, str]:
         """(kind, key-or-coin, value)."""
         kind = self.kind.currentText()
         extra = (self.key.currentText() if kind == "Text record"
@@ -731,7 +731,7 @@ class _SubnodeDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
-    def values(self) -> "tuple[str, str]":
+    def values(self) -> tuple[str, str]:
         return self.label.text().strip(), self.owner.text().strip()
 
 
@@ -742,35 +742,35 @@ class EnsPlugin(Plugin):
         super().__init__()
         self._store = store
         self._cache = EnsCache()
-        self._panel: Optional[EnsPanel] = None
-        self._loaded_for: Optional[str] = None
-        self._add_btn: Optional[QPushButton] = None
+        self._panel: EnsPanel | None = None
+        self._loaded_for: str | None = None
+        self._add_btn: QPushButton | None = None
         # In-memory records cache (name → (records, verified)) layered over the
         # disk cache, so re-expanding a name is instant within a session too.
         # Both the fast (unverified RPC) and the Helios reads are at the chain
         # HEAD, so ``verified`` True means "proven at latest".
-        self._rec_cache: "dict[str, tuple[EnsRecords, bool]]" = {}
+        self._rec_cache: dict[str, tuple[EnsRecords, bool]] = {}
         # Names whose records we're re-reading because a write to them just
         # confirmed. For these the head read is authoritative enough to also
         # CLEAR the name-row address (a setAddr to 0x0) — outside this set a
         # records read only sets a present address, never clears one (an absent
         # on-chain addr can just mean the name resolves offchain via CCIP).
-        self._force_reread: "set[str]" = set()
+        self._force_reread: set[str] = set()
         # Per-name resolver (from the ownership pass) — lets a record read skip
         # its resolver-lookup round-trip. Refreshed every load (self-heals a
         # re-pointed resolver). And a warm EthClient reused across record reads
         # so each expand doesn't pay a fresh TLS handshake.
-        self._resolver_cache: "dict[str, str]" = {}
+        self._resolver_cache: dict[str, str] = {}
         self._read_client = None
         # Names the chain proved this address does NOT own — indexer lies we
         # drop and keep filtered out of re-renders this session. Reset per
         # account; never persisted (a stale denial must never hide a real name).
-        self._denied: "set[str]" = set()
+        self._denied: set[str] = set()
         # Write state: the EnsName + on-chain ownership facts per name, so the
         # write actions know the resolver, wrapped flag, and parent expiry.
-        self._names_by_l: "dict[str, EnsName]" = {}
-        self._owned: "set[str]" = set()      # owned by the selected address
-        self._wrapped: "set[str]" = set()    # held by the NameWrapper
+        self._names_by_l: dict[str, EnsName] = {}
+        self._owned: set[str] = set()      # owned by the selected address
+        self._wrapped: set[str] = set()    # held by the NameWrapper
 
     # --- plugin contract --------------------------------------------------
 
@@ -783,7 +783,7 @@ class EnsPlugin(Plugin):
             self._panel.edit_record_requested.connect(self._on_edit_record)
         return self._panel
 
-    def action_widgets(self) -> "list[QWidget]":
+    def action_widgets(self) -> list[QWidget]:
         if self._add_btn is None:
             # Match the Tokens pane's add button exactly: a flat 28×28
             # list-add ("+") icon button, not a framed text button.
@@ -801,7 +801,7 @@ class EnsPlugin(Plugin):
         assert self._add_btn is not None
         return [self._add_btn]
 
-    def on_account_changed(self, address: Optional[str]) -> None:
+    def on_account_changed(self, address: str | None) -> None:
         self._load(address)
 
     def on_activated(self) -> None:
@@ -819,7 +819,7 @@ class EnsPlugin(Plugin):
         from ..chains import DEFAULT_CHAINS
         return next((c for c in DEFAULT_CHAINS if c.chain_id == ENS_CHAIN_ID), None)
 
-    def _load(self, address: Optional[str]) -> None:
+    def _load(self, address: str | None) -> None:
         if self._panel is None:
             return
         if address != self._loaded_for:
@@ -856,7 +856,7 @@ class EnsPlugin(Plugin):
         worker.ready.connect(self._on_names_ready)
         self._start(worker)
 
-    def _on_names_ready(self, address: str, names: "list[EnsName]") -> None:
+    def _on_names_ready(self, address: str, names: list[EnsName]) -> None:
         host = self.host
         if host is None or host.selected_address != address:
             return                                  # view moved on
@@ -864,7 +864,7 @@ class EnsPlugin(Plugin):
         self._render(names)
         self._verify(address, [n.name for n in names])
 
-    def _render(self, names: "list[EnsName]") -> None:
+    def _render(self, names: list[EnsName]) -> None:
         if self._panel is None:
             return
         # Keep names the chain already disowned this session filtered out, so a
@@ -877,7 +877,7 @@ class EnsPlugin(Plugin):
 
     # --- verification (batched, Helios) -----------------------------------
 
-    def _verify(self, address: str, names: "list[str]") -> None:
+    def _verify(self, address: str, names: list[str]) -> None:
         chain = self._mainnet()
         if chain is None or not names:
             return
@@ -889,7 +889,7 @@ class EnsPlugin(Plugin):
         worker.ready.connect(self._on_verified)
         self._start(worker)
 
-    def _on_verified(self, address: str, states: "dict[str, OwnershipCheck]",
+    def _on_verified(self, address: str, states: dict[str, OwnershipCheck],
                      verified: bool) -> None:
         host = self.host
         if not verified or self._panel is None:
@@ -1042,7 +1042,7 @@ class EnsPlugin(Plugin):
 
     # --- per-kind editors --------------------------------------------------
 
-    def _cur_records(self, name: str) -> "Optional[EnsRecords]":
+    def _cur_records(self, name: str) -> EnsRecords | None:
         c = self._rec_cache.get(name.lower())
         return c[0] if c is not None else None
 
@@ -1110,7 +1110,7 @@ class EnsPlugin(Plugin):
         to, data = ens_write.set_text(res, name, k, val)
         self._submit_tx(name, to, data, f"Set {k} · {name}")
 
-    def _write_record(self, name: str, *, preset: "Optional[str]" = None,
+    def _write_record(self, name: str, *, preset: str | None = None,
                       coin: str = "", value: str = "") -> None:
         if self._panel is None:
             return
@@ -1182,13 +1182,13 @@ class EnsPlugin(Plugin):
 
     # --- write plumbing ----------------------------------------------------
 
-    def _resolver_for(self, name: str) -> "Optional[str]":
+    def _resolver_for(self, name: str) -> str | None:
         res = self._resolver_cache.get(name.lower())
         if res and int(res, 16) != 0:
             return res
         return None
 
-    def _ensure_resolver(self, name: str) -> "Optional[str]":
+    def _ensure_resolver(self, name: str) -> str | None:
         """The name's resolver, or None — in which case offer to point the name
         at the default public resolver first (records can't be stored without
         one). The user then re-issues the record write after that confirms."""

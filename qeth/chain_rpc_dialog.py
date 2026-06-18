@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
@@ -119,7 +118,7 @@ class ChainRpcDialog(QDialog):
         # url -> (latency_ms or None, ok, simv1); used to sort the
         # picker once all probes have come back. simv1 is True/False/None
         # (supports eth_simulateV1 / definitively not / unknown).
-        self._results: dict[str, tuple[Optional[float], bool, object]] = {}
+        self._results: dict[str, tuple[float | None, bool, object]] = {}
         self._total_to_probe = 0
         self._done_probing = 0
         self.setWindowTitle(f"RPC for {chain.name} ({chain.chain_id})")
@@ -353,7 +352,7 @@ class ChainRpcDialog(QDialog):
 
     @staticmethod
     def _format_row(
-        url: str, ok: Optional[bool], latency_ms: Optional[float],
+        url: str, ok: bool | None, latency_ms: float | None,
         simv1: object = None,
     ) -> str:
         """Single source of truth for picker-row text. ``ok=None``

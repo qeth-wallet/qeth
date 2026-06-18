@@ -24,7 +24,7 @@ so mypy resolves them.
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import aiohttp
@@ -82,7 +82,7 @@ def _http_provider(urls: list[str], *, timeout: float) -> "AsyncHTTPProvider":
     state = {"i": 0}
 
     async def make_request(method: Any, params: Any) -> Any:
-        last: Optional[Exception] = None
+        last: Exception | None = None
         for offset in range(len(members)):
             i = (state["i"] + offset) % len(members)
             try:
@@ -119,7 +119,7 @@ def _ws_provider(url: str) -> "WebSocketProvider":
 
 
 def make_async_web3(
-    url: str, *, fallbacks: Optional[list[str]] = None, timeout: float = 15.0,
+    url: str, *, fallbacks: list[str] | None = None, timeout: float = 15.0,
 ) -> "AsyncWeb3":
     """Build an ``AsyncWeb3`` for ``url``: a ``WebSocketProvider`` for a
     ws/wss URL (so ``eth_subscribe`` works), else an ``AsyncHTTPProvider``

@@ -10,7 +10,6 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Optional
 
 from .fsatomic import atomic_write_text
 
@@ -27,7 +26,7 @@ class TokenMetadataCache:
     after a multicall and the whole chain file is rewritten once.
     """
 
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Path | None = None):
         # See RiskCache for why we don't bind the default at def-time.
         self.cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
         self._lock = threading.RLock()
@@ -56,7 +55,7 @@ class TokenMetadataCache:
                 self._chains[chain_id] = cc
             return cc
 
-    def get(self, chain_id: int, contract: str) -> Optional[dict]:
+    def get(self, chain_id: int, contract: str) -> dict | None:
         return self._chain_cache(chain_id).get(contract.lower())
 
     def missing(self, chain_id: int, contracts: list[str]) -> list[str]:

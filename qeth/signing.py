@@ -28,7 +28,6 @@ import logging
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Optional
 
 from eth_utils import to_checksum_address
 
@@ -55,22 +54,22 @@ class SigningRequest:
     """
     chain_id: int
     from_addr: str
-    to_addr: Optional[str]
+    to_addr: str | None
     value_wei: int = 0
     data: str = "0x"
-    gas: Optional[int] = None
-    max_fee_per_gas: Optional[int] = None
-    max_priority_fee_per_gas: Optional[int] = None
-    gas_price: Optional[int] = None
-    nonce: Optional[int] = None
+    gas: int | None = None
+    max_fee_per_gas: int | None = None
+    max_priority_fee_per_gas: int | None = None
+    gas_price: int | None = None
+    nonce: int | None = None
     # HTTP Origin / WS Origin of the caller — typically the dapp's
     # URL (https://app.uniswap.org), populated by the RPC handler
     # from the incoming request headers. ``None`` for locally
     # initiated requests (e.g. the user clicked Send in the UI).
-    origin: Optional[str] = None
+    origin: str | None = None
 
 
-def _hex_to_int(v) -> Optional[int]:
+def _hex_to_int(v) -> int | None:
     if v is None:
         return None
     if isinstance(v, int):
@@ -80,7 +79,7 @@ def _hex_to_int(v) -> Optional[int]:
 
 
 def parse_send_transaction_params(
-    params: list, chain_id: int, *, origin: Optional[str] = None,
+    params: list, chain_id: int, *, origin: str | None = None,
 ) -> SigningRequest:
     """Parse the dapp's ``eth_sendTransaction`` params list into a
     typed ``SigningRequest``. ``origin`` is the caller's HTTP /WS
@@ -123,7 +122,7 @@ def parse_send_transaction_params(
 _BUMP_NUM, _BUMP_DEN = 9, 8
 
 
-def _bumped(value: Optional[int]) -> Optional[int]:
+def _bumped(value: int | None) -> int | None:
     if value is None:
         return None
     return -(-value * _BUMP_NUM // _BUMP_DEN)   # ceil(value × 9/8)
@@ -132,11 +131,11 @@ def _bumped(value: Optional[int]) -> Optional[int]:
 @dataclass
 class OriginalFees:
     """Fee fields decoded from a signed raw tx."""
-    max_fee_per_gas: Optional[int] = None
-    max_priority_fee_per_gas: Optional[int] = None
-    gas_price: Optional[int] = None
-    gas: Optional[int] = None
-    nonce: Optional[int] = None
+    max_fee_per_gas: int | None = None
+    max_priority_fee_per_gas: int | None = None
+    gas_price: int | None = None
+    gas: int | None = None
+    nonce: int | None = None
 
 
 def decode_tx_fees(raw_signed: str) -> OriginalFees:
@@ -166,15 +165,15 @@ def decode_tx_fees(raw_signed: str) -> OriginalFees:
 class ReplacementFloor:
     """Minimum fees the replacement must beat (originals × 1.125). The
     dialog clamps the suggested fees up to these."""
-    max_fee_per_gas: Optional[int] = None
-    max_priority_fee_per_gas: Optional[int] = None
-    gas_price: Optional[int] = None
+    max_fee_per_gas: int | None = None
+    max_priority_fee_per_gas: int | None = None
+    gas_price: int | None = None
 
 
 def build_replacement_request(
-    *, from_addr: str, to_addr: Optional[str], value_wei: int, data: str,
+    *, from_addr: str, to_addr: str | None, value_wei: int, data: str,
     nonce: int, raw_signed: str, chain_id: int, cancel: bool = False,
-) -> tuple["SigningRequest", ReplacementFloor]:
+) -> tuple[SigningRequest, ReplacementFloor]:
     """A SigningRequest replacing a pending tx at the SAME nonce, plus the
     fee floor the dialog must enforce. ``cancel`` → a 0-value self-send
     (21 000 gas), so the original tx never lands. The request's fees start
@@ -207,7 +206,7 @@ class MessageSigningRequest:
     """
     from_addr: str
     raw: bytes
-    origin: Optional[str] = None
+    origin: str | None = None
 
 
 @dataclass
@@ -222,11 +221,11 @@ class TypedDataSigningRequest:
     """
     from_addr: str
     typed_data: dict
-    origin: Optional[str] = None
+    origin: str | None = None
 
 
 def parse_personal_sign_params(
-    params: list, *, origin: Optional[str] = None,
+    params: list, *, origin: str | None = None,
 ) -> MessageSigningRequest:
     """Parse the dapp's ``personal_sign`` params into a typed
     request.
@@ -276,7 +275,7 @@ def _decode_message_bytes(value) -> bytes:
 
 
 def parse_typed_data_params(
-    params: list, *, origin: Optional[str] = None,
+    params: list, *, origin: str | None = None,
 ) -> TypedDataSigningRequest:
     """Parse the dapp's ``eth_signTypedData_v4`` params:
     ``[address, typedData]``. ``typedData`` may be a JSON string

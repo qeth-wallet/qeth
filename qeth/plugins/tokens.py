@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -280,11 +279,11 @@ class TokensPlugin(Plugin):
         self._risk_cache = RiskCache()
         # Display state.
         self._show_all = False
-        self._displayed_view: Optional[tuple[int, str]] = None
+        self._displayed_view: tuple[int, str] | None = None
         # Throttled live-balance refresh, driven by ws Transfer logs via
         # on_balance_dirty (relayed from the TransactionsPlugin's LiveWatcher).
-        self._live_refresh_timer: Optional[QTimer] = None
-        self._live_refresh_addr: Optional[str] = None
+        self._live_refresh_timer: QTimer | None = None
+        self._live_refresh_addr: str | None = None
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()
@@ -301,9 +300,9 @@ class TokensPlugin(Plugin):
         self._receipt_contracts: dict[tuple[int, str], set[str]] = {}
         # Lifecycle objects (built lazily / in attach).
         self._panel = None
-        self._refresh_timer: Optional[QTimer] = None
-        self._lists_loader: Optional[TokenListsLoader] = None
-        self._top_tokens_loader: Optional[TopTokensLoader] = None
+        self._refresh_timer: QTimer | None = None
+        self._lists_loader: TokenListsLoader | None = None
+        self._top_tokens_loader: TopTokensLoader | None = None
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -455,7 +454,7 @@ class TokensPlugin(Plugin):
 
     # --- lifecycle hooks ----------------------------------------------------
 
-    def on_account_changed(self, address: Optional[str]) -> None:
+    def on_account_changed(self, address: str | None) -> None:
         # New viewing session → re-seed the native-receive baseline, so
         # returning to an account doesn't fire a misleading "received" for the
         # delta accumulated while it was off-screen (and unpolled).
@@ -1714,10 +1713,10 @@ class TokenListPanel(QWidget):
         self._chain_id: int | None = None
         # Set externally by MainWindow so we can mark scams with an alarm
         # icon and short-circuit `is_likely_scam` against the curated lists.
-        self._token_lists: "TokenLists | None" = None
+        self._token_lists: TokenLists | None = None
         # Same — MainWindow injects so the alarm icon also reflects GoPlus
         # high-risk verdicts (honeypot / hidden owner / >50% sell tax).
-        self._risk_cache: "RiskCache | None" = None
+        self._risk_cache: RiskCache | None = None
 
     def action_widgets(self) -> list[QWidget]:
         """The button strip, in display order. MainWindow mounts them

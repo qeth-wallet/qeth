@@ -23,7 +23,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from . import USER_AGENT
 
@@ -61,7 +60,7 @@ class ChainEntry:
 
 def fetch_chains(
     *, force: bool = False,
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[ChainEntry]:
@@ -107,7 +106,7 @@ def fetch_chains(
             continue
         rpcs: list[RpcEntry] = []
         for r in c.get("rpc") or []:
-            url: Optional[str]
+            url: str | None
             tracking = "unspecified"
             is_open_source = False
             if isinstance(r, str):
@@ -146,7 +145,7 @@ def fetch_chains(
 def probe_rpc(
     url: str, expected_chain_id: int, *,
     timeout: float = 5.0,
-) -> tuple[bool, Optional[float], Optional[str]]:
+) -> tuple[bool, float | None, str | None]:
     """Send a single ``eth_chainId`` JSON-RPC and time the
     round-trip. Returns ``(ok, latency_ms, reason)``:
 
@@ -217,7 +216,7 @@ _METHOD_MISSING_NEEDLES = (
 
 
 def _probe_method(url: str, method: str, params: list,
-                  timeout: float) -> Optional[bool]:
+                  timeout: float) -> bool | None:
     """POST one JSON-RPC request and classify the endpoint's support for
     ``method``:
 
@@ -263,7 +262,7 @@ def _probe_method(url: str, method: str, params: list,
     return None   # rate-limit / other error → unknown
 
 
-def probe_simulate_v1(url: str, *, timeout: float = 5.0) -> Optional[bool]:
+def probe_simulate_v1(url: str, *, timeout: float = 5.0) -> bool | None:
     """Probe whether ``url`` implements ``eth_simulateV1`` — the one-call
     simulation method qeth's event preview prefers (much faster than the
     local fork). Tri-state, see ``_probe_method`` (definitive ✗ examples:
@@ -278,7 +277,7 @@ def probe_simulate_v1(url: str, *, timeout: float = 5.0) -> Optional[bool]:
     }, "latest"], timeout)
 
 
-def probe_access_list(url: str, *, timeout: float = 5.0) -> Optional[bool]:
+def probe_access_list(url: str, *, timeout: float = 5.0) -> bool | None:
     """Probe whether ``url`` implements ``eth_createAccessList`` — the
     "which slots will this call touch" hint a verifying client (Helios)
     needs from an untrusted RPC. Tri-state, see ``_probe_method``.
@@ -300,8 +299,8 @@ def probe_access_list(url: str, *, timeout: float = 5.0) -> Optional[bool]:
 def lookup(
     chain_id: int, *,
     force_refresh: bool = False,
-    cache_dir: Optional[Path] = None,
-) -> Optional[ChainEntry]:
+    cache_dir: Path | None = None,
+) -> ChainEntry | None:
     """Convenience: return the ``ChainEntry`` for a specific
     chain id (or ``None``). Caches the full registry on the
     first call."""

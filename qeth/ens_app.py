@@ -19,7 +19,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Tuple
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 from . import USER_AGENT
 
@@ -91,9 +92,9 @@ class EnsName:
     caller). ``expiry_ts`` is None for subdomains (they ride the parent 2LD)."""
 
     name: str
-    resolved_address: Optional[str] = None    # the addr record (where it points)
-    owner: Optional[str] = None               # registry owner / controller
-    expiry_ts: Optional[int] = None           # unix seconds, or None
+    resolved_address: str | None = None    # the addr record (where it points)
+    owner: str | None = None               # registry owner / controller
+    expiry_ts: int | None = None           # unix seconds, or None
     source: str = "owned"                     # owned | resolved | custom
 
     @property
@@ -102,7 +103,7 @@ class EnsName:
         return self.name.split(".", 1)[0]
 
     @property
-    def parent(self) -> Optional[str]:
+    def parent(self) -> str | None:
         """The parent name (``vitalik.eth`` for ``alice.vitalik.eth``), or None
         for a 2LD / TLD."""
         parts = self.name.split(".")
@@ -119,7 +120,7 @@ class EnsRecords:
 
     addresses: dict[str, str] = field(default_factory=dict)   # coin -> addr
     texts: dict[str, str] = field(default_factory=dict)       # key -> value
-    contenthash: Optional[str] = None                         # e.g. ipfs://…
+    contenthash: str | None = None                         # e.g. ipfs://…
 
 
 @dataclass
@@ -127,10 +128,10 @@ class EnsNode:
     """A name plus its owned subdomains — the tree the UI renders."""
 
     name: EnsName
-    children: "list[EnsNode]" = field(default_factory=list)
+    children: list[EnsNode] = field(default_factory=list)
 
 
-def name_warning(name: str) -> Optional[str]:
+def name_warning(name: str) -> str | None:
     """A look-alike/confusable warning for ``name`` per ENSIP-15 normalization —
     the same check the ENS app uses — or None when the name is clean.
 
@@ -165,10 +166,10 @@ class OwnershipCheck:
     field is None when the call reverted or the name uses an offchain (CCIP)
     resolver we can't prove on-chain."""
 
-    controller: Optional[str] = None
-    registrant: Optional[str] = None
-    resolved_address: Optional[str] = None
-    resolver: Optional[str] = None      # registry.resolver(node) — for records
+    controller: str | None = None
+    registrant: str | None = None
+    resolved_address: str | None = None
+    resolver: str | None = None      # registry.resolver(node) — for records
     wrapped: bool = False               # held by the ENS NameWrapper
     # True when the ownership read DEFINITIVELY landed — so a None controller
     # means "the node has no owner / doesn't exist" (a droppable indexer lie),
@@ -190,7 +191,7 @@ class OwnershipCheck:
 
 # --- expiry ---------------------------------------------------------------
 
-def expiry_status(expiry_ts: Optional[int], now_ts: int,
+def expiry_status(expiry_ts: int | None, now_ts: int,
                   warn_window_s: int = 30 * 24 * 3600) -> str:
     """Classify a name's expiry: ``none`` (no expiry — subdomain), ``active``,
     ``expiring`` (within the warn window), ``grace`` (expired but renewable),
@@ -208,7 +209,7 @@ def expiry_status(expiry_ts: Optional[int], now_ts: int,
 
 # --- BENS discovery -------------------------------------------------------
 
-def _iso_to_unix(s: Optional[str]) -> Optional[int]:
+def _iso_to_unix(s: str | None) -> int | None:
     """Parse BENS's ISO-8601 ``expiry_date`` (``2048-03-27T13:25:30.000Z``) to
     unix seconds, or None."""
     if not s:
@@ -236,7 +237,7 @@ ZERO_ADDRESS = "0x" + "00" * 20
 ZERO_ADDR_BYTES = b"\x00" * 20   # the zero address as a raw 20-byte word
 
 
-def nonzero_addr(addr: Optional[str]) -> Optional[str]:
+def nonzero_addr(addr: str | None) -> str | None:
     """The address, or None when it's empty / the zero address. A cleared ENS
     record reads back as the zero address (and indexers report it that way); we
     treat that as "no address" rather than showing a literal zero."""
@@ -245,7 +246,7 @@ def nonzero_addr(addr: Optional[str]) -> Optional[str]:
     return addr
 
 
-def _parse_name_item(it: dict) -> Optional[EnsName]:
+def _parse_name_item(it: dict) -> EnsName | None:
     name = it.get("name")
     if not name:
         return None
@@ -269,7 +270,7 @@ def lookup_owned_names(
     what was gathered so far (an indexer is a hint, never blocking)."""
     out: list[EnsName] = []
     seen: set[str] = set()
-    token: Optional[str] = None
+    token: str | None = None
     for _ in range(max_pages):
         q = {
             "address": address, "owned_by": "true", "resolved_to": "false",
@@ -299,7 +300,7 @@ def fetch_name(
     chain_id: int, name: str, *,
     base_url: str = BENS_BASE,
     get_json: Callable[[str], dict] = _http_get_json,
-) -> Optional[EnsName]:
+) -> EnsName | None:
     """One name's details via BENS ``domains/{name}`` (owner / resolved-address
     / expiry) — for a custom-pinned name we didn't get from the owner sweep.
     None on any failure (or a name BENS doesn't know)."""
@@ -340,7 +341,7 @@ def build_tree(names: list[EnsName]) -> list[EnsNode]:
 
 # --- contenthash decode (pure, EIP-1577) ----------------------------------
 
-def decode_contenthash(raw: Optional[str]) -> Optional[str]:
+def decode_contenthash(raw: str | None) -> str | None:
     """Decode an EIP-1577 contenthash hex to a ``scheme://…`` URL, or None.
     Covers the common IPFS (ipfs-ns + dag-pb CIDv1) and IPNS cases; returns a
     raw ``0x…`` marker for anything else so the UI can still show *something*."""
@@ -397,7 +398,7 @@ def _is_eth_2ld(name: str) -> bool:
     return name.endswith(".eth") and name.count(".") == 1
 
 
-def _decode_addr_word(raw) -> Optional[str]:
+def _decode_addr_word(raw) -> str | None:
     """Decode a 32-byte address word (registry.owner / ownerOf / legacy addr).
     None for the zero address or short/empty data."""
     b = bytes(raw) if not isinstance(raw, (bytes, bytearray)) else raw
@@ -410,7 +411,7 @@ def _decode_addr_word(raw) -> Optional[str]:
     return to_checksum_address("0x" + word[12:32].hex())
 
 
-def _decode_addr_bytes(raw) -> Optional[str]:
+def _decode_addr_bytes(raw) -> str | None:
     """Decode ``addr(bytes32,uint256)``'s dynamic-bytes return (a 20-byte
     address payload) to a checksummed address, or None."""
     h = _abi_bytes(raw)
@@ -424,8 +425,8 @@ def _decode_addr_bytes(raw) -> Optional[str]:
 
 
 def verify_names(
-    chain: "Chain", names: "list[str]", *, wait_s: float = VERIFY_WAIT_S,
-) -> "Tuple[dict[str, OwnershipCheck], bool]":
+    chain: Chain, names: list[str], *, wait_s: float = VERIFY_WAIT_S,
+) -> tuple[dict[str, OwnershipCheck], bool]:
     """Batch on-chain check of controller + registrant + resolved-address for
     ``names`` → ``({name_lower: OwnershipCheck}, verified)``.
 
@@ -459,7 +460,7 @@ def verify_names(
     # left un-dropped/un-badged just because its batch blipped. After the budget
     # is spent we accept the partial result (those names stay unknown → kept,
     # never a false drop). An empty result (total failure) also retries.
-    states: "dict[str, OwnershipCheck]" = {}
+    states: dict[str, OwnershipCheck] = {}
     for attempt in range(_VERIFY_RETRIES):
         try:
             states = _read_name_states(client, names)
@@ -473,7 +474,7 @@ def verify_names(
     return states, verified
 
 
-def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]":
+def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
     """The multicall body of ``verify_names``, factored out so it can be tested
     against a fake client without a live chain."""
     nodes = {n: namehash(n) for n in names}
@@ -551,7 +552,7 @@ def _read_name_states(client, names: "list[str]") -> "dict[str, OwnershipCheck]"
     return out
 
 
-def _decode_abi_string(raw) -> Optional[str]:
+def _decode_abi_string(raw) -> str | None:
     """Decode an ABI ``string`` return (resolver.text). None when empty."""
     from eth_abi import decode as abi_decode
     s = abi_decode(["string"], bytes(raw))[0]
@@ -613,8 +614,8 @@ def _read_records_ccip(
 
 def _read_records_via_client(
     client, name: str, *, text_keys: tuple = TEXT_KEYS, block: str = "latest",
-    resolver: Optional[str] = None,
-) -> "Tuple[EnsRecords, bool, bool, Optional[str]]":
+    resolver: str | None = None,
+) -> tuple[EnsRecords, bool, bool, str | None]:
     """Read a name's resolver records on-chain → ``(records, ok, extended,
     resolver)``.
 
@@ -671,9 +672,9 @@ def _read_records_via_client(
 
 
 def read_records(
-    chain: "Chain", name: str, *, text_keys: tuple = TEXT_KEYS,
-    client=None, resolver: Optional[str] = None,
-) -> "Tuple[EnsRecords, bool]":
+    chain: Chain, name: str, *, text_keys: tuple = TEXT_KEYS,
+    client=None, resolver: str | None = None,
+) -> tuple[EnsRecords, bool]:
     """Fast, UNVERIFIED record read → ``(records, ok)`` (see
     ``_read_records_via_client`` for ``ok``). The first-paint path: shows records
     in ~1 s instead of waiting on the verified read to proof-fetch every slot
@@ -707,9 +708,9 @@ def read_records(
 
 
 def verified_read_records(
-    chain: "Chain", name: str, *,
+    chain: Chain, name: str, *,
     wait_s: float = VERIFY_WAIT_S, text_keys: tuple = TEXT_KEYS,
-) -> "Tuple[EnsRecords, bool]":
+) -> tuple[EnsRecords, bool]:
     """Verified-ONLY record read at the chain HEAD → ``(records, verified)``.
     Reads at ``latest`` (sync-committee-verified by Helios, not finalized) so the
     ✓ reflects the MOST RECENT on-chain records, not the ~2-epoch-stale finalized
@@ -741,7 +742,7 @@ def verified_read_records(
     return EnsRecords(), False
 
 
-def _abi_bytes(raw) -> Optional[str]:
+def _abi_bytes(raw) -> str | None:
     """Decode an ABI-encoded ``bytes`` return (offset, length, payload) to a
     ``0x…`` hex string, or None when empty."""
     b = bytes(raw) if not isinstance(raw, (bytes, bytearray)) else raw
@@ -761,13 +762,13 @@ class EnsCache:
     tree renders instantly on reopen while a refresh runs in the background.
     Mirrors ``WalletCache``'s shape."""
 
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Path | None = None):
         self.cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
 
     def _path(self, chain_id: int, address: str) -> Path:
         return self.cache_dir / str(chain_id) / f"{address.lower()}.json"
 
-    def load(self, chain_id: int, address: str) -> Optional[list[EnsName]]:
+    def load(self, chain_id: int, address: str) -> list[EnsName] | None:
         p = self._path(chain_id, address)
         if not p.exists():
             return None
@@ -810,7 +811,7 @@ class EnsCache:
 
     def load_records(
         self, chain_id: int, name: str,
-    ) -> "Optional[Tuple[EnsRecords, bool]]":
+    ) -> tuple[EnsRecords, bool] | None:
         """Cached ``(records, verified)`` for a name, or None. So re-expanding a
         name (or reopening the app) paints its records instantly while a refresh
         runs."""

@@ -32,7 +32,7 @@ Layout:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from eth_utils import to_canonical_address, to_checksum_address
 
@@ -71,7 +71,7 @@ class StateReader:
     must be safe to call repeatedly for the same key (the AccountDB
     caches, but State init may probe system-contract addresses)."""
 
-    def get_account(self, address: str) -> "tuple[int, int, bytes]":
+    def get_account(self, address: str) -> tuple[int, int, bytes]:
         """-> (balance_wei, nonce, code_bytes)"""
         raise NotImplementedError
 
@@ -91,10 +91,10 @@ class StateReader:
 # path covers anything beyond the cap.
 _PREFETCH_MAX_KEYS = 512
 
-_static_accounts_cache: "Optional[frozenset[str]]" = None
+_static_accounts_cache: frozenset[str] | None = None
 
 
-def _static_accounts() -> "frozenset[str]":
+def _static_accounts() -> frozenset[str]:
     """Lowercase addresses whose ACCOUNT fields can never influence a
     preview, so fetching them is pure waste (profiled at ~0.2 s each,
     ~9 per simulation — they dominated warm-run latency):
@@ -144,7 +144,7 @@ class RpcStateReader(StateReader):
     Best-effort throughout: any failure leaves the lazy path intact."""
 
     def __init__(self, chain: Any, block_id: str,
-                 hint_url: "Optional[str]" = None) -> None:
+                 hint_url: str | None = None) -> None:
         from .chain import EthClient
         self._chain = chain
         self._client = EthClient(chain)
@@ -160,7 +160,7 @@ class RpcStateReader(StateReader):
             self._memo[key] = self._client.rpc(method, params)
         return self._memo[key]
 
-    def get_account(self, address: str) -> "tuple[int, int, bytes]":
+    def get_account(self, address: str) -> tuple[int, int, bytes]:
         if address.lower() in _static_accounts():
             return 0, 0, b""
         addr = to_checksum_address(address)
@@ -196,7 +196,7 @@ class RpcStateReader(StateReader):
         log.debug("prefetched %d keys in %.2fs", n, _time.monotonic() - t0)
 
     def _call_obj(self, from_addr: str, to_addr: str, data: str,
-                  value: int) -> "dict[str, str]":
+                  value: int) -> dict[str, str]:
         # No fee fields (reference: chainlist.probe_access_list — gasPrice
         # 0x0 is rejected post-London, a priced probe trips balance checks).
         call: dict[str, str] = {"from": to_checksum_address(from_addr),
@@ -221,7 +221,7 @@ class RpcStateReader(StateReader):
         with _u.urlopen(req, timeout=30) as r:
             return _json.loads(r.read()).get("result")
 
-    def _prestate_hint(self, call: "dict[str, str]") -> "list[dict]":
+    def _prestate_hint(self, call: dict[str, str]) -> list[dict]:
         """``debug_traceCall`` with the prestateTracer: the full set of
         accounts/slots the call touches, in ONE pass (no iterative
         execute-prove rounds). Returns ``[]`` when the upstream doesn't
@@ -244,7 +244,7 @@ class RpcStateReader(StateReader):
                         "storageKeys": list(storage) if storage else []})
         return out
 
-    def _access_list_hint(self, call: "dict[str, str]") -> "list[dict]":
+    def _access_list_hint(self, call: dict[str, str]) -> list[dict]:
         # web3-style AttributeDict tolerance: duck-type on .get(), never
         # isinstance(x, dict).
         res = self._hint_rpc("eth_createAccessList", [call, self._block_id])
@@ -259,7 +259,7 @@ class RpcStateReader(StateReader):
     # the direct unverified path shares this code).
     _SEED_CONCURRENCY = 20
 
-    def _batch_seed(self, entries: "list[dict]", from_addr: str,
+    def _batch_seed(self, entries: list[dict], from_addr: str,
                     to_addr: str) -> int:
         """Seed the memo with the account triple for every hinted address
         (+ the sender and target, which geth-style nodes omit from access
@@ -356,7 +356,7 @@ def _fork_account_db_class() -> type:
             self._dontfetch = JournalDB(MemoryDB())
 
         # --- accounts -------------------------------------------------
-        def _get_account_local(self, address: "Address",
+        def _get_account_local(self, address: Address,
                                from_journal: bool = True) -> Any:
             if from_journal and address in self._account_cache:
                 return self._account_cache[address]
@@ -365,7 +365,7 @@ def _fork_account_db_class() -> type:
                 return rlp.decode(rlp_account, sedes=Account)
             return None
 
-        def _get_account(self, address: "Address",
+        def _get_account(self, address: Address,
                          from_journal: bool = True) -> Any:
             account = self._get_account_local(address, from_journal)
             if account is None:
@@ -377,7 +377,7 @@ def _fork_account_db_class() -> type:
                 self._account_cache[address] = account
             return account
 
-        def get_code(self, address: "Address") -> bytes:
+        def get_code(self, address: Address) -> bytes:
             try:
                 return super().get_code(address)
             except MissingBytecode:
@@ -389,13 +389,13 @@ def _fork_account_db_class() -> type:
             self.set_code(address, code)
             return code
 
-        def account_exists(self, address: "Address") -> bool:
+        def account_exists(self, address: Address) -> bool:
             if super().account_exists(address):
                 return True
             return self.get_balance(address) > 0 or self.get_nonce(address) > 0
 
         # --- storage --------------------------------------------------
-        def _have_storage_locally(self, address: "Address", slot: int,
+        def _have_storage_locally(self, address: Address, slot: int,
                                   from_journal: bool = True) -> bool:
             if not from_journal:
                 # AccountStorageDB internals: committed-but-unflushed
@@ -406,7 +406,7 @@ def _fork_account_db_class() -> type:
             key = self._get_storage_tracker_key(address, slot)
             return self._dontfetch.get(key) == _HAS_KEY
 
-        def get_storage(self, address: "Address", slot: int,
+        def get_storage(self, address: Address, slot: int,
                         from_journal: bool = True) -> int:
             # super() first for its warm/cold + validation side effects.
             val = super().get_storage(address, slot, from_journal)
@@ -420,7 +420,7 @@ def _fork_account_db_class() -> type:
                 self.set_storage(address, slot, fetched)
             return fetched
 
-        def set_storage(self, address: "Address", slot: int,
+        def set_storage(self, address: Address, slot: int,
                         value: int) -> None:
             super().set_storage(address, slot, value)
             key = self._get_storage_tracker_key(address, slot)
@@ -462,7 +462,7 @@ def _configured_state_class(reader: StateReader) -> type:
 
 def run_fork_call(reader: StateReader, block: dict, *, chain_id: int,
                   from_addr: str, to_addr: str, data: str,
-                  value: int) -> "list[dict]":
+                  value: int) -> list[dict]:
     """Execute one eth_call-shaped message against forked state and
     return its logs as ``decode_event``-ready dicts. Raises
     ``SimulationRevert`` when the call reverts; other VM/state errors

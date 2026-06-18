@@ -16,11 +16,10 @@ group/world-readable files.
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 
 def atomic_write_text(path: Path, text: str, *,
-                      mode: Optional[int] = None) -> None:
+                      mode: int | None = None) -> None:
     """Write ``text`` to ``path`` atomically (all-or-nothing).
 
     The data is fsynced before the rename and the directory entry after

@@ -27,7 +27,6 @@ arrow and any logo-less "generic" coins follow the row selection colour.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
@@ -46,7 +45,7 @@ class Coin:
     is None or null a neutral lettered coin is drawn so a logo-less token
     still reads."""
     symbol: str
-    icon: Optional[QPixmap] = None
+    icon: QPixmap | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +150,7 @@ _ICON_CACHE: dict = {}
 _ICON_CACHE_MAX = 4096
 
 
-def _coin_key(c: Coin) -> tuple[Optional[int], str]:
+def _coin_key(c: Coin) -> tuple[int | None, str]:
     icon = c.icon
     if icon is None or icon.isNull():
         return (None, c.symbol)

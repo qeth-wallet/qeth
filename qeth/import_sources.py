@@ -26,7 +26,6 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from eth_utils import to_checksum_address
 
@@ -77,8 +76,8 @@ class ImportSource(ABC):
     @abstractmethod
     def import_one(
         self, candidate: ImportCandidate, *,
-        source_passphrase: Optional[str] = None,
-        target_passphrase: Optional[str] = None,
+        source_passphrase: str | None = None,
+        target_passphrase: str | None = None,
     ) -> tuple[str, dict]:
         """Produce a (checksummed_address, qeth_keystore_dict) pair
         ready for ``hot_wallet.save_keystore``. The caller persists
@@ -136,8 +135,8 @@ class BrownieSource(ImportSource):
 
     def import_one(
         self, candidate: ImportCandidate, *,
-        source_passphrase: Optional[str] = None,
-        target_passphrase: Optional[str] = None,
+        source_passphrase: str | None = None,
+        target_passphrase: str | None = None,
     ) -> tuple[str, dict]:
         return candidate.address, candidate.extras["keystore"]
 
@@ -312,8 +311,8 @@ class FrameSource(ImportSource):
 
     def import_one(
         self, candidate: ImportCandidate, *,
-        source_passphrase: Optional[str] = None,
-        target_passphrase: Optional[str] = None,
+        source_passphrase: str | None = None,
+        target_passphrase: str | None = None,
     ) -> tuple[str, dict]:
         if not source_passphrase:
             raise ValueError("Frame passphrase is required")

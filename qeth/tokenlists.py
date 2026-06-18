@@ -21,7 +21,8 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Iterable
+from typing import ClassVar
+from collections.abc import Iterable
 
 from . import USER_AGENT
 

@@ -23,7 +23,8 @@ import logging
 import os
 import time
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 from eth_utils import to_checksum_address
 
@@ -94,7 +95,7 @@ def _copy_noun(value: str) -> str:
     return "Link"
 
 
-def _install_copy_menu(label: "QLabel", value: str, url: "Optional[str]") -> None:
+def _install_copy_menu(label: QLabel, value: str, url: str | None) -> None:
     """Give a hyperlink QLabel a useful right-click menu.
 
     Qt's default rich-text menu offers "Copy" (for *selected text*, so
@@ -183,7 +184,7 @@ class PendingProbeWorker(QThread):
     failed = Signal(object, str, str)
 
     def __init__(self, chain, tx_hash: str, from_addr: str, nonce: int,
-                 raw_signed: Optional[str], rebroadcast: bool, parent=None):
+                 raw_signed: str | None, rebroadcast: bool, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._tx_hash = tx_hash
@@ -361,7 +362,7 @@ def _make_identity_get_code(store):
     identified with no Etherscan key (the key is only needed for a contract's
     name/verified/deployer). Returns the code hex, or None when the chain
     is unknown or the read fails (the source then leaves the row bare)."""
-    def _get_code(chain_id: int, address: str) -> Optional[str]:
+    def _get_code(chain_id: int, address: str) -> str | None:
         chain = next((c for c in store.chains if c.chain_id == chain_id), None)
         if chain is None:
             return None
@@ -370,15 +371,15 @@ def _make_identity_get_code(store):
 
 
 def _build_pending_snapshot(
-    cache: "dict[tuple[int, str], list]",
-    chain_lookup: "Callable[[int], Any]",
-) -> "dict[int, tuple[Any, list[PendingTx]]]":
+    cache: dict[tuple[int, str], list],
+    chain_lookup: Callable[[int], Any],
+) -> dict[int, tuple[Any, list[PendingTx]]]:
     """Pure: scan the tx cache for pending entries and group them per chain
     as ``{chain_id: (Chain, [PendingTx, ...])}`` — the immutable snapshot the
     LiveWatcher reads from its asyncio thread. Pending txs for the same chain
     but different accounts are merged. Chains the host can't resolve are
     skipped."""
-    snap: "dict[int, tuple[Any, list[PendingTx]]]" = {}
+    snap: dict[int, tuple[Any, list[PendingTx]]] = {}
     for (chain_id, _addr), txs in cache.items():
         pend = [PendingTx(t.hash, t.from_addr, t.nonce, t.raw_signed)
                 for t in txs if t.pending]
@@ -480,7 +481,7 @@ def _format_token_amount(raw: int, decimals: int, symbol: str) -> str:
 
 
 def _render_decoded(text_edit, decoded: dict,
-                    token_context: Optional[dict] = None,
+                    token_context: dict | None = None,
                     known_addresses=None) -> None:
     """Render a decoded call into ``text_edit`` as Python-style
     annotated text. Top-level args render as
@@ -556,7 +557,7 @@ def _render_decoded(text_edit, decoded: dict,
 
 
 def _arg_html(arg: dict, *, indent: int, last: bool,
-              token_context: Optional[dict] = None,
+              token_context: dict | None = None,
               known_addresses=None) -> str:
     """Serialise one ``arg`` node (leaf, struct branch, or array
     branch) to an HTML fragment. ``last`` controls the trailing
@@ -725,7 +726,7 @@ class TransactionsWorker(QThread):
     def run(self) -> None:
         viewer = self.address.lower()
         raw = None
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         for attempt in range(self.MAX_ATTEMPTS):
             try:
                 raw = self.source.list_transactions(
@@ -802,7 +803,7 @@ class ReceiptScanWorker(QThread):
 
     found = Signal(QULONGLONG, str, object)   # chain_id, tx_hash, receipt logs
 
-    def __init__(self, chain, hashes: list[str], parent: Optional[QObject] = None):
+    def __init__(self, chain, hashes: list[str], parent: QObject | None = None):
         super().__init__(parent)
         self._chain = chain
         self._hashes = hashes
@@ -855,10 +856,10 @@ class TransactionsPlugin(Plugin):
 
     def __init__(
         self,
-        source: Optional[TransactionSource] = None,
-        disk_cache: Optional[TransactionCache] = None,
-        abi_source: Optional[AnyAbiSource] = None,
-        abi_cache: Optional[AbiCache] = None,
+        source: TransactionSource | None = None,
+        disk_cache: TransactionCache | None = None,
+        abi_source: AnyAbiSource | None = None,
+        abi_cache: AbiCache | None = None,
         store=None,
     ):
         super().__init__()
@@ -900,7 +901,7 @@ class TransactionsPlugin(Plugin):
         # shown on the To: row of the details + signing dialogs. Same
         # Etherscan-v2 key as the ABI source; immutable facts → cached
         # permanently on disk. None when there's no store/key (tests).
-        self._identity_source: Optional[ContractIdentitySource] = (
+        self._identity_source: ContractIdentitySource | None = (
             ContractIdentitySource(
                 lambda: store.etherscan_api_key,
                 get_code=_make_identity_get_code(store))
@@ -937,7 +938,7 @@ class TransactionsPlugin(Plugin):
         # to skip the show_transactions rebuild when on_activated fires
         # for the same view we already painted — Qt then preserves the
         # scrollbar and the user's scrolled-in batches stay intact.
-        self._rendered_for: Optional[tuple[int, str]] = None
+        self._rendered_for: tuple[int, str] | None = None
         # tx hash → (out ERC-20 contracts, in ERC-20 contracts) learned from
         # a receipt or pre-broadcast simulation, folded into the activity so
         # a swap's coins show before Blockscout indexes the transfers.
@@ -957,23 +958,23 @@ class TransactionsPlugin(Plugin):
         self._receipt_checked: set[str] = set()
         # The widget is built lazily so the plugin can be instantiated
         # outside a Qt event loop (useful in pure-Python imports).
-        self._panel: Optional[TransactionListPanel] = None
+        self._panel: TransactionListPanel | None = None
         # Wired in attach(); polls for receipts of broadcast txs whose
         # hashes are sitting in cache with pending=True.
-        self._pending_watcher: Optional[PendingTxWatcher] = None
+        self._pending_watcher: PendingTxWatcher | None = None
         # Optional ws live watcher (QETH_LIVE_WS): confirms pending txs on the
         # block they mine in, alongside the polling watcher (the floor).
-        self._live_watcher: Optional[LiveWatcher] = None
+        self._live_watcher: LiveWatcher | None = None
         # Immutable per-chain pending-tx snapshot the LiveWatcher reads from
         # its asyncio thread; rebuilt + atomically swapped on the main thread.
-        self._live_snapshot: "dict[int, tuple[Any, list[PendingTx]]]" = {}
+        self._live_snapshot: dict[int, tuple[Any, list[PendingTx]]] = {}
         # The (chain, account) currently on screen, whose ERC-20 Transfer
         # logs the LiveWatcher subscribes to for live balances. Atomic tuple
         # swap on the main thread; read from the asyncio thread.
-        self._live_account: "Optional[tuple[Any, str]]" = None
+        self._live_account: tuple[Any, str] | None = None
         # Keys with a NonceCheckWorker in flight (coalesce polls).
         self._nonce_in_flight: set[tuple[int, str]] = set()
-        self._nonce_timer: Optional[QTimer] = None
+        self._nonce_timer: QTimer | None = None
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -1028,18 +1029,18 @@ class TransactionsPlugin(Plugin):
 
     # --- ws live watcher wiring -------------------------------------------
 
-    def _live_chains_provider(self) -> "list[Any]":
+    def _live_chains_provider(self) -> list[Any]:
         """Chains to watch live = those with a pending tx. Read from the
         asyncio thread; returns the current immutable snapshot's Chains."""
         return [chain for chain, _ in self._live_snapshot.values()]
 
-    def _live_pending_provider(self, chain_id: int) -> "list[PendingTx]":
+    def _live_pending_provider(self, chain_id: int) -> list[PendingTx]:
         """Pending txs for a chain, for the live probe. Asyncio-thread read
         of the immutable snapshot (built on the main thread)."""
         entry = self._live_snapshot.get(chain_id)
         return entry[1] if entry is not None else []
 
-    def pending_nonce_floor(self, chain_id: int, address: str) -> Optional[int]:
+    def pending_nonce_floor(self, chain_id: int, address: str) -> int | None:
         """One past the highest nonce among the txs WE broadcast from
         ``address`` and are still tracking as pending — the nonce a brand-new
         send must use so it doesn't collide with one of ours that's still in
@@ -1075,7 +1076,7 @@ class TransactionsPlugin(Plugin):
             except Exception:
                 log.exception("on_ws_link_state relay failed")
 
-    def _live_account_provider(self) -> "Optional[tuple[Any, str]]":
+    def _live_account_provider(self) -> tuple[Any, str] | None:
         """The on-screen (chain, account) for the LiveWatcher's Transfer-log
         subscription. Asyncio-thread read of the atomically-swapped snapshot
         built on the main thread by _update_live_account."""
@@ -1201,7 +1202,7 @@ class TransactionsPlugin(Plugin):
     # --- pending-tx integration ---------------------------------------------
 
     def add_pending(self, tx_hash: str, req: SigningRequest, chain,
-                    raw_signed: Optional[str] = None) -> None:
+                    raw_signed: str | None = None) -> None:
         """Called by MainWindow right after a successful broadcast.
         Synthesises a ``Transaction(pending=True)`` from the finalised
         request + broadcast hash, prepends it to the cache for
@@ -1401,7 +1402,7 @@ class TransactionsPlugin(Plugin):
 
     # --- lifecycle hooks ----------------------------------------------------
 
-    def on_account_changed(self, address: Optional[str]) -> None:
+    def on_account_changed(self, address: str | None) -> None:
         self._update_live_account()   # re-target the live Transfer-log sub
         if address is None:
             if self._panel is not None:
@@ -1685,7 +1686,7 @@ class TransactionsPlugin(Plugin):
         # since the last visit. Older pages come from scroll.
         self._fetch_page(key, address, page=1)
 
-    def _oldest_block(self, key) -> Optional[int]:
+    def _oldest_block(self, key) -> int | None:
         """Block of the oldest loaded tx for this view — the cursor for
         paging older (explorer ``endblock``), which sidesteps the
         ``page × offset ≤ 10000`` window."""
@@ -1757,8 +1758,8 @@ class TransactionsPlugin(Plugin):
     def _on_page_fetched(self, chain_id: int, address_lower: str,
                          page_idx: int, page: list, has_more: bool,
                          walk_on_overlap: bool = False,
-                         raw_oldest: Optional[int] = None,
-                         requested_before: Optional[int] = None) -> None:
+                         raw_oldest: int | None = None,
+                         requested_before: int | None = None) -> None:
         """One page arrived. Merge it into the cache, persist, advance
         the paging cursor, and incrementally update the visible table
         — never rebuilding it from the full cache (which can be tens
@@ -1932,11 +1933,11 @@ class TransactionListPanel(QWidget):
         # (assets moved, out → in) with no text inside it. Until a row's
         # activity resolves (or on a chain with no source) both stay empty.
         self._activities: dict[str, Activity] = {}
-        self._icons: Optional[IconCache] = None
-        self._token_info: Optional[Callable[..., object]] = None
+        self._icons: IconCache | None = None
+        self._token_info: Callable[..., object] | None = None
         # Plugin-supplied callback (chain, address, txs) → fetch their
         # Activity off-thread; the panel calls it for newly-shown rows.
-        self._activity_kicker: Optional[Callable[..., None]] = None
+        self._activity_kicker: Callable[..., None] | None = None
         # Lazy coin-icon arrivals are coalesced: collect the contracts whose
         # logo just downloaded and repaint each affected row ONCE on a short
         # timer, instead of re-rendering every shared-coin row per arrival.
@@ -2091,7 +2092,7 @@ class TransactionListPanel(QWidget):
         """Buttons the slot mounts on its shared bottom-right row."""
         return [self.btn_details, self.btn_explorer, self.btn_copy_hash]
 
-    def _selected_tx(self) -> Optional["Transaction"]:
+    def _selected_tx(self) -> Transaction | None:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
         if not rows:
             return None
@@ -2128,7 +2129,7 @@ class TransactionListPanel(QWidget):
 
     # --- Activity column (verb + coins moved) -------------------------------
 
-    def activity_for(self, tx_hash: str) -> Optional[Activity]:
+    def activity_for(self, tx_hash: str) -> Activity | None:
         """The Activity currently held for ``tx_hash`` (if its worker has
         resolved), so the plugin can fold late-arriving receipt coins in."""
         return self._activities.get(tx_hash)
@@ -2139,7 +2140,7 @@ class TransactionListPanel(QWidget):
         _request_activities only kicks the ones still missing."""
         self._activities.update(mapping)
 
-    def set_icon_deps(self, icon_cache: Optional[IconCache],
+    def set_icon_deps(self, icon_cache: IconCache | None,
                       token_info: object) -> None:
         """Wire the shared icon cache (+ optional token_info logo lookup)
         the Activity column uses to paint coins. Connected once; lazy icon
@@ -2266,7 +2267,7 @@ class TransactionListPanel(QWidget):
                 if coins is not None:
                     coins.setIcon(self._coins_icon(self._build_summary(act)))
 
-    def set_activity_kicker(self, fn: Optional[Callable[..., None]]) -> None:
+    def set_activity_kicker(self, fn: Callable[..., None] | None) -> None:
         self._activity_kicker = fn
 
     def _request_activities(self, txs: list[Transaction]) -> None:
@@ -2467,7 +2468,7 @@ class TransactionListPanel(QWidget):
         if activity is not None:
             self._apply_activity(row, activity)
 
-    def _tx_at(self, row: int) -> Optional[Transaction]:
+    def _tx_at(self, row: int) -> Transaction | None:
         item = self.table.item(row, _C_VERB)
         if item is None:
             return None
@@ -2587,9 +2588,9 @@ class ContractIdentityWorker(QThread):
 
     ready = Signal(object)
 
-    def __init__(self, source: Optional[ContractIdentitySource],
+    def __init__(self, source: ContractIdentitySource | None,
                  cache: ContractIdentityCache, chain_id: int, address: str,
-                 my_addresses, tx_cache: Optional[TransactionCache] = None,
+                 my_addresses, tx_cache: TransactionCache | None = None,
                  mode: str = "interact", parent=None):
         super().__init__(parent)
         self._source = source
@@ -2969,7 +2970,7 @@ class _EventPreviewMixin:
         finished: SignalInstance
         _token_info: Any
         _icon_cache: Any
-        _abi_source: Optional[AnyAbiSource]
+        _abi_source: AnyAbiSource | None
         _abi_cache: AbiCache
         _start_worker: Any
 
@@ -2987,7 +2988,7 @@ class _EventPreviewMixin:
     def _init_event_preview(self, tabs, *, known_addresses) -> None:
         self._sim_tabs = tabs
         self._sim_key = None
-        self._sim_worker: Optional[SimulateWorker] = None
+        self._sim_worker: SimulateWorker | None = None
         self._sim_done = True   # no sim in flight
         self._events = _EventsView(
             chain=self.chain, known_addresses=known_addresses,
@@ -3129,11 +3130,11 @@ def _style_identity_label(label: QLabel, badge) -> None:
         label.setEnabled(badge.level != "info")   # grey out a plain EOA
 
 
-def _make_identity_row(*, to_addr: Optional[str], chain,
-                       identity_source: Optional[ContractIdentitySource],
+def _make_identity_row(*, to_addr: str | None, chain,
+                       identity_source: ContractIdentitySource | None,
                        identity_cache: ContractIdentityCache,
                        my_addresses, start_worker,
-                       tx_cache: Optional[TransactionCache] = None):
+                       tx_cache: TransactionCache | None = None):
     """Build the Contract:-row label and a ``kick()`` that fills it via a
     background ContractIdentityWorker. Returns ``(None, None)`` when there's
     no recipient to identify."""
@@ -3192,16 +3193,16 @@ class TransactionDetailsDialog(QDialog):
     replace_requested = Signal(object, bool)
 
     def __init__(self, tx: Transaction, chain, *,
-                 abi_source: Optional[AnyAbiSource],
+                 abi_source: AnyAbiSource | None,
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
-                 identity_source: Optional[ContractIdentitySource] = None,
-                 identity_cache: Optional[ContractIdentityCache] = None,
-                 tx_cache: Optional[TransactionCache] = None,
+                 identity_source: ContractIdentitySource | None = None,
+                 identity_cache: ContractIdentityCache | None = None,
+                 tx_cache: TransactionCache | None = None,
                  parent=None):
         super().__init__(parent)
         self.tx = tx
@@ -3224,8 +3225,8 @@ class TransactionDetailsDialog(QDialog):
         # None when there's no cached price for this (chain, from_addr)
         # — the fee row then omits the dollar parenthetical.
         self._native_price_usd = native_price_usd
-        self._to_icon_label: Optional[QLabel] = None
-        self._to_addr_lower: Optional[str] = None
+        self._to_icon_label: QLabel | None = None
+        self._to_addr_lower: str | None = None
 
         self.setWindowTitle(f"Transaction {tx.hash[:10]}…")
         self.resize(720, 660)
@@ -3496,7 +3497,7 @@ class TransactionDetailsDialog(QDialog):
         lbl.setWordWrap(True)
         return lbl
 
-    def _link_label(self, text: str, url: Optional[str], *,
+    def _link_label(self, text: str, url: str | None, *,
                     monospace: bool = False) -> QLabel:
         """Address / hash label that's a hyperlink when an explorer
         URL is available, plain selectable text when the chain has
@@ -3521,7 +3522,7 @@ class TransactionDetailsDialog(QDialog):
         return lbl
 
     def _explorer_url(self, kind: str, addr: str,
-                       *, ref_addr: Optional[str] = None) -> Optional[str]:
+                       *, ref_addr: str | None = None) -> str | None:
         """Build an Etherscan-family URL: ``tx``/``address``/``token``.
         ``token`` with ``ref_addr`` appends ``?a=<ref>`` — Etherscan's
         convention for filtering the token page to a specific holder
@@ -3543,7 +3544,7 @@ class TransactionDetailsDialog(QDialog):
 
     # --- "To:" row composition ------------------------------------------
 
-    def _build_to_row(self, to_addr: Optional[str], from_addr: str,
+    def _build_to_row(self, to_addr: str | None, from_addr: str,
                       chain, mono: QFont) -> QWidget:
         """The To: cell. Plain address text when the recipient isn't a
         known ERC-20; address with a leading icon + symbol when it is.
@@ -3817,7 +3818,7 @@ class GasSuggestionWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, chain, req: SigningRequest,
-                 nonce_floor: Optional[int] = None, parent=None):
+                 nonce_floor: int | None = None, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._req = req
@@ -3946,21 +3947,21 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
     sign_requested = Signal()
 
     def __init__(self, req: SigningRequest, chain, *,
-                 abi_source: Optional[AnyAbiSource],
+                 abi_source: AnyAbiSource | None,
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
                  icon_cache=None,
                  native_price_usd=None,
                  known_addresses=None,
-                 identity_source: Optional[ContractIdentitySource] = None,
-                 identity_cache: Optional[ContractIdentityCache] = None,
-                 tx_cache: Optional[TransactionCache] = None,
-                 fixed_nonce: Optional[int] = None,
-                 fee_floor: Optional["ReplacementFloor"] = None,
-                 replace_label: Optional[str] = None,
+                 identity_source: ContractIdentitySource | None = None,
+                 identity_cache: ContractIdentityCache | None = None,
+                 tx_cache: TransactionCache | None = None,
+                 fixed_nonce: int | None = None,
+                 fee_floor: ReplacementFloor | None = None,
+                 replace_label: str | None = None,
                  nonce_floor_provider:
-                     "Optional[Callable[[int, str], Optional[int]]]" = None,
+                     Callable[[int, str], int | None] | None = None,
                  parent=None):
         super().__init__(parent)
         self.req = req
@@ -3982,8 +3983,8 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         # in _on_to_icon_ready, which checks these two attrs to
         # know which row to repaint.
         self._icon_cache = icon_cache
-        self._to_icon_label: Optional[QLabel] = None
-        self._to_addr_lower: Optional[str] = None
+        self._to_icon_label: QLabel | None = None
+        self._to_addr_lower: str | None = None
         # Decimal USD-per-native price (e.g. ETH price); when set,
         # the Expected-fee line shows a "(0.015 USD)" annotation.
         # None when no cached price is available — the line just
@@ -4121,9 +4122,9 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         gas_form.addRow("Gas limit:", self.spin_gas)
 
         # Exactly one fee mode is populated; the other three stay None.
-        self.spin_max_fee: Optional[QDoubleSpinBox]
-        self.spin_priority: Optional[QDoubleSpinBox]
-        self.spin_gas_price: Optional[QDoubleSpinBox]
+        self.spin_max_fee: QDoubleSpinBox | None
+        self.spin_priority: QDoubleSpinBox | None
+        self.spin_gas_price: QDoubleSpinBox | None
         if chain.eip1559:
             self.spin_max_fee = QDoubleSpinBox()
             self.spin_max_fee.setRange(0.0, _GWEI_MAX)
@@ -4402,7 +4403,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
     # ---- rather than inherited because the two dialogs already
     # ---- share enough other state to make a base class awkward.
 
-    def _link_label(self, text: str, url: Optional[str], *,
+    def _link_label(self, text: str, url: str | None, *,
                     monospace: bool = False) -> QLabel:
         if not url:
             lbl = QLabel(text)
@@ -4429,7 +4430,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         return lbl
 
     def _explorer_url(self, kind: str, addr: str,
-                       *, ref_addr: Optional[str] = None) -> Optional[str]:
+                       *, ref_addr: str | None = None) -> str | None:
         if not self.chain.explorer or not addr:
             return None
         base = self.chain.explorer.rstrip("/")
@@ -4444,7 +4445,7 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
             return url
         return None
 
-    def _build_to_row(self, to_addr: Optional[str], from_addr: str,
+    def _build_to_row(self, to_addr: str | None, from_addr: str,
                       chain, mono: QFont) -> QWidget:
         container = QWidget()
         row = QHBoxLayout(container)
@@ -4572,7 +4573,7 @@ class _AddressBookCompleter(QCompleter):
     so this is race-free (unlike overriding the text after activation)."""
 
     def pathFromIndex(
-        self, index: "QModelIndex | QPersistentModelIndex",
+        self, index: QModelIndex | QPersistentModelIndex,
     ) -> str:
         addr = index.data(Qt.ItemDataRole.UserRole)
         return addr if addr else super().pathFromIndex(index)
@@ -4590,7 +4591,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
     sign_requested = Signal()
 
     def __init__(self, asset: dict, chain, from_addr: str, *,
-                 abi_source: Optional[AnyAbiSource],
+                 abi_source: AnyAbiSource | None,
                  abi_cache: AbiCache,
                  start_worker,
                  token_info=None,
@@ -4598,11 +4599,11 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
                  native_price_usd=None,
                  known_addresses=None,
                  address_book=None,
-                 identity_source: Optional[ContractIdentitySource] = None,
-                 identity_cache: Optional[ContractIdentityCache] = None,
-                 tx_cache: Optional[TransactionCache] = None,
+                 identity_source: ContractIdentitySource | None = None,
+                 identity_cache: ContractIdentityCache | None = None,
+                 tx_cache: TransactionCache | None = None,
                  nonce_floor_provider:
-                     "Optional[Callable[[int, str], Optional[int]]]" = None,
+                     Callable[[int, str], int | None] | None = None,
                  parent=None):
         super().__init__(parent)
         # Address book = (address, label) of the user's OWN wallets only —
@@ -4634,16 +4635,16 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._known_addresses_list = list(known_addresses or ())
         # Contract-identity row for the typed recipient (filled async as
         # the user enters a valid address). Created in the form below.
-        self._identity_label: Optional[QLabel] = None
-        self._identity_last_addr: Optional[str] = None
+        self._identity_label: QLabel | None = None
+        self._identity_last_addr: str | None = None
         self._recipient_hint = ""  # "", "own", or "token"
         self._gas_ready = False
         self._base_fee_wei = 0
         self._estimated_gas = 0
         self._suggested_nonce = None
         # Token-icon async update; only used for ERC-20s.
-        self._to_icon_label: Optional[QLabel] = None
-        self._to_addr_lower: Optional[str] = None
+        self._to_icon_label: QLabel | None = None
+        self._to_addr_lower: str | None = None
 
         self.setWindowTitle(f"Send {asset['symbol']}")
         self.resize(720, 640)
@@ -4720,7 +4721,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         # and show the 0x address here (highlighted) so the user verifies
         # the actual destination before signing. Hidden for a plain address.
         self._ens_input = ""
-        self._ens_resolved: Optional[str] = None
+        self._ens_resolved: str | None = None
         self._ens_label = QLabel("")
         self._ens_label.setWordWrap(True)
         self._ens_label.setTextInteractionFlags(
@@ -4818,9 +4819,9 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         gas_form.addRow("Gas limit:", self.spin_gas)
 
         # Exactly one fee mode is populated; the other three stay None.
-        self.spin_max_fee: Optional[QDoubleSpinBox]
-        self.spin_priority: Optional[QDoubleSpinBox]
-        self.spin_gas_price: Optional[QDoubleSpinBox]
+        self.spin_max_fee: QDoubleSpinBox | None
+        self.spin_priority: QDoubleSpinBox | None
+        self.spin_gas_price: QDoubleSpinBox | None
         if chain.eip1559:
             self.spin_max_fee = QDoubleSpinBox()
             self.spin_max_fee.setRange(0.0, _GWEI_MAX)
@@ -4865,7 +4866,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         # too — so a "Total leaving wallet" line that combines fee +
         # value is genuinely useful. For ERC-20s it'd just duplicate
         # the Amount field, so we only show it for native sends.
-        self.total_lbl: Optional[QLabel]
+        self.total_lbl: QLabel | None
         if asset["is_native"]:
             self.total_lbl = self._value_label("—")
             summary.addRow("Total to send:", self.total_lbl)
@@ -4924,7 +4925,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._reestimate_timer.setSingleShot(True)
         self._reestimate_timer.setInterval(400)
         self._reestimate_timer.timeout.connect(self._reestimate_gas)
-        self._last_estimated_recipient: Optional[str] = None
+        self._last_estimated_recipient: str | None = None
         self.recipient_edit.textChanged.connect(
             lambda _t: self._reestimate_timer.start()
         )
@@ -5007,7 +5008,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         lbl.setWordWrap(True)
         return lbl
 
-    def _link_label(self, text: str, url: Optional[str], *,
+    def _link_label(self, text: str, url: str | None, *,
                     monospace: bool = False) -> QLabel:
         if not url:
             return self._value_label(text, monospace=monospace)
@@ -5029,7 +5030,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         return lbl
 
     def _explorer_url(self, kind: str, addr: str,
-                       *, ref_addr: Optional[str] = None) -> Optional[str]:
+                       *, ref_addr: str | None = None) -> str | None:
         if not self.chain.explorer or not addr:
             return None
         base = self.chain.explorer.rstrip("/")
@@ -5092,7 +5093,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         else:
             _style_identity_label(self._identity_label, badge)
 
-    def _asset_price_usd(self) -> Optional[Decimal]:
+    def _asset_price_usd(self) -> Decimal | None:
         """USD price for the asset being sent: the native price the host
         passed in for native sends, or the token's cached price for ERC-20s.
         ``None`` when no price is known (we then show no value rather than
@@ -5159,7 +5160,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         )
         self.amount_edit.setText(format(bal, "f"))
 
-    def _build_book_completer(self) -> Optional[QCompleter]:
+    def _build_book_completer(self) -> QCompleter | None:
         """An autocomplete over the user's own wallets — search by label or
         address, contains-style. None when the book is empty."""
         if not self._address_book:
@@ -5271,7 +5272,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._update_recipient_identity()
         self._reestimate_timer.start()
 
-    def _parsed_recipient(self) -> Optional[str]:
+    def _parsed_recipient(self) -> str | None:
         text = self.recipient_edit.text().strip()
         if text.startswith("0x") and len(text) == 42:
             try:
@@ -5342,7 +5343,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
             self.recipient_edit.setStyleSheet("")
             self.recipient_edit.setToolTip("")
 
-    def _parsed_amount_raw_unchecked(self) -> Optional[int]:
+    def _parsed_amount_raw_unchecked(self) -> int | None:
         """Parse the amount field WITHOUT comparing against the
         cached balance. The calldata preview uses this so that
         typing always updates the rendered transfer(_to, _value) —
@@ -5361,7 +5362,7 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         amount_raw = int(amount * (Decimal(10) ** self._asset["decimals"]))
         return amount_raw if amount_raw > 0 else None
 
-    def _parsed_amount_raw(self) -> Optional[int]:
+    def _parsed_amount_raw(self) -> int | None:
         """Strict parse — used to enable/disable the Send button.
         Returns None if the typed amount exceeds the wallet-cached
         balance. The cap protects against the obvious mistake but

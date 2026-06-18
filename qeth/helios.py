@@ -37,7 +37,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 from .chains import Chain
 
@@ -49,7 +49,7 @@ log = logging.getLogger("qeth.helios")
 # the unsafe-signer path; Linea via its own module. Everything else
 # (Polygon, Arbitrum, Gnosis, BNB, TAC, …) has no Helios support — those
 # chains keep the direct untrusted-RPC path.
-HELIOS_NETWORKS: dict[int, tuple[str, Optional[str]]] = {
+HELIOS_NETWORKS: dict[int, tuple[str, str | None]] = {
     1:     ("ethereum", None),          # mainnet is the subcommand default
     10:    ("opstack", "op-mainnet"),
     8453:  ("opstack", "base"),
@@ -64,7 +64,7 @@ _READY_TIMEOUT_S = 30.0
 _POLL_INTERVAL_S = 0.5
 
 
-def helios_binary() -> Optional[str]:
+def helios_binary() -> str | None:
     """Path to a usable helios binary, or None (not installed, or the
     feature is disabled via ``QETH_HELIOS=0``).
 
@@ -97,7 +97,7 @@ def _free_port() -> int:
     return port
 
 
-def _rpc(url: str, method: str, params: Optional[list] = None,
+def _rpc(url: str, method: str, params: list | None = None,
          timeout: float = 5.0) -> Any:
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
                        "params": params or []}).encode()
@@ -186,7 +186,7 @@ def _stop_all() -> None:
 atexit.register(_stop_all)
 
 
-def _ensure_sidecar(chain: Chain) -> Optional[HeliosSidecar]:
+def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
     """The running (not necessarily synced) sidecar for ``chain`` —
     spawning one if needed. None when helios is absent/disabled or the
     chain isn't one Helios supports. Non-blocking (Popen returns
@@ -218,7 +218,7 @@ def prewarm(chain: Chain) -> None:
 
 
 def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
-                   ) -> Optional[Chain]:
+                   ) -> Chain | None:
     """A Chain whose RPC is a ready Helios sidecar verifying ``chain`` —
     or None when helios is absent/disabled, the chain isn't one Helios
     supports, or the sidecar didn't become ready in time (callers fall

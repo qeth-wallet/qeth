@@ -22,7 +22,6 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
 
 from PySide6.QtGui import QPixmap
 
@@ -59,7 +58,7 @@ class DesktopNotifier:
         return bool(self._notify_send or self._gdbus)
 
     def send(
-        self, title: str, body: str, pixmap: "Optional[QPixmap]" = None,
+        self, title: str, body: str, pixmap: "QPixmap | None" = None,
     ) -> bool:
         """Dispatch a notification; return True iff a backend handled it (the
         caller falls back to the Qt tray on False). Never raises."""
@@ -77,7 +76,7 @@ class DesktopNotifier:
 
     # --- internals --------------------------------------------------------
 
-    def _argv(self, title: str, body: str, icon_path: "Optional[str]") -> "List[str]":
+    def _argv(self, title: str, body: str, icon_path: "str | None") -> "list[str]":
         if self._notify_send:
             argv = [self._notify_send, "--app-name=qeth",
                     "-t", str(_TIMEOUT_MS)]
@@ -100,7 +99,7 @@ class DesktopNotifier:
             _gvariant_path(icon_path) if icon_path else "{}", str(_TIMEOUT_MS),
         ]
 
-    def _write_icon(self, pixmap: "Optional[QPixmap]") -> "Optional[str]":
+    def _write_icon(self, pixmap: "QPixmap | None") -> "str | None":
         if pixmap is None or pixmap.isNull():
             return None
         try:

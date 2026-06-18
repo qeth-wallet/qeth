@@ -166,7 +166,13 @@ target-version = "py310"    # match [tool.mypy] python_version
 #
 # RUF012 (mutable class default → mark ClassVar) is on: it documents that a
 # class-level constant is shared, not a per-instance mutable-default footgun.
-select = ["E9", "F", "RUF012"]
+#
+# UP (pyupgrade) keeps annotations on modern py310 syntax: X | None over
+# Optional[X], list/tuple over List/Tuple, unquoted forward refs. UP031
+# (printf → format) is excluded — string formatting is a separate concern,
+# not annotation modernization, and left as-is for now.
+select = ["E9", "F", "RUF012", "UP"]
+ignore = ["UP031"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test stubs/fixtures use shared class-level lists as quick recorders

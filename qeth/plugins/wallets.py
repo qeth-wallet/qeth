@@ -23,7 +23,6 @@ so the host can refresh the status bar.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import io
 
@@ -209,14 +208,14 @@ class WalletsPlugin(Plugin):
         self._store = store
         # Built lazily in widget()/_build so importing this module
         # doesn't require a running Qt event loop.
-        self._container: Optional[QWidget] = None
-        self._tree: Optional[QTreeWidget] = None
+        self._container: QWidget | None = None
+        self._tree: QTreeWidget | None = None
         self._details = None
-        self._splitter: Optional[QSplitter] = None
+        self._splitter: QSplitter | None = None
         self._account_buttons: list[QPushButton] = []
-        self.act_add: Optional[QAction] = None
-        self.act_copy: Optional[QAction] = None
-        self.act_remove: Optional[QAction] = None
+        self.act_add: QAction | None = None
+        self.act_copy: QAction | None = None
+        self.act_remove: QAction | None = None
         # ENS workers kicked from post-import label-fill; tracked
         # here so Python's GC doesn't drop them mid-run (Qt's
         # QThread destructor aborts on a still-running thread).
@@ -245,7 +244,7 @@ class WalletsPlugin(Plugin):
     # --- public surface (read by MainWindow + Host implementations) --------
 
     @property
-    def selected_address(self) -> Optional[str]:
+    def selected_address(self) -> str | None:
         """The single currently-selected address, or None when zero or
         multiple are selected."""
         addrs = self.selected_addresses()
@@ -556,7 +555,7 @@ class WalletsPlugin(Plugin):
         if self._tree is None:
             return out
 
-        def walk(item: Optional[QTreeWidgetItem]) -> None:
+        def walk(item: QTreeWidgetItem | None) -> None:
             if item is None:
                 return
             key = item.data(0, EXPAND_KEY_ROLE)
@@ -591,7 +590,7 @@ class WalletsPlugin(Plugin):
         ledger_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self._tree.addTopLevelItem(ledger_root)
         groups: dict[str, QTreeWidgetItem] = {}
-        default_item: Optional[QTreeWidgetItem] = None
+        default_item: QTreeWidgetItem | None = None
         for a in ledger_accts:
             scheme = a.get("scheme", "Custom")
             grp = groups.get(scheme)
@@ -710,7 +709,7 @@ class WalletsPlugin(Plugin):
         if self._tree is None:
             return
 
-        def walk(item: Optional[QTreeWidgetItem]) -> None:
+        def walk(item: QTreeWidgetItem | None) -> None:
             if item is None:
                 return
             addr = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1613,7 +1612,7 @@ class AddWatchOnlyDialog(QDialog):
         self._ens_workers: list[QThread] = []
         # Set when the entered ENS name forward-resolves to an address; used
         # in place of the raw text on accept.
-        self._ens_forward_addr: Optional[str] = None
+        self._ens_forward_addr: str | None = None
 
     def _on_address_changed(self) -> None:
         """Accept either a 0x address or an ENS name as the user types.
@@ -1646,7 +1645,7 @@ class AddWatchOnlyDialog(QDialog):
         if not text:
             self.error_lbl.setVisible(False)
 
-    def _set_resolved(self, text: Optional[str]) -> None:
+    def _set_resolved(self, text: str | None) -> None:
         self.resolved_lbl.setText(text or "")
         self.resolved_lbl.setVisible(bool(text))
         # Reset to neutral; _on_ens_forward re-applies the verified pill. Stops
@@ -1901,7 +1900,7 @@ class AddHotWalletDialog(QDialog):
         from ..hot_wallet import generate_random_private_key
         self.pk_edit.setText(generate_random_private_key().hex())
 
-    def _parsed_private_key(self) -> Optional[bytes]:
+    def _parsed_private_key(self) -> bytes | None:
         """Returns the parsed 32 bytes if the field holds a valid
         hex private key, else None. Used by _update_state to gate
         the Add button; ``_on_accept`` re-parses (with the same

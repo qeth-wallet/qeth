@@ -6,7 +6,6 @@ expiry-status colouring, lazy records expansion, custom-name pinning, and
 that the plugin renders from cache without a fetch.
 """
 
-from typing import Optional
 
 from PySide6.QtCore import Qt
 
@@ -26,7 +25,7 @@ NOW = 1_700_000_000
 
 
 class _StubHost:
-    def __init__(self, chain=ETH, address: Optional[str] = None):
+    def __init__(self, chain=ETH, address: str | None = None):
         self._chain = chain
         self.selected_address = address
         self.started_workers: list = []

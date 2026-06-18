@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from . import USER_AGENT
 from .chains import Chain
@@ -69,13 +69,13 @@ NATIVE_COINGECKO_IDS: dict[str, str] = {
 # picker-added chains like TAC get a correct native price without a
 # hand-maintained entry. Populated by load_native_coin_ids(); None until
 # first load.
-_DISCOVERED_NATIVE_IDS: Optional[dict[int, str]] = None
+_DISCOVERED_NATIVE_IDS: dict[int, str] | None = None
 _ASSET_PLATFORMS_URL = "https://api.coingecko.com/api/v3/asset_platforms"
 _NATIVE_IDS_CACHE_DIR = Path.home() / ".qeth" / "coingecko"
 _NATIVE_IDS_TTL = 7 * 24 * 3600.0
 
 
-def load_native_coin_ids(*, cache_dir: Optional[Path] = None,
+def load_native_coin_ids(*, cache_dir: Path | None = None,
                          ttl: float = _NATIVE_IDS_TTL,
                          timeout: float = 10.0,
                          force: bool = False) -> dict[int, str]:
@@ -117,7 +117,7 @@ def load_native_coin_ids(*, cache_dir: Optional[Path] = None,
     return out
 
 
-def native_coingecko_id(chain) -> Optional[str]:
+def native_coingecko_id(chain) -> str | None:
     """CoinGecko id for a chain's *native* asset. Discovery first
     (CoinGecko asset_platforms, all chains), then the offline symbol map,
     then the chain's own id — but never the unsafe "ethereum" default on a

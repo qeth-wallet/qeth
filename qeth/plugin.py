@@ -16,7 +16,7 @@ logic and is tested directly in ``tests/test_plugin.py``.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Optional, Protocol
+from typing import Protocol
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -33,7 +33,7 @@ class Host(Protocol):
     minimal stand-in object that quacks the same)."""
 
     @property
-    def selected_address(self) -> Optional[str]:
+    def selected_address(self) -> str | None:
         ...
 
     def current_chain(self):
@@ -97,7 +97,7 @@ class Plugin(QObject):
         super().__init__()
         # ``host`` is wired in attach(); plugins reach back through it
         # rather than receiving five constructor args.
-        self.host: Optional[Host] = None
+        self.host: Host | None = None
 
     @abstractmethod
     def widget(self) -> QWidget:
@@ -117,7 +117,7 @@ class Plugin(QObject):
 
     # --- lifecycle hooks (the host calls these) --------------------------
 
-    def on_account_changed(self, address: Optional[str]) -> None:
+    def on_account_changed(self, address: str | None) -> None:
         """Fires when the user picks a different wallet."""
 
     def on_chain_changed(self) -> None:
@@ -143,7 +143,7 @@ class Slot(QWidget):
 
     active_plugin_changed = Signal(object)   # emits the new Plugin
 
-    def __init__(self, parent: Optional[QWidget] = None,
+    def __init__(self, parent: QWidget | None = None,
                  show_single_tab: bool = False):
         super().__init__(parent)
         self._plugins: list[Plugin] = []
@@ -212,7 +212,7 @@ class Slot(QWidget):
     def plugins(self) -> list[Plugin]:
         return list(self._plugins)
 
-    def active(self) -> Optional[Plugin]:
+    def active(self) -> Plugin | None:
         idx = self._stack.currentIndex()
         if 0 <= idx < len(self._plugins):
             return self._plugins[idx]
@@ -233,7 +233,7 @@ class Slot(QWidget):
 
     # --- broadcasts to mounted plugins ----------------------------------
 
-    def broadcast_account_changed(self, address: Optional[str]) -> None:
+    def broadcast_account_changed(self, address: str | None) -> None:
         for p in self._plugins:
             p.on_account_changed(address)
 

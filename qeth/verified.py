@@ -18,7 +18,8 @@ verification library.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Callable
 
 from .helios import verified_chain
 
@@ -34,8 +35,8 @@ _T = TypeVar("_T")
 DEFAULT_WAIT_S = 8.0
 
 
-def verified_or_plain(chain: "Chain", *, wait_s: float = DEFAULT_WAIT_S,
-                      ) -> "Tuple[Chain, bool]":
+def verified_or_plain(chain: Chain, *, wait_s: float = DEFAULT_WAIT_S,
+                      ) -> tuple[Chain, bool]:
     """``(chain_to_read_from, verified)`` — the Helios shadow of ``chain`` when a
     sidecar is ready (``verified`` True), else ``chain`` itself (``verified``
     False).
@@ -48,9 +49,9 @@ def verified_or_plain(chain: "Chain", *, wait_s: float = DEFAULT_WAIT_S,
 
 
 def verified_or_fallback(
-    chain: "Chain", read: "Callable[[str, bool], Optional[_T]]", *,
+    chain: Chain, read: Callable[[str, bool], _T | None], *,
     wait_s: float = DEFAULT_WAIT_S,
-) -> "Tuple[Optional[_T], bool]":
+) -> tuple[_T | None, bool]:
     """Run ``read(rpc_url, strict)`` preferring the Helios path → ``(result,
     verified)``.
 
@@ -71,9 +72,9 @@ def verified_or_fallback(
     return read(chain.rpc_url, False), False
 
 
-def verified_client(chain: "Chain", *, wait_s: float = DEFAULT_WAIT_S,
+def verified_client(chain: Chain, *, wait_s: float = DEFAULT_WAIT_S,
                     fallback: bool = True,
-                    ) -> "Tuple[Optional[EthClient], bool]":
+                    ) -> tuple[EthClient | None, bool]:
     """``(client, verified)`` — an ``EthClient`` whose reads (``call``,
     ``multicall``, ``rpc``) are Helios-proof-verified when a sidecar is ready
     (``verified`` True), else a plain client against ``chain`` (``verified``

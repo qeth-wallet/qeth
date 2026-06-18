@@ -19,7 +19,8 @@ context manager so callers never see the raw aggregate3 wire format.
 import logging
 import re
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
+from collections.abc import Callable
 
 if TYPE_CHECKING:
     # These names are injected into module globals at runtime by
@@ -186,7 +187,7 @@ def _failover_provider(urls: list[str], *, request_kwargs: dict,
     state = {"i": 0}
 
     def make_request(method: Any, params: Any) -> Any:
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         last_limited: Any = None
         for offset in range(len(members)):
             i = (state["i"] + offset) % len(members)
@@ -276,7 +277,7 @@ class EthClient:
 
     # --- low-level ---------------------------------------------------------
 
-    def rpc(self, method: str, params: Optional[list] = None):
+    def rpc(self, method: str, params: list | None = None):
         """Direct JSON-RPC call. Raises ``ChainError`` on RPC-level errors."""
         try:
             return self._w3.manager.request_blocking(
@@ -412,9 +413,9 @@ class _Pending:
 
     __slots__ = ("success", "raw", "value", "_decoder")
 
-    def __init__(self, decoder: Optional[Callable] = None):
-        self.success: Optional[bool] = None  # None until flushed
-        self.raw: Optional[bytes] = None
+    def __init__(self, decoder: Callable | None = None):
+        self.success: bool | None = None  # None until flushed
+        self.raw: bytes | None = None
         # None until flushed; then the decoded call result (int, str,
         # tuple, …) or the raw bytes when there's no decoder.
         self.value: Any = None
@@ -460,7 +461,7 @@ class Multicall:
     # ---- queuing API ----------------------------------------------------
 
     def add(self, target: str, calldata: bytes,
-            *, decoder: Optional[Callable] = None) -> _Pending:
+            *, decoder: Callable | None = None) -> _Pending:
         """Queue an arbitrary call to ``target`` with ``calldata``.
 
         Returns a ``_Pending`` whose ``.value`` will be populated when

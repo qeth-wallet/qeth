@@ -19,7 +19,6 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
 from . import USER_AGENT
 from .fsatomic import atomic_write_text
@@ -157,7 +156,7 @@ class RiskCache:
     callers re-fetch them.
     """
 
-    def __init__(self, cache_dir: Optional[Path] = None,
+    def __init__(self, cache_dir: Path | None = None,
                  ttl_seconds: float = DEFAULT_TTL_SECONDS):
         # Look up CACHE_DIR at instantiation, not at function definition
         # time, so monkeypatch.setattr(qeth.risk, "CACHE_DIR", ...) in
@@ -213,7 +212,7 @@ class RiskCache:
                 self._chains[chain_id] = c
             return c
 
-    def get(self, chain_id: int, contract: str) -> Optional[RiskReport]:
+    def get(self, chain_id: int, contract: str) -> RiskReport | None:
         r = self._chain_cache(chain_id).get(contract.lower())
         if r is None:
             return None

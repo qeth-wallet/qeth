@@ -23,7 +23,6 @@ import logging
 import re
 import urllib.parse
 import urllib.request
-from typing import Optional, Union
 
 from . import USER_AGENT
 from .tokens import (   # reuse the per-chain maps + Etherscan v2 endpoint
@@ -58,7 +57,7 @@ _PROXY_IMPL_SLOTS = (
 
 
 def _impl_from_storage(storage_reader, chain_id: int,
-                       address: str) -> Optional[str]:
+                       address: str) -> str | None:
     """Probe the well-known proxy implementation slots via
     ``storage_reader`` (callable ``(chain_id, address, slot) -> 0x-hex``);
     return the first non-zero implementation address, or None. Shared by
@@ -108,7 +107,7 @@ class BlockscoutAbiSource:
     def supports(self, chain_id: int) -> bool:
         return chain_id in self.instances
 
-    def fetch(self, chain_id: int, address: str) -> Union[Abi, bool]:
+    def fetch(self, chain_id: int, address: str) -> Abi | bool:
         if chain_id not in self.instances:
             raise AbiSourceError(
                 f"No Blockscout instance configured for chain {chain_id}"
@@ -117,7 +116,7 @@ class BlockscoutAbiSource:
 
     def _fetch_recursive(self, chain_id: int, address: str,
                           depth: int,
-                          seen: set[str]) -> Union[Abi, bool]:
+                          seen: set[str]) -> Abi | bool:
         addr_l = address.lower()
         if addr_l in seen or depth >= self.max_proxy_depth:
             return False
@@ -161,11 +160,11 @@ class BlockscoutAbiSource:
     def set_storage_reader(self, reader) -> None:
         self.storage_reader = reader
 
-    def _read_proxy_impl(self, chain_id: int, address: str) -> Optional[str]:
+    def _read_proxy_impl(self, chain_id: int, address: str) -> str | None:
         return _impl_from_storage(self.storage_reader, chain_id, address)
 
     def _merge_rpc_proxy(self, chain_id: int, address: str, own,
-                         depth: int, seen: set[str]) -> Union[Abi, bool]:
+                         depth: int, seen: set[str]) -> Abi | bool:
         """If ``address`` is a proxy (per the chain's impl slots), fetch +
         merge the implementation's ABI onto ``own`` (the proxy's own ABI,
         which may be ``False`` for an unverified proxy)."""
@@ -184,7 +183,7 @@ class BlockscoutAbiSource:
 
     # --- HTTP layers -----------------------------------------------------
 
-    def _fetch_v2(self, chain_id: int, address: str) -> Optional[dict]:
+    def _fetch_v2(self, chain_id: int, address: str) -> dict | None:
         """Returns {"own_abi": [...], "implementations": [...],
         "is_verified": bool} or None when v2 isn't usable."""
         base = self.instances[chain_id]
@@ -213,7 +212,7 @@ class BlockscoutAbiSource:
             "is_verified": data.get("is_verified"),
         }
 
-    def _fetch_v1(self, chain_id: int, address: str) -> Union[Abi, bool]:
+    def _fetch_v1(self, chain_id: int, address: str) -> Abi | bool:
         """Fallback for instances that don't serve the v2 endpoint."""
         base = self.instances[chain_id]
         url = (
@@ -271,7 +270,7 @@ class EtherscanV2AbiSource:
     def supports(self, chain_id: int) -> bool:
         return chain_id in self._supported and bool(self._get_api_key())
 
-    def fetch(self, chain_id: int, address: str) -> Union[Abi, bool]:
+    def fetch(self, chain_id: int, address: str) -> Abi | bool:
         return self._fetch_recursive(chain_id, address, depth=0, seen=set())
 
     def _fetch_recursive(self, chain_id, address, depth, seen):
@@ -291,7 +290,7 @@ class EtherscanV2AbiSource:
                 return _dedup_by_selector(merged)
         return own
 
-    def _getabi(self, chain_id: int, address: str) -> Union[Abi, bool]:
+    def _getabi(self, chain_id: int, address: str) -> Abi | bool:
         key = self._get_api_key()
         if not key:
             raise AbiSourceError("No Etherscan API key configured")
@@ -339,7 +338,7 @@ class RoutedAbiSource:
     def supports(self, chain_id: int) -> bool:
         return self._primary.supports(chain_id) or self._secondary.supports(chain_id)
 
-    def fetch(self, chain_id: int, address: str) -> Union[Abi, bool]:
+    def fetch(self, chain_id: int, address: str) -> Abi | bool:
         secondary_ok = self._secondary.supports(chain_id)
         if self._primary.supports(chain_id):
             try:
@@ -377,7 +376,7 @@ def _dedup_by_selector(abi: Abi) -> Abi:
     return out
 
 
-def _function_signature(entry: dict) -> Optional[str]:
+def _function_signature(entry: dict) -> str | None:
     """Canonical "name(t1,t2,…)" — what keccak256 of which becomes
     the 4-byte selector. We don't actually need the bytes, just a
     uniqueness key."""
@@ -475,7 +474,7 @@ def _sig_type_to_input(name: str, type_str: str) -> dict:
 
 
 def decode_with_signature(signature: str,
-                          input_data: str) -> Optional[dict]:
+                          input_data: str) -> dict | None:
     """Decode ``input_data`` from a ``name(t1,t2,…)`` signature string,
     reusing ``decode_call`` so the tree shape is identical (args named
     positionally). Adds ``via_signature: True``. None if it doesn't fit."""
@@ -509,7 +508,7 @@ def fetch_signatures(selector: str, *, transport=None,
             if isinstance(r, dict) and r.get("text_signature")]
 
 
-def decode_via_4byte(input_data: str, *, transport=None) -> Optional[dict]:
+def decode_via_4byte(input_data: str, *, transport=None) -> dict | None:
     """Last-resort decode when no ABI matched: look the selector up in
     the 4-byte database and try each candidate signature, returning the
     first that decodes cleanly."""
@@ -522,8 +521,8 @@ def decode_via_4byte(input_data: str, *, transport=None) -> Optional[dict]:
     return None
 
 
-def decode_call(abi: Optional[Abi], input_data: str,
-                address: Optional[str] = None) -> Optional[dict]:
+def decode_call(abi: Abi | None, input_data: str,
+                address: str | None = None) -> dict | None:
     """Decode ``input_data`` against ``abi``. Returns a tree like
 
         {"function": "register",
@@ -611,7 +610,7 @@ def _describe(value, inp: dict) -> dict:
     return {"name": name, "type": type_, "value": _stringify(value, type_)}
 
 
-def _stringify(value, type_hint: Optional[str] = None) -> str:
+def _stringify(value, type_hint: str | None = None) -> str:
     """Coerce a decoded value to a string. web3.py hands back:
 
       - bytes / bytearray for bytesN and bytes      → 0x<hex>
@@ -695,7 +694,7 @@ def _ev(address, name, args) -> dict:
     }
 
 
-def _decode_known_event(address, topics: list, data: str) -> Optional[dict]:
+def _decode_known_event(address, topics: list, data: str) -> dict | None:
     t0 = topics[0]
     if t0 == _TRANSFER_TOPIC and len(topics) == 3:        # ERC-20
         return _ev(address, "Transfer", [
@@ -725,7 +724,7 @@ def _decode_known_event(address, topics: list, data: str) -> Optional[dict]:
     return None
 
 
-def _decode_event_with_abi(address, log, abi: Abi) -> Optional[dict]:
+def _decode_event_with_abi(address, log, abi: Abi) -> dict | None:
     try:
         from web3 import Web3
         from hexbytes import HexBytes
@@ -762,7 +761,7 @@ def _decode_event_with_abi(address, log, abi: Abi) -> Optional[dict]:
     return None
 
 
-def decode_event(log, abi: Optional[Abi] = None) -> Optional[dict]:
+def decode_event(log, abi: Abi | None = None) -> dict | None:
     """Decode one receipt ``log`` into
 
         {"contract": "0x…", "event": "Transfer",

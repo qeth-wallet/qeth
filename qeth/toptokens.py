@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from . import USER_AGENT
 from .fsatomic import atomic_write_text
@@ -147,8 +147,8 @@ class TopTokens:
     def __init__(
         self,
         *,
-        cache_dir: Optional[Path] = None,
-        seed_path: Optional[Path] = None,
+        cache_dir: Path | None = None,
+        seed_path: Path | None = None,
         ttl_seconds: float = _DEFAULT_TTL_S,
         clock: Callable[[], float] = time.time,
         fetch: FetchFn = fetch_top_tokens,
@@ -175,7 +175,7 @@ class TopTokens:
                 return
 
     @staticmethod
-    def _read(path: Path) -> Optional[tuple[dict[int, list[str]], float]]:
+    def _read(path: Path) -> tuple[dict[int, list[str]], float] | None:
         try:
             raw = json.loads(path.read_text())
         except (OSError, ValueError):

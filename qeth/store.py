@@ -2,7 +2,6 @@ import json
 import threading
 from dataclasses import fields
 from pathlib import Path
-from typing import Optional
 
 from .chains import Chain, DEFAULT_CHAINS
 from .fsatomic import atomic_write_text
@@ -55,7 +54,7 @@ class Store:
         self.accounts: list[dict] = []  # {address, path, source, scheme, label}
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
-        self.default_account: Optional[str] = None
+        self.default_account: str | None = None
         # User overrides for the token panel: (chain_id, addr_lower) tuples.
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
@@ -69,12 +68,12 @@ class Store:
         self.custom_ens_names: set[str] = set()
         # Hex-encoded QByteArray from QMainWindow.saveGeometry(), so size +
         # position + maximized state all round-trip.
-        self.window_geometry: Optional[str] = None
+        self.window_geometry: str | None = None
         # Same encoding for QSplitter.saveState() — preserves the user's
         # drag positions for the outer horizontal split (tree+details vs
         # token panel) and the inner vertical split (tree vs details).
-        self.splitter_state_main: Optional[str] = None
-        self.splitter_state_left: Optional[str] = None
+        self.splitter_state_main: str | None = None
+        self.splitter_state_left: str | None = None
         # Per-panel header state (hex of QHeaderView.saveState()), keyed
         # by an opaque panel name. Lets users drag columns to widths
         # they prefer and have those persist across runs.
@@ -83,7 +82,7 @@ class Store:
         # the unified v2 API supports). When set, the tokens /
         # transactions plugins prefer Etherscan over Blockscout for
         # discovery; empty means "Blockscout only".
-        self.etherscan_api_key: Optional[str] = None
+        self.etherscan_api_key: str | None = None
         # Desktop notifications for sent/received ETH + tokens (tray
         # showMessage). On by default; toggled from the tray menu.
         self.notifications_enabled: bool = True
@@ -271,7 +270,7 @@ class Store:
             self.chains.append(chain)
         self.save()
 
-    def set_etherscan_api_key(self, key: Optional[str]) -> bool:
+    def set_etherscan_api_key(self, key: str | None) -> bool:
         """Persist the (global) Etherscan v2 API key. Empty string
         and None both clear the override. Returns True when the
         stored value actually changed."""
@@ -369,7 +368,7 @@ class Store:
             self.splitter_state_left = left_hex
         self.save()
 
-    def get_header_state(self, name: str) -> Optional[str]:
+    def get_header_state(self, name: str) -> str | None:
         return self.header_states.get(name)
 
     def set_header_state(self, name: str, state_hex: str) -> None:

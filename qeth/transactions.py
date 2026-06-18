@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from . import USER_AGENT
 from .chains import Chain
@@ -45,7 +45,7 @@ class Transaction:
     timestamp: int            # unix seconds
     nonce: int
     from_addr: str            # lowercased
-    to_addr: Optional[str]    # lowercased; None for contract creations
+    to_addr: str | None    # lowercased; None for contract creations
     value_wei: int            # raw native amount
     gas_used: int
     gas_price_wei: int
@@ -71,7 +71,7 @@ class Transaction:
     # so PendingTxWatcher can re-broadcast it if the RPC silently drops
     # it (DRPC sometimes acks a tx it never propagates). Public data (no
     # key material); cleared once the tx confirms or is dropped.
-    raw_signed: Optional[str] = None
+    raw_signed: str | None = None
 
     def direction(self, viewer: str) -> TxDirection:
         v = viewer.lower()
@@ -109,7 +109,7 @@ class TransactionSource(ABC):
         address: str,
         page: int = 1,
         limit: int = 50,
-        before_block: Optional[int] = None,
+        before_block: int | None = None,
     ) -> list[Transaction]:
         """Newest-first. ``before_block`` (when set) caps results at that
         block (explorer ``endblock``) — the block-cursor used to page
@@ -135,7 +135,7 @@ def _urllib_transport(url: str, timeout: float) -> bytes:
         return r.read()
 
 
-def _parse_blockscout_tx(entry: dict, chain_id: int) -> Optional[Transaction]:
+def _parse_blockscout_tx(entry: dict, chain_id: int) -> Transaction | None:
     """Convert one Etherscan-shaped result row into a ``Transaction``.
 
     Returns ``None`` for rows we can't make sense of (missing hash etc.)
@@ -192,7 +192,7 @@ class EtherscanV2TransactionSource(TransactionSource):
         self,
         get_api_key,
         timeout: float = 20.0,
-        transport: Optional[Transport] = None,
+        transport: Transport | None = None,
         supported_chains: frozenset[int] | None = None,
     ):
         self._get_api_key = get_api_key
@@ -215,7 +215,7 @@ class EtherscanV2TransactionSource(TransactionSource):
         address: str,
         page: int = 1,
         limit: int = 50,
-        before_block: Optional[int] = None,
+        before_block: int | None = None,
     ) -> list[Transaction]:
         key = self._get_api_key()
         if not key:
@@ -274,7 +274,7 @@ class RoutedTransactionSource(TransactionSource):
 
     def list_transactions(
         self, chain: Chain, address: str, page: int = 1, limit: int = 50,
-        before_block: Optional[int] = None,
+        before_block: int | None = None,
     ) -> list[Transaction]:
         if self._primary.supports(chain):
             return self._primary.list_transactions(
@@ -298,9 +298,9 @@ class BlockscoutTransactionSource(TransactionSource):
 
     def __init__(
         self,
-        instances: Optional[dict[int, str]] = None,
+        instances: dict[int, str] | None = None,
         timeout: float = 20.0,
-        transport: Optional[Transport] = None,
+        transport: Transport | None = None,
     ):
         self.instances = instances if instances is not None else BLOCKSCOUT_INSTANCES
         self.timeout = timeout
@@ -315,7 +315,7 @@ class BlockscoutTransactionSource(TransactionSource):
         address: str,
         page: int = 1,
         limit: int = 50,
-        before_block: Optional[int] = None,
+        before_block: int | None = None,
     ) -> list[Transaction]:
         base = self.instances.get(chain.chain_id)
         if not base:

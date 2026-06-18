@@ -15,7 +15,6 @@ import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .fsatomic import atomic_write_text
 
@@ -30,10 +29,10 @@ class CachedToken:
     symbol: str
     name: str
     decimals: int
-    logo_uri: Optional[str] = None
+    logo_uri: str | None = None
     balance_raw: int = 0
     # Decimal-as-string so JSON round-trips don't lose precision.
-    price_usd: Optional[str] = None
+    price_usd: str | None = None
     balance_updated: int = 0
     price_updated: int = 0
 
@@ -44,13 +43,13 @@ class CachedWallet:
     address: str          # lower-case
     tokens: list[CachedToken] = field(default_factory=list)
     native_balance_wei: int = 0
-    native_price_usd: Optional[str] = None
+    native_price_usd: str | None = None
     native_balance_updated: int = 0
     native_price_updated: int = 0
 
 
 class WalletCache:
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Path | None = None):
         # See RiskCache for why we don't bind the default at def-time.
         self.cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
         self._lock = threading.Lock()
@@ -58,7 +57,7 @@ class WalletCache:
     def _path(self, chain_id: int, address: str) -> Path:
         return self.cache_dir / str(chain_id) / f"{address.lower()}.json"
 
-    def load(self, chain_id: int, address: str) -> Optional[CachedWallet]:
+    def load(self, chain_id: int, address: str) -> CachedWallet | None:
         p = self._path(chain_id, address)
         if not p.exists():
             return None

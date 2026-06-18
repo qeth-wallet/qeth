@@ -23,7 +23,8 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional, cast
+from typing import Any, cast
+from collections.abc import Callable, Iterable
 
 from . import USER_AGENT
 from .abi import BlockscoutAbiSource, selector_names
@@ -40,7 +41,7 @@ _APPROVE = "0x095ea7b3"
 @dataclass(frozen=True)
 class AssetLeg:
     symbol: str
-    contract: Optional[str]   # lowercased ERC-20 address; None = native coin
+    contract: str | None   # lowercased ERC-20 address; None = native coin
 
 
 @dataclass(frozen=True)
@@ -105,8 +106,8 @@ _PAGE = 300
 
 
 def _account_rows(base: str, action: str, address: str, timeout: float, *,
-                  startblock: Optional[int] = None,
-                  endblock: Optional[int] = None,
+                  startblock: int | None = None,
+                  endblock: int | None = None,
                   max_pages: int = 1) -> list[dict]:
     """One Etherscan-style account list (tokentx / txlistinternal). When a
     block range is given, walk pages (newest-first) until the range is
@@ -149,8 +150,8 @@ class _Verbs:
         self._cache = cache
         self._maps: dict[str, dict[str, str]] = {}
 
-    def name(self, to: Optional[str], selector: str, *,
-             fetch: bool = True) -> Optional[str]:
+    def name(self, to: str | None, selector: str, *,
+             fetch: bool = True) -> str | None:
         if not to:
             return None
         key = to.lower()
@@ -200,7 +201,7 @@ def _coins(tx: Transaction, viewer: str, native: str,
     seen_in: set[str] = set()
 
     def add(legs: list[AssetLeg], seen: set[str], sym: str,
-            contract: Optional[str]) -> None:
+            contract: str | None) -> None:
         k = contract or f"native:{sym}"
         if k in seen:
             return
@@ -250,9 +251,9 @@ def fetch_activities(
     txs: list[Transaction],
     *,
     timeout: float = 25.0,
-    abi_source: Optional[BlockscoutAbiSource] = None,
-    abi_cache: Optional[AbiCache] = None,
-    on_batch: Optional[Callable[[dict[str, Activity]], None]] = None,
+    abi_source: BlockscoutAbiSource | None = None,
+    abi_cache: AbiCache | None = None,
+    on_batch: Callable[[dict[str, Activity]], None] | None = None,
 ) -> dict[str, Activity]:
     """Build ``{tx_hash: Activity}`` for ``txs``. Best-effort: a failed
     transfers/internal fetch yields verb-only activities (still useful);

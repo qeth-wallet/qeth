@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -11,7 +10,7 @@ from .signing import (
 )
 
 
-def is_ledger_available() -> tuple[bool, Optional[str]]:
+def is_ledger_available() -> tuple[bool, str | None]:
     """Probe the Ledger device. Returns ``(True, None)`` when the
     dongle is connected, unlocked, and has the Ethereum app open;
     otherwise ``(False, reason)`` where ``reason`` is a short
@@ -243,7 +242,7 @@ class LedgerSigner(Signer):
     def can_sign(self, address: str) -> bool:
         return self._lookup(address) is not None
 
-    def _lookup(self, address: str) -> Optional[dict]:
+    def _lookup(self, address: str) -> dict | None:
         addr = address.lower()
         for a in self._store.accounts:
             if (a.get("source") == "ledger"

@@ -35,7 +35,8 @@ import asyncio
 import logging
 import threading
 import time
-from typing import (TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, NamedTuple)
+from collections.abc import Callable
 
 import aiohttp
 from PySide6.QtCore import QThread, Signal
@@ -80,7 +81,7 @@ class PendingTx(NamedTuple):
     hash: str
     from_addr: str
     nonce: int
-    raw_signed: Optional[str]
+    raw_signed: str | None
 
 
 class LiveWatcher(QThread):
@@ -122,10 +123,10 @@ class LiveWatcher(QThread):
     def __init__(
         self,
         chains_provider: "Callable[[], list[Chain]]",
-        pending_provider: "Optional[Callable[[int], List[PendingTx]]]" = None,
+        pending_provider: "Callable[[int], list[PendingTx]] | None" = None,
         account_provider:
-            "Optional[Callable[[], Optional[tuple[Chain, str]]]]" = None,
-        parent: Optional[object] = None,
+            "Callable[[], tuple[Chain, str] | None] | None" = None,
+        parent: object | None = None,
     ) -> None:
         super().__init__(parent)  # type: ignore[arg-type]
         # web3's ws provider logs every connect / subscribe / disconnect at
@@ -167,7 +168,7 @@ class LiveWatcher(QThread):
         chain, restarting it when its on-screen account changes (so the
         Transfer-log subscription re-targets), cancelling departed ones,
         until ``stop()``."""
-        tasks: dict[int, "tuple[asyncio.Task[None], Optional[str]]"] = {}
+        tasks: dict[int, tuple[asyncio.Task[None], str | None]] = {}
         try:
             while not self._stopping.is_set():
                 desired = self._desired_targets()
@@ -186,12 +187,12 @@ class LiveWatcher(QThread):
                 *(self._cancel(t) for t, _ in tasks.values()),
                 return_exceptions=True)
 
-    def _desired_targets(self) -> "dict[int, tuple[Chain, Optional[str]]]":
+    def _desired_targets(self) -> "dict[int, tuple[Chain, str | None]]":
         """Chains to watch and, for the on-screen chain, the account whose
         Transfer logs we also subscribe to. Pending-tx chains get newHeads
         only (account ``None``); the current chain gets logs too. The current
         chain may also have a pending tx — it gets both."""
-        targets: "dict[int, tuple[Chain, Optional[str]]]" = {}
+        targets: dict[int, tuple[Chain, str | None]] = {}
         for chain in self._chains_provider():
             targets[chain.chain_id] = (chain, None)
         if self._account_provider is not None:
@@ -212,7 +213,7 @@ class LiveWatcher(QThread):
             pass
 
     async def _watch_chain(
-        self, chain: "Chain", account: Optional[str] = None,
+        self, chain: "Chain", account: str | None = None,
     ) -> None:
         """Hold a connection for one chain, reconnecting with exponential
         backoff. ``link_state(False)`` whenever down so the legacy timer
@@ -234,7 +235,7 @@ class LiveWatcher(QThread):
             backoff *= 2
 
     async def _serve_connection(
-        self, chain: "Chain", account: Optional[str] = None,
+        self, chain: "Chain", account: str | None = None,
     ) -> None:
         """Connect to the chain's ws endpoints in order; on the first that
         subscribes, multiplex ``newHeads`` (→ block + pending-tx probe) and,
@@ -246,7 +247,7 @@ class LiveWatcher(QThread):
         The single live-I/O seam — orchestration tests override it with a
         synthetic emitter; the probe / log logic is tested via ``_probe_one``
         and ``_handle_log``."""
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         for url in ws_urls_for(chain):
             try:
                 async with make_async_web3(url) as w3:
@@ -282,7 +283,7 @@ class LiveWatcher(QThread):
         raise last_err or RuntimeError(f"no ws endpoint for {chain.name}")
 
     @staticmethod
-    def _transfer_filters(account: str) -> "list[list[Optional[str]]]":
+    def _transfer_filters(account: str) -> "list[list[str | None]]":
         """The two ``logs`` filter topic-lists for ERC-20 Transfers touching
         the account: incoming (``to == account``) and outgoing
         (``from == account``), any token contract. You can't OR across topic

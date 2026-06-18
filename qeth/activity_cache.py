@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from .fsatomic import atomic_write_text
 from .store import CONFIG_DIR
@@ -67,7 +66,7 @@ class ActivityCache:
     """Per-(chain, address) ``{tx_hash: Activity}`` store, JSON on disk,
     cached in memory."""
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         self._root = root or ACTIVITIES_DIR
         self._mem: dict[tuple[int, str], dict[str, Activity]] = {}
 

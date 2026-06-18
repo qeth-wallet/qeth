@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional, Union
 
 from .fsatomic import atomic_write_text
 
@@ -90,7 +89,7 @@ class AbiCache:
       - ``None``:               not in cache yet, caller should fetch
     """
 
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Path | None = None):
         # Look up CACHE_DIR at instantiation, so tests that
         # monkey-patch the module constant see the redirect.
         self.root = root if root is not None else CACHE_DIR
@@ -98,7 +97,7 @@ class AbiCache:
     def _path(self, chain_id: int, address: str) -> Path:
         return self.root / str(chain_id) / f"{address.lower()}.json"
 
-    def load(self, chain_id: int, address: str) -> Union[Abi, bool, None]:
+    def load(self, chain_id: int, address: str) -> Abi | bool | None:
         p = self._path(chain_id, address)
         if not p.exists():
             return None
@@ -136,7 +135,7 @@ class AbiCache:
         return abi
 
     def save(self, chain_id: int, address: str,
-             abi: Union[Abi, bool]) -> None:
+             abi: Abi | bool) -> None:
         """Persist either the ABI (a list) or the negative sentinel
         (``False`` — meaning Blockscout has no source for this
         address, so future calls can skip the fetch)."""

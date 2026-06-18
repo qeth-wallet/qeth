@@ -28,7 +28,7 @@ of the user's current view.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QThread, Signal
 
@@ -73,7 +73,7 @@ def _make_w3(rpc_url: str, ccip: bool):
 
 def lookup_ens_name(
     rpc_url: str, address: str, *, ccip: bool = True,
-) -> Optional[str]:
+) -> str | None:
     """Reverse-resolve ``address`` on mainnet ENS, verifying via a forward
     lookup. Returns the verified primary name, or None when no reverse record
     exists, the forward lookup mismatches, or any RPC error occurs (ENS data is
@@ -109,7 +109,7 @@ def lookup_ens_name(
 
 def resolve_ens_address(
     rpc_url: str, name: str, *, ccip: bool = True,
-) -> Optional[str]:
+) -> str | None:
     """Forward-resolve an ENS name to a checksummed address on mainnet, or None
     when the name has no address record / any RPC error. ``ccip=False`` forbids
     offchain gateway resolution (strict on-chain only)."""
@@ -132,8 +132,8 @@ def resolve_ens_address(
 
 
 def verified_resolve_address(
-    chain: "Chain", name: str, wait_s: float = _VERIFY_WAIT_S,
-) -> Tuple[Optional[str], bool]:
+    chain: Chain, name: str, wait_s: float = _VERIFY_WAIT_S,
+) -> tuple[str | None, bool]:
     """Forward-resolve ``name`` → (address, verified). Tries the Helios path
     first (strict, no CCIP); on success the mapping is proof-verified. Falls
     back to the normal RPC (CCIP allowed) marked unverified — so an offchain
@@ -148,8 +148,8 @@ def verified_resolve_address(
 
 
 def verified_lookup_name(
-    chain: "Chain", address: str, wait_s: float = _VERIFY_WAIT_S,
-) -> Tuple[Optional[str], bool]:
+    chain: Chain, address: str, wait_s: float = _VERIFY_WAIT_S,
+) -> tuple[str | None, bool]:
     """Reverse-resolve ``address`` → (name, verified), Helios-first (strict),
     falling back to the normal RPC marked unverified."""
     from .verified import verified_or_fallback
@@ -166,7 +166,7 @@ class EnsResolveWorker(QThread):
 
     resolved = Signal(str, str, bool)
 
-    def __init__(self, chain: "Chain", name: str, parent=None,
+    def __init__(self, chain: Chain, name: str, parent=None,
                  *, wait_s: float = _VERIFY_WAIT_S):
         super().__init__(parent)
         self._chain = chain
@@ -186,7 +186,7 @@ class EnsReverseWorker(QThread):
 
     resolved = Signal(str, str, bool)
 
-    def __init__(self, chain: "Chain", address: str, parent=None,
+    def __init__(self, chain: Chain, address: str, parent=None,
                  *, wait_s: float = _VERIFY_WAIT_S):
         super().__init__(parent)
         self._chain = chain

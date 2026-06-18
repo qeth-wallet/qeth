@@ -30,7 +30,6 @@ Decoding for ``eth_signTypedData_v4``:
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 from PySide6.QtCore import QRegularExpression, Qt, Signal
 from PySide6.QtGui import (
@@ -124,7 +123,7 @@ class _JsonHighlighter(QSyntaxHighlighter):
                 self.setFormat(m.capturedStart(), m.capturedLength(), fmt)
 
 
-def _is_printable_utf8(b: bytes) -> Optional[str]:
+def _is_printable_utf8(b: bytes) -> str | None:
     """Returns the decoded string if ``b`` is valid UTF-8 AND every
     character is either whitespace or printable. Many EIP-4361
     "Sign-in with Ethereum" challenges are plain ASCII; lots of

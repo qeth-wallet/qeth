@@ -29,7 +29,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .abi import _urllib_transport
 from .fsatomic import atomic_write_text
@@ -60,15 +60,15 @@ class ContractIdentity:
 
     address: str
     is_contract: bool
-    name: Optional[str] = None          # ContractName; None when unverified
+    name: str | None = None          # ContractName; None when unverified
     verified: bool = False
-    deployer: Optional[str] = None      # creator address
-    deployed_at: Optional[int] = None   # unix timestamp of the creation tx
-    name_tag: Optional[str] = None      # this address's public label (OLI)
-    deployer_label: Optional[str] = None  # the deployer's public label
+    deployer: str | None = None      # creator address
+    deployed_at: int | None = None   # unix timestamp of the creation tx
+    name_tag: str | None = None      # this address's public label (OLI)
+    deployer_label: str | None = None  # the deployer's public label
 
     @property
-    def deployed_date(self) -> Optional[str]:
+    def deployed_date(self) -> str | None:
         if not self.deployed_at:
             return None
         return datetime.datetime.fromtimestamp(
@@ -87,7 +87,7 @@ class ContractIdentity:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ContractIdentity":
+    def from_dict(cls, d: dict) -> ContractIdentity:
         return cls(
             address=d["address"],
             is_contract=bool(d.get("is_contract", True)),
@@ -105,14 +105,14 @@ class ContractIdentityCache:
     address we look up — contract or EOA — gets an entry, so a second
     open is instant and offline (the facts are immutable)."""
 
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Path | None = None):
         # Resolve CACHE_DIR at construction so tests can monkey-patch it.
         self.root = root if root is not None else CACHE_DIR
 
     def _path(self, chain_id: int, address: str) -> Path:
         return self.root / str(chain_id) / f"{address.lower()}.json"
 
-    def load(self, chain_id: int, address: str) -> Optional[ContractIdentity]:
+    def load(self, chain_id: int, address: str) -> ContractIdentity | None:
         p = self._path(chain_id, address)
         if not p.exists():
             return None
@@ -165,9 +165,9 @@ class ContractIdentitySource:
     """Fetches identity from Etherscan v2 (multichain). Reuses the same
     endpoint/key plumbing as the ABI source."""
 
-    def __init__(self, get_api_key: Callable[[], Optional[str]],
+    def __init__(self, get_api_key: Callable[[], str | None],
                  timeout: float = 15.0, transport=None,
-                 get_code: Optional[Callable[[int, str], Optional[str]]] = None):
+                 get_code: Callable[[int, str], str | None] | None = None):
         self._get_api_key = get_api_key
         self.timeout = timeout
         self._transport = transport or _urllib_transport
@@ -213,7 +213,7 @@ class ContractIdentitySource:
                     tags, key=lambda t: t.get("ordinal") or 0)["name"]
         return out
 
-    def fetch(self, chain_id: int, address: str) -> Optional[ContractIdentity]:
+    def fetch(self, chain_id: int, address: str) -> ContractIdentity | None:
         """Returns the identity, or ``None`` on an unsupported chain /
         transient error (so the caller leaves the cache untouched and can
         retry). A definitive "not a contract" comes back as a populated
@@ -250,7 +250,7 @@ class ContractIdentitySource:
         # two round-trips instead of three, which the user sees as a faster
         # "identifying…". A getsourcecode failure just leaves it unverified;
         # the provenance from the creation record above still stands.
-        name: Optional[str] = None
+        name: str | None = None
         verified = False
         to_label = [address] + ([deployer] if deployer else [])
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -274,7 +274,7 @@ class ContractIdentitySource:
             deployer_label=labels.get(deployer.lower()) if deployer else None)
 
     def _fetch_keyless(self, chain_id: int,
-                       address: str) -> Optional[ContractIdentity]:
+                       address: str) -> ContractIdentity | None:
         """Identify an address with no Etherscan key. ``eth_getCode``
         (keyless, cheap, not CU-limited) tells EOA-vs-contract, and
         Blockscout supplies the public label (also keyless). An EOA is
@@ -311,7 +311,7 @@ class IdentityBadge:
 
 def describe_identity(identity: ContractIdentity, *,
                       my_addresses, deployer_count: int = 0,
-                      interaction_count: Optional[int] = None,
+                      interaction_count: int | None = None,
                       context: str = "interact",
                       now_ts: float) -> IdentityBadge:
     """Render a contract identity as a human badge. ``deployer_count`` is

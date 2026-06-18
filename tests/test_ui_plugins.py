@@ -6,7 +6,6 @@ plugin contract: who owns what, who fires when, and what the
 plugins do in response to lifecycle calls.
 """
 
-from typing import Optional
 
 import pytest
 from PySide6.QtCore import Qt
@@ -26,7 +25,7 @@ class _StubHost:
     started so tests can inspect them, but never actually starts
     them (each test's hermetic monkeypatching neutralizes ``run``).
     """
-    def __init__(self, chain=ETH, address: Optional[str] = None):
+    def __init__(self, chain=ETH, address: str | None = None):
         self._chain = chain
         self.selected_address = address
         self.started_workers: list = []

@@ -6,7 +6,6 @@ lifecycle broadcasts reach every plugin; switching tabs swaps both
 the visible widget AND the bottom action row.
 """
 
-from typing import Optional
 
 from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
@@ -15,7 +14,7 @@ from qeth.plugin import Plugin, Slot
 
 class _StubHost:
     """Minimal Host-shaped stand-in for plugin tests."""
-    selected_address: Optional[str] = None
+    selected_address: str | None = None
 
     def current_chain(self):
         return None

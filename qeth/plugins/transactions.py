@@ -4736,7 +4736,12 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self._identity_label.setWordWrap(True)
         self._identity_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        header.addRow("Contract:", self._identity_label)
+        # "Identity:", not "Contract:" — in the Send dialog this row describes
+        # the typed RECIPIENT (usually an EOA: "Regular account … sent here
+        # N×"), not a contract. The tx's actual contract is the "Token:" row
+        # above. (The sign/details dialogs keep "Contract:" — there the row
+        # genuinely describes tx.to.)
+        header.addRow("Identity:", self._identity_label)
 
         # Amount + Max + balance label.
         amount_box = QWidget()

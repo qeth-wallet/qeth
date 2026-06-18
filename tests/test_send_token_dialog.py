@@ -486,7 +486,7 @@ class TestLiveUsdValue:
 
 
 class TestRecipientIdentity:
-    """The Contract: row resolves the typed recipient's identity once
+    """The Identity: row resolves the typed recipient's identity once
     it's a valid address. (The worker is stubbed out via the no-op
     start_worker, so we assert the synchronous kick/clear behaviour:
     a valid recipient enters the "…" loading state and records the

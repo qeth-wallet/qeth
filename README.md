@@ -63,21 +63,33 @@ Self-contained — runs on any reasonably recent x86-64 Linux (glibc ≥ 2.34).
 
 ### From source
 
+**Linux desktop** — uses your distro's Qt so the app matches your theme:
+
 ```sh
 uv venv --system-site-packages      # pulls in system PySide6 for native theming
-uv sync --inexact                   # installs the pinned deps from uv.lock
+uv sync --inexact --no-dev          # runtime deps only (no dev tooling)
 uv run python -m qeth
 ```
 
-(Falls back to `uv pip install -e '.[bundled]'` if you have no system PySide6.)
-
-To **import accounts from Frame**, add the `frame` extra — it pulls in
-`cryptography` (used only to decrypt Frame's export). Everything else,
-including signing, works without it:
+**Self-contained venv** — when there's no system PySide6 (macOS, or a
+minimal box): drop `--system-site-packages` and bundle Qt from PyPI:
 
 ```sh
-uv pip install -e '.[frame]'
+uv venv
+uv sync --inexact --no-dev --extra bundled
+uv run python -m qeth
 ```
+
+Optional feature extras (append to the `uv sync` line):
+
+- `--extra frame` — import accounts from Frame. Pulls in `cryptography`
+  (used only to decrypt Frame's export); everything else, including
+  signing, works without it.
+- `--extra simulate` — transaction-preview simulation on RPCs that lack
+  `eth_simulateV1` (pure-Python py-evm). Degrades to "no preview" if absent.
+
+Contributors: drop `--no-dev` to also get the test/lint/type toolchain
+(pytest, mypy, ruff, ty) — see CLAUDE.md.
 
 ## Verified transaction previews (optional)
 

@@ -119,6 +119,7 @@ files = [
     "qeth/tray.py",
     "qeth/notify.py",
     "qeth/ledger.py",
+    "qeth/ledger_hid.py",
     "qeth/signing.py",
     "qeth/alerts.py",
     "qeth/branding.py",

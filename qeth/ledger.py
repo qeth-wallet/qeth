@@ -1,13 +1,28 @@
+"""Ledger hardware-wallet signing + account discovery.
+
+Every ledgereth/hidapi call here is funnelled through the single-thread
+``ledger_hid`` service (``run_ledger_hid_job``) rather than touching HID from
+the transient Qt worker threads that drive signing/discovery — hidapi's macOS
+backend is only valid on the thread that opened the handle. The service also
+clears ledgereth's dongle cache after every job, so a stale USB-HID handle
+never carries between operations.
+"""
+
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from PySide6.QtCore import QThread, Signal
 
 from .chain import EthClient
 from .chains import Chain
+from .ledger_hid import DEFAULT_LEDGER_HID_TIMEOUT_S, run_ledger_hid_job
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
     TypedDataSigningRequest,
 )
+
+T = TypeVar("T")
 
 
 def is_ledger_available() -> tuple[bool, str | None]:
@@ -16,31 +31,24 @@ def is_ledger_available() -> tuple[bool, str | None]:
     otherwise ``(False, reason)`` where ``reason`` is a short
     human-readable explanation from ledgereth.
 
-    Side effect: a successful probe leaves ledgereth's module-level
-    dongle cache empty, so the next real sign / discovery call
-    starts from a fresh ``init_dongle`` (consistent with
-    LedgerSigner.sign's "fresh handle per call" invariant — see
-    qeth/ledger.py)."""
+    The probe runs on the HID service thread, which clears ledgereth's
+    module-level dongle cache afterwards — so the next real sign /
+    discovery call starts from a fresh ``init_dongle``."""
     try:
-        from ledgereth.comms import init_dongle
-        from ledgereth import comms as _comms
+        run_ledger_hid_job(_probe_ledger_available)
     except ImportError as e:
         return False, f"ledgereth not installed: {e}"
-    try:
-        dongle = init_dongle()
+    except SignerError as e:
+        return False, str(e)
     except Exception as e:
         return False, _explain_ledger_error(e)
-    # Drop the cache + close the probe handle. ledgereth keeps the
-    # Dongle in a module-level slot across calls; reusing it for
-    # the next real sign is unreliable (see the dongle-cache
-    # discussion in LedgerSigner.sign).
-    _comms.DONGLE_CACHE = None
-    _comms.DONGLE_CONFIG_CACHE = None
-    try:
-        dongle.close()
-    except Exception:
-        pass
     return True, None
+
+
+def _probe_ledger_available() -> None:
+    from ledgereth.comms import init_dongle
+
+    init_dongle()
 
 
 def _explain_ledger_error(e: Exception) -> str:
@@ -134,6 +142,10 @@ PATH_SCHEMES: dict[str, str] = {
 
 AUTO_STOP_CONSECUTIVE_ZEROS = 3
 AUTO_DETECT_HARD_CAP = 100
+# Derive this many paths per HID job. One ``init_dongle`` is amortised over a
+# batch (cheaper + less USB churn) while keeping all HID work on the service
+# thread; nonce lookups (RPC, not HID) happen between batches on the worker.
+AUTO_DETECT_BATCH_SIZE = 5
 
 
 @dataclass
@@ -155,7 +167,8 @@ class LedgerWorker(QThread):
 
     If `count` is 0, scans until `AUTO_STOP_CONSECUTIVE_ZEROS` consecutive
     accounts with nonce 0 (up to `AUTO_DETECT_HARD_CAP`). Nonces are
-    fetched from `chain` if provided.
+    fetched from `chain` if provided. Path derivation (HID) is delegated to
+    the ledger_hid service in batches; nonce lookups stay on this thread.
     """
 
     discovered = Signal(object)
@@ -169,19 +182,6 @@ class LedgerWorker(QThread):
         self.client = EthClient(chain) if chain is not None else None
 
     def run(self) -> None:
-        try:
-            from ledgereth.accounts import get_account_by_path
-            from ledgereth.comms import init_dongle
-        except ImportError as e:
-            self.failed.emit(f"ledgereth not installed: {e}")
-            return
-
-        try:
-            dongle = init_dongle()
-        except Exception as e:
-            self.failed.emit(_explain_ledger_error(e))
-            return
-
         template = PATH_SCHEMES.get(self.scheme)
         if template is None:
             self.failed.emit(f"Unknown derivation scheme: {self.scheme}")
@@ -189,30 +189,56 @@ class LedgerWorker(QThread):
 
         auto = self.count == 0
         max_scan = AUTO_DETECT_HARD_CAP if auto else self.count
-        consecutive_zero = 0
 
         try:
-            for i in range(max_scan):
-                path = template.format(i=i)
-                acct = get_account_by_path(path, dongle=dongle)
-                nonce = self._nonce(acct.address) if self.client else 0
-                self.discovered.emit(DiscoveredAccount(
-                    address=acct.address, path=path, index=i, nonce=nonce
-                ))
-                if auto:
-                    if nonce == 0:
-                        consecutive_zero += 1
-                        if consecutive_zero >= AUTO_STOP_CONSECUTIVE_ZEROS:
-                            break
-                    else:
-                        consecutive_zero = 0
+            if auto:
+                self._scan_auto(template, max_scan)
+            else:
+                paths = [template.format(i=i) for i in range(max_scan)]
+                derived = run_ledger_hid_job(
+                    lambda: _derive_ledger_paths(paths),
+                )
+                for i, (path, address) in enumerate(derived):
+                    nonce = self._nonce(address) if self.client else 0
+                    self.discovered.emit(DiscoveredAccount(
+                        address=address, path=path, index=i, nonce=nonce,
+                    ))
             self.finished_ok.emit()
+        except ImportError as e:
+            self.failed.emit(f"ledgereth not installed: {e}")
+        except SignerError as e:
+            self.failed.emit(str(e))
         except Exception as e:
-            # Same decoder as the init_dongle failure above —
-            # surfaces friendly messages for known errors and the
-            # hex SW for unknown ones, instead of the raw ledgereth
-            # "Unexpected error: 0x???? UNKNOWN" leaking through.
+            # Same decoder as the probe path — surfaces friendly messages for
+            # known errors and the hex SW for unknown ones, instead of the raw
+            # ledgereth "Unexpected error: 0x???? UNKNOWN" leaking through.
             self.failed.emit(_explain_ledger_error(e))
+
+    def _scan_auto(self, template: str, max_scan: int) -> None:
+        """Derive in batches of ``AUTO_DETECT_BATCH_SIZE`` until
+        ``AUTO_STOP_CONSECUTIVE_ZEROS`` consecutive nonce-0 accounts."""
+        consecutive_zero = 0
+        i = 0
+        while i < max_scan:
+            paths = [
+                template.format(i=j)
+                for j in range(i, min(i + AUTO_DETECT_BATCH_SIZE, max_scan))
+            ]
+            # Synchronous (run_ledger_hid_job blocks on the result), so the
+            # current ``paths`` is what runs — no late-binding capture needed.
+            derived = run_ledger_hid_job(lambda: _derive_ledger_paths(paths))
+            for offset, (path, address) in enumerate(derived):
+                nonce = self._nonce(address) if self.client else 0
+                self.discovered.emit(DiscoveredAccount(
+                    address=address, path=path, index=i + offset, nonce=nonce,
+                ))
+                if nonce == 0:
+                    consecutive_zero += 1
+                    if consecutive_zero >= AUTO_STOP_CONSECUTIVE_ZEROS:
+                        return
+                else:
+                    consecutive_zero = 0
+            i += len(paths)
 
     def _nonce(self, address: str) -> int:
         """Latest-block sent-tx count for ``address``. We ask for
@@ -227,6 +253,71 @@ class LedgerWorker(QThread):
             return 0
 
 
+def _derive_ledger_paths(paths: list[str]) -> list[tuple[str, str]]:
+    """Derive ``(path, address)`` for each path on one shared dongle.
+    Runs on the HID service thread."""
+    from ledgereth.accounts import get_account_by_path
+    from ledgereth.comms import init_dongle
+
+    dongle = init_dongle()
+    return [
+        (path, get_account_by_path(path, dongle=dongle).address)
+        for path in paths
+    ]
+
+
+def _verify_device_holds_on_hid(address: str, path: str, dongle) -> None:
+    """Refuse to sign unless the *connected* Ledger actually derives
+    ``address`` at ``path`` (runs inside the signing HID job, on the shared
+    dongle).
+
+    qeth records Ledger accounts by address + path with no device or seed
+    identifier, so a *different* Ledger plugged in would otherwise sign at
+    this path as a DIFFERENT address — a valid signature for the wrong
+    account. ``get_account_by_path`` is a silent getAddress read (no
+    on-device confirmation)."""
+    from ledgereth.accounts import get_account_by_path
+
+    derived = get_account_by_path(path, dongle=dongle).address
+    if derived.lower() != address.lower():
+        raise SignerError(
+            f"This Ledger doesn't hold {address} — it derives "
+            f"{derived} at {path}. Connect the device/seed that owns "
+            f"{address} and try again."
+        )
+
+
+def _run_ledger_job(fn: Callable[[], T], *, timeout: float) -> T:
+    """Run ``fn`` on the HID service thread, mapping ledgereth failures to a
+    uniform ``SignerError`` the RPC/UI layers already understand."""
+    try:
+        return run_ledger_hid_job(fn, timeout=timeout)
+    except ImportError as e:
+        raise SignerError(f"ledgereth not installed: {e}") from e
+    except SignerError:
+        raise
+    except Exception as e:
+        raise SignerError(_explain_ledger_error(e)) from e
+
+
+def _raw_transaction_bytes(signed: Any) -> bytes:
+    # ledgereth exposes the encoded signed tx in two shapes that both have
+    # the name ``raw_transaction``-ish: an attribute (``rawTransaction`` — a
+    # hex-string property) and a method (``raw_transaction()``) on different
+    # versions. Don't grab the method object as if it were the payload (web3
+    # chokes on the bound-method with a generic "expected … bytes" error).
+    raw = getattr(signed, "rawTransaction", None)
+    if raw is None:
+        method = getattr(signed, "raw_transaction", None)
+        if callable(method):
+            raw = method()
+    if raw is None:
+        raise SignerError("Signed transaction has no raw payload")
+    if isinstance(raw, str):
+        raw = bytes.fromhex(raw[2:] if raw.startswith("0x") else raw)
+    return raw
+
+
 class LedgerSigner(Signer):
     """``Signer`` implementation backed by a Ledger hardware wallet.
 
@@ -234,10 +325,12 @@ class LedgerSigner(Signer):
     store's account list (where each Ledger-discovered account is
     recorded with its ``path``) and asks the dongle to sign — the
     user has to confirm on the device, so signing takes a few
-    seconds and must be done off the Qt main thread."""
+    seconds and runs on the HID service thread. The device-holds check
+    and the sign share one dongle inside a single HID job."""
 
-    def __init__(self, store):
+    def __init__(self, store, *, hid_timeout: float = DEFAULT_LEDGER_HID_TIMEOUT_S):
         self._store = store
+        self._hid_timeout = hid_timeout
 
     def can_sign(self, address: str) -> bool:
         return self._lookup(address) is not None
@@ -261,14 +354,6 @@ class LedgerSigner(Signer):
             raise SignerError(
                 f"Account {req.from_addr} has no derivation path on file"
             )
-        try:
-            # ledgereth.transactions does its own dongle init when
-            # no Dongle is passed; we don't reuse a handle here
-            # because USB connects are cheap and signing isn't a
-            # hot path.
-            from ledgereth.transactions import create_transaction
-        except ImportError as e:
-            raise SignerError(f"ledgereth not installed: {e}") from e
 
         if req.gas is None or req.nonce is None:
             raise SignerError("gas and nonce must be set before signing")
@@ -297,70 +382,38 @@ class LedgerSigner(Signer):
                 )
             kwargs["gas_price"] = req.gas_price
 
-        self._verify_device_holds(req.from_addr, path)
-        try:
-            signed = create_transaction(**kwargs)
-        except Exception as e:
-            # Anything from a user rejecting on the device to USB
-            # comms hiccups lands here — surface as SignerError so
-            # the RPC handler sees a uniform shape. _explain_ledger_
-            # error maps the ledgereth typed exceptions to friendly
-            # sentences, and falls back to the raw status word for
-            # codes ledgereth doesn't have a typed exception for.
-            raise SignerError(_explain_ledger_error(e)) from e
-        finally:
-            # ledgereth caches the Dongle handle in a module-level
-            # slot across calls. Reusing it between signs is
-            # unreliable: the USB-HID session sometimes goes stale
-            # (device briefly drops at the firmware layer; the
-            # cached pyhidapi handle then yields "device not
-            # connected" on the next exchange without ever waking
-            # the device screen). Close + clear so the next sign
-            # starts from a fresh init_dongle.
-            from ledgereth import comms as _comms
-            cached = _comms.DONGLE_CACHE
-            _comms.DONGLE_CACHE = None
-            _comms.DONGLE_CONFIG_CACHE = None
-            if cached is not None:
-                try:
-                    cached.close()
-                except Exception:
-                    pass
-        # ledgereth exposes the encoded signed tx in two shapes that
-        # both have the name ``raw_transaction``-ish: an attribute
-        # (``rawTransaction`` — a hex-string property) and a method
-        # (``raw_transaction()``) on different versions. Don't grab
-        # the method object as if it were the payload (web3 chokes
-        # on the bound-method as transaction data with a generic
-        # "expected … bytes" TypeError).
-        raw = getattr(signed, "rawTransaction", None)
-        if raw is None:
-            method = getattr(signed, "raw_transaction", None)
-            if callable(method):
-                raw = method()
-        if raw is None:
-            raise SignerError("Signed transaction has no raw payload")
-        if isinstance(raw, str):
-            raw = bytes.fromhex(raw[2:] if raw.startswith("0x") else raw)
-        return raw
+        signed = _run_ledger_job(
+            lambda: self._sign_transaction_on_hid(req.from_addr, path, kwargs),
+            timeout=self._hid_timeout,
+        )
+        return _raw_transaction_bytes(signed)
+
+    def _sign_transaction_on_hid(self, address: str, path: str, kwargs: dict):
+        from ledgereth.comms import init_dongle
+        from ledgereth.transactions import create_transaction
+
+        dongle = init_dongle()
+        _verify_device_holds_on_hid(address, path, dongle)
+        return create_transaction(**kwargs, dongle=dongle)
 
     def sign_message(self, req: MessageSigningRequest) -> bytes:
         """personal_sign on the Ledger. The device prompts the user
         to review the message (truncated on screen) and confirm —
         same UX as MetaMask's "Sign" popup."""
         path = self._require_path(req.from_addr)
-        self._verify_device_holds(req.from_addr, path)
-        try:
-            from ledgereth.messages import sign_message
-        except ImportError as e:
-            raise SignerError(f"ledgereth not installed: {e}") from e
-        try:
-            signed = sign_message(req.raw, sender_path=path)
-        except Exception as e:
-            raise SignerError(_explain_ledger_error(e)) from e
-        finally:
-            _clear_dongle_cache()
+        signed = _run_ledger_job(
+            lambda: self._sign_message_on_hid(req.from_addr, path, req.raw),
+            timeout=self._hid_timeout,
+        )
         return _extract_ledger_signature(signed)
+
+    def _sign_message_on_hid(self, address: str, path: str, raw: bytes):
+        from ledgereth.comms import init_dongle
+        from ledgereth.messages import sign_message
+
+        dongle = init_dongle()
+        _verify_device_holds_on_hid(address, path, dongle)
+        return sign_message(raw, sender_path=path, dongle=dongle)
 
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
         """EIP-712 v4 — the Ledger Ethereum app does the full
@@ -368,20 +421,13 @@ class LedgerSigner(Signer):
         else falls back to a "blind sign" prompt the user must
         enable in the device settings."""
         path = self._require_path(req.from_addr)
-        self._verify_device_holds(req.from_addr, path)
-        try:
-            from ledgereth.messages import sign_typed_data_draft
-        except ImportError as e:
-            raise SignerError(f"ledgereth not installed: {e}") from e
         # ledgereth's draft signer expects the pre-computed domain
         # separator + message hash. eth_account's encode_typed_data
         # returns a SignableMessage where ``header`` is the 32-byte
         # domain separator and ``body`` is the 32-byte struct hash
         # (the two values the EIP-191 v0x01 prefix wraps). Earlier
-        # versions of this code sliced ``body`` as if it carried
-        # both halves — sending the struct hash AS the domain and
-        # empty bytes AS the message — which the Ledger Ethereum
-        # app rejected with an "invalid data" status word.
+        # versions of this code sliced ``body`` as if it carried both
+        # halves — which the Ledger Ethereum app rejected.
         try:
             from eth_account.messages import encode_typed_data
         except ImportError as e:
@@ -399,15 +445,24 @@ class LedgerSigner(Signer):
             raise
         except Exception as e:
             raise SignerError(f"failed to hash typed data: {e}") from e
-        try:
-            signed = sign_typed_data_draft(
-                domain_hash, message_hash, sender_path=path,
-            )
-        except Exception as e:
-            raise SignerError(_explain_ledger_error(e)) from e
-        finally:
-            _clear_dongle_cache()
+        signed = _run_ledger_job(
+            lambda: self._sign_typed_data_on_hid(
+                req.from_addr, path, domain_hash, message_hash,
+            ),
+            timeout=self._hid_timeout,
+        )
         return _extract_ledger_signature(signed)
+
+    def _sign_typed_data_on_hid(self, address: str, path: str,
+                                domain_hash: bytes, message_hash: bytes):
+        from ledgereth.comms import init_dongle
+        from ledgereth.messages import sign_typed_data_draft
+
+        dongle = init_dongle()
+        _verify_device_holds_on_hid(address, path, dongle)
+        return sign_typed_data_draft(
+            domain_hash, message_hash, sender_path=path, dongle=dongle,
+        )
 
     def _require_path(self, address: str) -> str:
         acct = self._lookup(address)
@@ -421,54 +476,6 @@ class LedgerSigner(Signer):
                 f"Account {address} has no derivation path on file"
             )
         return path
-
-    def _verify_device_holds(self, address: str, path: str) -> None:
-        """Refuse to sign unless the *connected* Ledger actually derives
-        ``address`` at ``path``.
-
-        qeth records Ledger accounts by address + path with no device or
-        seed identifier, so if a *different* Ledger is plugged in it would
-        otherwise sign at this path as a DIFFERENT address — producing a
-        valid signature for the wrong account (which then fails at
-        broadcast, or in a nonce/balance coincidence sends an unintended
-        tx). Re-derive the path on whatever device is connected and bail
-        out with a clear message if it doesn't match. ``get_account_by_path``
-        is a silent getAddress read — no on-device confirmation prompt."""
-        try:
-            from ledgereth.accounts import get_account_by_path
-            from ledgereth.comms import init_dongle
-        except ImportError as e:
-            raise SignerError(f"ledgereth not installed: {e}") from e
-        try:
-            dongle = init_dongle()
-            derived = get_account_by_path(path, dongle=dongle).address
-        except Exception as e:
-            raise SignerError(_explain_ledger_error(e)) from e
-        finally:
-            _clear_dongle_cache()
-        if derived.lower() != address.lower():
-            raise SignerError(
-                f"This Ledger doesn't hold {address} — it derives "
-                f"{derived} at {path}. Connect the device/seed that owns "
-                f"{address} and try again."
-            )
-
-
-def _clear_dongle_cache() -> None:
-    """Mirror of the post-sign cleanup in LedgerSigner.sign — the
-    USB-HID handle ledgereth caches gets stale between calls."""
-    try:
-        from ledgereth import comms as _comms
-    except ImportError:
-        return
-    cached = _comms.DONGLE_CACHE
-    _comms.DONGLE_CACHE = None
-    _comms.DONGLE_CONFIG_CACHE = None
-    if cached is not None:
-        try:
-            cached.close()
-        except Exception:
-            pass
 
 
 def _extract_ledger_signature(signed) -> bytes:
@@ -491,4 +498,3 @@ def _extract_ledger_signature(signed) -> bytes:
     else:
         v_byte = bytes([v + 27])
     return r + s + v_byte
-

@@ -13,7 +13,7 @@ regression in the field.
 
 import pytest
 
-from qeth.ledger import _clear_dongle_cache
+from qeth.ledger_hid import _clear_ledgereth_cache
 
 
 def test_ledgereth_still_exposes_the_dongle_cache_globals():
@@ -27,7 +27,7 @@ def test_ledgereth_still_exposes_the_dongle_cache_globals():
     )
 
 
-def test_clear_dongle_cache_nulls_globals_and_closes_handle(monkeypatch):
+def test_clear_ledgereth_cache_nulls_globals_and_closes_handle(monkeypatch):
     comms = pytest.importorskip("ledgereth.comms")
 
     closed = []
@@ -39,7 +39,7 @@ def test_clear_dongle_cache_nulls_globals_and_closes_handle(monkeypatch):
     monkeypatch.setattr(comms, "DONGLE_CACHE", _FakeDongle())
     monkeypatch.setattr(comms, "DONGLE_CONFIG_CACHE", object())
 
-    _clear_dongle_cache()
+    _clear_ledgereth_cache()
 
     assert comms.DONGLE_CACHE is None
     assert comms.DONGLE_CONFIG_CACHE is None

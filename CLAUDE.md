@@ -38,6 +38,14 @@ versions without touching packages already present from
 `--system-site-packages` (notably system PySide6). Use `uv lock`
 to regenerate after editing dependencies in `pyproject.toml`.
 
+**Bumping / security.** `uv lock --upgrade && uv sync --inexact && uv audit`.
+`uv audit` checks the locked deps against the advisory DB (it's how the
+aiohttp CVEs were caught). A `[tool.uv] exclude-newer = "1 week"` supply-chain
+policy means a bump never adopts a release younger than ~1 week (rolling,
+evaluated at resolution time — no date to maintain); `ty` is exempted and
+fresh security fixes are pulled forward per-package — see the comments in
+`pyproject.toml`.
+
 `--system-site-packages` is load-bearing on Linux desktops. The PyPI
 `PySide6` wheel ships its own Qt without the qt6ct/KDE platform-theme
 plugin, so the user's qt6ct/Breeze/Kvantum setup is silently ignored.

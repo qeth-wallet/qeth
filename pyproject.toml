@@ -60,6 +60,27 @@ dev = [
     "cryptography>=42",
 ]
 
+[tool.uv]
+# Supply-chain policy: never resolve a package version newer than ~1 week old.
+# A malicious/compromised fresh upload is usually caught + yanked within days,
+# so a one-week soak before adopting any release blunts that. uv evaluates this
+# RELATIVE duration at resolution time, so it ROLLS automatically — no date to
+# maintain. Applies to every `uv lock` (incl. `--upgrade`).
+#
+# Bump deps:   uv lock --upgrade && uv sync --inexact && uv audit
+# A fresh SECURITY fix can be pulled forward past the cutoff for one package,
+# and it STICKS (a later plain `uv lock` won't revert an already-locked
+# version):
+#   uv lock --upgrade-package <pkg> --exclude-newer-package <pkg>=<recent-date>
+# That's how aiohttp sits on 3.14.1 here, ahead of the cutoff (6 CVEs fixed).
+exclude-newer = "1 week"
+
+[tool.uv.exclude-newer-package]
+# ty is a fast-moving preview tool we run locally (never shipped) and track at
+# its latest; its pin is otherwise unsatisfiable under the 1-week cutoff.
+# Exempt it — effectively no cutoff for ty.
+ty = "2099-01-01T00:00:00Z"
+
 [tool.pytest.ini_options]
 # Network tests exercise real Blockscout / DefiLlama / GoPlus / Curve /
 # chain RPC endpoints; they're skipped by default to keep `pytest` fast

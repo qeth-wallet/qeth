@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
 from qeth.ens_app import (
-    EnsName, EnsNode, EnsRecords, OwnershipCheck, build_tree,
+    EnsName, EnsRecords, OwnershipCheck, build_tree,
 )
 from qeth.plugins.ens import (
     _EXPIRY_STYLE, _NAME_ROLE, _STATUS_ROLE, _UNSAFE_ROLE, _VALUE_ROLE,
@@ -137,7 +137,6 @@ class TestEnsPanel:
         assert seen == ["alice.eth"]   # guarded against re-emit
 
     def test_sortable_by_name_and_expiry(self, qtbot):
-        from PySide6.QtCore import Qt
         from qeth.plugins.ens import _NAME_COL, _EXPIRES_COL
         panel = EnsPanel()
         qtbot.addWidget(panel)
@@ -161,7 +160,6 @@ class TestEnsPanel:
         assert order() == ["zzz.eth", "aaa.eth", "mmm.eth"]
 
     def test_subdomains_sort_after_domains(self, qtbot):
-        from PySide6.QtCore import Qt
         from qeth.plugins.ens import _NAME_COL
         panel = EnsPanel()
         qtbot.addWidget(panel)
@@ -178,7 +176,6 @@ class TestEnsPanel:
                          "aaa.somedao.eth", "dao.curvefi.eth"]
 
     def test_records_sort_by_tier_then_alpha(self, qtbot):
-        from PySide6.QtCore import Qt
         from qeth.plugins.ens import _NAME_COL
         panel = EnsPanel()
         qtbot.addWidget(panel)

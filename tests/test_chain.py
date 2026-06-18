@@ -22,8 +22,6 @@ def _addr(seed: str) -> str:
 from qeth.chain import (
     ChainError,
     EthClient,
-    Multicall,
-    _SEL_AGGREGATE3,
     _decode_string_or_bytes32,
     wei_to_ether,
 )
@@ -220,7 +218,7 @@ class TestMulticallContextManager:
         seen = []
         monkeypatch.setattr(eth_client, "call",
                             lambda *a, **kw: seen.append(a) or "0x")
-        with eth_client.multicall() as mc:
+        with eth_client.multicall():
             pass
         assert seen == []
 

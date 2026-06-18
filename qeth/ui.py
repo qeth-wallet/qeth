@@ -15,10 +15,10 @@ from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QLabel, QMainWindow, QSplitter, QStatusBar,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QTreeWidget, QWidget,
+    QTableWidget, QWidget,
 )
 
-from .icons import ChainIconCache, bundled_chain_icon
+from .icons import ChainIconCache
 from .notify import DesktopNotifier
 from .plugin import Slot
 from .plugins.ens import EnsPlugin

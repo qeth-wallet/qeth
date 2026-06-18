@@ -85,7 +85,7 @@ def main() -> int:
     app.processEvents()
     t_first_paint = (time.perf_counter() - t) * 1000
 
-    print(f"\n--- main-thread blocking phases ---")
+    print("\n--- main-thread blocking phases ---")
     print(f"  ensure_heavy_imports:    {t_heavy:8.1f} ms")
     print(f"  Store.load:              {t_store:8.1f} ms")
     print(f"  RpcServer.start:         {t_rpc:8.1f} ms")
@@ -93,7 +93,7 @@ def main() -> int:
     print(f"  show() + first paint:    {t_first_paint:8.1f} ms")
     print(f"  TOTAL blocking:          "
           f"{t_heavy + t_store + t_rpc + t_window + t_first_paint:8.1f} ms")
-    print(f"\n--- per-method counters during MainWindow init ---")
+    print("\n--- per-method counters during MainWindow init ---")
     rows = sorted(counter.items(), key=lambda kv: -kv[1][1])
     for name, (n, total_ms) in rows:
         print(f"  {name:32s}  n={n:5d}   total={total_ms:7.1f} ms"

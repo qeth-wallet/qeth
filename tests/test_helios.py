@@ -4,7 +4,6 @@ No real helios process is ever spawned (conftest sets QETH_HELIOS=0 for
 the whole suite; these tests inject fakes and opt back in per-test).
 """
 
-from types import SimpleNamespace
 
 import pytest
 

@@ -5,12 +5,10 @@ Generates real keystores (small scrypt parameters via the
 encryption calls per test minimal).
 """
 
-import json
 
 import pytest
 
 from qeth.hot_wallet import (
-    KEYSTORE_DIR,
     HotWalletSigner,
     delete_keystore,
     encrypt_keystore,

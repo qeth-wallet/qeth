@@ -134,7 +134,6 @@ class BlockscoutAbiSource:
             return self._merge_rpc_proxy(chain_id, address, v1, depth, seen)
         own_abi = v2.get("own_abi") or []
         impls = v2.get("implementations") or []
-        verified = v2.get("is_verified")
 
         # Recursively resolve any proxy implementations and merge.
         merged: Abi = list(own_abi)

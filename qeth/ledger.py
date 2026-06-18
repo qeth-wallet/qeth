@@ -52,7 +52,7 @@ def _explain_ledger_error(e: Exception) -> str:
     "UNKNOWN" cases stay diagnosable instead of getting hidden."""
     try:
         from ledgereth.exceptions import (
-            CommException, LedgerAppNotOpened, LedgerCancel, LedgerError,
+            CommException, LedgerAppNotOpened, LedgerCancel,
             LedgerErrorCodes, LedgerInvalid, LedgerInvalidADPU,
             LedgerLocked, LedgerNotFound,
         )

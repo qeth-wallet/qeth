@@ -1,10 +1,7 @@
 """Tests for qeth.store — config persistence + hide/show semantics."""
 
-import json
 
-import pytest
 
-from qeth.chains import Chain
 from qeth.store import Store, _merge_chain
 
 

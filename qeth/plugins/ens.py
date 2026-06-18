@@ -18,7 +18,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDesktopServices, QIcon, QPalette,
+    QBrush, QColor, QDesktopServices, QIcon, QPalette,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,

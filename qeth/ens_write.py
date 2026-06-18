@@ -14,7 +14,7 @@ permitted to make simply reverts, which the sign dialog's simulation surfaces).
 from __future__ import annotations
 
 from base64 import b32decode
-from typing import Optional, Tuple
+from typing import Tuple
 
 from .ens_app import (
     ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, namehash,

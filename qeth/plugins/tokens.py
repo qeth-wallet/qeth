@@ -26,10 +26,10 @@ from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QAction, QDesktopServices, QFont, QIcon, QKeySequence,
+    QAction, QDesktopServices, QIcon, QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog,
+    QAbstractItemView, QApplication, QHeaderView, QInputDialog,
     QMenu, QPushButton, QSizePolicy, QStyle, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -1473,7 +1473,6 @@ class TokensPlugin(Plugin):
             self._panel.show_message(f"Token lists failed: {msg}")
 
 
-from decimal import Decimal
 
 
 # --- panel + helpers (moved from qeth.ui) ----------------------------------

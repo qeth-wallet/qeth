@@ -20,7 +20,6 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
 
 from qeth.chains import DEFAULT_CHAINS
 
@@ -149,7 +148,6 @@ class TestGasEstimateNoPlaceholder:
     def test_no_worker_starts_until_recipient_entered(
         self, qtbot, monkeypatch,
     ):
-        import qeth.plugins.transactions as tx
         constructed: list = []
 
         class _StubWorker:
@@ -179,7 +177,6 @@ class TestGasReestimateOnRecipientChange:
     def test_re_estimate_fires_with_typed_recipient(
         self, qtbot, monkeypatch,
     ):
-        import qeth.plugins.transactions as tx
 
         constructed: list = []
 
@@ -209,7 +206,6 @@ class TestGasReestimateOnRecipientChange:
     def test_re_estimate_skips_duplicate_recipient(
         self, qtbot, monkeypatch,
     ):
-        import qeth.plugins.transactions as tx
         constructed: list = []
 
         class _StubWorker:
@@ -235,7 +231,6 @@ class TestGasReestimateOnRecipientChange:
     def test_re_estimate_skips_invalid_recipient(
         self, qtbot, monkeypatch,
     ):
-        import qeth.plugins.transactions as tx
         constructed: list = []
 
         class _StubWorker:

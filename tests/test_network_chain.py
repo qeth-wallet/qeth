@@ -13,11 +13,10 @@ against:
 - our ABI selector or encoding drifting from the canonical contracts.
 """
 
-from decimal import Decimal
 
 import pytest
 
-from qeth.chain import EthClient, wei_to_ether
+from qeth.chain import EthClient
 from qeth.chains import DEFAULT_CHAINS
 
 pytestmark = pytest.mark.network

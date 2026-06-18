@@ -41,6 +41,7 @@ simulate = ["py-evm>=0.10"]
 [dependency-groups]
 dev = [
     "mypy>=2.1.0",
+    "ruff>=0.14",       # lint gate (tests/test_lint.py)
     "pytest>=8",
     "pytest-qt>=4.4",
     # The simulate extra, mirrored here so the fork-engine tests always
@@ -147,6 +148,21 @@ module = [
     "eth_account.*",
 ]
 ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py310"    # match [tool.mypy] python_version
+
+[tool.ruff.lint]
+# Start with pyflakes (E9 syntax + F: unused imports/vars, redefinitions,
+# undefined names) — high signal, no style bikeshed. tests/test_lint.py
+# gates it, mirroring the mypy gate.
+#
+# E402 (module-import-not-at-top) is deliberately NOT enabled: qeth uses
+# lazy/deferred module imports on purpose — chain._ensure_heavy_imports,
+# async_chain._ensure_async_imports, and the Flatpak Qt setup in __main__ —
+# which the rule would wrongly flag. Broaden to E/W/I/B later via deliberate,
+# reviewed passes (and keep E402 off, or per-file-ignore the lazy modules).
+select = ["E9", "F"]
 
 [project.scripts]
 qeth = "qeth.__main__:main"

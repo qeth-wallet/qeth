@@ -5,7 +5,6 @@ import time
 import pytest
 
 from qeth.risk import (
-    DEFAULT_TTL_SECONDS,
     HIGH_SELL_TAX,
     GoPlusRisk,
     RiskCache,

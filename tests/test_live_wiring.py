@@ -7,7 +7,6 @@ an empty cache so the watcher starts but dials nothing (no chains to watch).
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
 
 from qeth.live_watcher import PendingTx
 from qeth.plugins.transactions import (TransactionsPlugin,

@@ -2077,7 +2077,6 @@ class _ImportSourcePanel(QWidget):
 
     def __init__(self, source, existing_lower: set[str], parent=None):
         super().__init__(parent)
-        from PySide6.QtWidgets import QFileDialog, QPlainTextEdit
         self._source = source
         self._existing = existing_lower
         self._candidates: list = []

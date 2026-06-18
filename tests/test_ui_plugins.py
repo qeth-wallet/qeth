@@ -679,7 +679,7 @@ class TestTransactionsPlugin:
         with the right tx and chain wired through. Plugin no-ops the
         ABI fetch worker so the test doesn't hit Blockscout."""
         from qeth.plugins.transactions import (
-            TransactionDetailsDialog, TransactionListPanel,
+            TransactionDetailsDialog,
         )
         from qeth.transactions_cache import TransactionCache
 
@@ -1429,7 +1429,6 @@ class TestTokensPlugin:
         host = _StubHost(address=ADDR)
         tokens_plugin.attach(host)
         # Populate the panel so we can see clear() do something.
-        from qeth.tokens import TokenBalance
         tokens_plugin.widget().show_balances(ETH, 10**18, [], {})
         assert tokens_plugin.widget().table.rowCount() == 1
 
@@ -1568,7 +1567,6 @@ class TestTokensPlugin:
         # result isn't dropped) and the panel MUST be cleared (so
         # A's rows don't linger on B's view).
         tokens_plugin.widget()  # ensure panel exists
-        from qeth.tokens import TokenBalance
         # Seed the panel with something so the clear is observable.
         tokens_plugin.widget().show_balances(
             host.current_chain(), 10**18, [], {},

@@ -30,18 +30,16 @@ Decoding for ``eth_signTypedData_v4``:
 from __future__ import annotations
 
 import json
-import re
 from typing import Optional
 
 from PySide6.QtCore import QRegularExpression, Qt, Signal
 from PySide6.QtGui import (
-    QClipboard, QColor, QFont, QGuiApplication, QPalette,
+    QColor, QFont, QGuiApplication, QPalette,
     QSyntaxHighlighter, QTextCharFormat,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QSizePolicy, QStyle, QTextEdit, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..signing import MessageSigningRequest, TypedDataSigningRequest

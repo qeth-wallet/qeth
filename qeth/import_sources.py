@@ -203,9 +203,17 @@ def _decrypt_frame_ring(
         maxmem=_FRAME_SCRYPT_MAXMEM,
     )
 
-    from cryptography.hazmat.primitives.ciphers import (
-        Cipher, algorithms, modes,
-    )
+    try:
+        from cryptography.hazmat.primitives.ciphers import (
+            Cipher, algorithms, modes,
+        )
+    except ImportError as e:
+        # cryptography is an optional dep (only the Frame-import path uses it).
+        # The UI catches this and shows the message — keep it actionable.
+        raise ImportError(
+            "Importing Frame accounts needs the optional 'cryptography' "
+            "package. Install it with:  uv pip install 'qeth[frame]'"
+        ) from e
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     decryptor = cipher.decryptor()
     padded = decryptor.update(ciphertext) + decryptor.finalize()

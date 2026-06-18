@@ -210,3 +210,21 @@ class TestFrameSource:
         # And the decrypted key is k2, not _TEST_PRIV — index was
         # honoured.
         assert Account.decrypt(ks, PASSPHRASE_DST) == k2
+
+
+def test_frame_import_without_cryptography_is_actionable(monkeypatch):
+    """Without the optional cryptography dep, Frame import must fail with an
+    actionable 'install qeth[frame]' message — not a raw ImportError."""
+    import sys
+
+    from qeth import import_sources
+
+    # Skip the ~150ms scrypt (irrelevant to the guard) and simulate the
+    # cryptography submodule being unavailable.
+    monkeypatch.setattr(import_sources.hashlib, "scrypt",
+                        lambda *a, **k: b"\x00" * 32)
+    monkeypatch.setitem(
+        sys.modules, "cryptography.hazmat.primitives.ciphers", None)
+    blob = ":".join(["00" * 16, "00" * 16, "00" * 16])  # salt:iv:ciphertext
+    with pytest.raises(ImportError, match=r"qeth\[frame\]"):
+        import_sources._decrypt_frame_ring(blob, "passphrase")

@@ -71,6 +71,14 @@ uv run python -m qeth
 
 (Falls back to `uv pip install -e '.[bundled]'` if you have no system PySide6.)
 
+To **import accounts from Frame**, add the `frame` extra — it pulls in
+`cryptography` (used only to decrypt Frame's export). Everything else,
+including signing, works without it:
+
+```sh
+uv pip install -e '.[frame]'
+```
+
 ## Verified transaction previews (optional)
 
 The Send / signing dialogs preview the events a transaction will emit before

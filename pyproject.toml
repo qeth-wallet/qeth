@@ -37,6 +37,13 @@ bundled = ["PySide6>=6.6"]
 # when absent. Install with:
 #   uv pip install -e '.[simulate]'
 simulate = ["py-evm>=0.10"]
+# Decrypting Frame ring-signer account exports ("Import from Frame"). Only
+# that one code path needs cryptography (a heavy Rust-built dep), and the
+# import is guarded — without this extra, Frame import fails with a clear
+# "install qeth[frame]" message instead of a traceback. Everything else
+# (incl. signing) works without it. Install with:
+#   uv pip install -e '.[frame]'
+frame = ["cryptography>=42"]
 
 [dependency-groups]
 dev = [
@@ -48,6 +55,9 @@ dev = [
     # The simulate extra, mirrored here so the fork-engine tests always
     # run the real (pure-Python) EVM rather than skipping.
     "py-evm>=0.10",
+    # The frame extra, mirrored so the Frame-import decrypt tests run
+    # against the real cryptography rather than relying on system packages.
+    "cryptography>=42",
 ]
 
 [tool.pytest.ini_options]

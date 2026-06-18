@@ -23,6 +23,7 @@ import logging
 import re
 import urllib.parse
 import urllib.request
+from typing import Any, cast
 
 from . import USER_AGENT
 from .tokens import (   # reuse the per-chain maps + Etherscan v2 endpoint
@@ -174,7 +175,7 @@ class BlockscoutAbiSource:
         if not impl or impl.lower() in seen:
             return own
         impl_abi = self._fetch_recursive(chain_id, impl, depth + 1, seen)
-        merged: Abi = list(own) if isinstance(own, list) else []
+        merged: Abi = cast(Abi, list(own)) if isinstance(own, list) else []
         if isinstance(impl_abi, list):
             merged.extend(impl_abi)
         if not merged:
@@ -741,7 +742,7 @@ def _decode_event_with_abi(address, log, abi: Abi) -> dict | None:
             "transactionHash": HexBytes(b""), "blockHash": HexBytes(b""),
             "blockNumber": 0,
         }
-        for ev in contract.events:  # type: ignore[attr-defined]  # web3 ContractEvents iteration isn't typed
+        for ev in cast(Any, contract.events):   # web3 ContractEvents iteration isn't typed
             try:
                 decoded = ev().process_log(entry)
             except Exception:

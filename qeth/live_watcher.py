@@ -39,7 +39,7 @@ from typing import (TYPE_CHECKING, Any, NamedTuple)
 from collections.abc import Callable
 
 import aiohttp
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from . import USER_AGENT
 from .async_chain import make_async_web3, ws_urls_for
@@ -126,9 +126,9 @@ class LiveWatcher(QThread):
         pending_provider: "Callable[[int], list[PendingTx]] | None" = None,
         account_provider:
             "Callable[[], tuple[Chain, str] | None] | None" = None,
-        parent: object | None = None,
+        parent: QObject | None = None,
     ) -> None:
-        super().__init__(parent)  # type: ignore[arg-type]
+        super().__init__(parent)
         # web3's ws provider logs every connect / subscribe / disconnect at
         # INFO; on an account-switching session (each switch re-subscribes)
         # that's a wall of noise. Quiet to WARNING — errors still surface, and

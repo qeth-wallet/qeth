@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 
 import io
+from typing import Any, cast
 
 import segno
 
@@ -544,7 +545,8 @@ class WalletsPlugin(Plugin):
         menu). Pops the same Ledger/Watch-only picker as the
         toolbar dropdown, anchored at the cursor."""
         from PySide6.QtGui import QCursor
-        self._add_menu.exec(QCursor.pos())
+        # cast: ty mis-picks the QMenu.exec overload for a QPoint arg.
+        cast(Any, self._add_menu).exec(QCursor.pos())
 
     # --- tree population ----------------------------------------------------
 

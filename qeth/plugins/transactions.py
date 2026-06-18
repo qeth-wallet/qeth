@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from collections.abc import Callable
 
 from eth_utils import to_checksum_address
@@ -3006,7 +3006,8 @@ class _EventPreviewMixin:
         tabs.addTab(self._events_page, "&Events")
         tabs.currentChanged.connect(self._on_sim_tab_changed)
         # Parented to the dialog so it can't fire after the dialog dies.
-        self._sim_timer = QTimer(self)  # type: ignore[arg-type]  # mixin is always mixed into a QDialog (a QObject)
+        # The mixin is always mixed into a QDialog (a QObject).
+        self._sim_timer = QTimer(cast(QObject, self))
         self._sim_timer.setSingleShot(True)
         self._sim_timer.timeout.connect(self._on_sim_timeout)
         # The simulation worker is tracked by the host, not this dialog, so

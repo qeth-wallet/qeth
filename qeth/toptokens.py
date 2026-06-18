@@ -26,9 +26,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from typing import cast
 
 from . import USER_AGENT
 from .fsatomic import atomic_write_text
@@ -92,8 +93,13 @@ def fetch_top_tokens(
         batch = _get_json(f"{_MARKETS_URL}?{q}", timeout)
         if not isinstance(batch, list) or not batch:
             break
-        ranked.extend(str(c["id"]) for c in batch
-                      if isinstance(c, dict) and c.get("id"))
+        for coin in batch:
+            if not isinstance(coin, dict):
+                continue
+            c = cast(dict[str, object], coin)
+            coin_id = c.get("id")
+            if coin_id:
+                ranked.append(str(coin_id))
         if len(batch) < per_page:
             break
         page += 1
@@ -101,12 +107,22 @@ def fetch_top_tokens(
 
     # 2) id -> {slug: contract}, id -> symbol
     listing = _get_json(_LIST_URL, timeout)
-    platforms: dict[str, dict] = {}
+    platforms: dict[str, dict[str, object]] = {}
     symbols: dict[str, str] = {}
-    for c in listing if isinstance(listing, list) else []:
-        if isinstance(c, dict) and c.get("id"):
-            platforms[str(c["id"])] = c.get("platforms") or {}
-            symbols[str(c["id"])] = str(c.get("symbol") or "").upper()
+    listing_items = listing if isinstance(listing, list) else []
+    for coin in listing_items:
+        if not isinstance(coin, dict):
+            continue
+        c = cast(dict[str, object], coin)
+        coin_id = c.get("id")
+        if not coin_id:
+            continue
+        platforms_raw = c.get("platforms")
+        platforms[str(coin_id)] = (
+            cast(dict[str, object], platforms_raw)
+            if isinstance(platforms_raw, dict) else {}
+        )
+        symbols[str(coin_id)] = str(c.get("symbol") or "").upper()
 
     # 3) per chain, in rank order
     out: dict[int, list[TopToken]] = {cid: [] for cid in slugs}

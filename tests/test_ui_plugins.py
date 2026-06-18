@@ -42,6 +42,70 @@ class _StubHost:
         self.status_calls.append((text, timeout_ms))
 
 
+# --- TokensPlugin carry-forward -------------------------------------------
+
+ARB = next(c for c in DEFAULT_CHAINS if c.chain_id == 42161)
+USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+OTHER = "0x" + "cd" * 20
+
+
+class TestCarryForwardAbsent:
+    """An inconclusive balance read must not drop an already-shown token.
+    A token ABSENT from a multicall had its read fail (rate-limited
+    upstream / lagging node) — not a real zero, which comes back
+    explicitly — so its last-known balance is carried forward. A genuine
+    zero (present in the result) still hides. The explorer-fallback path
+    also prefers last-known over the explorer's stale value."""
+
+    def _plugin_with_prev(self, tmp_qeth, prev_balance=1000):
+        from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+        p = TokensPlugin.__new__(TokensPlugin)   # skip heavy __init__
+        p._wallet_cache = WalletCache()
+        p._wallet_cache.save(CachedWallet(
+            chain_id=ARB.chain_id, address=ADDR,
+            native_balance_wei=0, native_price_usd=None,
+            native_balance_updated=0, native_price_updated=0,
+            tokens=[CachedToken(
+                contract=USDC, symbol="USDC", name="USD Coin", decimals=6,
+                logo_uri=None, balance_raw=prev_balance, price_usd=None,
+                balance_updated=0, price_updated=0,
+            )],
+        ))
+        return p
+
+    def test_absent_token_is_carried_forward(self, tmp_qeth):
+        p = self._plugin_with_prev(tmp_qeth)
+        raw: dict = {}                       # multicall omitted USDC (read failed)
+        p._carry_forward_absent(ARB, ADDR, raw, [USDC])
+        assert raw[USDC] == 1000             # kept its last-known balance
+
+    def test_explicit_zero_is_not_overridden(self, tmp_qeth):
+        p = self._plugin_with_prev(tmp_qeth)
+        raw = {USDC: 0}                       # conclusive zero — genuinely emptied
+        p._carry_forward_absent(ARB, ADDR, raw, [USDC])
+        assert raw[USDC] == 0                 # left alone → row hides
+
+    def test_explorer_fallback_prefers_last_known(self, tmp_qeth):
+        p = self._plugin_with_prev(tmp_qeth)
+        raw = {USDC: 5}                       # block explorer's stale value
+        p._carry_forward_absent(ARB, ADDR, raw, [USDC], override_existing=True)
+        assert raw[USDC] == 1000              # last-known wins over stale explorer
+
+    def test_unknown_token_stays_absent(self, tmp_qeth):
+        p = self._plugin_with_prev(tmp_qeth)
+        raw = {}                              # OTHER was never shown before
+        p._carry_forward_absent(ARB, ADDR, raw, [OTHER])
+        assert raw == {}                      # nothing to carry forward
+
+    def test_no_prior_cache_is_noop(self, tmp_qeth):
+        from qeth.wallet_cache import WalletCache
+        p = TokensPlugin.__new__(TokensPlugin)
+        p._wallet_cache = WalletCache()       # nothing saved
+        raw: dict = {}
+        p._carry_forward_absent(ARB, ADDR, raw, [USDC])
+        assert raw == {}
+
+
 # --- TransactionsPlugin ----------------------------------------------------
 
 def _tx_send(*, nonce: int):

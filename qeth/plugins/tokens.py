@@ -1010,16 +1010,30 @@ class TokensPlugin(Plugin):
 
             def on_balances(cid: int, mc_native, mc_balances: dict) -> None:
                 pv["native_wei"] = int(mc_native)
-                pv["balances_raw"] = {k.lower(): int(v) for k, v in mc_balances.items()}
+                raw = {k.lower(): int(v) for k, v in mc_balances.items()}
+                # A queried token ABSENT from the result had its balanceOf
+                # read fail (rate-limited upstream / lagging node), not
+                # return zero — a real zero comes back explicitly. Keep its
+                # last-known value so a failed read can't blink it out.
+                self._carry_forward_absent(chain, address, raw, contracts)
+                pv["balances_raw"] = raw
                 pv["metadata"] = build_metadata()
                 kick_risk_then_prices()
 
             def on_balances_fail(msg: str) -> None:
                 log.warning("post-discovery multicall failed: %s", msg)
                 pv["native_wei"] = int(blockscout_native_wei)
-                pv["balances_raw"] = {
+                raw = {
                     b.contract.lower(): int(b.balance_raw) for b in blockscout_tokens
                 }
+                # The multicall failed entirely; these are the explorer's
+                # stale balances. For a token we were already showing, prefer
+                # its last-known (a conclusive multicall value) over the
+                # explorer's lagging number — the explorer value only seeds
+                # tokens we hadn't shown yet.
+                self._carry_forward_absent(
+                    chain, address, raw, contracts, override_existing=True)
+                pv["balances_raw"] = raw
                 pv["metadata"] = build_metadata()
                 kick_risk_then_prices()
 
@@ -1209,6 +1223,36 @@ class TokensPlugin(Plugin):
         addr = self.host.selected_address
         if addr is not None:
             self._refresh(addr)
+
+    def _carry_forward_absent(
+        self, chain, address: str, balances_raw: dict, contracts: list,
+        *, override_existing: bool = False,
+    ) -> None:
+        """Protect already-shown balances from an inconclusive read.
+
+        A token we queried but that's ABSENT from ``balances_raw`` had its
+        balanceOf read fail (a rate-limited upstream, a lagging node) rather
+        than return zero — a genuine zero comes back explicitly in a
+        multicall. So absence must not drop a token that was showing a
+        balance: carry its last-known value forward until a conclusive read
+        lands. With ``override_existing`` (the block-explorer fallback path),
+        also replace a stale explorer value for an already-shown token with
+        its last-known — the explorer's number only seeds tokens we hadn't
+        shown yet. Last-known comes from the saved wallet cache (the previous
+        good view); mutates ``balances_raw`` in place."""
+        cached = self._wallet_cache.load(chain.chain_id, address)
+        if cached is None:
+            return
+        prev = {t.contract.lower(): t.balance_raw
+                for t in cached.tokens if t.balance_raw}
+        if not prev:
+            return
+        queried = {c.lower() for c in contracts}
+        for cl, bal in prev.items():
+            if cl not in queried:
+                continue
+            if cl not in balances_raw or override_existing:
+                balances_raw[cl] = bal
 
     def _on_balance_refresh(self, chain_id: int, native_wei, balances_raw: dict) -> None:
         """Fast in-place balance refresh for the cached set, ahead of

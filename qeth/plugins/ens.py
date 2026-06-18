@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import ClassVar, Optional
 
 from PySide6.QtCore import QEvent, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
@@ -341,7 +341,7 @@ class EnsPanel(QWidget):
     # ✓/⚠ glyph gets emoji presentation on some themes and changes the row
     # height). The one icon covers the whole line — name ownership and the
     # resolved value together.
-    COLS = ["Name", "Expires", "Resolves to", ""]
+    COLS: ClassVar[list[str]] = ["Name", "Expires", "Resolves to", ""]
     _STATUS_COL = 3
 
     def __init__(self, parent=None):

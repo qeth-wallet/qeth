@@ -21,7 +21,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import ClassVar, Iterable
 
 from . import USER_AGENT
 
@@ -151,7 +151,7 @@ class CoinGeckoPerChain(TokenListSource):
 
     name = "coingecko"
     # chain_id → CoinGecko platform slug (used in their URL path)
-    SLUGS: dict[int, str] = {
+    SLUGS: ClassVar[dict[int, str]] = {
         1:     "uniswap",
         10:    "optimistic-ethereum",
         137:   "polygon-pos",
@@ -179,7 +179,7 @@ class Curve(TokenListSource):
 
     name = "curve"
     # chain_id → Curve blockchainId slug (Gnosis is "xdai", its old name)
-    SLUGS: dict[int, str] = {
+    SLUGS: ClassVar[dict[int, str]] = {
         1:     "ethereum",
         10:    "optimism",
         137:   "polygon",
@@ -233,7 +233,7 @@ class OneInch(TokenListSource):
     """
 
     name = "1inch"
-    CHAINS: list[int] = [1, 10, 137, 42161, 8453, 43114]
+    CHAINS: ClassVar[list[int]] = [1, 10, 137, 42161, 8453, 43114]
 
     def fetch_entries(self, cache_dir, ttl, timeout):
         for cid in self.CHAINS:

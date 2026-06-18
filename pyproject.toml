@@ -163,7 +163,16 @@ target-version = "py310"    # match [tool.mypy] python_version
 # async_chain._ensure_async_imports, and the Flatpak Qt setup in __main__ —
 # which the rule would wrongly flag. Broaden to E/W/I/B later via deliberate,
 # reviewed passes (and keep E402 off, or per-file-ignore the lazy modules).
-select = ["E9", "F"]
+#
+# RUF012 (mutable class default → mark ClassVar) is on: it documents that a
+# class-level constant is shared, not a per-instance mutable-default footgun.
+select = ["E9", "F", "RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test stubs/fixtures use shared class-level lists as quick recorders
+# (re-created per test, so harmless) — ClassVar discipline is a
+# production-code concern, not worth imposing on scaffolding.
+"tests/**" = ["RUF012"]
 
 [project.scripts]
 qeth = "qeth.__main__:main"

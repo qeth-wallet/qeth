@@ -3,9 +3,31 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMainWindow
 
-from qeth.__main__ import _adopt_host_qt_font, _ensure_legible_icon_theme
+from qeth.__main__ import (
+    _adopt_host_qt_font, _ensure_legible_icon_theme, _install_sigint_shutdown,
+)
+
+
+class _FakeSignalModule:
+    """Stand-in for the ``signal`` module so the SIGINT wiring is testable
+    without touching the real process-wide handler."""
+
+    SIGINT = object()
+
+    def __init__(self):
+        self.previous_handler = object()
+        self.handler = None
+
+    def getsignal(self, sig):
+        assert sig is self.SIGINT
+        return self.previous_handler
+
+    def signal(self, sig, handler):
+        assert sig is self.SIGINT
+        self.handler = handler
+        return self.previous_handler
 
 
 def test_icon_theme_is_a_noop_outside_flatpak(qtbot):
@@ -51,3 +73,31 @@ def test_font_is_a_noop_outside_flatpak(qtbot, tmp_path):
     before = app.font()
     _adopt_host_qt_font(app, {"XDG_CONFIG_HOME": str(tmp_path)})
     assert app.font() == before
+
+
+def test_sigint_shutdown_closes_window_via_close_event(qtbot):
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    fake_signal = _FakeSignalModule()
+    closed: list[bool] = []
+
+    class Window(QMainWindow):
+        def closeEvent(self, event):  # noqa: N802 - Qt override
+            closed.append(True)
+            super().closeEvent(event)
+
+    win = Window()
+    qtbot.addWidget(win)
+    win.show()
+    assert win.isVisible()
+
+    timer = _install_sigint_shutdown(app, win, signal_module=fake_signal)
+    try:
+        assert timer.isActive()
+        assert fake_signal.handler is not None
+        # Firing SIGINT schedules window.close() → closeEvent persists state.
+        fake_signal.handler(fake_signal.SIGINT, None)
+        qtbot.waitUntil(lambda: bool(closed) and not win.isVisible())
+    finally:
+        timer.stop()
+        timer.deleteLater()

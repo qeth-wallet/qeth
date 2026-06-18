@@ -1,8 +1,10 @@
 import locale
 import logging
 import os
+import signal
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from .alerts import warn
 
@@ -111,6 +113,40 @@ def _adopt_host_qt_font(app, environ) -> None:
             return
 
 
+def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
+    """Route Ctrl+C through the same close path as the window manager.
+
+    Qt's event loop sits in C++ long enough that Python's default SIGINT
+    handling isn't observed promptly. A 500 ms no-op QTimer gives the
+    interpreter regular checkpoints, and the handler schedules
+    ``window.close()`` so closeEvent persists UI state before app shutdown.
+    The previous handler is restored on aboutToQuit. ``signal_module`` is
+    injectable for testing."""
+    previous_handler = signal_module.getsignal(signal_module.SIGINT)
+    shutdown_requested = False
+
+    def request_shutdown(_signum, _frame) -> None:
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            return
+        shutdown_requested = True
+        QTimer.singleShot(0, window.close)
+
+    def restore_handler() -> None:
+        signal_module.signal(signal_module.SIGINT, previous_handler)
+
+    signal_module.signal(signal_module.SIGINT, request_shutdown)
+    app.aboutToQuit.connect(restore_handler)
+
+    # The interpreter-checkpoint heartbeat: parented to ``app`` so Qt keeps
+    # it alive (no Python ref needed).
+    timer = QTimer(app)
+    timer.setInterval(500)
+    timer.timeout.connect(lambda: None)
+    timer.start()
+    return timer
+
+
 def main() -> int:
     _harden_x11_backing_store(os.environ, sys.platform)
 
@@ -169,6 +205,9 @@ def main() -> int:
     # ties its lifetime to the window.
     _tray = install_tray(app, win)  # noqa: F841 — kept-alive ref
     win.set_tray(_tray)             # the desktop-notification sink (or None)
+    # Ctrl+C → window.close() (persists state) → app quits. Timer is
+    # app-parented, so no kept-alive ref needed.
+    _install_sigint_shutdown(app, win)
     try:
         return app.exec()
     finally:

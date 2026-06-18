@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
@@ -120,35 +121,74 @@ class RpcServer:
         self._thread.start()
         self._ready.wait(timeout=5.0)
 
-    def stop(self) -> None:
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+    def stop(self, timeout: float = 5.0) -> None:
+        """Shut the server down and BLOCK until it's actually down (or the
+        timeout elapses), so callers — e.g. ``main()``'s finally — know the
+        loop/runner/session are released before the process exits. Safe to
+        call from any thread (won't join itself)."""
+        loop = self._loop
+        thread = self._thread
+        if loop and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+            try:
+                future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                log.warning("timed out waiting for qeth JSON-RPC shutdown")
+            except Exception:
+                log.exception("qeth JSON-RPC shutdown failed")
+            finally:
+                if loop.is_running():
+                    loop.call_soon_threadsafe(loop.stop)
+        if (thread is not None and thread.is_alive()
+                and thread is not threading.current_thread()):
+            thread.join(timeout=timeout)
+        if thread is not None and not thread.is_alive():
+            self._thread = None
 
     @property
     def error(self) -> str | None:
         return self._error
 
     async def _shutdown(self) -> None:
-        try:
-            if self._client:
-                await self._client.close()
-            if self._runner:
-                await self._runner.cleanup()
-        finally:
-            if self._loop is not None:
-                self._loop.stop()
+        # Null the handles BEFORE closing them: in-flight request handlers
+        # read ``self._client`` (the "are we shutting down?" check) and a
+        # half-closed-but-non-None client would race. ``stop`` stops the
+        # loop afterwards (not here).
+        client = self._client
+        runner = self._runner
+        self._client = None
+        self._runner = None
+        if client:
+            await client.close()
+        if runner:
+            await runner.cleanup()
 
     def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
         try:
-            self._loop.run_until_complete(self._serve())
+            loop.run_until_complete(self._serve())
         except Exception as e:
             self._error = str(e)
             self._ready.set()
-            return
-        self._ready.set()
-        self._loop.run_forever()
+        else:
+            self._ready.set()
+            loop.run_forever()
+        finally:
+            # Defensive cleanup if stop() never ran (or the loop fell out of
+            # run_forever unexpectedly): release the session/runner and close
+            # the loop so we don't leak it or log "Task was destroyed".
+            try:
+                if self._client is not None or self._runner is not None:
+                    loop.run_until_complete(self._shutdown())
+            except Exception:
+                log.exception("qeth JSON-RPC cleanup failed")
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+                if self._loop is loop:
+                    self._loop = None
 
     async def _serve(self) -> None:
         self._client = ClientSession(

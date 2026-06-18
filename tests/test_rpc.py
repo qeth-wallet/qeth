@@ -7,11 +7,12 @@ the response grants it. These tests lock the granting headers in.
 """
 
 import asyncio
+from unittest.mock import MagicMock
 
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from qeth.rpc import _cors
+from qeth.rpc import RpcServer, _cors
 
 
 def _run(coro):
@@ -51,3 +52,17 @@ class TestCorsHeaders:
         resp = _run(_cors(req, _ok_handler))
         assert resp.headers["Access-Control-Allow-Origin"] == "*"
         assert resp.headers["Access-Control-Allow-Private-Network"] == "true"
+
+
+def test_rpc_stop_joins_background_thread():
+    """stop() now blocks until the server is actually down: the asyncio
+    loop stops and the background thread is joined (not left dangling)."""
+    server = RpcServer(MagicMock(), port=0)
+    server.start()
+    thread = server._thread
+    assert thread is not None
+    assert thread.is_alive()
+
+    server.stop()
+
+    assert not thread.is_alive()

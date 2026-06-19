@@ -28,6 +28,41 @@ def test_construction_quiets_web3_ws_logging():
     assert lg.level == logging.WARNING
 
 
+def test_ws_disconnect_is_quieted_not_dumped(caplog):
+    """A dropped WS connection surfaces as an unretrieved websockets exception
+    in a background task; the loop handler downgrades it to one warning rather
+    than letting asyncio dump a multi-line ERROR + traceback (issue #21)."""
+    import logging
+
+    class ConnectionClosedError(Exception):   # mimics websockets' type
+        pass
+    ConnectionClosedError.__module__ = "websockets.exceptions"
+
+    w = LiveWatcher(lambda: [])
+    default_called = []
+    fake_loop = type("L", (), {
+        "default_exception_handler": lambda self, ctx: default_called.append(ctx)
+    })()
+    with caplog.at_level(logging.WARNING, logger="qeth.live_watcher"):
+        w._quiet_ws_disconnects(
+            fake_loop, {"exception": ConnectionClosedError("ping timeout")})
+    assert not default_called                      # not dumped by default
+    assert any("connection dropped" in r.message for r in caplog.records)
+
+
+def test_real_loop_error_still_reaches_default_handler():
+    """A non-websockets exception must still hit the default handler so real
+    bugs stay loud."""
+    w = LiveWatcher(lambda: [])
+    seen = []
+    fake_loop = type("L", (), {
+        "default_exception_handler": lambda self, ctx: seen.append(ctx)
+    })()
+    ctx = {"exception": ValueError("boom")}
+    w._quiet_ws_disconnects(fake_loop, ctx)
+    assert seen == [ctx]
+
+
 def test_to_int_normalises_hex_and_int():
     """newHeads block numbers arrive as a hex str from DRPC but an int from
     publicnode (web3's subscription formatting is provider-inconsistent);

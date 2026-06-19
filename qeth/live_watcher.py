@@ -163,11 +163,30 @@ class LiveWatcher(QThread):
         except Exception:
             log.exception("live watcher loop crashed")
 
+    def _quiet_ws_disconnects(self, loop, context) -> None:
+        """Loop exception handler: a dropped WS connection (web3's websockets
+        transport) surfaces here as an *unretrieved* exception in the
+        library's background close task — typically a keepalive-ping timeout
+        or a peer reset. ``_serve_connection`` already catches the drop and
+        the supervisor reconnects with backoff, so the only fallout is the
+        default handler dumping a multi-line ERROR + traceback. Downgrade a
+        websockets-originated close to one clean warning; everything else
+        still goes to the default handler so real bugs stay loud."""
+        exc = context.get("exception")
+        name = type(exc).__name__ if exc is not None else ""
+        module = type(exc).__module__ if exc is not None else ""
+        if module.startswith("websockets") or name.startswith("ConnectionClosed"):
+            log.warning("live ws connection dropped (%s); reconnecting", name)
+            return
+        loop.default_exception_handler(context)
+
     async def _serve(self) -> None:
         """Supervisor: keep one ``_watch_chain`` task alive per desired
         chain, restarting it when its on-screen account changes (so the
         Transfer-log subscription re-targets), cancelling departed ones,
         until ``stop()``."""
+        asyncio.get_running_loop().set_exception_handler(
+            self._quiet_ws_disconnects)
         tasks: dict[int, tuple[asyncio.Task[None], str | None]] = {}
         try:
             while not self._stopping.is_set():

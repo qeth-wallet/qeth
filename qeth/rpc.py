@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import (
     ClientConnectorError, ClientOSError, ClientSession, TCPConnector,
@@ -26,6 +27,31 @@ class RpcError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+# Schemes a dapp-supplied chain entry may carry. The RPC endpoint can be
+# http(s) or ws(s) (some chains advertise a websocket RPC); the explorer is a
+# plain web page. Anything else — file://, data:, gopher://, a bare host with
+# no scheme — is rejected before the entry is ever shown for approval, so a
+# malicious wallet_addEthereumChain can't smuggle in a non-network URL that
+# later rounds-trip into a fetch. Loopback/private hosts are NOT blocked here:
+# the user explicitly approves each add (and may legitimately run a local
+# node), and the approval dialog shows the URL.
+_RPC_URL_SCHEMES = frozenset({"http", "https", "ws", "wss"})
+_EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _require_safe_chain_urls(rpc_url: str, explorer: str) -> None:
+    """Reject a dapp-supplied chain whose RPC or explorer URL isn't a normal
+    network URL (raises ``RpcError(-32602)``). Cheap structural validation —
+    not a trust decision (that's the approval prompt)."""
+    rpc = urlparse(rpc_url or "")
+    if rpc.scheme not in _RPC_URL_SCHEMES or not rpc.netloc:
+        raise RpcError(-32602, f"unsupported RPC URL: {rpc_url!r}")
+    if explorer:                       # optional
+        exp = urlparse(explorer)
+        if exp.scheme not in _EXPLORER_URL_SCHEMES or not exp.netloc:
+            raise RpcError(-32602, f"unsupported explorer URL: {explorer!r}")
 
 
 @web.middleware
@@ -575,12 +601,18 @@ class RpcServer:
             # be a no-op when we already have a working entry.
             if any(c.chain_id == cid for c in self.store.chains):
                 return None
+            rpc_url = p["rpcUrls"][0]
+            explorer = (p.get("blockExplorerUrls") or [""])[0]
+            # Structurally reject non-network URLs (file://, data:, …) before
+            # we even prompt — the approval below is the trust decision, this
+            # just keeps a garbage scheme from ever being persisted.
+            _require_safe_chain_urls(rpc_url, explorer)
             new_chain = Chain(
                 name=p.get("chainName", "Custom"),
                 chain_id=cid,
-                rpc_url=p["rpcUrls"][0],
+                rpc_url=rpc_url,
                 symbol=(p.get("nativeCurrency") or {}).get("symbol", "ETH"),
-                explorer=(p.get("blockExplorerUrls") or [""])[0],
+                explorer=explorer,
             )
             # Adding a genuinely new chain means trusting the
             # *site-supplied* RPC URL for every future read, preview,

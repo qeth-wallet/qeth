@@ -1370,6 +1370,42 @@ class TestRpcDispatchAddChain:
         assert ei.value.code == 4001
         assert chains == []
 
+    def test_non_network_rpc_url_is_rejected_before_prompt(self, qtbot):
+        """A file:// (or other non-network) RPC URL is structurally rejected
+        with -32602 and the user is never even prompted (issue #1)."""
+        from qeth.rpc import RpcError
+        bridge = SignerBridge()
+        asked: list = []
+        bridge.chain_add_requested.connect(lambda i, f: asked.append(i))
+        server, chains = self._make_server(bridge=bridge)
+        params = self._add_params()
+        params[0]["rpcUrls"] = ["file:///etc/passwd"]
+
+        async def go():
+            await server._dispatch("wallet_addEthereumChain", params)
+
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(go())
+        assert ei.value.code == -32602
+        assert chains == [] and asked == []   # not persisted, not prompted
+
+    def test_bad_explorer_scheme_is_rejected(self, qtbot):
+        from qeth.rpc import RpcError
+        bridge = SignerBridge()
+        bridge.chain_add_requested.connect(
+            lambda i, f: bridge.resolve_chain(f, True))
+        server, chains = self._make_server(bridge=bridge)
+        params = self._add_params()
+        params[0]["blockExplorerUrls"] = ["javascript:alert(1)"]
+
+        async def go():
+            await server._dispatch("wallet_addEthereumChain", params)
+
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(go())
+        assert ei.value.code == -32602
+        assert chains == []
+
     def test_known_chain_is_silent_noop_without_prompt(self, qtbot):
         from qeth.chains import DEFAULT_CHAINS
         bridge = SignerBridge()

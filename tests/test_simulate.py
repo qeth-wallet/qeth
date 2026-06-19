@@ -114,12 +114,15 @@ def test_simulation_error_returns_none():
                          fork_reader=_Boom()) is None
 
 
-def test_revert_returns_none_without_retrying():
-    # A genuine revert must fail fast — no backoff, single attempt.
+def test_revert_returns_a_note_without_retrying():
+    # A genuine revert must fail fast — no backoff, single attempt — and come
+    # back as a RevertNote (definitive; the UI warns) rather than None.
+    from qeth.simulate import RevertNote
     world = _WorldReader(code=REVERT_CODE)
     delays: list = []
-    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
-                         sleep=delays.append) is None
+    out = simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
+                        sleep=delays.append)
+    assert isinstance(out, RevertNote)
     assert delays == []
 
 
@@ -401,10 +404,28 @@ def test_logs_from_simv1_success_and_revert():
     out = _logs_from_simv1(ok)
     assert len(out) == 1 and out[0]["address"] == USDC
     assert out[0]["topics"][0] == TRANSFER and out[0]["data"].endswith("05")
-    # A reverted call → None (definitive), not a fall-back trigger.
+    # A reverted call → a RevertNote carrying the reason (definitive; the UI
+    # warns in red), not None and not a fall-back trigger.
+    from qeth.simulate import RevertNote
     reverted = [{"calls": [{"status": "0x0", "error": {"message": "boom"},
                             "logs": []}]}]
-    assert _logs_from_simv1(reverted) is None
+    note = _logs_from_simv1(reverted)
+    assert isinstance(note, RevertNote) and note.reason == "boom"
+    assert not note.verified
+
+
+def test_simv1_revert_decodes_error_string_into_the_note():
+    """The Error(string) envelope in returnData becomes the human reason."""
+    from qeth.simulate import RevertNote
+    err = ("0x08c379a0"
+           "0000000000000000000000000000000000000000000000000000000000000020"
+           "0000000000000000000000000000000000000000000000000000000000000026"
+           "45524332303a207472616e7366657220616d6f756e7420657863656564732062"
+           "616c616e63650000000000000000000000000000000000000000000000000000")
+    reverted = [{"calls": [{"status": "0x0", "returnData": err, "logs": []}]}]
+    note = _logs_from_simv1(reverted)
+    assert isinstance(note, RevertNote)
+    assert note.reason == "ERC20: transfer amount exceeds balance"
 
 
 def test_decode_revert_output_direct():
@@ -455,14 +476,32 @@ def test_orchestrator_skips_simv1_once_known_unsupported(monkeypatch):
 
 
 def test_orchestrator_revert_is_definitive_no_fork(monkeypatch):
-    # simulateV1 ran and the tx reverted (None) — that's the answer; we
-    # must NOT then fork (it'd just revert again, wasting requests).
+    # simulateV1 ran and the tx reverted — that's the answer; we must NOT
+    # then fork (it'd just revert again, wasting requests). The RevertNote
+    # is forwarded so the UI can warn.
+    from qeth.simulate import RevertNote
     sim._SIMV1_SUPPORT.clear()
-    monkeypatch.setattr(sim, "_simulate_via_rpc", lambda *a, **k: None)
+    monkeypatch.setattr(sim, "_simulate_via_rpc",
+                        lambda *a, **k: RevertNote("nope"))
     monkeypatch.setattr(sim, "_simulate_via_fork",
                         lambda *a, **k: pytest.fail("revert must not fork"))
-    assert simulate_logs(CHAIN, FROM, USDC, "0x", 0) is None
+    out = simulate_logs(CHAIN, FROM, USDC, "0x", 0)
+    assert isinstance(out, RevertNote) and out.reason == "nope"
     assert sim._SIMV1_SUPPORT[CHAIN.rpc_url] is True
+
+
+def test_verified_revert_is_flagged(monkeypatch):
+    """A revert proven over Helios state comes back as a RevertNote with
+    verified=True so the warning can say the RPC couldn't have faked it."""
+    import qeth.helios as helios_mod
+    from qeth.simulate import RevertNote
+    monkeypatch.setattr(sim, "fork_available", lambda: True)
+    monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
+    monkeypatch.setattr(sim, "_simulate_via_fork",
+                        lambda *a, **k: RevertNote("boom"))
+    out = simulate_logs(CHAIN, FROM, USDC, "0x1234", 0)
+    assert isinstance(out, RevertNote) and out.reason == "boom"
+    assert out.verified is True
 
 
 def test_simv1_rpc_raises_unsupported_on_minus_32601(monkeypatch):

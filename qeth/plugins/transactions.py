@@ -3036,11 +3036,57 @@ class _EventPreviewMixin:
         self._sim_timer = QTimer(cast(QObject, self))
         self._sim_timer.setSingleShot(True)
         self._sim_timer.timeout.connect(self._on_sim_timeout)
+        # A prominent, always-visible warning the host places above its
+        # Confirm button (outside the tabs), shown red when the preview
+        # predicts a revert — warn-only, the user can still send. Hidden
+        # otherwise. Word-wrapped + selectable; no setSizePolicy (that resets
+        # a wrapped QLabel's heightForWidth and clips it).
+        self._revert_banner = QLabel()
+        self._revert_banner.setWordWrap(True)
+        self._revert_banner.setVisible(False)
+        self._revert_banner.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Debounce proactive re-runs (dialog open, Send-dialog edits) so a
+        # predicted revert warns before the user opens the Events tab without
+        # forking on every keystroke.
+        self._sim_debounce = QTimer(cast(QObject, self))
+        self._sim_debounce.setSingleShot(True)
+        self._sim_debounce.timeout.connect(self._maybe_simulate)
         # The simulation worker is tracked by the host, not this dialog, so
         # it outlives a closed dialog (these dialogs are non-modal). Detach
         # its signal on close so a late `ready` can't call into a deleted
         # dialog.
         self.finished.connect(self._detach_sim)
+
+    # Debounce for proactive re-runs (open / Send-dialog edits).
+    SIM_DEBOUNCE_MS = 400
+
+    def revert_banner(self) -> QLabel:
+        """The red 'will revert' warning label — the host adds it to its own
+        layout above the Confirm button so it shows from any tab."""
+        return self._revert_banner
+
+    def request_simulation(self) -> None:
+        """Kick the preview proactively (debounced), so a predicted revert
+        warns before the user opens the Events tab or edits further. Idempotent
+        — ``_maybe_simulate`` no-ops when the tx params haven't changed."""
+        self._sim_debounce.start(self.SIM_DEBOUNCE_MS)
+
+    def _show_revert_warning(self, note) -> None:
+        bg, fg = _IDENTITY_TINT["warn"]
+        self._revert_banner.setStyleSheet(
+            f"background:{bg}; color:{fg}; padding:6px 10px; border-radius:4px;")
+        text = "⚠ This transaction is expected to revert"
+        reason = (note.reason or "").strip()
+        if reason:
+            text += f": {reason}"
+        if getattr(note, "verified", False):
+            text += "  (verified)"
+        self._revert_banner.setText(text)
+        self._revert_banner.setVisible(True)
+
+    def _clear_revert_warning(self) -> None:
+        self._revert_banner.setVisible(False)
 
     def _on_sim_tab_changed(self, idx: int) -> None:
         if self._sim_tabs.widget(idx) is self._events_page:
@@ -3057,10 +3103,14 @@ class _EventPreviewMixin:
         if params is None or not params[1]:   # no/invalid `to` address
             self._events.set_placeholder(self._sim_blocked_text())
             self._sim_key = None
+            self._clear_revert_warning()
             return
         if params == self._sim_key:
             return   # already simulated (or in flight) for this exact tx
         self._sim_key = params
+        # Drop any stale warning from the previous params while the new run
+        # is in flight; _on_sim_ready re-raises it if this tx also reverts.
+        self._clear_revert_warning()
         from ..simulate import simulation_available
         if not simulation_available(self.chain):
             self._events.set_placeholder(self._no_simulation_text())
@@ -3114,7 +3164,17 @@ class _EventPreviewMixin:
             return   # superseded by a newer sim, or already timed out
         self._sim_done = True
         self._detach_sim()
-        from ..simulate import SimulationNote, VerifiedLogs
+        from ..simulate import RevertNote, SimulationNote, VerifiedLogs
+        if isinstance(logs, RevertNote):
+            # Definitive revert — warn in red above Confirm (warn-only, send
+            # stays enabled) and mirror the reason in the Events tab.
+            self._show_revert_warning(logs)
+            self._events.set_verified(logs.verified)
+            self._events.set_placeholder(
+                f"(reverts: {logs.reason})" if logs.reason else "(reverts)"
+            )
+            return
+        self._clear_revert_warning()
         if isinstance(logs, SimulationNote):
             # Ran fine, but an (empty) events list would mislead — e.g.
             # calldata to a code-less target that the chain's node may
@@ -3123,16 +3183,16 @@ class _EventPreviewMixin:
             return
         self._events.set_verified(isinstance(logs, VerifiedLogs))
         if logs is None:
-            # The worker may have just *learned* this endpoint can't
-            # simulate (no eth_simulateV1, no py-evm) — distinguish that
-            # from a genuine revert so the note is accurate.
+            # No definitive answer — the worker may have just *learned* this
+            # endpoint can't simulate (no eth_simulateV1, no py-evm), or a
+            # transient failure. Not a revert (that's RevertNote now), so don't
+            # claim one.
             from ..simulate import simulation_available
             if not simulation_available(self.chain):
                 self._events.set_placeholder(self._no_simulation_text())
             else:
                 self._events.set_placeholder(
-                    "(simulation failed — the transaction would likely "
-                    "revert on-chain)"
+                    "(couldn't simulate this transaction — try again)"
                 )
             return
         self._events.set_logs(logs)
@@ -4236,7 +4296,12 @@ class SignTransactionDialog(_EventPreviewMixin, QDialog):
         # --- events preview tab (lazy local simulation) --------------
         self._init_event_preview(self._tabs, known_addresses=known_addresses,
                                  sim_floor_provider=sim_floor_provider)
+        # Run the preview up front so a predicted revert warns before the user
+        # opens the Events tab. (Send dialog: a no-op until inputs are valid;
+        # its recipient/amount edits re-kick it.)
+        self.request_simulation()
 
+        root.addWidget(self.revert_banner())
         root.addWidget(self.buttons)
 
         # --- decode calldata in the background ----------------------
@@ -4934,7 +4999,12 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         # --- events preview tab (lazy local simulation) --------------
         self._init_event_preview(self._tabs, known_addresses=known_addresses,
                                  sim_floor_provider=sim_floor_provider)
+        # Run the preview up front so a predicted revert warns before the user
+        # opens the Events tab. (Send dialog: a no-op until inputs are valid;
+        # its recipient/amount edits re-kick it.)
+        self.request_simulation()
 
+        root.addWidget(self.revert_banner())
         root.addWidget(self.buttons)
 
         # Wire live updates: recipient/amount changes re-evaluate the
@@ -4944,8 +5014,10 @@ class SendTokenDialog(_EventPreviewMixin, QDialog):
         self.recipient_edit.textChanged.connect(self._update_recipient_identity)
         self.recipient_edit.textChanged.connect(self._update_state)
         self.recipient_edit.textChanged.connect(self._update_recipient_hint)
+        self.recipient_edit.textChanged.connect(self.request_simulation)
         self.amount_edit.textChanged.connect(self._update_state)
         self.amount_edit.textChanged.connect(self._update_usd_value)
+        self.amount_edit.textChanged.connect(self.request_simulation)
         for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
             if sp is not None:
                 sp.valueChanged.connect(self._update_max_total)

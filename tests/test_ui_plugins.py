@@ -2934,7 +2934,36 @@ class TestEventPreviewTab:
         dlg._on_sim_ready(("old",), [])       # superseded → ignored
         assert "simulating" in dlg._events.events_view.toPlainText()
 
-    def test_sim_failure_shows_revert_hint(self, qtbot, tmp_qeth, monkeypatch):
+    def test_revert_shows_red_banner_and_events_note(
+            self, qtbot, tmp_qeth, monkeypatch):
+        from qeth.simulate import RevertNote
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._sim_key = ("k",)
+        dlg._sim_done = False
+        dlg._on_sim_ready(("k",), RevertNote("ERC20: insufficient allowance"))
+        # Prominent red warning above Confirm (isHidden, not isVisible — the
+        # dialog isn't shown in the test, but the banner is explicitly shown).
+        banner = dlg.revert_banner()
+        assert not banner.isHidden()
+        assert "revert" in banner.text().lower()
+        assert "insufficient allowance" in banner.text()
+        # ...mirrored in the Events tab.
+        assert "reverts" in dlg._events.events_view.toPlainText()
+
+    def test_verified_revert_is_labelled(self, qtbot, tmp_qeth):
+        from qeth.simulate import RevertNote
+        _, started = self._started()
+        dlg = self._send(qtbot, started)
+        dlg._sim_key = ("k",)
+        dlg._sim_done = False
+        dlg._on_sim_ready(("k",), RevertNote("boom", verified=True))
+        assert "verified" in dlg.revert_banner().text().lower()
+
+    def test_inconclusive_sim_does_not_warn_of_revert(
+            self, qtbot, tmp_qeth, monkeypatch):
+        # None now means 'couldn't tell' (no route / transient), NOT a revert —
+        # so no red banner and no revert wording.
         import qeth.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
@@ -2942,7 +2971,8 @@ class TestEventPreviewTab:
         dlg._sim_key = ("k",)
         dlg._sim_done = False
         dlg._on_sim_ready(("k",), None)
-        assert "revert" in dlg._events.events_view.toPlainText()
+        assert dlg.revert_banner().isHidden()
+        assert "revert" not in dlg._events.events_view.toPlainText().lower()
 
     def test_no_route_shows_unavailable_hint(
             self, qtbot, tmp_qeth, monkeypatch):

@@ -67,6 +67,21 @@ class SimulationNote:
         self.text = text
 
 
+class RevertNote(SimulationNote):
+    """A *definitive* 'this transaction reverts' outcome, carrying the decoded
+    reason (the ``Error(string)`` message, a panic code, or the bare selector).
+
+    Distinct from ``SimulationNote`` (ran fine, empty preview) and from ``None``
+    (no route / transient failure) so the UI can warn in red *before* broadcast
+    instead of hedging. ``verified`` marks a revert computed over Helios-proven
+    state — the RPC cannot have faked it, so the warning is trustworthy."""
+
+    def __init__(self, reason: str, *, verified: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.verified = verified
+
+
 class VerifiedLogs(list):
     """Simulation logs produced over proof-verified state (a Helios
     sidecar): every account/slot the execution touched was checked
@@ -178,9 +193,10 @@ def _logs_from_simv1(res):
         for c in (blk.get("calls") or []):
             status = c.get("status")
             if status not in ("0x1", "0x01", 1):
+                reason = _decode_simv1_revert(c)
                 log.warning("eth_simulateV1 call reverted (status %s): %s",
-                            status, _decode_simv1_revert(c))
-                return None
+                            status, reason)
+                return RevertNote(reason)
             for lg in (c.get("logs") or []):
                 out.append(_normalize_rpc_log(lg))
     return out
@@ -382,9 +398,10 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                     return SimulationNote(_NO_CODE_NOTE)
             return out
         except SimulationRevert as e:
-            log.warning("fork simulation reverted (block %s): %s", fork_no,
-                        _decode_revert_output("0x" + e.output.hex()))
-            return None
+            reason = _decode_revert_output("0x" + e.output.hex())
+            log.warning("fork simulation reverted (block %s): %s",
+                        fork_no, reason)
+            return RevertNote(reason)
         except Exception as e:
             if (_is_rate_limited(e) and attempt < retries - 1
                     and not _past(deadline)):
@@ -456,7 +473,11 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
                 floor_block=floor_block,
                 retries=retries, sleep=sleep, deadline=deadline)
             # Mark success (incl. an empty log list) as verified; None /
-            # SimulationNote pass through unchanged.
+            # SimulationNote pass through unchanged. A revert proven over
+            # Helios state is trustworthy too — flag it so the warning can say
+            # the RPC couldn't have faked it.
+            if isinstance(out, RevertNote):
+                out.verified = True
             return VerifiedLogs(out) if isinstance(out, list) else out
     if fork_reader is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
         try:

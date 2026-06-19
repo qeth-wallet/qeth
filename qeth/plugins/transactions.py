@@ -51,14 +51,9 @@ from PySide6.QtWidgets import (
 
 from .. import QULONGLONG
 from ..abi import (
-    KNOWN_EVENT_NAMES, BlockscoutAbiSource, EtherscanV2AbiSource,
+    KNOWN_EVENT_NAMES, AnyAbiSource, BlockscoutAbiSource, EtherscanV2AbiSource,
     RoutedAbiSource, decode_call, decode_event,
 )
-
-# The three ABI sources are duck-typed (no common base class); this Union
-# is their shared static type for the params/attrs that hold whichever one
-# the caller wired up — or the RoutedAbiSource built internally below.
-AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource
 from ..abi_cache import AbiCache
 from ..contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
@@ -770,12 +765,14 @@ class TxActivityWorker(QThread):
     loaded = Signal(QULONGLONG, str, object)   # (chain_id, addr_lower, dict[str, Activity])
 
     def __init__(self, chain, address: str, txs: list[Transaction],
-                 abi_cache: AbiCache, parent=None):
+                 abi_cache: AbiCache, abi_source: AnyAbiSource | None = None,
+                 parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
         self._txs = txs
         self._abi_cache = abi_cache
+        self._abi_source = abi_source
 
     def run(self) -> None:
         cid = self._chain.chain_id
@@ -790,6 +787,7 @@ class TxActivityWorker(QThread):
 
         try:
             fetch_activities(self._chain, self._address, self._txs,
+                             abi_source=self._abi_source,
                              abi_cache=self._abi_cache, on_batch=emit)
         except Exception as e:
             log.debug("activity build failed: %s", e)
@@ -1492,7 +1490,8 @@ class TransactionsPlugin(Plugin):
         if self.host is None or self._panel is None or not txs:
             return
         key = (chain.chain_id, address.lower())
-        worker = TxActivityWorker(chain, address, list(txs), self._abi_cache)
+        worker = TxActivityWorker(chain, address, list(txs), self._abi_cache,
+                                  self._abi_source)
         worker.loaded.connect(
             lambda _cid, _addr, acts, k=key: self._on_activities(k, acts))
         self.host.start_worker(worker)

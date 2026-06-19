@@ -66,6 +66,30 @@ def test_legacy_unverified_sentinel_without_ts_is_refetched(tmp_qeth):
     assert cache.load(1, ADDR) is None
 
 
+def test_unverified_sentinel_does_not_clobber_a_real_abi(tmp_qeth):
+    """Verified-ness is monotonic: a later "unverified" miss from a
+    single-explorer resolver must not erase an ABI another source already
+    cached. This is the write-write race that left freshly-decoded calls
+    showing their raw 4-byte selector in the tx list — guard it at the
+    store so no resolver ordering can trigger it."""
+    cache = AbiCache()
+    cache.save(1, ADDR, ABI_SAMPLE)
+    cache.save(1, ADDR, False)          # a Blockscout-only miss lands later
+    loaded = cache.load(1, ADDR)
+    assert isinstance(loaded, list)
+    assert loaded[0]["name"] == "transfer"
+
+
+def test_real_abi_still_heals_an_unverified_sentinel(tmp_qeth):
+    """The guard is one-directional — a real ABI *may* replace a negative
+    sentinel (a contract verified since we cached the miss), it just can't
+    be replaced *by* one."""
+    cache = AbiCache()
+    cache.save(1, ADDR, False)
+    cache.save(1, ADDR, ABI_SAMPLE)
+    assert cache.load(1, ADDR) == ABI_SAMPLE
+
+
 def test_corrupt_file_returns_none(tmp_qeth):
     cache = AbiCache()
     p = cache._path(1, ADDR)

@@ -142,6 +142,15 @@ class AbiCache:
         p = self._path(chain_id, address)
         p.parent.mkdir(parents=True, exist_ok=True)
         if abi is False:
+            # Never let an "unverified" sentinel overwrite a real ABI we
+            # already hold. Verified-ness is monotonic — once a contract
+            # is verified it stays verified — so a single-explorer miss
+            # (e.g. a Blockscout-only resolver on an Etherscan-verified
+            # contract) must not erase another source's hit. This is the
+            # write-write race that left freshly-decoded calls showing
+            # their raw 4-byte selector in the tx list.
+            if isinstance(self.load(chain_id, address), list):
+                return
             payload: object = {"unverified": True, "ts": time.time()}
         elif isinstance(abi, list):
             payload = {"abi": abi}

@@ -27,7 +27,7 @@ from typing import Any, cast
 from collections.abc import Callable, Iterable
 
 from . import USER_AGENT
-from .abi import BlockscoutAbiSource, selector_names
+from .abi import AnyAbiSource, BlockscoutAbiSource, selector_names
 from .abi_cache import AbiCache
 from .chains import Chain
 from .tokens import BLOCKSCOUT_INSTANCES
@@ -144,7 +144,7 @@ class _Verbs:
     change); unverified contracts get a negative sentinel so we don't
     refetch. Returns None when the contract has no usable ABI."""
 
-    def __init__(self, chain_id: int, source: BlockscoutAbiSource, cache: AbiCache):
+    def __init__(self, chain_id: int, source: AnyAbiSource, cache: AbiCache):
         self._chain_id = chain_id
         self._source = source
         self._cache = cache
@@ -251,7 +251,7 @@ def fetch_activities(
     txs: list[Transaction],
     *,
     timeout: float = 25.0,
-    abi_source: BlockscoutAbiSource | None = None,
+    abi_source: AnyAbiSource | None = None,
     abi_cache: AbiCache | None = None,
     on_batch: Callable[[dict[str, Activity]], None] | None = None,
 ) -> dict[str, Activity]:

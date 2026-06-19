@@ -355,6 +355,11 @@ class RoutedAbiSource:
         raise AbiSourceError(f"No ABI source supports chain {chain_id}")
 
 
+# Any of the concrete ABI sources — they share .supports()/.fetch(). Used
+# wherever a caller is agnostic about which explorer backs the lookup.
+AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource
+
+
 def _dedup_by_selector(abi: Abi) -> Abi:
     """Drop function entries whose 4-byte selector we've already
     seen. Order matters: the proxy's own ABI comes first, so its

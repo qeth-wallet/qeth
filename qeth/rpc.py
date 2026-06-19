@@ -158,6 +158,26 @@ class RpcServer:
         runner = self._runner
         self._client = None
         self._runner = None
+        # Close live WS clients up front. Otherwise the site's shutdown
+        # (inside runner.cleanup) waits its shutdown_timeout for these
+        # still-open connections to drain — which, with a dapp/browser
+        # connected, is exactly the multi-second "timed out waiting for
+        # shutdown" hang on app close. Bounded so a dead socket can't itself
+        # stall the close.
+        if self._ws_clients:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(ws.close() for ws in list(self._ws_clients)),
+                        return_exceptions=True,
+                    ),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                pass
+        self._ws_clients.clear()
+        self._ws_subscriptions.clear()
+        self._ws_origin.clear()
         if client:
             await client.close()
         if runner:
@@ -211,7 +231,11 @@ class RpcServer:
         # stay.
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
+        # shutdown_timeout caps how long runner.cleanup() waits for open
+        # connections (default 60s) — the backstop behind closing WS clients
+        # in _shutdown, so close stays prompt even if a connection lingers.
+        site = web.TCPSite(self._runner, self.host, self.port,
+                           shutdown_timeout=1.0)
         await site.start()
         log.info("qeth JSON-RPC listening on http(s)/ws://%s:%d", self.host, self.port)
 

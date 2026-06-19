@@ -66,3 +66,25 @@ def test_rpc_stop_joins_background_thread():
     server.stop()
 
     assert not thread.is_alive()
+
+
+def test_shutdown_closes_ws_clients_so_cleanup_does_not_block():
+    """A connected WS client is closed up front during shutdown — otherwise
+    the site's cleanup waits its shutdown_timeout for the open socket, which
+    is the slow-close hang. _shutdown also clears the WS bookkeeping."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    server = RpcServer(MagicMock())
+    ws = MagicMock(close=AsyncMock())
+    server._ws_clients = {ws}
+    server._ws_subscriptions = {ws: {"chainChanged": "0x1"}}
+    server._ws_origin = {ws: "https://app.example"}
+    server._client = None
+    server._runner = None
+
+    asyncio.run(server._shutdown())
+
+    ws.close.assert_awaited_once()
+    assert server._ws_clients == set()
+    assert server._ws_subscriptions == {}
+    assert server._ws_origin == {}

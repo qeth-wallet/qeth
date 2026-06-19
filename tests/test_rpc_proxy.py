@@ -6,7 +6,7 @@ into a clean JSON-RPC error + a host-failure cooldown — not crash the dispatch
 with a JSONDecodeError traceback (the production bug this covers).
 """
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -289,3 +289,79 @@ def test_handle_one_routes_raw_broadcast_with_broadcast_flag():
         {"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction",
          "params": ["0xraw"]}, None))
     assert calls == {"method": "eth_sendRawTransaction", "broadcast": True}
+
+
+class TestGetLogsChunking:
+    """eth_getLogs wider than a free RPC's range cap is split into
+    <=_MAX_LOG_BLOCKS-block chunks (each still failed-over via _proxy), and the
+    per-chunk log lists are concatenated (chunks are disjoint + ascending)."""
+
+    def _server(self):
+        store = MagicMock()
+        store.chains = DEFAULT_CHAINS
+        store.current_chain.return_value = DEFAULT_CHAINS[0]
+        return RpcServer(store)
+
+    def test_narrow_range_is_forwarded_unchunked(self):
+        server = self._server()
+        server._proxy = AsyncMock(return_value=[])
+        asyncio.run(server._get_logs_chunked(
+            [{"fromBlock": "0x64", "toBlock": "0xc8"}], None))  # 100..200
+        assert server._proxy.await_count == 1
+        assert server._proxy.await_args.args[0] == "eth_getLogs"
+
+    def test_wide_range_is_chunked_and_merged(self):
+        server = self._server()
+        seen = []
+
+        async def fake_proxy(method, params, origin=None, **kw):
+            f, t = (int(params[0]["fromBlock"], 16),
+                    int(params[0]["toBlock"], 16))
+            seen.append((f, t))
+            return [{"range": [f, t]}]
+        server._proxy = fake_proxy
+
+        out = asyncio.run(server._get_logs_chunked(
+            [{"fromBlock": "0x0", "toBlock": hex(25000)}], None))
+        assert seen == [(0, 9999), (10000, 19999), (20000, 25000)]
+        assert all(t - f <= 9999 for f, t in seen)   # never over 10000 blocks
+        assert len(out) == 3                          # merged
+
+    def test_latest_bound_is_resolved_then_chunked(self):
+        server = self._server()
+        seen = []
+
+        async def fake_proxy(method, params, origin=None, **kw):
+            if method == "eth_blockNumber":
+                return hex(15000)
+            seen.append((int(params[0]["fromBlock"], 16),
+                         int(params[0]["toBlock"], 16)))
+            return []
+        server._proxy = fake_proxy
+
+        asyncio.run(server._get_logs_chunked(
+            [{"fromBlock": "0x0", "toBlock": "latest"}], None))
+        assert seen == [(0, 9999), (10000, 15000)]
+
+    def test_blockhash_filter_is_passthrough(self):
+        server = self._server()
+        server._proxy = AsyncMock(return_value=[])
+        asyncio.run(server._get_logs_chunked(
+            [{"blockHash": "0x" + "ab" * 32}], None))
+        assert server._proxy.await_count == 1
+
+    def test_absurd_range_is_forwarded_as_is(self):
+        server = self._server()
+        calls = []
+
+        async def fake_proxy(method, params, origin=None, **kw):
+            calls.append((method, params))
+            return []
+        server._proxy = fake_proxy
+
+        # 0 .. 10_000_000 → past the 50-chunk cap → single forward, unchanged.
+        asyncio.run(server._get_logs_chunked(
+            [{"fromBlock": "0x0", "toBlock": hex(10_000_000)}], None))
+        getlogs = [c for c in calls if c[0] == "eth_getLogs"]
+        assert len(getlogs) == 1
+        assert getlogs[0][1][0]["toBlock"] == hex(10_000_000)

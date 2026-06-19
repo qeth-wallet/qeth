@@ -350,18 +350,15 @@ class TestGetLogsChunking:
             [{"blockHash": "0x" + "ab" * 32}], None))
         assert server._proxy.await_count == 1
 
-    def test_absurd_range_is_forwarded_as_is(self):
+    def test_over_cap_range_returns_clean_error_and_is_not_forwarded(self):
         server = self._server()
-        calls = []
-
-        async def fake_proxy(method, params, origin=None, **kw):
-            calls.append((method, params))
-            return []
-        server._proxy = fake_proxy
-
-        # 0 .. 10_000_000 → past the 50-chunk cap → single forward, unchanged.
-        asyncio.run(server._get_logs_chunked(
-            [{"fromBlock": "0x0", "toBlock": hex(10_000_000)}], None))
-        getlogs = [c for c in calls if c[0] == "eth_getLogs"]
-        assert len(getlogs) == 1
-        assert getlogs[0][1][0]["toBlock"] == hex(10_000_000)
+        server._proxy = AsyncMock(return_value=[])
+        # 0 .. 10_000_000 (a 0→latest-style scan) is past the cap → a clean
+        # limit-exceeded error, and crucially NOT forwarded upstream (no
+        # doomed sub-requests, no opaque DRPC 400 reaching the dapp).
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(server._get_logs_chunked(
+                [{"fromBlock": "0x0", "toBlock": hex(10_000_000)}], None))
+        assert ei.value.code == -32005
+        assert "too wide" in ei.value.message
+        server._proxy.assert_not_awaited()

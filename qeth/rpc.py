@@ -697,9 +697,11 @@ class RpcServer:
     # Free-tier eth_getLogs range cap. DRPC rejects ranges OVER 10000 blocks,
     # so a chunk spans at most this many blocks (fromBlock..fromBlock+N-1).
     _MAX_LOG_BLOCKS = 10000
-    # Don't fan a single getLogs into more than this many requests — a dapp
-    # asking for millions of blocks at once is forwarded as-is instead.
-    _MAX_LOG_CHUNKS = 50
+    # Cap on chunks per getLogs (≈ _MAX_LOG_BLOCKS × this = 1.5M blocks, a few
+    # months of Ethereum). A wider range — e.g. a dapp scanning 0→latest — is
+    # refused with a clean error rather than fanned into thousands of doomed
+    # sub-requests: no RPC serves a full-chain log scan; that's an indexer's job.
+    _MAX_LOG_CHUNKS = 150
 
     async def _get_logs_chunked(self, params: list,
                                 origin: str | None) -> Any:
@@ -721,10 +723,21 @@ class RpcServer:
         # the cap, so forward unchanged. Also bail on an inverted range.
         if start > end or (end - start) < self._MAX_LOG_BLOCKS:
             return await self._proxy("eth_getLogs", params, origin=origin)
-        if (end - start) // self._MAX_LOG_BLOCKS + 1 > self._MAX_LOG_CHUNKS:
-            log.warning("eth_getLogs over %d blocks (%d–%d) exceeds the chunk "
-                        "cap; forwarding as-is", end - start + 1, start, end)
-            return await self._proxy("eth_getLogs", params, origin=origin)
+        max_blocks = self._MAX_LOG_BLOCKS * self._MAX_LOG_CHUNKS
+        if (end - start) >= max_blocks:
+            # Too wide to serve. Return a clean, actionable JSON-RPC error
+            # (limit-exceeded) instead of fanning out or forwarding DRPC's
+            # opaque 400 — so the dapp gets a definitive answer and stops
+            # retry-storming an impossible request.
+            log.warning("eth_getLogs range too wide: %d blocks (%d–%d); "
+                        "refusing (max %d)", end - start + 1, start, end,
+                        max_blocks)
+            raise RpcError(
+                -32005,
+                f"eth_getLogs range too wide: {end - start + 1} blocks "
+                f"(max {max_blocks}). Narrow fromBlock/toBlock, or use an "
+                f"indexer for full-history scans.",
+            )
         out: list = []
         lo = start
         while lo <= end:

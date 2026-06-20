@@ -21,8 +21,18 @@ dependencies = [
     "ledgereth>=0.10",
     "aiohttp>=3.9",
     "segno>=1.6",
-    "eth-abi>=5.0",
     "web3>=7",
+    # The eth stack web3 pulls in, but which qeth ALSO imports directly —
+    # declared explicitly (not leaned on as web3 transitives) so a self-
+    # contained install can't break when web3's dependency graph shifts. Same
+    # discipline that the `frame`/cryptography split enforced; deptry checks it.
+    "eth-abi>=5.0",
+    "eth-account>=0.11",
+    "eth-typing>=4",
+    "eth-utils>=4",
+    "hexbytes>=1",
+    "requests>=2.31",
+    "rlp>=4",
 ]
 
 [project.optional-dependencies]
@@ -217,6 +227,26 @@ ignore = ["UP031"]
 # (re-created per test, so harmless) — ClassVar discipline is a
 # production-code concern, not worth imposing on scaffolding.
 "tests/**" = ["RUF012"]
+
+[tool.deptry]
+# Dependency hygiene checker (`uvx deptry .`): catches modules imported but
+# not declared (the cryptography-class bug) and declared-but-unused deps. Run
+# it after touching imports/deps. The remaining noise is all by-design:
+#   - PySide6: deliberately NOT a hard dep — system-site-packages on Linux or
+#     the [bundled] extra (see the header above). deptry sees the import but
+#     not the runtime provision either way.
+#   - Falkon: the host browser's plugin API, present only inside Falkon.
+#   - py-evm imports as `eth` (+ owns `eth.*`); web3 ships the `ens` module.
+known_first_party = ["qeth_connector"]
+
+[tool.deptry.package_module_name_map]
+py-evm = ["eth"]
+web3 = ["web3", "ens"]
+
+[tool.deptry.per_rule_ignores]
+# DEP001 = imported but undeclared; DEP002 = declared but unused.
+DEP001 = ["PySide6", "Falkon"]
+DEP002 = ["PySide6"]
 
 [project.scripts]
 qeth = "qeth.__main__:main"

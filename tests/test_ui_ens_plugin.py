@@ -410,6 +410,22 @@ class TestEnsPlugin:
         assert len(host.started_workers) == 1
         assert host.started_workers[0]._name == "alice.eth"
 
+    def test_record_workers_do_not_share_an_ethclient(self, qtbot):
+        """Each record worker must make its own EthClient on its own thread —
+        never a shared one passed in by the plugin (issue #6: EthClient owns a
+        non-thread-safe requests.Session + failover state)."""
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._on_records_requested("alice.eth")
+        plugin._on_records_requested("bob.eth")
+        assert len(host.started_workers) == 2
+        # No worker carries a plugin-supplied client → read_records builds one
+        # inside run(), on the worker's own thread.
+        assert all(w._client is None for w in host.started_workers)
+        assert not hasattr(plugin, "_read_client")
+
     def test_records_cache_paints_instantly(self, qtbot, tmp_qeth):
         plugin = EnsPlugin(_StubStore())
         host = _StubHost(address=ADDR)

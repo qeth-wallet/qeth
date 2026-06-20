@@ -279,7 +279,11 @@ class EnsRecordsWorker(QThread):
         self._chain = chain
         self._name = name
         self._wait_s = wait_s
-        self._client = client          # warm EthClient reused across expands
+        # None in production → read_records makes its own EthClient on THIS
+        # worker's thread (issue #6: no client shared across threads). A test
+        # may inject one; a single worker runs alone on its thread, so that's
+        # still single-threaded use.
+        self._client = client
         self._resolver = resolver      # cached per-name resolver (skips a round)
         # Forced (post-write) re-read: wait for Helios's verified head to catch
         # up to the value the fast read already saw, so the ✓ lands on the NEW
@@ -758,10 +762,8 @@ class EnsPlugin(Plugin):
         self._force_reread: set[str] = set()
         # Per-name resolver (from the ownership pass) — lets a record read skip
         # its resolver-lookup round-trip. Refreshed every load (self-heals a
-        # re-pointed resolver). And a warm EthClient reused across record reads
-        # so each expand doesn't pay a fresh TLS handshake.
+        # re-pointed resolver).
         self._resolver_cache: dict[str, str] = {}
-        self._read_client = None
         # Names the chain proved this address does NOT own — indexer lies we
         # drop and keep filtered out of re-renders this session. Reset per
         # account; never persisted (a stale denial must never hide a real name).
@@ -950,11 +952,14 @@ class EnsPlugin(Plugin):
         chain = self._mainnet()
         if chain is None:
             return
-        if self._read_client is None:
-            from ..chain import EthClient
-            self._read_client = EthClient(chain)
+        # No shared EthClient: each worker creates its own inside run() (on its
+        # own thread). EthClient owns a requests.Session + web3 provider stack +
+        # mutable failover state, none thread-safe — sharing one across the
+        # concurrent record workers (one per expanded name) could interleave
+        # session/failover state (issue #6). A fresh client per expand costs a
+        # TLS handshake; correctness wins, and expands are user-paced.
         worker = EnsRecordsWorker(
-            chain, name, client=self._read_client,
+            chain, name,
             resolver=self._resolver_cache.get(nl), catchup=force)
         worker.ready.connect(self._on_records_ready)
         self._start(worker)

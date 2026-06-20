@@ -54,6 +54,33 @@ def _require_safe_chain_urls(rpc_url: str, explorer: str) -> None:
             raise RpcError(-32602, f"unsupported explorer URL: {explorer!r}")
 
 
+def _effective_origin(http_origin: str | None,
+                      frame_origin: str | None) -> str | None:
+    """The origin to trust + display for a request (the signing dialog's
+    "Requested by"). Display-trust only — a wrong value mislabels who asked;
+    it grants no capability (the tx details + confirm gate are unchanged).
+
+    ``http_origin`` is the transport ``Origin`` header — browser-set, so page
+    JavaScript can't forge it. ``frame_origin`` is a ``__frameOrigin`` field in
+    the JSON body: the Frame extension attaches the real dapp URL there because
+    ITS own transport origin is the extension's, not the dapp's. We honour that,
+    but only when the transport isn't itself a web page.
+
+    A real website always carries an ``http(s)`` transport Origin. If one is
+    present and ``__frameOrigin`` claims a *different* site, that's a spoof — a
+    page POSTing ``__frameOrigin: "https://app.uniswap.org"`` to fake the
+    dialog — so the unforgeable transport origin wins. Frame's transport origin
+    is an extension scheme (or absent), and qeth's own Falkon connector sets the
+    real dapp Origin as the transport header without ``__frameOrigin`` at all,
+    so neither legitimate path is affected."""
+    if not frame_origin:
+        return http_origin
+    if http_origin and http_origin != frame_origin:
+        if urlparse(http_origin).scheme in ("http", "https"):
+            return http_origin     # a real site can't claim to be another
+    return frame_origin
+
+
 @web.middleware
 async def _cors(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -473,14 +500,15 @@ class RpcServer:
         method = req.get("method")
         params = req.get("params") or []
         rid = req.get("id")
-        # Frame attaches the real dapp URL as a top-level
-        # ``__frameOrigin`` field on each JSON-RPC message — the
-        # HTTP / WS Origin header is the extension's own. Other
-        # wallet-extension wire formats may add their own field;
-        # add them here as we learn the names.
+        # Frame attaches the real dapp URL as a top-level ``__frameOrigin``
+        # field (its own transport Origin is the extension's). Honour it, but
+        # never let it OVERRIDE a real web transport origin — a malicious page
+        # could otherwise POST __frameOrigin to spoof the signing dialog's
+        # "Requested by". See _effective_origin.
         frame_origin = req.get("__frameOrigin")
-        if isinstance(frame_origin, str) and frame_origin:
-            origin = frame_origin
+        if not isinstance(frame_origin, str):
+            frame_origin = None
+        origin = _effective_origin(origin, frame_origin)
         try:
             if not isinstance(method, str):
                 raise RpcError(-32600, "Invalid Request: 'method' must be a string")

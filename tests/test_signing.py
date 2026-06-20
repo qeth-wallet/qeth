@@ -178,6 +178,53 @@ class TestRpcOriginExtraction:
         asyncio.run(go())
         assert captured[0].origin == "https://app.uniswap.org"
 
+    def test_web_origin_cannot_be_overridden_by_frame_spoof(self, qtbot):
+        """A malicious page POSTs __frameOrigin to impersonate a trusted dapp
+        while its true (browser-set, unforgeable) Origin is evil.example. The
+        transport origin must win, so the dialog shows the real site (#2)."""
+        server, captured = self._server_with_bridge()
+
+        async def go():
+            return await server._handle_one(
+                {
+                    "method": "eth_sendTransaction",
+                    "params": [{"from": ADDR_LOWER, "to": TOKEN_LOWER}],
+                    "__frameOrigin": "https://app.uniswap.org",   # the spoof
+                },
+                origin="https://evil.example",                   # the truth
+            )
+
+        asyncio.run(go())
+        assert captured[0].origin == "https://evil.example"
+
+
+class TestEffectiveOrigin:
+    """_effective_origin: trust the unforgeable transport Origin over a body
+    __frameOrigin claim, except where the transport isn't a web page (the
+    Frame-extension case it exists for)."""
+
+    def _eff(self, http, frame):
+        from qeth.rpc import _effective_origin
+        return _effective_origin(http, frame)
+
+    def test_extension_transport_honours_frame_origin(self):
+        # Frame: transport is the extension → trust the dapp it reports.
+        assert self._eff("chrome-extension://abc",
+                         "https://curve.finance") == "https://curve.finance"
+
+    def test_absent_transport_honours_frame_origin(self):
+        assert self._eff(None, "https://curve.finance") == "https://curve.finance"
+
+    def test_conflicting_web_transport_wins(self):
+        assert self._eff("https://evil.example",
+                         "https://uniswap.org") == "https://evil.example"
+
+    def test_no_frame_origin_uses_transport(self):
+        assert self._eff("https://app.uniswap.org", None) == "https://app.uniswap.org"
+
+    def test_matching_origins_are_stable(self):
+        assert self._eff("https://x.org", "https://x.org") == "https://x.org"
+
 
 # --- apply_gas_policy (pure) --------------------------------------------
 

@@ -1,8 +1,40 @@
 """Tests for qeth.store — config persistence + hide/show semantics."""
 
+import os
+import stat
+
+from qeth.store import Store, _merge_chain, ensure_private_root
 
 
-from qeth.store import Store, _merge_chain
+class TestPrivateRoot:
+    """~/.qeth must be owner-only (0700) so another local user can't traverse
+    into the cache subtree and read wallet addresses / chain ids / metadata
+    (issue #3). Mirrors the keystore dir's hardening."""
+
+    def test_ensure_private_root_creates_owner_only(self, tmp_qeth):
+        import qeth.store as store_mod
+        # tmp_qeth points CONFIG_DIR at a fresh dir; make it a child that
+        # doesn't exist yet so we test creation, not just chmod.
+        root = tmp_qeth / "root"
+        store_mod.CONFIG_DIR = root
+        ensure_private_root()
+        assert root.is_dir()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+    def test_ensure_private_root_tightens_a_loose_existing_dir(self, tmp_qeth):
+        import qeth.store as store_mod
+        root = tmp_qeth / "loose"
+        root.mkdir()
+        os.chmod(root, 0o755)            # an older build's default-umask dir
+        store_mod.CONFIG_DIR = root
+        ensure_private_root()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+    def test_save_hardens_the_root(self, tmp_qeth):
+        # Store.save() goes through ensure_private_root, so a round-trip
+        # leaves the config dir owner-only.
+        Store().save()
+        assert stat.S_IMODE(tmp_qeth.stat().st_mode) == 0o700
 
 
 class TestRoundTrip:

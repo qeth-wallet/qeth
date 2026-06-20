@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from dataclasses import fields
 from pathlib import Path
@@ -44,6 +45,21 @@ def _merge_chain(persisted: dict) -> Chain:
 
 CONFIG_DIR = Path.home() / ".qeth"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def ensure_private_root() -> None:
+    """Create ``~/.qeth`` owner-only (0700). Every qeth cache lives under it,
+    so a private root keeps another local user from traversing into any of
+    them — wallet addresses, chain ids, contract metadata leak through dir
+    names and cache paths otherwise — regardless of each subdir's own mode
+    (a 0700 root denies the `x` traversal the whole subtree needs). Idempotent
+    and best-effort: tightens a root left at a looser umask by an older build,
+    and a chmod failure (exotic FS) still leaves the dir created."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
 
 
 class Store:
@@ -174,7 +190,7 @@ class Store:
                 "notifications_enabled": self.notifications_enabled,
                 "custom_ens_names": sorted(self.custom_ens_names),
             }
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_private_root()
         # Atomic: a crash mid-write must not torch the accounts list.
         atomic_write_text(CONFIG_FILE, json.dumps(data, indent=2))
 

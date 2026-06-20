@@ -154,6 +154,10 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Own the config/cache root owner-only (0700) before anything writes under
+    # it, and tighten a root an older build left at the default umask.
+    from .store import ensure_private_root
+    ensure_private_root()
     # Honor the user's LC_TIME for strftime("%x %X") in tx timestamps.
     # Python starts in the POSIX C locale until something flips it;
     # without this call all timestamps would render as MM/DD/YY.

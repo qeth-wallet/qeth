@@ -14,11 +14,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRect, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import (QBuffer, QObject, QRect, QRectF, Qt,
+                            QThread, Signal)
 from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen,
                            QPixmap)
 
 from . import QULONGLONG, USER_AGENT
+from .fsatomic import atomic_write_bytes
 
 log = logging.getLogger("qeth.icons")
 
@@ -354,7 +356,8 @@ class ChainIconCache(QObject):
             return
         self._mem[int(chain_id)] = to_circular(raw)
         try:
-            (CHAIN_ICONS_DIR / f"{int(chain_id)}.png").write_bytes(bytes(data))
+            atomic_write_bytes(
+                CHAIN_ICONS_DIR / f"{int(chain_id)}.png", bytes(data))
         except Exception as e:
             log.debug("chain icon save failed: %s", e)
         self.icon_ready.emit(int(chain_id))
@@ -466,9 +469,15 @@ class IconCache(QObject):
         # write to disk so a future code change can re-process it.
         self._mem[key] = to_circular(raw)
         path = self._dir(chain_id) / f"{contract.lower()}.png"
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            raw.save(str(path), "PNG")
+            # Serialize the re-encoded PNG to bytes so it lands owner-only
+            # (0600) and atomically — a token icon's filename is its contract
+            # address, so the file is privacy-bearing (issue #3). raw.save()
+            # would write at the umask (~0644).
+            buf = QBuffer()
+            buf.open(QBuffer.OpenModeFlag.WriteOnly)
+            if raw.save(buf, "PNG"):
+                atomic_write_bytes(path, bytes(buf.data().data()))
         except Exception as e:
             log.debug("icon save failed: %s — %s", path, e)
         self.icon_ready.emit(chain_id, contract.lower())

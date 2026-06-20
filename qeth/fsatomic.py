@@ -18,23 +18,17 @@ import tempfile
 from pathlib import Path
 
 
-def atomic_write_text(path: Path, text: str, *,
-                      mode: int | None = None) -> None:
-    """Write ``text`` to ``path`` atomically (all-or-nothing).
-
-    The data is fsynced before the rename and the directory entry after
-    it, so the file is durable — not just consistent — once this returns.
-    On any failure the half-written tmp file is removed and ``path`` is
-    left exactly as it was.
-    """
+def _atomic_write(path: Path, data: bytes, mode: int | None) -> None:
+    """Shared core: write ``data`` to ``path`` atomically + durably. The tmp
+    file inherits ``mkstemp``'s 0600 unless ``mode`` overrides it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
         if mode is not None:
             os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -50,3 +44,24 @@ def atomic_write_text(path: Path, text: str, *,
         except OSError:
             pass
         raise
+
+
+def atomic_write_text(path: Path, text: str, *,
+                      mode: int | None = None) -> None:
+    """Write ``text`` to ``path`` atomically (all-or-nothing).
+
+    The data is fsynced before the rename and the directory entry after
+    it, so the file is durable — not just consistent — once this returns.
+    On any failure the half-written tmp file is removed and ``path`` is
+    left exactly as it was.
+    """
+    _atomic_write(path, text.encode("utf-8"), mode)
+
+
+def atomic_write_bytes(path: Path, data: bytes, *,
+                       mode: int | None = None) -> None:
+    """Bytes counterpart of :func:`atomic_write_text` — for the binary caches
+    (icons, price/chain/token-list blobs). Same 0600-by-default privacy and
+    all-or-nothing durability, so every file under ``~/.qeth`` is owner-only
+    even if the directory mode is ever loosened (issue #3)."""
+    _atomic_write(path, data, mode)

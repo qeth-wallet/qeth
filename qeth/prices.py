@@ -23,6 +23,7 @@ from collections.abc import Iterable
 
 from . import USER_AGENT
 from .chains import Chain
+from .fsatomic import atomic_write_bytes
 
 log = logging.getLogger("qeth.prices")
 
@@ -97,8 +98,7 @@ def load_native_coin_ids(*, cache_dir: Path | None = None,
             )
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
-            cache.mkdir(parents=True, exist_ok=True)
-            cache_file.write_bytes(raw)
+            atomic_write_bytes(cache_file, raw)
         except Exception as e:
             log.warning("asset_platforms fetch failed: %s", e)
             if not cache_file.exists():

@@ -25,6 +25,7 @@ from typing import ClassVar
 from collections.abc import Iterable
 
 from . import USER_AGENT
+from .fsatomic import atomic_write_bytes
 
 log = logging.getLogger("qeth.tokenlists")
 
@@ -85,8 +86,7 @@ def _fetch_json(url: str, cache_path: Path, ttl: float, timeout: float):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read()
         data = json.loads(body)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(body)
+        atomic_write_bytes(cache_path, body)
         return data
     except Exception as e:
         log.warning("fetch %s failed: %s", url, e)

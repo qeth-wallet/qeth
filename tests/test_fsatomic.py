@@ -9,13 +9,32 @@ import os
 
 import pytest
 
-from qeth.fsatomic import atomic_write_text
+from qeth.fsatomic import atomic_write_bytes, atomic_write_text
 
 
 def test_writes_content_and_creates_parents(tmp_path):
     p = tmp_path / "deep" / "nested" / "cache.json"
     atomic_write_text(p, '{"a": 1}')
     assert p.read_text() == '{"a": 1}'
+
+
+def test_bytes_round_trips_and_is_owner_only(tmp_path):
+    # The binary caches (icons, price/chain/tokenlist blobs) go through the
+    # bytes variant; like the text one it's 0600 by default so the whole
+    # ~/.qeth tree is owner-only even at the file level (issue #3).
+    p = tmp_path / "deep" / "icon.png"
+    blob = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+    atomic_write_bytes(p, blob)
+    assert p.read_bytes() == blob
+    assert (p.stat().st_mode & 0o077) == 0           # no group/world bits
+
+
+def test_bytes_replaces_atomically_no_tmp_leftover(tmp_path):
+    p = tmp_path / "icon.png"
+    p.write_bytes(b"OLD")
+    atomic_write_bytes(p, b"NEW")
+    assert p.read_bytes() == b"NEW"
+    assert os.listdir(tmp_path) == ["icon.png"]      # no .tmp debris
 
 
 def test_replaces_existing_atomically_no_tmp_leftover(tmp_path):

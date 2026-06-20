@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import USER_AGENT
+from .fsatomic import atomic_write_bytes
 
 
 log = logging.getLogger("qeth.chainlist")
@@ -86,8 +87,7 @@ def fetch_chains(
             )
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = r.read()
-            cache.mkdir(parents=True, exist_ok=True)
-            cache_file.write_bytes(data)
+            atomic_write_bytes(cache_file, data)
         except Exception as e:
             log.warning("chainlist fetch failed: %s", e)
             if not cache_file.exists():

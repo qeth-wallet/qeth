@@ -577,6 +577,33 @@ class WalletsPlugin(Plugin):
         item.setData(0, EXPAND_KEY_ROLE, key)
         item.setExpanded(snapshot.get(key, True))
 
+    def _make_account_item(self, a: dict) -> tuple[QTreeWidgetItem, bool]:
+        """Build the address-leaf row for one account — shared by the Ledger /
+        hot / watch-only sections (previously copy-pasted three times). Returns
+        ``(item, is_default)`` so the caller can track the default row; the
+        caller adds it under the right parent."""
+        addr = a["address"]
+        is_default = (
+            self._store.default_account is not None
+            and addr.lower() == self._store.default_account.lower()
+        )
+        display = f"[{addr}]" if is_default else f" {addr} "
+        label_text = a.get("label") or ""
+        it = QTreeWidgetItem([display])
+        it.setData(0, Qt.ItemDataRole.UserRole, addr)
+        if label_text:
+            it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
+            if addr.lower() in self._ens_verified:
+                it.setToolTip(0, f"{label_text} — cryptographically verified")
+        it.setFont(0, QFont("monospace"))
+        # Address leaf: selectable + draggable, never a drop target (an address
+        # can only land in the gap between siblings, resolved at the parent).
+        it.setFlags(
+            Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        return it, is_default
+
     def _rebuild_tree(self) -> None:
         if self._tree is None:
             return
@@ -604,29 +631,7 @@ class WalletsPlugin(Plugin):
                 grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
                 ledger_root.addChild(grp)
                 groups[scheme] = grp
-            addr = a["address"]
-            is_default = (
-                self._store.default_account is not None
-                and addr.lower() == self._store.default_account.lower()
-            )
-            display = f"[{addr}]" if is_default else f" {addr} "
-            label_text = a.get("label") or ""
-            it = QTreeWidgetItem([display])
-            it.setData(0, Qt.ItemDataRole.UserRole, addr)
-            if label_text:
-                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
-                if addr.lower() in self._ens_verified:
-                    it.setToolTip(
-                        0,
-                        f"{label_text} — cryptographically verified")
-            it.setFont(0, QFont("monospace"))
-            # Address leaf: selectable + draggable, NOT a drop target
-            # (so an address can't be dropped onto another address —
-            # only into the gap between siblings, which Qt resolves at
-            # the parent group level).
-            it.setFlags(
-                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
-            )
+            it, is_default = self._make_account_item(a)
             grp.addChild(it)
             if is_default:
                 default_item = it
@@ -641,25 +646,7 @@ class WalletsPlugin(Plugin):
         hot_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
         self._tree.addTopLevelItem(hot_root)
         for a in hot_accts:
-            addr = a["address"]
-            is_default = (
-                self._store.default_account is not None
-                and addr.lower() == self._store.default_account.lower()
-            )
-            label_text = a.get("label") or ""
-            display = f"[{addr}]" if is_default else f" {addr} "
-            it = QTreeWidgetItem([display])
-            it.setData(0, Qt.ItemDataRole.UserRole, addr)
-            if label_text:
-                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
-                if addr.lower() in self._ens_verified:
-                    it.setToolTip(
-                        0,
-                        f"{label_text} — cryptographically verified")
-            it.setFont(0, QFont("monospace"))
-            it.setFlags(
-                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
-            )
+            it, is_default = self._make_account_item(a)
             hot_root.addChild(it)
             if is_default:
                 default_item = it
@@ -674,25 +661,7 @@ class WalletsPlugin(Plugin):
         watch_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
         self._tree.addTopLevelItem(watch_root)
         for a in watch_accts:
-            addr = a["address"]
-            is_default = (
-                self._store.default_account is not None
-                and addr.lower() == self._store.default_account.lower()
-            )
-            label_text = a.get("label") or ""
-            display = f"[{addr}]" if is_default else f" {addr} "
-            it = QTreeWidgetItem([display])
-            it.setData(0, Qt.ItemDataRole.UserRole, addr)
-            if label_text:
-                it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
-                if addr.lower() in self._ens_verified:
-                    it.setToolTip(
-                        0,
-                        f"{label_text} — cryptographically verified")
-            it.setFont(0, QFont("monospace"))
-            it.setFlags(
-                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled
-            )
+            it, is_default = self._make_account_item(a)
             watch_root.addChild(it)
             if is_default:
                 default_item = it

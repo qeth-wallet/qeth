@@ -214,6 +214,11 @@ def _decrypt_frame_ring(
             "Importing Frame accounts needs the optional 'cryptography' "
             "package. Install it with:  uv pip install 'qeth[frame]'"
         ) from e
+    # AES-CBC (unauthenticated) is Frame's export format, not our choice — we
+    # decrypt to match what Frame encrypted with. The missing MAC is benign
+    # here: the ciphertext is the user's own local export file, not data from a
+    # tampering MITM, and a wrong passphrase fails the PKCS7 unpad below.
+    # (Flagged by semgrep crypto-mode-without-authentication; safe in context.)
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     decryptor = cipher.decryptor()
     padded = decryptor.update(ciphertext) + decryptor.finalize()

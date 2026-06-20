@@ -80,6 +80,16 @@ when checked that way. mypy, ruff, and ty are all **dev-only** deps
 them. Optional features that need a heavy dep go behind an extra mirrored
 into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.
 
+**Extra signal (not gates), all via `uvx` so they don't touch project deps:**
+- `uvx deptry .` — declared-vs-imported dependency hygiene (catches the
+  cryptography-class "imported but undeclared" bug). Config in `[tool.deptry]`.
+  Run after touching imports/deps.
+- `uvx detect-secrets scan --baseline .secrets.baseline` — secret scan. The
+  committed `.secrets.baseline` records the known test-fixture keys/hex (e.g.
+  `_TEST_PRIV`), so a run flags only NEW potential secrets. Regenerate with
+  `uvx detect-secrets scan > .secrets.baseline` after adding intentional
+  fixtures.
+
 ## Conventions
 
 ### On-chain math: always `Decimal`, never `float`

@@ -272,6 +272,35 @@ def fetch_activities(
     blocks = [tx.block_number for tx in txs if tx.block_number]
     sb = min(blocks) if blocks else None
     eb = max(blocks) if blocks else None
+
+    verbs = _Verbs(chain.chain_id, abi_source or BlockscoutAbiSource(),
+                   abi_cache if abi_cache is not None else AbiCache())
+
+    def quick_verb(tx: Transaction) -> tuple[str, bool]:
+        """(verb, is_cold) from no-network sources only: send / deploy, or a
+        callee whose ABI is already on disk. is_cold → the bare selector, ABI
+        fetched in pass 2."""
+        sel = (tx.method_id or "").lower()
+        if sel in ("", "0x"):
+            return "send", False
+        if tx.to_addr is None:
+            return "deploy", False
+        name = verbs.name(tx.to_addr, sel, fetch=False)
+        return (sel, True) if name is None else (name, False)
+
+    # Pass 0 — verbs ONLY, before the (possibly slow) tokentx/internal fetch.
+    # The method label needs just the contract's ABI, which a freshly-signed tx
+    # already has cached, so emit it immediately — otherwise a just-created
+    # pending tx shows a blank method until the coins network round-trip
+    # returns (minutes on a flaky link). Coins fill in via pass 1 below.
+    if on_batch:
+        early = {tx.hash: _make_activity(v, [], [], (tx.method_id or "").lower(),
+                                         tx, {})
+                 for tx in txs
+                 for v, is_cold in [quick_verb(tx)] if not is_cold}
+        if early:
+            on_batch(early)
+
     try:
         transfers = _account_rows(base, "tokentx", address, timeout,
                                   startblock=sb, endblock=eb, max_pages=12)
@@ -296,33 +325,23 @@ def fetch_activities(
         if h:
             int_by_hash[h].append(it)
 
-    verbs = _Verbs(chain.chain_id, abi_source or BlockscoutAbiSource(),
-                   abi_cache if abi_cache is not None else AbiCache())
     out: dict[str, Activity] = {}
     by_hash = {tx.hash.lower(): tx for tx in txs}
     coins: dict[str, tuple[list[AssetLeg], list[AssetLeg], str]] = {}
     cold: dict[str, list[str]] = defaultdict(list)   # cold callee → tx hashes
 
     # Pass 1 — coins (one fast tokentx/internal batch) plus the verbs we
-    # already know: send / deploy / approve, or a callee whose ABI is
-    # cached. A callee whose ABI isn't cached yet shows its bare selector
-    # as a placeholder and is queued for the parallel resolve below.
+    # already know (pass 0 re-derives the same way). A callee whose ABI isn't
+    # cached yet shows its bare selector as a placeholder and is queued for the
+    # parallel resolve below.
     for tx in txs:
         h = tx.hash.lower()
         out_legs, in_legs = _coins(tx, viewer, native, tok_by_hash, int_by_hash)
         sel = (tx.method_id or "").lower()
         coins[h] = (out_legs, in_legs, sel)
-        if sel in ("", "0x"):           # no calldata → a plain value send
-            verb = "send"
-        elif tx.to_addr is None:
-            verb = "deploy"
-        else:
-            name = verbs.name(tx.to_addr, sel, fetch=False)
-            if name is None:            # cold ABI — placeholder + queue
-                verb = sel
-                cold[tx.to_addr.lower()].append(h)
-            else:
-                verb = name
+        verb, is_cold = quick_verb(tx)
+        if is_cold and tx.to_addr is not None:    # placeholder + queue the fetch
+            cold[tx.to_addr.lower()].append(h)
         out[tx.hash] = _make_activity(verb, out_legs, in_legs, sel, tx, sym_of)
 
     if on_batch:

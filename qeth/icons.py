@@ -30,6 +30,52 @@ BUNDLED_NATIVE_DIR = Path(__file__).parent / "assets" / "native"
 BUNDLED_CHAIN_DIR = Path(__file__).parent / "assets" / "chains"
 FETCH_TIMEOUT = 10.0
 
+# Ceiling on an icon response body. Real token/chain logos are a few KB;
+# anything past this is either a mistake or a deliberate memory-DoS via a
+# poisoned token list's logoURI. Read is capped at the cap+1 byte so an
+# oversize body is detected without slurping it whole.
+_MAX_ICON_BYTES = 2 * 1024 * 1024   # 2 MiB
+
+
+def _safe_icon_fetch(url: str) -> bytes:
+    """Fetch an icon URL defensively and return its body (capped).
+
+    A token list's ``logoURI`` is third-party data, so the URL is untrusted:
+    restrict it to ``http(s)`` (no ``file://`` local reads, no ``ftp://`` …),
+    refuse obvious loopback/private/link-local hosts (a poisoned list shouldn't
+    turn the wallet into an SSRF probe of the user's LAN or its own
+    127.0.0.1:1248 RPC), and cap the read so a huge body can't exhaust memory.
+    Raises ``ValueError`` on a rejected URL, propagates transport errors."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http(s) icon URL: {url!r}")
+    host = (parsed.hostname or "").lower()
+    if _is_private_host(host):
+        raise ValueError(f"refusing private/loopback icon host: {host!r}")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
+        data = r.read(_MAX_ICON_BYTES + 1)
+    if len(data) > _MAX_ICON_BYTES:
+        raise ValueError(f"icon body exceeds {_MAX_ICON_BYTES} bytes: {url!r}")
+    return data
+
+
+def _is_private_host(host: str) -> bool:
+    """True for a host we won't fetch icons from: localhost, a loopback /
+    private / link-local IP literal, or an unqualified name (``.local`` etc.).
+    Best-effort literal check — DNS rebinding can still resolve a public name
+    to a private IP, but this blocks the cheap, direct SSRF a poisoned token
+    list would attempt."""
+    import ipaddress
+    if not host or host == "localhost" or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False   # a normal DNS name — allowed
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified)
+
 
 # Chain-id → slug in each upstream icon source. Slug conventions
 # differ between sources (Curve uses "xdai" for Gnosis,
@@ -273,11 +319,7 @@ class _ChainIconFetchWorker(QThread):
     def run(self) -> None:
         for url in self.urls:
             try:
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": USER_AGENT},
-                )
-                with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
-                    data = r.read()
+                data = _safe_icon_fetch(url)
                 if len(data) < 32:
                     continue
                 self.fetched.emit(self.chain_id, data)
@@ -374,9 +416,7 @@ class _IconFetchWorker(QThread):
 
     def run(self) -> None:
         try:
-            req = urllib.request.Request(self.url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
-                data = r.read()
+            data = _safe_icon_fetch(self.url)
             if len(data) < 32:
                 self.fetched.emit(self.chain_id, self.contract, None)
                 return

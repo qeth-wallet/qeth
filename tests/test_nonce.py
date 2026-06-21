@@ -36,20 +36,23 @@ def test_floor_ignores_other_senders():
     assert _plugin_with_pending(pending).pending_nonce_floor(1, ADDR) is None
 
 
-# --- latest_confirmed_block: the verified-preview fork floor ----------------
+# --- fork_floor_block: the verified-preview fork floor ----------------------
 # A verified simulation forks a few blocks behind the head (proof convergence)
 # but must NOT fork before this wallet's own latest tx, or it would hide a
-# just-confirmed approval. This is where that floor block comes from.
+# just-sent approval from the follow-up swap. This is where that floor comes
+# from — and an in-flight (pending) sent tx demands the freshest state (head),
+# since it may have just mined before our receipt watcher confirmed it.
 
+from qeth.plugins.transactions import _FORK_FLOOR_HEAD
 from qeth.transactions import Transaction
 
 
-def _tx(block, frm=ADDR, *, pending=False):
+def _tx(block, frm=ADDR, *, pending=False, dropped=False):
     return Transaction(
         chain_id=1, hash="0x" + "ab" * 32, block_number=block,
         timestamp=0, nonce=0, from_addr=frm, to_addr=OTHER, value_wei=0,
         gas_used=0, gas_price_wei=0, method_id="0x", input_data="0x",
-        success=True, pending=pending,
+        success=True, pending=pending, dropped=dropped,
     )
 
 
@@ -59,22 +62,30 @@ def _plugin_with_cache(txs):
     return plug
 
 
-def test_confirmed_block_is_none_with_no_history():
-    assert _plugin_with_cache([]).latest_confirmed_block(1, ADDR) is None
+def test_floor_is_none_with_no_history():
+    assert _plugin_with_cache([]).fork_floor_block(1, ADDR) is None
 
 
-def test_confirmed_block_is_highest_we_sent():
+def test_floor_is_highest_confirmed_we_sent():
     txs = [_tx(100), _tx(140), _tx(120)]
-    assert _plugin_with_cache(txs).latest_confirmed_block(1, ADDR) == 140
+    assert _plugin_with_cache(txs).fork_floor_block(1, ADDR) == 140
 
 
-def test_confirmed_block_ignores_pending_and_others():
+def test_pending_sent_tx_forks_at_head():
+    # The approve-then-swap case: the approval is still pending in our cache
+    # (mined or not), so the floor demands head — never head-lag, which would
+    # hide it. Regression for "approval invisible for ~30s".
+    txs = [_tx(100), _tx(0, pending=True)]
+    assert _plugin_with_cache(txs).fork_floor_block(1, ADDR) == _FORK_FLOOR_HEAD
+
+
+def test_floor_ignores_pending_from_others_and_dropped():
     txs = [
-        _tx(100),                       # ours, confirmed
-        _tx(0, pending=True),           # ours, pending (block 0)
-        _tx(200, frm=OTHER),            # someone else sent (we're only `to`)
+        _tx(100),                          # ours, confirmed
+        _tx(0, frm=OTHER, pending=True),   # someone else's pending → not ours
+        _tx(0, pending=True, dropped=True),  # ours but dropped → not in-flight
     ]
-    assert _plugin_with_cache(txs).latest_confirmed_block(1, ADDR) == 100
+    assert _plugin_with_cache(txs).fork_floor_block(1, ADDR) == 100
 
 
 # --- GasSuggestionWorker: applies the floor over the MINED count -----------

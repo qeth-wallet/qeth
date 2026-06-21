@@ -821,6 +821,12 @@ class ReceiptScanWorker(QThread):
                 self.found.emit(cid, h, logs)
 
 
+# Sentinel fork floor meaning "fork at the freshest state (head)" — returned
+# by fork_floor_block when the wallet has an in-flight sent tx. Above any real
+# block number, so _latest_block's min(floor, head) clamps it to the live head.
+_FORK_FLOOR_HEAD = (1 << 63) - 1
+
+
 class TransactionsPlugin(Plugin):
     name = "Transactions"
 
@@ -1060,23 +1066,30 @@ class TransactionsPlugin(Plugin):
         ]
         return max(nonces) + 1 if nonces else None
 
-    def latest_confirmed_block(self, chain_id: int, address: str) -> int | None:
-        """The highest block in which this wallet has a confirmed tx it *sent*
-        on ``chain_id`` — the floor a verified preview must not fork before, so
-        a just-confirmed approval is always present in the simulated state.
-        ``None`` when we've never seen one here (the fork uses its lag alone).
-        Only txs we sent (``from == address``) count: those are the ones whose
-        omission would make a follow-up call falsely revert, and keeping the
-        floor minimal preserves the lag's proof-convergence margin."""
+    def fork_floor_block(self, chain_id: int, address: str) -> int | None:
+        """The block a verified preview must not fork BEFORE, so an
+        approve-then-swap sees the approval. The latest block this wallet's
+        own sent activity may have touched on ``chain_id``:
+
+          - an in-flight (pending, not dropped) sent tx → ``_FORK_FLOOR_HEAD``,
+            a sentinel meaning "fork at the freshest state (head)". The tx may
+            have *just mined* before our receipt watcher flipped it to
+            confirmed (the ~30 s window that hid an approval from the next
+            swap) — forking behind the head would still miss it, so demand
+            head; ``_latest_block`` clamps the sentinel down to the live head.
+          - else the highest CONFIRMED sent-tx block.
+          - else ``None`` (the fork uses its per-chain lag alone).
+
+        Only txs we *sent* (``from == address``) count — those are the ones
+        whose omission would make a follow-up call falsely revert."""
         addr = address.lower()
         txs = self._cache.get((chain_id, addr))
         if txs is None:
             txs = self._disk_cache.load(chain_id, addr) or []
-        blocks = [
-            t.block_number for t in txs
-            if not t.pending and t.block_number
-            and (t.from_addr or "").lower() == addr
-        ]
+        sent = [t for t in txs if (t.from_addr or "").lower() == addr]
+        if any(t.pending and not getattr(t, "dropped", False) for t in sent):
+            return _FORK_FLOOR_HEAD
+        blocks = [t.block_number for t in sent if t.block_number]
         return max(blocks) if blocks else None
 
     def _rebuild_live_snapshot(self) -> None:

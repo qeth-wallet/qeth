@@ -115,12 +115,31 @@ class _CoinsIconDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
               index: QModelIndex | QPersistentModelIndex) -> None:
-        super().paint(painter, option, index)
+        # Draw the cell background ourselves. The table's QTableView::item
+        # stylesheet suppresses the style's selection fill on a custom-delegate
+        # cell, so super().paint() leaves a selected coins cell un-highlighted
+        # while the rest of the row is highlighted. Match the row: Highlight
+        # when selected (Active/Inactive to track focus), else the alternating
+        # / base colour.
+        pal = option.palette
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            grp = (QPalette.ColorGroup.Active
+                   if option.state & QStyle.StateFlag.State_Active
+                   else QPalette.ColorGroup.Inactive)
+            painter.fillRect(option.rect, pal.brush(grp, QPalette.ColorRole.Highlight))
+        elif option.features & QStyleOptionViewItem.ViewItemFeature.Alternate:
+            painter.fillRect(option.rect,
+                             pal.brush(QPalette.ColorGroup.Normal,
+                                       QPalette.ColorRole.AlternateBase))
+        else:
+            painter.fillRect(option.rect,
+                             pal.brush(QPalette.ColorGroup.Normal,
+                                       QPalette.ColorRole.Base))
         summary = index.data(_COINS_ROLE)
         if summary is None:
             return
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        fg = option.palette.color(
+        fg = pal.color(
             QPalette.ColorRole.HighlightedText if selected
             else QPalette.ColorRole.Text)
         r = option.rect

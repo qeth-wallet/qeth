@@ -1,15 +1,18 @@
 """Transaction-activity rendering helpers for the transactions list.
 
-The "what happened" field is split across **two columns** so each uses
-plain, standard cell rendering (no custom delegate, no whole-line image —
-both of which fought the view / mangled font rendering):
+The "what happened" field is split across **two columns**:
 
 * the **verb** column is ordinary text (the decoded function name), so it
   picks up the theme font and the row's selection colour for free;
-* the **coins** column is a small icons-only image — the assets that
-  moved, ``[leaving] → [entering]`` — built by :func:`coins_icon`. It
-  holds *no text*, only coin pixmaps and a vector arrow, so there's no
-  font in the pixmap to render badly.
+* the **coins** column shows the assets that moved, ``[leaving] → [entering]``
+  — coin logos and a flow arrow, no text.
+
+The coins column is drawn by a custom item delegate that calls
+:func:`paint_summary` straight onto the view's painter: logos are blitted
+(memoised explicit-smooth downscale) and the arrow is *vector*. Drawing at the
+view's own device resolution — rather than rasterising into a QIcon the style
+then rescales per row — keeps the thin arrow crisp and pixel-identical in every
+row at any DPI.
 
 Examples (icons shown as ``()``):
 
@@ -20,8 +23,8 @@ Examples (icons shown as ``()``):
     claim      →(USDC)(WBTC)
     approve    (USDC)            # approved token, no arrow
 
-``coins_icon`` returns a QIcon with Normal/Selected pixmaps so the vector
-arrow and any logo-less "generic" coins follow the row selection colour.
+The arrow and any logo-less "generic" coins are drawn in the row's foreground
+colour (``Text`` / ``HighlightedText``) so they follow the selection.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 from ..icons import smooth_scaled
 
@@ -101,6 +104,24 @@ def _generic_coin(p: QPainter, x: int, top: int, symbol: str, fg: QColor) -> Non
     p.restore()
 
 
+# Logos are 64 px; the cells display at _ICON. Memoise the explicit
+# bilinear downscale (keyed by content + size + dpr) so per-paint redraws in
+# the item delegate don't re-scale the same logo every frame.
+_SCALED_CACHE: dict = {}
+_SCALED_CACHE_MAX = 2048
+
+
+def _scaled_coin(src: QPixmap, dpr: float) -> QPixmap:
+    key = (src.cacheKey(), _ICON, round(dpr * 100))
+    hit = _SCALED_CACHE.get(key)
+    if hit is None:
+        if len(_SCALED_CACHE) >= _SCALED_CACHE_MAX:
+            _SCALED_CACHE.clear()
+        hit = smooth_scaled(src, _ICON, dpr)
+        _SCALED_CACHE[key] = hit
+    return hit
+
+
 def _draw_block(coins: tuple[Coin, ...], p: QPainter, fg: QColor,
                 x: int, top: int) -> int:
     if not coins:
@@ -116,9 +137,7 @@ def _draw_block(coins: tuple[Coin, ...], p: QPainter, fg: QColor,
             # blit it 1:1, rather than letting p.drawPixmap(...,w,h,...) scale
             # it via the SmoothPixmapTransform *hint* — some Qt builds ignore
             # that hint and fall back to nearest, which renders the coin blocky.
-            # smooth_scaled is QPixmap.scaled(SmoothTransformation), honoured
-            # everywhere.
-            p.drawPixmap(x, top, smooth_scaled(c.icon, _ICON, dpr))
+            p.drawPixmap(x, top, _scaled_coin(c.icon, dpr))
         else:
             _generic_coin(p, x, top, c.symbol, fg)
         x += _STEP
@@ -150,84 +169,34 @@ def _draw_arrow(p: QPainter, fg: QColor, x: int, cy: float) -> int:
     return x + _ARROW
 
 
-# coins_icon is a pure function of its inputs, and a wallet switch re-renders
-# ~200 rows of mostly-identical icons (the generic lettered coin especially) —
-# QPainter vector work that profiled at ~210 ms per switch on the MAIN thread,
-# stretching to ~0.5 s when something else pegs the CPU. Memoize the composed
-# QIcon: QPixmap.cacheKey() identifies a coin pixmap's contents, rgba() the
-# theme colours, so repeat renders are a dict hit. Bounded by wholesale clear —
-# entries are a few KB and 4096 covers many wallets of distinct activity.
-_ICON_CACHE: dict = {}
-_ICON_CACHE_MAX = 4096
+def paint_summary(p: QPainter, summary: TxSummary, fg: QColor,
+                  x: int, top: int) -> int:
+    """Draw the moved-assets row (out coins → in coins) straight onto ``p``
+    starting at (x, top), and return the x past the last element.
+
+    The arrow is *vector* — rendered onto the destination surface at its real
+    device resolution — so it is crisp and pixel-identical in every row at any
+    DPI, with no rasterise-then-rescale step (the item delegate calls this
+    directly on the view's painter). Coin logos are blitted via the memoised
+    explicit-smooth downscale in :func:`_draw_block`.
+    """
+    start = x
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    if summary.muted:
+        p.setOpacity(0.5)
+    cy = top + _ICON / 2
+    x = _draw_block(summary.out, p, fg, x, top)
+    if summary.show_arrow and (summary.out or summary.inn):
+        x = _draw_arrow(p, fg, x, cy)
+    if summary.inn and x > start:
+        x += _GAP
+    x = _draw_block(summary.inn, p, fg, x, top)
+    p.restore()
+    return x
 
 
-def _coin_key(c: Coin) -> tuple[int | None, str]:
-    icon = c.icon
-    if icon is None or icon.isNull():
-        return (None, c.symbol)
-    return (icon.cacheKey(), c.symbol)
-
-
-def coins_icon(summary: TxSummary, normal_fg: QColor, selected_fg: QColor,
-               dpr: float = 1.0) -> QIcon:
-    """Composite the moved-assets row (out → in) into a QIcon — coin icons
-    + a vector arrow only, never text. Returns an empty icon when nothing
-    moved (e.g. a bare ``vote``). Memoized (see ``_ICON_CACHE`` above)."""
-    if not (summary.out or summary.inn):
-        return QIcon()
-    key = (
-        tuple(_coin_key(c) for c in summary.out),
-        tuple(_coin_key(c) for c in summary.inn),
-        summary.show_arrow, summary.muted,
-        normal_fg.rgba(), selected_fg.rgba(), round(dpr * 100),
-    )
-    hit = _ICON_CACHE.get(key)
-    if hit is not None:
-        return hit
-    icon = _render_coins_icon(summary, normal_fg, selected_fg, dpr)
-    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
-        _ICON_CACHE.clear()
-    _ICON_CACHE[key] = icon
-    return icon
-
-
-def _render_coins_icon(summary: TxSummary, normal_fg: QColor,
-                       selected_fg: QColor, dpr: float) -> QIcon:
-    w = _coins_width(summary) + 2 * _PAD
-    h = _ICON + 2 * _PAD
-    icon = QIcon()
-    for mode, fg in ((QIcon.Mode.Normal, normal_fg),
-                     (QIcon.Mode.Selected, selected_fg)):
-        pm = QPixmap(max(1, round(w * dpr)), max(1, round(h * dpr)))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        if summary.muted:
-            p.setOpacity(0.5)
-        x = _PAD
-        top = _PAD
-        cy = top + _ICON / 2
-        x = _draw_block(summary.out, p, fg, x, top)
-        if summary.show_arrow and (summary.out or summary.inn):
-            x = _draw_arrow(p, fg, x, cy)
-        if summary.inn and x > _PAD:
-            x += _GAP
-        _draw_block(summary.inn, p, fg, x, top)
-        p.end()
-        # The composite is _ICON + 2*_PAD (18) logical px tall, but the view's
-        # iconSize is 16 — so the item view fractionally rescales every icon
-        # 18→16 at draw time. That rescale lands on a different sub-pixel grid
-        # per row (icons differ in width), so coins and the arrow render with
-        # inconsistent weight/blur — the "bad scaling" on low-res screens.
-        # Do that downscale once here, with a smooth (bilinear) filter, to the
-        # exact icon height; the view then blits 1:1, uniformly, for every row.
-        target_h = max(1, round(_ICON * dpr))
-        if pm.height() != target_h:
-            pm = pm.scaledToHeight(
-                target_h, Qt.TransformationMode.SmoothTransformation
-            )
-            pm.setDevicePixelRatio(dpr)
-        icon.addPixmap(pm, mode)
-    return icon
+def coins_content_width(summary: TxSummary) -> int:
+    """Logical px the drawn coins row occupies — the delegate's sizeHint."""
+    return _coins_width(summary) + 2 * _PAD

@@ -78,7 +78,9 @@ from ..tx_activity import (
 from ..icons import (
     IconCache, bundled_native_icon, notification_icon, smooth_scaled,
 )
-from .tx_summary import Coin, TxSummary, coins_icon
+from .tx_summary import (
+    _ICON, Coin, TxSummary, coins_content_width, paint_summary,
+)
 
 
 def _copy_noun(value: str) -> str:
@@ -94,42 +96,47 @@ def _copy_noun(value: str) -> str:
     return "Link"
 
 
-class _CoinsIconDelegate(QStyledItemDelegate):
-    """Draw the coins column's icon 1:1 at its native pixel size.
+_COINS_ROLE = Qt.ItemDataRole.UserRole + 1   # stores the row's TxSummary
 
-    The default item delegate hands the icon to the active QStyle, and some
-    style / Qt combinations rescale the rasterised decoration per row (the cell
-    width differs row to row). The solid coin discs survive that, but the thin
-    flow arrow does not — it renders at visibly different sizes / sharpness
-    depending on how many coins are in the row. Blitting the pixmap ourselves,
-    at its own device-pixel size, removes every paint-time rescale so the arrow
-    is identical in every row regardless of style or DPI. Background, selection
-    and focus still come from the base delegate (we just blank its icon).
+
+class _CoinsIconDelegate(QStyledItemDelegate):
+    """Paint the coins column by drawing the moved-assets row straight onto the
+    view's painter — coin logos blitted, the flow arrow as *vector*.
+
+    Nothing is rasterised into an icon and then rescaled by the style, so the
+    arrow is crisp and pixel-identical in every row at any DPI. (The default
+    delegate hands a pixmap to the QStyle, and some style/Qt combos rescale the
+    per-row decoration — the solid coin discs hide it but the thin arrow shows
+    it as size/sharpness differences.) Background, selection and focus still
+    come from the base delegate; we only add the drawing.
     """
+
+    _HPAD = 6   # matches the cell stylesheet's horizontal padding
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
               index: QModelIndex | QPersistentModelIndex) -> None:
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        icon = opt.icon
-        opt.icon = QIcon()                       # base draws bg/selection only
-        super().paint(painter, opt, index)
-        sizes = icon.availableSizes() if not icon.isNull() else []
-        if not sizes:
+        super().paint(painter, option, index)
+        summary = index.data(_COINS_ROLE)
+        if summary is None:
             return
-        mode = (QIcon.Mode.Selected
-                if opt.state & QStyle.StateFlag.State_Selected
-                else QIcon.Mode.Normal)
-        pm = icon.pixmap(sizes[0], mode)
-        if pm.isNull():
-            return
-        # left-aligned, vertically centred; matches the cell's 6px h-padding.
-        dpr = pm.devicePixelRatio() or 1.0
-        logical_h = pm.height() / dpr
-        r = opt.rect
-        x = r.x() + 6
-        y = r.y() + (r.height() - logical_h) / 2.0
-        painter.drawPixmap(int(x), int(round(y)), pm)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        fg = option.palette.color(
+            QPalette.ColorRole.HighlightedText if selected
+            else QPalette.ColorRole.Text)
+        r = option.rect
+        top = r.y() + (r.height() - _ICON) // 2
+        painter.save()
+        paint_summary(painter, summary, fg, r.x() + self._HPAD, top)
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem,
+                 index: QModelIndex | QPersistentModelIndex) -> QSize:
+        base = super().sizeHint(option, index)
+        summary = index.data(_COINS_ROLE)
+        if summary is None:
+            return base
+        w = coins_content_width(summary) + 2 * self._HPAD
+        return QSize(max(w, base.width()), max(base.height(), _ICON + 6))
 
 
 def _set_coin_pixmap(label: QLabel | None, src: QPixmap, size: int = 20) -> None:
@@ -2387,7 +2394,7 @@ class TransactionListPanel(QWidget):
                     QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text))
         coins = self.table.item(row, _C_COINS)
         if coins is not None:
-            coins.setIcon(self._coins_icon(summary))
+            coins.setData(_COINS_ROLE, summary)
             coins.setToolTip(self._coins_tooltip(summary))
 
     @staticmethod
@@ -2443,17 +2450,6 @@ class TransactionListPanel(QWidget):
             muted=activity.muted,
         )
 
-    def _coins_icon(self, summary: TxSummary) -> QIcon:
-        """Coins-only icon (out → in) for col 4, with Normal/Selected
-        pixmaps so the vector arrow + generic coins follow the selection."""
-        pal = self.table.palette()
-        return coins_icon(
-            summary,
-            pal.color(QPalette.ColorRole.Text),
-            pal.color(QPalette.ColorRole.HighlightedText),
-            self.table.devicePixelRatioF(),
-        )
-
     def _coin(self, leg) -> Coin:
         if leg.contract is None:                      # native coin
             return Coin(leg.symbol, bundled_native_icon(leg.symbol))
@@ -2485,11 +2481,13 @@ class TransactionListPanel(QWidget):
                 continue
             if any((leg.contract or "") in dirty
                    for leg in (*act.out, *act.inn)):
-                # Only the coins icon depends on the logo; leave the verb
+                # Only the coins cell depends on the logo; leave the verb
                 # cell untouched so just the picture refreshes, not the row.
+                # Re-store the (rebuilt, now logo-bearing) summary; the
+                # delegate repaints it.
                 coins = self.table.item(row, _C_COINS)
                 if coins is not None:
-                    coins.setIcon(self._coins_icon(self._build_summary(act)))
+                    coins.setData(_COINS_ROLE, self._build_summary(act))
 
     def set_activity_kicker(self, fn: Callable[..., None] | None) -> None:
         self._activity_kicker = fn

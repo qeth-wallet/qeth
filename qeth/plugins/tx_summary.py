@@ -205,5 +205,18 @@ def _render_coins_icon(summary: TxSummary, normal_fg: QColor,
             x += _GAP
         _draw_block(summary.inn, p, fg, x, top)
         p.end()
+        # The composite is _ICON + 2*_PAD (18) logical px tall, but the view's
+        # iconSize is 16 — so the item view fractionally rescales every icon
+        # 18→16 at draw time. That rescale lands on a different sub-pixel grid
+        # per row (icons differ in width), so coins and the arrow render with
+        # inconsistent weight/blur — the "bad scaling" on low-res screens.
+        # Do that downscale once here, with a smooth (bilinear) filter, to the
+        # exact icon height; the view then blits 1:1, uniformly, for every row.
+        target_h = max(1, round(_ICON * dpr))
+        if pm.height() != target_h:
+            pm = pm.scaledToHeight(
+                target_h, Qt.TransformationMode.SmoothTransformation
+            )
+            pm.setDevicePixelRatio(dpr)
         icon.addPixmap(pm, mode)
     return icon

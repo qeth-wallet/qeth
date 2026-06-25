@@ -2001,7 +2001,16 @@ class TransactionsPlugin(Plugin):
         self._in_flight.discard(key)
         if self._panel is None:
             return
-        existing = self._cache.get(key) or []
+        existing = self._cache.get(key)
+        if existing is None:
+            # Seed from disk before merging. A background fetch (the 30s nonce
+            # poll detecting an external send) can land before this view is
+            # ever rendered; without seeding, this page would *replace* the
+            # full on-disk history with just itself in memory and shadow it for
+            # the rest of the session — the render path only loads disk when
+            # the key is absent from memory. A just-sent pending row then
+            # merged into that stub showed up as the only row in the list.
+            existing = self._disk_cache.load(chain_id, address_lower) or []
         existing_hashes = {t.hash for t in existing}
         merged = merge_txs(page, existing)
         self._cache[key] = merged

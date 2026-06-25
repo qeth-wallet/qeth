@@ -357,6 +357,48 @@ class TestTransactionsPlugin:
         reloaded = TransactionCache().load(ETH.chain_id, ADDR)
         assert [t.hash for t in reloaded] == [new_only[0].hash, old_history[0].hash]
 
+    def test_background_fetch_seeds_disk_before_render(self, qtbot, tmp_qeth):
+        """A background fetch (the nonce poll detecting an external send) can
+        land before the view is ever rendered — i.e. with no in-memory cache
+        entry yet. It must seed from disk first, otherwise it replaces the full
+        on-disk history with just this page in memory and shadows it for the
+        rest of the session (the symptom: a just-sent tx shows as the only row
+        even though the wallet has history)."""
+        from qeth.transactions_cache import TransactionCache
+        old_history = [
+            Transaction(
+                chain_id=1, hash="0x" + "11" * 32, block_number=5,
+                timestamp=1, nonce=0, from_addr=ADDR, to_addr="0xbeef",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+        ]
+        TransactionCache().save(ETH.chain_id, ADDR, old_history)
+
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+
+        # NOTE: no on_account_changed() — the fetch arrives before any render,
+        # so the in-memory cache is still empty.
+        assert (ETH.chain_id, ADDR.lower()) not in plugin._cache
+        new_only = [
+            Transaction(
+                chain_id=1, hash="0x" + "22" * 32, block_number=10,
+                timestamp=2, nonce=1, from_addr=ADDR, to_addr="0xbeef",
+                value_wei=0, gas_used=0, gas_price_wei=0,
+                method_id="", input_data="0x", success=True,
+            )
+        ]
+        plugin._on_page_fetched(ETH.chain_id, ADDR.lower(), 1, new_only, True)
+
+        merged = plugin._cache[(ETH.chain_id, ADDR.lower())]
+        # The disk history must survive — not be replaced by just the new page.
+        assert [t.hash for t in merged] == [new_only[0].hash, old_history[0].hash]
+        reloaded = TransactionCache().load(ETH.chain_id, ADDR)
+        assert [t.hash for t in reloaded] == [new_only[0].hash, old_history[0].hash]
+
     def test_fetched_results_get_persisted(self, qtbot, tmp_qeth):
         from qeth.transactions_cache import TransactionCache
         plugin = TransactionsPlugin()

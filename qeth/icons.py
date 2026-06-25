@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import (QBuffer, QObject, QRect, QRectF, Qt,
+from PySide6.QtCore import (QBuffer, QObject, QRectF, Qt,
                             QThread, Signal)
 from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen,
                            QPixmap)
@@ -235,71 +235,51 @@ _RECEIVED_COLOR = QColor(34, 160, 70)
 _SENT_COLOR = QColor(40, 110, 210)
 
 
-def _arrow_path(cx: float, cy: float, s: float, up: bool) -> QPainterPath:
-    """A filled triangle centred at (cx, cy): apex up (sent) or down
-    (received), half-extent ``s``."""
-    path = QPainterPath()
+def _draw_white_arrow(
+    painter: QPainter, cx: float, cy: float, r: float, up: bool,
+) -> None:
+    """A white arrow (vertical shaft + chevron head) centred at (cx, cy),
+    pointing up for sent / down for received, sized to radius ``r``.
+
+    Drawn as *vector* rather than pulling the desktop theme's ``go-up`` /
+    ``go-down`` glyph: that glyph is absent on minimal icon themes and portable
+    runtimes, where QIcon.fromTheme returned null and the badge silently
+    degraded to a bare triangle. A vector arrow renders identically on every
+    machine."""
+    ay = r * 0.6          # half the arrow's vertical extent
+    hw = r * 0.46         # chevron half-width
+    hl = r * 0.62         # chevron length along the shaft
+    pen = QPen(QColor(255, 255, 255), max(1.0, r * 0.3))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
     if up:
-        path.moveTo(cx, cy - s)
-        path.lineTo(cx - s, cy + s * 0.7)
-        path.lineTo(cx + s, cy + s * 0.7)
+        tip_y, tail_y, head_y = cy - ay, cy + ay, cy - ay + hl
     else:
-        path.moveTo(cx, cy + s)
-        path.lineTo(cx - s, cy - s * 0.7)
-        path.lineTo(cx + s, cy - s * 0.7)
-    path.closeSubpath()
-    return path
-
-
-def _themed_arrow_white(name: str, px: int) -> "QPixmap | None":
-    """The desktop icon theme's ``name`` (e.g. ``go-up``) rendered to exactly
-    ``px``×``px`` at device-pixel-ratio 1 and tinted solid white, or ``None``
-    when the theme doesn't provide it (then the caller draws a triangle).
-
-    Rendering to an explicit dpr-1 pixmap is load-bearing: on a HiDPI screen
-    ``QIcon.pixmap(px)`` hands back a 2× physical pixmap whose ``width()`` is
-    ``2*px``, and placing it by that width drops the badge in the wrong spot.
-    """
-    if px <= 0:
-        return None
-    icon = QIcon.fromTheme(name)
-    if icon.isNull():
-        return None
-    src = icon.pixmap(px, px)
-    if src.isNull():
-        return None
-    out = QPixmap(px, px)
-    out.setDevicePixelRatio(1.0)
-    out.fill(Qt.GlobalColor.transparent)
-    p = QPainter(out)
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    p.drawPixmap(QRect(0, 0, px, px), src)
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    p.fillRect(out.rect(), QColor(255, 255, 255))
-    p.end()
-    return out
+        tip_y, tail_y, head_y = cy + ay, cy - ay, cy + ay - hl
+    path = QPainterPath()
+    path.moveTo(cx, tail_y)            # shaft
+    path.lineTo(cx, tip_y)
+    path.moveTo(cx - hw, head_y)       # chevron head, joined at the tip
+    path.lineTo(cx, tip_y)
+    path.lineTo(cx + hw, head_y)
+    painter.drawPath(path)
 
 
 def _draw_direction_badge(
     painter: QPainter, cx: float, cy: float, r: float, outgoing: bool,
 ) -> None:
-    """A coloured disc (green = received, blue = sent) with a white arrow,
+    """A coloured disc (blue = sent, green = received) with a white arrow,
     centred at (cx, cy), radius ``r``; a thin white ring separates it from
-    whatever's behind. The arrow is the desktop theme's own ``go-up``/
-    ``go-down`` glyph when available (so it matches the user's icon set),
-    falling back to a hand-drawn triangle (portable Flatpak/AppImage runtimes
-    may not ship those names)."""
+    whatever's behind. The arrow is drawn as vector (see
+    :func:`_draw_white_arrow`) so it renders identically on every machine,
+    including minimal icon themes / portable runtimes that ship no
+    ``go-up`` / ``go-down``."""
     painter.setPen(QPen(QColor(255, 255, 255), max(1.0, r * 0.12)))
     painter.setBrush(_SENT_COLOR if outgoing else _RECEIVED_COLOR)
     painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
-    painter.setPen(Qt.PenStyle.NoPen)
-    asz = int(r * 1.25)
-    arrow = _themed_arrow_white("go-up" if outgoing else "go-down", asz)
-    if arrow is not None:
-        painter.drawPixmap(int(cx - asz / 2), int(cy - asz / 2), arrow)
-    else:
-        painter.setBrush(QColor(255, 255, 255))
-        painter.drawPath(_arrow_path(cx, cy, r * 0.5, up=outgoing))
+    _draw_white_arrow(painter, cx, cy, r, up=outgoing)
 
 
 def notification_icon(

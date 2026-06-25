@@ -38,14 +38,15 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence,
-    QPalette, QPixmap, QResizeEvent, QStandardItem, QStandardItemModel,
-    QTextDocument, QTextOption,
+    QPainter, QPalette, QPixmap, QResizeEvent, QStandardItem,
+    QStandardItemModel, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
-    QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
+    QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
+    QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -91,6 +92,44 @@ def _copy_noun(value: str) -> str:
         if len(v) == 66:
             return "Hash"
     return "Link"
+
+
+class _CoinsIconDelegate(QStyledItemDelegate):
+    """Draw the coins column's icon 1:1 at its native pixel size.
+
+    The default item delegate hands the icon to the active QStyle, and some
+    style / Qt combinations rescale the rasterised decoration per row (the cell
+    width differs row to row). The solid coin discs survive that, but the thin
+    flow arrow does not — it renders at visibly different sizes / sharpness
+    depending on how many coins are in the row. Blitting the pixmap ourselves,
+    at its own device-pixel size, removes every paint-time rescale so the arrow
+    is identical in every row regardless of style or DPI. Background, selection
+    and focus still come from the base delegate (we just blank its icon).
+    """
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex | QPersistentModelIndex) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        icon = opt.icon
+        opt.icon = QIcon()                       # base draws bg/selection only
+        super().paint(painter, opt, index)
+        sizes = icon.availableSizes() if not icon.isNull() else []
+        if not sizes:
+            return
+        mode = (QIcon.Mode.Selected
+                if opt.state & QStyle.StateFlag.State_Selected
+                else QIcon.Mode.Normal)
+        pm = icon.pixmap(sizes[0], mode)
+        if pm.isNull():
+            return
+        # left-aligned, vertically centred; matches the cell's 6px h-padding.
+        dpr = pm.devicePixelRatio() or 1.0
+        logical_h = pm.height() / dpr
+        r = opt.rect
+        x = r.x() + 6
+        y = r.y() + (r.height() - logical_h) / 2.0
+        painter.drawPixmap(int(x), int(round(y)), pm)
 
 
 def _set_coin_pixmap(label: QLabel | None, src: QPixmap, size: int = 20) -> None:
@@ -2167,6 +2206,9 @@ class TransactionListPanel(QWidget):
         h.setSectionResizeMode(_C_NONCE, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(_C_TIME, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(_C_COINS, QHeaderView.ResizeMode.ResizeToContents)
+        # Draw the coins icon 1:1 so the style can't rescale it per row (which
+        # renders the thin flow arrow at inconsistent sizes). See the delegate.
+        self.table.setItemDelegateForColumn(_C_COINS, _CoinsIconDelegate(self.table))
         # The two empty gap columns soak up the slack on a wide window so
         # the row justifies (Nonce left, Time centre, Activity+coins right)
         # instead of pooling whitespace on the right; they shrink to the

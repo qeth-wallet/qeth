@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 
+from ..icons import smooth_scaled
+
 _ICON = 16        # coin diameter, logical px
 _STEP = 18        # x-advance per coin
 _ARROW = 16       # width reserved for the flow arrow (incl. side gaps)
@@ -105,9 +107,18 @@ def _draw_block(coins: tuple[Coin, ...], p: QPainter, fg: QColor,
         return x
     shown = coins[:_MAX_COINS]
     overflow = len(coins) - len(shown)
+    # dpr of the surface we're painting into, so the explicit downscale below
+    # targets real device pixels.
+    dpr = p.device().devicePixelRatioF()
     for c in shown:
         if c.icon is not None and not c.icon.isNull():
-            p.drawPixmap(x, top, _ICON, _ICON, c.icon)
+            # Scale the (64px) logo down with an EXPLICIT bilinear filter and
+            # blit it 1:1, rather than letting p.drawPixmap(...,w,h,...) scale
+            # it via the SmoothPixmapTransform *hint* — some Qt builds ignore
+            # that hint and fall back to nearest, which renders the coin blocky.
+            # smooth_scaled is QPixmap.scaled(SmoothTransformation), honoured
+            # everywhere.
+            p.drawPixmap(x, top, smooth_scaled(c.icon, _ICON, dpr))
         else:
             _generic_coin(p, x, top, c.symbol, fg)
         x += _STEP

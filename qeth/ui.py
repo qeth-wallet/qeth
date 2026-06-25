@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QWidget,
 )
 
-from .icons import ChainIconCache
+from .icons import ChainIconCache, smooth_icon
 from .notify import DesktopNotifier
 from .plugin import Slot
 from .plugins.ens import EnsPlugin
@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
             label = f"{c.name} ({c.chain_id})"
             pix = self._chain_icon_cache.get(c.chain_id)
             if pix is not None:
-                combo.addItem(QIcon(pix), label, c.chain_id)
+                combo.addItem(smooth_icon(pix), label, c.chain_id)
             else:
                 combo.addItem(label, c.chain_id)
                 self._chain_icon_cache.request(c.chain_id, c.name)
@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
             return
         for i in range(self.chain_combo.count()):
             if self.chain_combo.itemData(i) == chain_id:
-                self.chain_combo.setItemIcon(i, QIcon(pix))
+                self.chain_combo.setItemIcon(i, smooth_icon(pix))
                 break
         # Let the Tokens panel fill the native-asset row's icon (AVAX/BNB/…
         # use the chain logo, fetched async).
@@ -244,7 +244,7 @@ class MainWindow(QMainWindow):
             label = f"{chain.name} ({chain.chain_id})"
             pix = self._chain_icon_cache.get(chain.chain_id)
             if pix is not None:
-                self.chain_combo.addItem(QIcon(pix), label, chain.chain_id)
+                self.chain_combo.addItem(smooth_icon(pix), label, chain.chain_id)
             else:
                 self.chain_combo.addItem(label, chain.chain_id)
                 self._chain_icon_cache.request(chain.chain_id, chain.name)

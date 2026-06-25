@@ -39,7 +39,9 @@ from ..chain import EthClient, wei_to_ether
 from ..formatting import format_balance as _format_balance
 from ..formatting import format_usd as _format_usd
 from ..formatting import transfer_notice
-from ..icons import IconCache, bundled_native_icon, notification_icon
+from ..icons import (
+    IconCache, bundled_native_icon, notification_icon, smooth_icon,
+)
 from ..plugin import Plugin
 from ..prices import DefiLlamaPrices, Price, PriceSource
 from ..risk import GoPlusRisk, RiskCache
@@ -1801,7 +1803,7 @@ class TokenListPanel(QWidget):
             # fills it in when chain-icon-ready fires.
             native_pix = self._chain_icon_getter(chain.chain_id)
         if native_pix is not None:
-            sym.setIcon(QIcon(native_pix))
+            sym.setIcon(smooth_icon(native_pix))
         bal = _NumericItem(_format_balance(native_balance), native_balance)
         bal.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bal.setFont(bf)
@@ -1841,7 +1843,7 @@ class TokenListPanel(QWidget):
             else:
                 pix = self._icons.get(chain.chain_id, b.contract)
                 if pix is not None:
-                    sym.setIcon(QIcon(pix))
+                    sym.setIcon(smooth_icon(pix))
                 elif entry and entry.logo_uri:
                     self._icons.request(chain.chain_id, b.contract, entry.logo_uri)
             bal = _NumericItem(_format_balance(b.balance), b.balance)
@@ -1871,7 +1873,7 @@ class TokenListPanel(QWidget):
         for r in range(self.table.rowCount()):
             it = self.table.item(r, 0)
             if it is not None and it.data(Qt.ItemDataRole.UserRole) == target:
-                it.setIcon(QIcon(pix))
+                it.setIcon(smooth_icon(pix))
                 return
 
     def render_full(self, chain, native_wei: int, tokens: list[TokenBalance],
@@ -2101,7 +2103,7 @@ class TokenListPanel(QWidget):
                 continue
             cid, addr = item.data(Qt.ItemDataRole.UserRole) or (None, None)
             if cid == chain_id and addr == contract.lower():
-                item.setIcon(QIcon(pix))
+                item.setIcon(smooth_icon(pix))
                 break
 
     # ---- action buttons --------------------------------------------------

@@ -150,6 +150,34 @@ def _chain_icon_urls(chain_id: int, name: str | None = None) -> list[str]:
 CIRCULAR_RENDER_SIZE = 64   # Rendered once, scaled down by Qt for display.
 
 
+_VIEW_ICON_SIZES = (16, 18, 20, 24, 32, 36, 40, 48)
+
+
+def smooth_icon(src: QPixmap) -> QIcon:
+    """Build a QIcon that holds ``src`` pre-scaled (bilinear) to every size the
+    UI actually displays at — 16/18/20 px and their 2× HiDPI variants.
+
+    Why not just ``QIcon(src)``: an icon built from a single 64 px pixmap is
+    downscaled by Qt's icon engine at paint time, and some Qt builds do that
+    with nearest-neighbour — blocky logos on low-res screens. By baking the
+    real display sizes ourselves with an explicit smooth filter, the engine
+    finds an exact-size match and blits it 1:1, so it never rescales (nearest
+    or otherwise). Falls back to the source for any larger request.
+    """
+    icon = QIcon()
+    if src.isNull():
+        return icon
+    for s in _VIEW_ICON_SIZES:
+        if s < src.width():
+            icon.addPixmap(src.scaled(
+                s, s,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+    icon.addPixmap(src)   # largest available, for requests beyond the list
+    return icon
+
+
 def smooth_scaled(src: QPixmap, size: int, dpr: float = 1.0) -> QPixmap:
     """Scale ``src`` to ``size``×``size`` *logical* px with a smooth (bilinear)
     filter, tagged at ``dpr`` so it stays crisp on HiDPI.

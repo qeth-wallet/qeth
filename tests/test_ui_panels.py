@@ -78,6 +78,37 @@ class TestNotificationIcon:
         assert isinstance(icon, QIcon) and not icon.isNull()
 
 
+# --- tray minimise-to-tray -------------------------------------------------
+
+class TestTrayDehydrate:
+    def test_minimise_only_hides_no_state_change(self):
+        """Minimise→tray must ONLY hide() — it must not call setWindowState().
+        Running setWindowState on the just-hidden (unmapped) window blocks Qt's
+        X11 backend waiting on a WM reply that never comes, hanging the app on
+        every minimise. The minimised bit is cleared on restore via
+        showNormal() instead."""
+        from PySide6.QtCore import Qt
+        from qeth.tray import _TrayController
+
+        calls = []
+
+        class FakeWin:
+            def windowState(self):
+                return Qt.WindowState.WindowMinimized
+
+            def hide(self):
+                calls.append("hide")
+
+            def setWindowState(self, _state):
+                calls.append("setWindowState")
+
+        ctrl = _TrayController.__new__(_TrayController)   # skip Qt __init__
+        ctrl._win = FakeWin()
+        ctrl._dehydrate_to_tray()
+
+        assert calls == ["hide"]
+
+
 # --- DetailsPanel ----------------------------------------------------------
 
 class TestDetailsPanel:

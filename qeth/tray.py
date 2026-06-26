@@ -108,11 +108,18 @@ class _TrayController(QObject):
     # --- behaviour --------------------------------------------
 
     def _dehydrate_to_tray(self) -> None:
-        # Clear the minimised bit before hiding so a later show
-        # comes back as a normal window rather than minimised.
-        self._win.setWindowState(
-            self._win.windowState() & ~Qt.WindowState.WindowMinimized
-        )
+        # Just hide — do NOT touch the window state here.
+        #
+        # Calling setWindowState() to clear the minimised bit and hide() in the
+        # same breath is trouble either way round: clear-then-hide races the
+        # WM's restore-map against the hide-unmap (rare empty frame stuck on
+        # screen), and hide-then-clear runs setWindowState on an already
+        # unmapped window, where Qt's X11 backend blocks the GUI thread waiting
+        # on a WM reply that never arrives — the app hangs on every minimise.
+        #
+        # The canonical pattern: hide() on minimise, showNormal() on restore
+        # (see _show). showNormal() clears the minimised bit as it remaps, so
+        # the window always comes back as a normal, restored window.
         self._win.hide()
 
     def _on_activated(self, reason) -> None:
@@ -126,10 +133,10 @@ class _TrayController(QObject):
             self._show()
 
     def _show(self) -> None:
-        self._win.show()
-        self._win.setWindowState(
-            self._win.windowState() & ~Qt.WindowState.WindowMinimized
-        )
+        # showNormal() maps the window AND clears the minimised bit in one
+        # documented call — no separate setWindowState (which can hang on a
+        # not-yet-mapped window). Restores to the previous normal geometry.
+        self._win.showNormal()
         self._win.raise_()
         self._win.activateWindow()
 

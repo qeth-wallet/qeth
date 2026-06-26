@@ -305,6 +305,33 @@ _VERIFIED_FORK_LAG: dict[int, int] = {
 }
 _DEFAULT_FORK_LAG = 3
 
+# A real block height is astronomically smaller than the "fork at head"
+# sentinel ``fork_floor_block`` returns while a tx is pending, so anything below
+# this is a genuine block number (no chain reaches 2**40 blocks for millennia).
+_REAL_BLOCK_CEILING = 1 << 40
+
+
+def _floor_ahead_of_head(chain, floor_block) -> bool:
+    """True when ``floor_block`` — this wallet's latest *confirmed* tx — is a
+    real block height that ``chain``'s head hasn't reached yet.
+
+    In verified mode the head is Helios's, which trails the execution head by a
+    few slots. A verified fork is capped at that head (it can't prove a block
+    Helios hasn't synced), so right after a tx confirms, the fork can land
+    BEFORE it and miss its state — e.g. a just-confirmed approval, making the
+    follow-up swap falsely look like it reverts until Helios catches up (~30s).
+    When that's the case the caller skips verified and uses the unverified sim,
+    which forks at the real head and sees the tx. Excludes the pending-tx
+    sentinel (a huge number that legitimately wants the head)."""
+    if floor_block is None or floor_block >= _REAL_BLOCK_CEILING:
+        return False
+    from .chain import EthClient
+    try:
+        head = _hexint(EthClient(chain).rpc("eth_blockNumber", [])) or 0
+    except Exception:
+        return False
+    return floor_block > head
+
 
 def _latest_block(chain, lag: int = 0, floor_block=None) -> "dict | None":
     """Env-relevant fields (ints / address / bytes) of the head block — or,
@@ -455,6 +482,17 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         # binary but no simulate extra. Don't even probe (or spawn) the
         # sidecar in that case.
         helios_chain = verified_chain(chain) if fork_available() else None
+        if helios_chain is not None and _floor_ahead_of_head(
+                helios_chain, floor_block):
+            # The Helios head is still behind this wallet's own latest confirmed
+            # tx (it catches up within ~30s). A verified fork would run before
+            # that tx and miss its state, falsely reverting the follow-up — so
+            # fall through to the unverified sim, which forks at the real head
+            # and sees it. A correct (unverified) preview beats a wrong verified
+            # one; verified mode resumes automatically once Helios catches up.
+            log.info("helios head behind wallet's last tx (block %s); using "
+                     "unverified sim this round", floor_block)
+            helios_chain = None
         if helios_chain is not None:
             log.info("simulating on helios-verified state (%s)",
                      helios_chain.rpc_url)

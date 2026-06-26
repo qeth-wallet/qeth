@@ -504,6 +504,51 @@ def test_verified_revert_is_flagged(monkeypatch):
     assert out.verified is True
 
 
+def test_floor_ahead_of_head(monkeypatch):
+    """The helper that detects when the wallet's just-confirmed tx is at a
+    block the (Helios) head hasn't reached yet — the window where a verified
+    fork would miss it. The pending-tx sentinel must be excluded."""
+    from qeth.simulate import _REAL_BLOCK_CEILING, _floor_ahead_of_head
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params): return hex(100)   # head = block 100
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+
+    assert _floor_ahead_of_head(CHAIN, None) is False               # no floor
+    assert _floor_ahead_of_head(CHAIN, _REAL_BLOCK_CEILING) is False  # pending sentinel
+    assert _floor_ahead_of_head(CHAIN, 105) is True                 # tx ahead of head
+    assert _floor_ahead_of_head(CHAIN, 100) is False                # tx at head
+    assert _floor_ahead_of_head(CHAIN, 90) is False                 # tx behind head
+
+
+def test_verified_skipped_when_helios_behind_floor(monkeypatch):
+    """Right after a tx confirms, the Helios head can still be behind it. The
+    verified fork (capped at that head) would run before the tx and miss its
+    state, so the orchestrator falls through to the unverified sim until Helios
+    catches up — a correct preview beats a wrong verified one."""
+    import qeth.helios as helios_mod
+    monkeypatch.setattr(sim, "_SIMV1_SUPPORT", {})
+    monkeypatch.setattr(sim, "fork_available", lambda: True)
+    monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params): return hex(100)   # helios head = 100
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+
+    used = []
+    monkeypatch.setattr(sim, "_simulate_via_fork",
+                        lambda *a, **k: used.append("fork") or ["verified"])
+    monkeypatch.setattr(sim, "_simulate_via_rpc",
+                        lambda *a, **k: used.append("rpc") or ["unverified"])
+
+    # Wallet's latest confirmed tx is at block 105 — ahead of the helios head.
+    out = simulate_logs(CHAIN, FROM, USDC, "0x1234", 0, floor_block=105)
+    assert used == ["rpc"]          # unverified path taken, verified fork skipped
+    assert out == ["unverified"]
+
+
 def test_simv1_rpc_raises_unsupported_on_minus_32601(monkeypatch):
     from qeth.chain import ChainError
     class _Client:

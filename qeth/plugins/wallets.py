@@ -512,12 +512,14 @@ class WalletsPlugin(Plugin):
         self.act_label.setEnabled(False)
         self.act_label.triggered.connect(self._edit_label)
 
-        # Globe / browser icon for "make this address visible to dapps
-        # via the local JSON-RPC server". Checkable: pressed when this
+        # Network-connect (plug) icon for "make this address visible to
+        # dapps via the local JSON-RPC server" — reads as connecting a
+        # link, not opening a web page. Checkable: pressed when this
         # account is the dapp-facing default.
         self.act_connect = QAction(
-            _icon("applications-internet", "internet-web-browser",
-                  QStyle.StandardPixmap.SP_DesktopIcon),
+            _icon("network-connect", "network-wired",
+                  "network-transmit-receive",
+                  QStyle.StandardPixmap.SP_DriveNetIcon),
             "Connect to &Browser",
         )
         self.act_connect.setToolTip("Make default for dapps")

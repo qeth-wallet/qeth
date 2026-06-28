@@ -41,6 +41,7 @@ _STICKY_PAD_V = 1
 _STICKY_GAP = 8
 _STICKY_MARGIN = 4
 from .alerts import warn
+from .dialog import prompt_text
 from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
 
 
@@ -941,11 +942,10 @@ class MainWindow(QMainWindow):
             signer = LedgerSigner(self.store)
             progress_text = "Confirm the transaction on your Ledger device…"
         elif source == "hot":
-            from PySide6.QtWidgets import QInputDialog, QLineEdit
-            passphrase, ok = QInputDialog.getText(
+            passphrase, ok = prompt_text(
                 dialog, "Hot wallet",
                 f"Passphrase for {finalised.from_addr}:",
-                QLineEdit.EchoMode.Password, "",
+                password=True,
             )
             if not ok:
                 return
@@ -1014,11 +1014,10 @@ class MainWindow(QMainWindow):
                 "Confirm on your Ledger device…",
             )
         if source == "hot":
-            from PySide6.QtWidgets import QInputDialog, QLineEdit
-            passphrase, ok = QInputDialog.getText(
+            passphrase, ok = prompt_text(
                 dialog, "Hot wallet",
                 f"Passphrase for {address}:",
-                QLineEdit.EchoMode.Password, "",
+                password=True,
             )
             if not ok:
                 return None, None

@@ -166,6 +166,7 @@ files = [
     "qeth/ledger_hid.py",
     "qeth/signing.py",
     "qeth/alerts.py",
+    "qeth/dialog.py",
     "qeth/branding.py",
     "qeth/formatting.py",
     "qeth/ens.py",

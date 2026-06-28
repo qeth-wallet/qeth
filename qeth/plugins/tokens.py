@@ -28,12 +28,13 @@ from PySide6.QtGui import (
     QAction, QDesktopServices, QIcon, QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHeaderView, QInputDialog,
+    QAbstractItemView, QApplication, QHeaderView,
     QMenu, QPushButton, QSizePolicy, QStyle, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import QULONGLONG
+from ..dialog import prompt_text
 from ..alerts import warn
 from ..chain import EthClient, wei_to_ether
 from ..formatting import format_balance as _format_balance
@@ -1344,9 +1345,10 @@ class TokensPlugin(Plugin):
         if self.host is None or self._panel is None:
             return
         chain = self.host.current_chain()
-        addr, ok = QInputDialog.getText(
+        addr, ok = prompt_text(
             self._panel, "Add custom token",
             f"Contract address on {chain.name} (0x… 40 hex chars):",
+            wide=True,
         )
         if not ok:
             return

@@ -28,10 +28,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QFormLayout,
+    QAbstractItemView, QDialogButtonBox, QFormLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QVBoxLayout,
 )
+
+from .dialog import Dialog
 
 
 log = logging.getLogger("qeth.chain_rpc_dialog")
@@ -99,7 +101,7 @@ class _ChainlistLoader(QThread):
         self.probing_done.emit()
 
 
-class ChainRpcDialog(QDialog):
+class ChainRpcDialog(Dialog):
     """Edit the JSON-RPC URL for one chain, plus the (global)
     Etherscan v2 API key.
 
@@ -125,7 +127,7 @@ class ChainRpcDialog(QDialog):
         self.resize(640, 540)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 12)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         outer.setSpacing(10)
 
         form = QFormLayout()

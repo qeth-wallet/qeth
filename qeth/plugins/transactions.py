@@ -42,7 +42,7 @@ from PySide6.QtGui import (
     QStandardItemModel, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCompleter, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCompleter, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
@@ -65,6 +65,7 @@ from ..signing import ReplacementFloor, SignerError, SigningRequest
 from ..formatting import format_balance, transfer_notice
 from ..formatting import format_datetime as _format_datetime
 from ..plugin import Plugin
+from ..dialog import Dialog
 from ..transactions import (
     BlockscoutTransactionSource, EtherscanV2TransactionSource,
     RoutedTransactionSource, Transaction, TransactionSource,
@@ -3503,7 +3504,7 @@ def _make_identity_row(*, to_addr: str | None, chain,
     return label, kick
 
 
-class TransactionDetailsDialog(QDialog):
+class TransactionDetailsDialog(Dialog):
     """Modal-ish dialog showing the full tx record.
 
     Calldata decoding runs asynchronously: the dialog opens with a
@@ -4252,7 +4253,7 @@ class _CollapsibleSection(QWidget):
         return self._toggle.isChecked()
 
 
-class SignTransactionDialog(_EventPreviewMixin, QDialog):
+class SignTransactionDialog(_EventPreviewMixin, Dialog):
     """Confirmation dialog for an incoming ``eth_sendTransaction``
     from the Frame RPC. Reuses the decoded-call renderer used by the
     history details dialog, and exposes editable gas / fee fields
@@ -4909,7 +4910,7 @@ class _AddressBookCompleter(QCompleter):
         return addr if addr else super().pathFromIndex(index)
 
 
-class SendTokenDialog(_EventPreviewMixin, QDialog):
+class SendTokenDialog(_EventPreviewMixin, Dialog):
     """User-driven counterpart to ``SignTransactionDialog``. Same
     overall shape (gas controls, expected fee, signing flow) but
     the recipient + amount are *editable*: the user types them

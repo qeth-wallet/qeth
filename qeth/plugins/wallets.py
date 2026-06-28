@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMenu, QProgressBar, QPushButton,
     QSizePolicy, QSpinBox, QStyle, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread
 
 from ..alerts import confirm, error, info, warn
+from ..dialog import Dialog, address_field_min_width, prompt_text
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from ..plugin import Plugin
 
@@ -1179,9 +1180,8 @@ class WalletsPlugin(Plugin):
             (a for a in self._store.accounts if a["address"] == addr), None,
         )
         current = (acct.get("label") if acct else "") or ""
-        new, ok = QInputDialog.getText(
-            self._container, "Edit Label",
-            f"Label for {addr}:", text=current,
+        new, ok = prompt_text(
+            self._container, "Edit Label", f"Label for {addr}:", current,
         )
         if ok and new.strip() != current:
             self._on_label_changed(addr, new.strip())
@@ -1230,7 +1230,7 @@ class WalletsPlugin(Plugin):
 
 # --- AccountInfoDialog + AddLedgerDialog (moved from qeth.ui) --------------
 
-class AccountInfoDialog(QDialog):
+class AccountInfoDialog(Dialog):
     """Modal popup for a single account: the receive QR plus the
     address / path / source / scheme. Opened from the QR button on
     the accounts panel's action row (the info used to sit in a
@@ -1299,7 +1299,7 @@ class AccountInfoDialog(QDialog):
 
 
 
-class AddLedgerDialog(QDialog):
+class AddLedgerDialog(Dialog):
     def __init__(self, chain, parent=None):
         super().__init__(parent)
         self._chain = chain
@@ -1485,7 +1485,7 @@ class AddLedgerDialog(QDialog):
         return [it.data(Qt.ItemDataRole.UserRole) for it in self.results.selectedItems()]
 
 
-class AddWatchOnlyDialog(QDialog):
+class AddWatchOnlyDialog(Dialog):
     """Small modal for adding a watch-only address. No signing
     capability — these accounts can be selected, view balances and
     transaction history, but Send / Connect-to-browser stay disabled
@@ -1503,7 +1503,8 @@ class AddWatchOnlyDialog(QDialog):
         self._existing = {a.lower() for a in existing_addresses}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 16)
+        # Outer margins come from the Dialog base (font-derived, uniform
+        # across all dialogs); only the inter-row spacing is set here.
         layout.setSpacing(10)
 
         form = QFormLayout()
@@ -1511,6 +1512,8 @@ class AddWatchOnlyDialog(QDialog):
         self.address_edit.setPlaceholderText(
             "0x… address or ENS name (e.g. vitalik.eth)")
         self.address_edit.setFont(QFont("monospace"))
+        # Wide enough that a full 0x address shows without scrolling.
+        self.address_edit.setMinimumWidth(address_field_min_width(self))
         form.addRow("&Address:", self.address_edit)
 
         self.label_edit = QLineEdit()
@@ -1692,7 +1695,7 @@ class AddWatchOnlyDialog(QDialog):
         }
 
 
-class AddHotWalletDialog(QDialog):
+class AddHotWalletDialog(Dialog):
     """Generate a new hot wallet: pick a passphrase, get a fresh
     random key encrypted with it. The keystore file lands in
     ``~/.qeth/keystores/`` and the passphrase IS the only key —
@@ -1708,7 +1711,7 @@ class AddHotWalletDialog(QDialog):
         self.resize(560, 0)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 16)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         layout.setSpacing(14)
 
         warn = QLabel(
@@ -1928,7 +1931,7 @@ def _frame_source():
     return FrameSource()
 
 
-class ImportHotWalletsDialog(QDialog):
+class ImportHotWalletsDialog(Dialog):
     """Single-source hot-wallet importer.
 
     One dialog per source (Brownie or Frame), opened from its own
@@ -2019,7 +2022,7 @@ class _ImportSourcePanel(QWidget):
         self._candidates: list = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         layout.setSpacing(8)
 
         # Directory row.

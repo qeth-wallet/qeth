@@ -22,7 +22,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QHeaderView, QInputDialog, QLineEdit, QMenu, QPushButton,
+    QFormLayout, QHeaderView, QLineEdit, QMenu, QPushButton,
     QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -34,6 +34,7 @@ from ..ens_app import (
     verify_names,
 )
 from ..plugin import Plugin
+from ..dialog import Dialog, address_field_min_width, prompt_text
 
 log = logging.getLogger("qeth.plugins.ens")
 
@@ -656,7 +657,7 @@ _RECORD_KINDS = ["ETH address", "Content (IPFS)", "Text record",
                  "Other-chain address"]
 
 
-class _RecordDialog(QDialog):
+class _RecordDialog(Dialog):
     """Choose a record type and enter its value. ``preset`` locks the type
     (used by the quick 'Set text record…' entry); otherwise the type combo is
     shown (the general 'Add / change record…')."""
@@ -688,7 +689,8 @@ class _RecordDialog(QDialog):
         if coin:
             self.coin.setCurrentText(coin)
         self.value = QLineEdit(value)
-        self.value.setMinimumWidth(360)
+        # Wide enough that a full 0x address shows without scrolling.
+        self.value.setMinimumWidth(address_field_min_width(self))
         form.addRow("Key", self.key)
         form.addRow("Coin", self.coin)
         form.addRow("Value", self.value)
@@ -716,7 +718,7 @@ class _RecordDialog(QDialog):
         return kind, extra, self.value.text().strip()
 
 
-class _SubnodeDialog(QDialog):
+class _SubnodeDialog(Dialog):
     """Add a subdomain: label + owner."""
 
     def __init__(self, parent_name: str, self_addr: str, parent=None):
@@ -726,7 +728,8 @@ class _SubnodeDialog(QDialog):
         self.label = QLineEdit()
         self.label.setPlaceholderText("label  (→ label." + parent_name + ")")
         self.owner = QLineEdit(self_addr or "")
-        self.owner.setMinimumWidth(360)
+        # Wide enough that a full 0x owner address shows without scrolling.
+        self.owner.setMinimumWidth(address_field_min_width(self))
         form.addRow("Subdomain", self.label)
         form.addRow("Owner", self.owner)
         buttons = QDialogButtonBox(
@@ -1006,7 +1009,7 @@ class EnsPlugin(Plugin):
     def _on_add_custom(self) -> None:
         if self._panel is None:
             return
-        text, ok = QInputDialog.getText(
+        text, ok = prompt_text(
             self._panel, "Add ENS name", "ENS name (e.g. vitalik.eth):")
         name = (text or "").strip().lower()
         if not ok or not name or "." not in name:
@@ -1058,9 +1061,9 @@ class EnsPlugin(Plugin):
         if not cur:
             n = self._names_by_l.get(name.lower())
             cur = (n.resolved_address or "") if n is not None else ""
-        text, ok = QInputDialog.getText(
+        text, ok = prompt_text(
             self._panel, "Set ETH address", f"ETH address for {name}:",
-            QLineEdit.EchoMode.Normal, cur or "")
+            cur or "", wide=True)
         if not ok:
             return
         from .. import ens_write
@@ -1081,9 +1084,9 @@ class EnsPlugin(Plugin):
         if not cur:
             rec = self._cur_records(name)
             cur = (rec.contenthash or "") if rec is not None else ""
-        text, ok = QInputDialog.getText(
+        text, ok = prompt_text(
             self._panel, "Set content", f"IPFS / IPNS URL for {name}:",
-            QLineEdit.EchoMode.Normal, cur or "")
+            cur or "", wide=True)
         if not ok:
             return
         res = self._ensure_resolver(name)

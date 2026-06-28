@@ -128,6 +128,24 @@ chain id exactly — verified up to 2⁶³⁺. Money values stay `object`:
 uint256 outgrows *any* Qt integer type — 10 ETH = 10¹⁹ wei already
 exceeds qint64.
 
+### Dialogs subclass `qeth.dialog.Dialog`, not `QDialog`
+
+Every dialog inherits `Dialog` (`qeth/dialog.py`), which gives its
+top-level layout uniform, font-derived edge margins on first show —
+half a line-height on every side. Don't set the outer
+`setContentsMargins` per dialog (that's what made some dialogs crowd
+their content against the frame, others over-pad); just build the
+layout and inherit the standard. Inner/nested layouts still set their
+own margins as needed. Mixin dialogs keep the mixin first:
+`class SendTokenDialog(_EventPreviewMixin, Dialog)`.
+
+For one-off text prompts use `dialog.prompt_text(...)` (a `Dialog`-based
+`QInputDialog.getText` replacement, so it inherits the margins) rather
+than `QInputDialog`. Pass `password=True` to mask, `wide=True` for a
+field holding a full address. Any field that holds a 0x address sets
+`setMinimumWidth(address_field_min_width(self))` so the address shows
+without horizontal scroll.
+
 ### Long-lived QThreads
 
 Don't park a `QThread` in a single attribute slot (`self._worker = …`)

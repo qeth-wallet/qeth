@@ -37,12 +37,13 @@ from PySide6.QtGui import (
     QSyntaxHighlighter, QTextCharFormat,
 )
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..signing import MessageSigningRequest, TypedDataSigningRequest
 from ..alerts import warn
+from ..dialog import Dialog
 
 
 class _JsonHighlighter(QSyntaxHighlighter):
@@ -157,7 +158,7 @@ def _format_typed_data(typed: dict) -> str:
     return "\n".join(out)
 
 
-class SignMessageDialog(QDialog):
+class SignMessageDialog(Dialog):
     """Review dialog for a dapp-initiated ``personal_sign`` /
     ``eth_signTypedData_v4`` request. The user sees the decoded
     content and either confirms or rejects. Mirrors
@@ -176,7 +177,7 @@ class SignMessageDialog(QDialog):
         self.resize(680, 540)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 18, 20, 16)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         outer.setSpacing(8)
 
         header = QFormLayout()
@@ -247,7 +248,7 @@ class SignMessageDialog(QDialog):
                 btn.setEnabled(not busy)
 
 
-class ComposeMessageDialog(QDialog):
+class ComposeMessageDialog(Dialog):
     """Local "sign anything you paste" dialog launched from the
     wallet details panel. The user pastes a UTF-8 string or a
     typed-data JSON object; we sniff the shape and build the
@@ -263,7 +264,7 @@ class ComposeMessageDialog(QDialog):
         self.resize(640, 480)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 12)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         outer.setSpacing(10)
 
         intro = QLabel(
@@ -350,7 +351,7 @@ class ComposeMessageDialog(QDialog):
         self.accept()
 
 
-class SignatureResultDialog(QDialog):
+class SignatureResultDialog(Dialog):
     """Post-sign confirmation showing the 65-byte signature with
     a copy-to-clipboard button. Tiny but visible so the user can
     grab the value when signing locally (no dapp to receive it
@@ -362,7 +363,7 @@ class SignatureResultDialog(QDialog):
         self.resize(560, 200)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 12)
+        # Outer margins come from the Dialog base (font-derived, uniform).
         outer.setSpacing(10)
 
         outer.addWidget(QLabel("Signature (65-byte r || s || v):"))

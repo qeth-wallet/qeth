@@ -373,7 +373,7 @@ class TestEnsPlugin:
         plugin.attach(host)
         qtbot.addWidget(plugin.widget())
         monkeypatch.setattr(
-            "qeth.plugins.ens.QInputDialog.getText",
+            "qeth.plugins.ens.prompt_text",
             staticmethod(lambda *a, **k: ("Foo.ETH", True)),
         )
         plugin._on_add_custom()
@@ -535,7 +535,7 @@ class TestEnsWriteActions:
     def test_set_addr_validates_and_builds(self, qtbot, monkeypatch):
         plugin, host, store = self._plugin(qtbot)
         monkeypatch.setattr(
-            "qeth.plugins.ens.QInputDialog.getText",
+            "qeth.plugins.ens.prompt_text",
             staticmethod(lambda *a, **k: (self.OTHER, True)))
         plugin._write_addr("vitalik.eth")
         req, *_ = host.tx_requests[0]
@@ -546,7 +546,7 @@ class TestEnsWriteActions:
         warned: list = []
         plugin, host, store = self._plugin(qtbot)
         monkeypatch.setattr(
-            "qeth.plugins.ens.QInputDialog.getText",
+            "qeth.plugins.ens.prompt_text",
             staticmethod(lambda *a, **k: ("not-an-address", True)))
         monkeypatch.setattr(plugin, "_warn", lambda t: warned.append(t))
         plugin._write_addr("vitalik.eth")
@@ -559,7 +559,7 @@ class TestEnsWriteActions:
         plugin, host, store = self._plugin(qtbot)
         plugin._resolver_cache.clear()              # name has no resolver
         monkeypatch.setattr(
-            "qeth.plugins.ens.QInputDialog.getText",
+            "qeth.plugins.ens.prompt_text",
             staticmethod(lambda *a, **k: (self.OTHER, True)))
         monkeypatch.setattr(
             "PySide6.QtWidgets.QMessageBox.question",

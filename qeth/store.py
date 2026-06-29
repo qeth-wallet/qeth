@@ -41,6 +41,16 @@ def _merge_chain(persisted: dict) -> Chain:
     for f in _USER_EDITABLE_FIELDS:
         if persisted.get(f):
             base[f] = persisted[f]
+    # A user who points a shipped chain at their own node wants THAT node —
+    # not our public DRPC/publicnode fallbacks silently leaking their address
+    # set onto a public endpoint when a single read hiccups. So when the
+    # rpc_url is overridden to something other than our default, drop the
+    # inherited public read-fallbacks and ws endpoints: reads then use only
+    # the user's node (failover collapses to a plain provider), and the live
+    # watcher derives ws from it (or falls back to polling that same node).
+    if base.get("rpc_url") and base["rpc_url"] != default.rpc_url:
+        base["fallback_rpcs"] = ()
+        base["ws_url"] = ()
     return Chain(**{k: v for k, v in base.items() if k in _CHAIN_FIELDS})
 
 CONFIG_DIR = Path.home() / ".qeth"

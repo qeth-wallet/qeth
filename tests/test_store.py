@@ -3,6 +3,7 @@
 import os
 import stat
 
+from qeth.chains import DEFAULT_CHAINS
 from qeth.store import Store, _merge_chain, ensure_private_root
 
 
@@ -239,6 +240,33 @@ class TestChainMigration:
         }
         chain = _merge_chain(old)
         assert chain.rpc_url == "https://my-private-rpc/polygon"
+
+    def test_custom_rpc_drops_inherited_public_fallbacks(self, tmp_qeth):
+        """A user pointing a shipped chain at their own node must NOT keep
+        our public DRPC/publicnode fallbacks — reads would silently leak
+        their address set there on a transient hiccup (issue #24). Both the
+        read-fallbacks and the ws endpoints are cleared so only the user's
+        node is used."""
+        old = {
+            "name": "Ethereum", "chain_id": 1,
+            "rpc_url": "http://localhost:8545",
+        }
+        chain = _merge_chain(old)
+        assert chain.rpc_url == "http://localhost:8545"
+        assert chain.fallback_rpcs == ()
+        assert chain.ws_url == ()
+
+    def test_default_rpc_keeps_public_fallbacks(self, tmp_qeth):
+        """The user who hasn't overridden the RPC still gets failover
+        resilience — fallbacks are only dropped on an explicit override."""
+        default_eth = next(d for d in DEFAULT_CHAINS if d.chain_id == 1)
+        old = {
+            "name": "Ethereum", "chain_id": 1,
+            "rpc_url": default_eth.rpc_url,
+        }
+        chain = _merge_chain(old)
+        assert chain.fallback_rpcs == default_eth.fallback_rpcs
+        assert chain.ws_url == default_eth.ws_url
 
     def test_unknown_chain_falls_back_to_dataclass_default(self, tmp_qeth):
         unknown = {

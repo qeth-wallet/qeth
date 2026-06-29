@@ -15,6 +15,34 @@ from .tray import install_tray
 from .ui import MainWindow
 
 
+def _raise_open_file_limit(target: int = 8192) -> int | None:
+    """Lift the soft RLIMIT_NOFILE toward ``target`` (capped by the hard
+    limit). macOS ships a low soft limit (256) while qeth opens many sockets
+    at once — concurrent chainlist probes, the failover Sessions, the live
+    watcher, prices — plus a pipe per QThread. Hit the cap and Qt can't make
+    a thread pipe ("Too many open files") and DNS lookups start failing,
+    which looks like the RPC being unreachable (see issue #24).
+
+    Unix-only and best-effort: ``resource`` is absent on Windows, and a
+    kernel may reject a raise we then swallow. Returns the new soft limit,
+    or ``None`` if unchanged / unavailable."""
+    try:
+        import resource
+    except ImportError:
+        return None  # Windows — no POSIX rlimits
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    # hard may be RLIM_INFINITY (-1); clamp the request to a concrete number
+    # either way — macOS rejects setrlimit to an unbounded soft value.
+    desired = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    if soft != resource.RLIM_INFINITY and soft >= desired:
+        return soft
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+        return desired
+    except (ValueError, OSError):
+        return None
+
+
 def _harden_x11_backing_store(environ, platform) -> None:
     """Disable Qt's MIT-SHM (shared-memory) X11 backing store. Left on,
     the window stops repainting after many hours of uptime — the
@@ -149,6 +177,7 @@ def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
 
 def main() -> int:
     _harden_x11_backing_store(os.environ, sys.platform)
+    _raise_open_file_limit()
 
     logging.basicConfig(
         level=logging.INFO,

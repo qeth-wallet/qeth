@@ -18,6 +18,7 @@ context manager so callers never see the raw aggregate3 wire format.
 
 import logging
 import re
+import threading
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 from collections.abc import Callable
@@ -109,19 +110,44 @@ _SEL_SYMBOL = bytes.fromhex("95d89b41")
 _SEL_DECIMALS = bytes.fromhex("313ce567")
 
 
-def _build_session():
-    """A requests.Session with our User-Agent. DRPC's Cloudflare front
-    rejects the default ``python-requests/x.y`` UA (HTTP 403, "error
-    code: 1010"), so every HTTP call out of EthClient needs this set."""
-    _ensure_heavy_imports()
-    s = requests.Session()
-    s.headers["User-Agent"] = USER_AGENT
-    # Set Content-Type explicitly so reads can be pointed at a Helios sidecar:
-    # its strict JSON-RPC server 415s a POST without "application/json" (DRPC is
-    # lenient, which masks this on the public path). Harmless for every other
-    # endpoint. Same fix as ``ens._make_w3``.
-    s.headers["Content-Type"] = "application/json"
-    return s
+_shared_session: Any = None
+_shared_session_lock = threading.Lock()
+
+
+def _build_session() -> Any:
+    """The process-wide ``requests.Session`` shared by every ``EthClient``.
+
+    One Session = one urllib3 connection pool (bounded, with keep-alive
+    reuse), shared across all the short-lived ``EthClient`` instances qeth
+    mints on hot refresh paths (token balances, metadata sweeps, native
+    balance, tx polling — 20-odd call sites). A *fresh* Session per client
+    meant a fresh pool of sockets every time, reclaimed only on GC; a burst
+    of multi-chain discovery (multicall + metadata + prices firing at once)
+    could then hold a pile of open fds and exhaust the descriptor limit —
+    low by default on macOS — at which point even opening the local-node
+    socket fails and reads "fail over" to a public endpoint that's equally
+    unreachable. See issue #24.
+
+    DRPC's Cloudflare front rejects the default ``python-requests/x.y`` UA
+    (HTTP 403, "error code: 1010"), so the UA header is mandatory. The
+    explicit Content-Type lets reads be pointed at a strict Helios sidecar
+    (it 415s a POST without "application/json"; DRPC is lenient, masking
+    this). Same headers as ``ens._make_w3``.
+
+    ``requests.Session`` / urllib3's ``PoolManager`` are thread-safe for
+    concurrent requests, so the single instance is safe to share across the
+    Qt worker threads; only the lazy first-build is locked (workers race to
+    construct the first ``EthClient``)."""
+    global _shared_session
+    if _shared_session is None:
+        with _shared_session_lock:
+            if _shared_session is None:
+                _ensure_heavy_imports()
+                s = requests.Session()
+                s.headers["User-Agent"] = USER_AGENT
+                s.headers["Content-Type"] = "application/json"
+                _shared_session = s
+    return _shared_session
 
 
 def _rpc_urls(chain: Chain) -> list[str]:

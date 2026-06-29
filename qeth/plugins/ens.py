@@ -23,8 +23,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit,
-    QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QLineEdit,
-    QMenu, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+    QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QStyle,
+    QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -810,9 +811,37 @@ class _RenewDialog(Dialog):
         form.addRow("New expiry", self.date)
         self.cal = QCalendarWidget()
         self.cal.setGridVisible(True)
+        # No ISO week-number column — it sits in the same grid as the day
+        # numbers and reads as just-another-column of confusing digits.
+        self.cal.setVerticalHeaderFormat(
+            QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.cal.setMinimumDate(min_qd)
         self.cal.setSelectedDate(default_qd)
-        form.addRow(self.cal)
+        # Sit the calendar in a bordered panel so it reads as one block rather
+        # than floating loose on the dialog background. The border is drawn via
+        # a stylesheet, NOT QFrame.setFrameShape — some styles (qt6ct/Kvantum)
+        # suppress a QFrame's native frame entirely, so the shape-based border
+        # was invisible on the user's theme. A stylesheet ``border`` is honoured
+        # by Qt's own QStyleSheetStyle on top of whatever base style is active.
+        # Colour comes from the palette (theme-aware), scoped by object name so
+        # it can't cascade onto the calendar's own widgets.
+        # Wrap the calendar in a QScrollArea purely to inherit the theme's own
+        # sunken "view" frame — the inset border item-views and text fields get.
+        # Drawing it ourselves (stylesheet bevel) looked synthetic, and a plain
+        # QFrame's border is suppressed by the user's Kvantum style; a view
+        # frame is drawn natively. widgetResizable keeps the whole calendar
+        # visible (it never actually scrolls); the minimum sized to the
+        # calendar's hint stops the form from shrinking it into scrollbars.
+        cal_scroll = QScrollArea()
+        cal_scroll.setWidget(self.cal)
+        cal_scroll.setWidgetResizable(True)
+        cal_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        cal_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _hint = self.cal.sizeHint()
+        cal_scroll.setMinimumSize(_hint.width() + 8, _hint.height() + 8)
+        form.addRow(cal_scroll)
         self._cost_lbl = QLabel("Fetching price…")
         form.addRow("Estimated cost", self._cost_lbl)
         outer.addLayout(form)

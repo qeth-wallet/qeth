@@ -140,13 +140,27 @@ def test_keyless_eoa_resolves_without_api_key():
     assert idy.name_tag == "Binance: Hot Wallet"
 
 
-def test_keyless_contract_stays_bare():
-    # Without a key we can't usefully identify a CONTRACT (no name/verified/
-    # deployer), so leave the row bare rather than cache a half-identity.
+def test_keyless_contract_returns_partial_with_label():
+    # Without a key we can't get a contract's verified name/deployer, but the
+    # public Blockscout name-tag IS keyless — so resolve a PARTIAL identity
+    # (name-tag + is_contract) instead of leaving the row bare. ``partial``
+    # marks it so the worker won't cache the half-identity.
+    label_payload = {"addresses": {ADDR: {"tags": [
+        {"tagType": "name", "name": "ENS: ETH Registrar Controller",
+         "ordinal": 1},
+    ]}}}
+
+    def transport(url, timeout):
+        return json.dumps(label_payload).encode()
     src = ContractIdentitySource(
-        lambda: None,
+        lambda: None, transport=transport,
         get_code=lambda cid, addr: "0x60806040")   # bytecode → a contract
-    assert src.fetch(1, ADDR) is None
+    idy = src.fetch(1, ADDR)
+    assert idy is not None
+    assert idy.is_contract is True
+    assert idy.partial is True
+    assert idy.name_tag == "ENS: ETH Registrar Controller"
+    assert idy.name is None and idy.verified is False
 
 
 def test_keyless_without_get_code_is_none():
@@ -193,6 +207,27 @@ def test_describe_unverified_is_warn():
     idy = ContractIdentity(ADDR, True, deployer=DEPLOYER, deployed_at=OLD)
     b = describe_identity(idy, my_addresses=[], now_ts=NOW)
     assert b.level == "warn" and "Unverified" in b.text
+
+
+def test_describe_partial_contract_with_label_shows_label():
+    # Keyless contract with a public name-tag: the tag is authoritative, so
+    # it's a normal "ok" headline — no "unverified"/"add a key" noise.
+    idy = ContractIdentity(ADDR, True, name_tag="Curve.fi: Router",
+                           partial=True)
+    b = describe_identity(idy, my_addresses=[], now_ts=NOW)
+    assert b.level == "ok"
+    assert "Curve.fi: Router" in b.text
+    assert "Unverified" not in b.text
+
+
+def test_describe_partial_contract_without_label_hints_at_key():
+    # Keyless contract with no tag: don't assert "unverified" (we couldn't
+    # check) — point the user at adding an Etherscan key, neutrally.
+    idy = ContractIdentity(ADDR, True, partial=True)
+    b = describe_identity(idy, my_addresses=[], now_ts=NOW)
+    assert b.level == "info"
+    assert "Unverified" not in b.text
+    assert "Etherscan key" in b.text
 
 
 def test_describe_self_deployed():

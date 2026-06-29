@@ -66,6 +66,11 @@ class ContractIdentity:
     deployed_at: int | None = None   # unix timestamp of the creation tx
     name_tag: str | None = None      # this address's public label (OLI)
     deployer_label: str | None = None  # the deployer's public label
+    # True for a contract identified WITHOUT an Etherscan key: we know it's a
+    # contract and (maybe) its public name-tag, but not its verified-source
+    # name or deployer. Runtime-only and never cached — so adding a key later
+    # re-fetches the full identity instead of being stuck on this stub.
+    partial: bool = False
 
     @property
     def deployed_date(self) -> str | None:
@@ -277,11 +282,15 @@ class ContractIdentitySource:
                        address: str) -> ContractIdentity | None:
         """Identify an address with no Etherscan key. ``eth_getCode``
         (keyless, cheap, not CU-limited) tells EOA-vs-contract, and
-        Blockscout supplies the public label (also keyless). An EOA is
-        FULLY resolved this way — identical to the keyed EOA result — so it's
-        safe to cache. A contract still needs the explorer for
-        name/verified/deployer, so leave it bare (return None, uncached)
-        until a key is configured rather than persist a half-identity."""
+        Blockscout supplies the public label (also keyless).
+
+        An EOA is FULLY resolved this way — identical to the keyed EOA result
+        — so it's cached. A contract resolves only *partially* (we get its
+        public name-tag, e.g. "ENS: ETH Registrar Controller", but not the
+        verified-source name or deployer, which need the explorer). That stub
+        is still worth showing — the name-tag is the most useful bit — but is
+        flagged ``partial`` so the worker doesn't cache it, leaving a later
+        key free to fetch the full identity."""
         if self._get_code is None:
             return None
         try:
@@ -291,12 +300,12 @@ class ContractIdentitySource:
         if code is None:
             return None
         stripped = code[2:] if code.startswith("0x") else code
-        if stripped.strip("0"):          # any non-zero bytecode → a contract
-            return None
+        is_contract = bool(stripped.strip("0"))   # any non-zero bytecode
         labels = self.fetch_labels(chain_id, [address])
         return ContractIdentity(
-            address=address, is_contract=False,
-            name_tag=labels.get(address.lower()))
+            address=address, is_contract=is_contract,
+            name_tag=labels.get(address.lower()),
+            partial=is_contract)
 
 
 @dataclass
@@ -341,6 +350,11 @@ def describe_identity(identity: ContractIdentity, *,
     elif identity.verified and identity.name:
         headline = identity.name
         level = "ok"
+    elif identity.partial:
+        # No Etherscan key, so we couldn't check the source — say so plainly
+        # rather than assert "unverified" (which we don't actually know).
+        headline = "Contract · add an Etherscan key to verify"
+        level = "info"
     else:
         headline = "⚠ Unverified contract"
         level = "warn"

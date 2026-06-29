@@ -2863,7 +2863,10 @@ class ContractIdentityWorker(QThread):
             except Exception as e:
                 log.warning("identity fetch failed for %s/%s: %s",
                             self._chain_id, self._address, e)
-            if idy is not None:
+            # A ``partial`` (keyless) contract identity is a stub — don't
+            # persist it, so adding an Etherscan key later fetches the full
+            # one instead of hitting a cached half-identity forever.
+            if idy is not None and not idy.partial:
                 self._cache.save(self._chain_id, idy)
         if idy is None:
             self.ready.emit(None)

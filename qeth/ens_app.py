@@ -70,6 +70,13 @@ ENS_ETH_REGISTRAR = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
 # NameWrapper.ownerOf(uint256(namehash)). Without unwrapping, every wrapped name
 # (which the ENS app shows as yours) would read as "not owned".
 ENS_NAME_WRAPPER = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401"
+# ETHRegistrarController — the .eth registration/renewal entry point. renew()
+# and the rentPrice() oracle live here. VERIFIED ON-CHAIN (not from memory):
+# this is the controller whose renew() the BaseRegistrar actually accepts; the
+# later-deployed 0x59E1…0CE547 exposes the same rentPrice() view but its renew()
+# reverts (it isn't an authorized controller), so don't "upgrade" to it without
+# re-checking on-chain.
+ENS_ETH_CONTROLLER = "0x253553366Da8546fC250F225fe3d25d0C782303b"
 
 _SEL_OWNER = bytes.fromhex("02571be3")      # registry.owner(bytes32)
 _SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
@@ -80,6 +87,7 @@ _SEL_TEXT = bytes.fromhex("59d1d43c")       # resolver.text(bytes32,string)
 _SEL_CONTENTHASH = bytes.fromhex("bc1c58d1")  # resolver.contenthash(bytes32)
 _SEL_SUPPORTS = bytes.fromhex("01ffc9a7")   # supportsInterface(bytes4)
 _SEL_RESOLVE = bytes.fromhex("9061b923")    # resolve(bytes,bytes) — IExtendedResolver
+_SEL_RENT_PRICE = bytes.fromhex("83e7f6ff")  # controller.rentPrice(string,uint256)
 # ENSIP-10 IExtendedResolver interface id (== the resolve() selector). A resolver
 # that supports it answers via resolve()/CCIP rather than plain text()/addr().
 _IFACE_EXTENDED = bytes.fromhex("9061b923")
@@ -396,6 +404,28 @@ def _is_eth_2ld(name: str) -> bool:
     """True for a second-level ``label.eth`` — the only names that are .eth
     registrar NFTs (subdomains and other TLDs aren't)."""
     return name.endswith(".eth") and name.count(".") == 1
+
+
+def rent_price(chain, label: str, duration_s: int, *, client=None) -> int | None:
+    """Cost in wei to renew (or register) ``label``.eth for ``duration_s``
+    seconds — ``base + premium`` from the ETHRegistrarController's rentPrice
+    oracle (the premium is 0 for a straight renewal; it only applies to a name
+    in its post-expiry temporary-premium window). ``label`` is the bare label
+    ('vitalik', not 'vitalik.eth'). Returns None if the read doesn't land — the
+    caller must not proceed to send value it couldn't price."""
+    from .chain import EthClient
+    from eth_abi import decode as abi_decode, encode as abi_encode
+    cl = client if client is not None else EthClient(chain)
+    data = "0x" + (_SEL_RENT_PRICE
+                   + abi_encode(["string", "uint256"], [label, duration_s])).hex()
+    try:
+        out = cl.call({"to": ENS_ETH_CONTROLLER, "data": data})
+        base, premium = abi_decode(["uint256", "uint256"],
+                                   bytes.fromhex(out[2:]))
+        return int(base) + int(premium)
+    except Exception:
+        log.debug("ENS rent_price read failed for %s", label, exc_info=True)
+        return None
 
 
 def _decode_addr_word(raw) -> str | None:

@@ -9,7 +9,8 @@ routes to the registry (unwrapped) vs the NameWrapper (wrapped).
 from eth_abi import encode as abi_encode
 
 from qeth.ens_app import (
-    ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, decode_contenthash, namehash,
+    ENS_ETH_CONTROLLER, ENS_NAME_WRAPPER, ENS_REGISTRY,
+    _labelhash, decode_contenthash, namehash,
 )
 from qeth import ens_write
 
@@ -120,3 +121,16 @@ class TestSubnode:
              "uint64", "uint32", "uint64"],
             [namehash(NAME), "blog", ADDR, ens_write.PUBLIC_RESOLVER,
              0, 0, 123])
+
+
+class TestRenew:
+    def test_renew_targets_controller_with_bare_label(self):
+        # renew takes the LABEL ('vitalik'), not the full name or a namehash.
+        to, data = ens_write.renew("vitalik", 2 * ens_write.SECONDS_PER_YEAR)
+        assert to == ENS_ETH_CONTROLLER
+        assert _selector(data) == "acf1a841"
+        assert _body(data) == abi_encode(
+            ["string", "uint256"], ["vitalik", 2 * ens_write.SECONDS_PER_YEAR])
+
+    def test_seconds_per_year_is_365_days(self):
+        assert ens_write.SECONDS_PER_YEAR == 365 * 24 * 60 * 60

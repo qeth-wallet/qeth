@@ -7,6 +7,7 @@ that the plugin renders from cache without a fetch.
 """
 
 
+from eth_abi import encode as abi_encode
 from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
@@ -679,6 +680,97 @@ class TestEnsWriteActions:
         _req, _chain, _label, on_confirmed = host.tx_requests[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
+
+    # --- renewal ----------------------------------------------------------
+
+    OWNED_EXP = 1_900_000_000        # a far-future expiry (year ~2030)
+
+    def test_renew_quotes_one_year_with_usd(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        from qeth.plugins.ens import _RenewDialog, EnsRenewPriceWorker
+        from qeth import ens_write
+        plugin, host, store = self._plugin(qtbot)
+        plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
+        # Reject so _renew returns after starting just the quote worker.
+        monkeypatch.setattr(_RenewDialog, "exec",
+                            lambda self: QDialog.DialogCode.Rejected)
+        plugin._renew("vitalik.eth")
+        assert len(host.started_workers) == 1
+        w = host.started_workers[0]
+        assert isinstance(w, EnsRenewPriceWorker)
+        assert w._label == "vitalik"                       # bare label, no .eth
+        assert w._duration == ens_write.SECONDS_PER_YEAR   # one-year quote
+        assert w._with_usd is True
+        assert host.tx_requests == []
+
+    def test_renew_rejects_subdomain(self, qtbot):
+        plugin, host, store = self._plugin(qtbot, owned=("blog.vitalik.eth",))
+        plugin._renew("blog.vitalik.eth")                   # not a .eth 2LD
+        assert host.started_workers == []
+
+    def test_renew_quote_reaches_open_dialog_only(self, qtbot):
+        from qeth.plugins.ens import _RenewDialog
+        from decimal import Decimal
+        plugin, host, store = self._plugin(qtbot)
+        dlg = _RenewDialog("vitalik.eth", self.OWNED_EXP)
+        qtbot.addWidget(dlg)
+        plugin._renew_dlg = dlg
+        plugin._on_renew_quote(1000, Decimal("2000"))
+        assert dlg._price_1y == 1000
+        plugin._renew_dlg = None                            # dialog closed
+        plugin._on_renew_quote(9999, Decimal("1"))          # dropped, no crash
+        assert dlg._price_1y == 1000
+
+    def test_submit_renew_builds_payable_tx_to_controller(self, qtbot):
+        from qeth.ens_app import ENS_ETH_CONTROLLER
+        from qeth import ens_write
+        plugin, host, store = self._plugin(qtbot)
+        duration = 2 * ens_write.SECONDS_PER_YEAR
+        target = self.OWNED_EXP + duration
+        plugin._submit_renew("vitalik.eth", "vitalik", duration, target, 1_000_000)
+        req, _chain, label, cb = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_ETH_CONTROLLER.lower()
+        assert req.data[2:10] == "acf1a841"                 # renew(string,uint256)
+        # The duration is encoded raw (arbitrary seconds, not whole years).
+        assert req.data[10:] == abi_encode(
+            ["string", "uint256"], ["vitalik", duration]).hex()
+        assert req.value_wei == 1_000_000 + 1_000_000 // 10  # price + 10% buffer
+        assert "to " in label                               # "Renew … · to <date>"
+
+    def test_submit_renew_price_failure_warns_and_submits_nothing(self, qtbot):
+        warned: list = []
+        plugin, host, store = self._plugin(qtbot)
+        plugin._warn = lambda t: warned.append(t)
+        plugin._submit_renew("vitalik.eth", "vitalik", 31_536_000,
+                             self.OWNED_EXP, None)
+        assert host.tx_requests == []
+        assert warned
+
+    def test_renew_confirmation_rediscovers(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        refreshed: list = []
+        plugin._on_refresh = lambda: refreshed.append(True)
+        plugin._submit_renew("vitalik.eth", "vitalik", 31_536_000,
+                             self.OWNED_EXP, 1000)
+        _req, _chain, _label, on_confirmed = host.tx_requests[0]
+        on_confirmed({"status": "0x1"})
+        assert refreshed == [True]
+
+    def test_renew_dialog_scales_cost_by_date(self, qtbot):
+        from qeth.plugins.ens import _RenewDialog
+        from decimal import Decimal
+        # expiry at a known instant; default date is +1 year.
+        dlg = _RenewDialog("vitalik.eth", self.OWNED_EXP)
+        qtbot.addWidget(dlg)
+        dlg.set_quote(1_000_000_000, Decimal("3000"))      # 1e9 wei / year, $3000/ETH
+        one_year = dlg.selected_value_wei()
+        # Default term is the picked day +1 calendar year (~365 days, minus the
+        # base instant's time-of-day) — close to a year's price, not exact.
+        assert 0.97 * 1e9 < one_year < 1.0 * 1e9
+        # Push the date out by ~another year → cost ~doubles (linear in seconds).
+        dlg.date.setDate(dlg.date.date().addYears(1))
+        assert dlg.selected_value_wei() > one_year * 9 // 5  # clearly grew
+        assert "ETH" in dlg._cost_lbl.text() and "$" in dlg._cost_lbl.text()
 
 
 # --- EnsPlugin: name-row resolution follows the head address read ----------

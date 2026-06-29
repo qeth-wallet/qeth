@@ -16,7 +16,7 @@ from __future__ import annotations
 from base64 import b32decode
 
 from .ens_app import (
-    ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, namehash,
+    ENS_ETH_CONTROLLER, ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, namehash,
 )
 
 # Latest canonical mainnet PublicResolver — the resolver to point a name at when
@@ -33,8 +33,14 @@ _SEL_SET_RESOLVER = bytes.fromhex("1896f70a")      # registry.setResolver(bytes3
 _SEL_SUBNODE_RECORD = bytes.fromhex("5ef2c7f0")
 # NameWrapper.setSubnodeRecord(bytes32,string,address,address,uint64,uint32,uint64)
 _SEL_WRAPPED_SUBNODE = bytes.fromhex("24c1af44")
+_SEL_RENEW = bytes.fromhex("acf1a841")             # controller.renew(string,uint256)
 
 ZERO_ADDRESS = "0x" + "00" * 20
+
+# Registration duration is charged per second; a "year" in the UI is this many.
+# 365 days (the ENS-app convention) — exactness doesn't matter for renewal since
+# the oracle prices per second and the user sees the cost before signing.
+SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
 # ENSIP-9 coin types (SLIP-44). EVM chains use ENSIP-11: 0x80000000 | chain_id.
 ETH_COIN_TYPE = 60
@@ -136,6 +142,19 @@ def add_subnode(parent_name: str, label: str, owner: str, *, wrapped: bool,
         ["bytes32", "bytes32", "address", "address", "uint64"],
         [parent_node, _labelhash(label), owner, resolver, ttl])
     return _tx(ENS_REGISTRY, _SEL_SUBNODE_RECORD, body)
+
+
+# --- registration (renewal) -----------------------------------------------
+
+def renew(label: str, duration_s: int) -> Tx:
+    """Extend a ``label``.eth 2LD's registration by ``duration_s`` seconds, via
+    ``ETHRegistrarController.renew(string,uint256)``. ``label`` is the bare label
+    ('vitalik', not 'vitalik.eth'). The call is PAYABLE — the caller sets
+    ``msg.value`` from ``ens_app.rent_price`` (plus a small buffer for ETH/USD
+    oracle drift between pricing and mining; the controller refunds any
+    overpayment). Anyone may renew any name, so this needs no ownership."""
+    body = _abi(["string", "uint256"], [label, duration_s])
+    return _tx(ENS_ETH_CONTROLLER, _SEL_RENEW, body)
 
 
 def eth_addr_bytes(address: str) -> bytes:

@@ -14,17 +14,19 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import Decimal
 from typing import ClassVar
 
-from PySide6.QtCore import QEvent, QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QIcon, QPalette,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QHeaderView, QLineEdit, QMenu, QPushButton,
-    QSizePolicy, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit,
+    QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel, QLineEdit,
+    QMenu, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..ens_app import (
@@ -334,6 +336,43 @@ class EnsVerifyWorker(QThread):
         self.ready.emit(self._address, states, verified)
 
 
+def _eth_usd_rate(chain) -> Decimal | None:
+    """Current USD price of 1 ETH (DefiLlama), to value a renewal in dollars.
+    None if the lookup doesn't land — the dialog then shows ETH only."""
+    try:
+        from ..prices import DefiLlamaPrices
+        res = DefiLlamaPrices().fetch(chain, [], include_native=True)
+    except Exception:
+        log.debug("ETH/USD rate fetch failed", exc_info=True)
+        return None
+    p = res.get("")        # "" is the native-asset key
+    return p.price_usd if p is not None else None
+
+
+class EnsRenewPriceWorker(QThread):
+    """Read the on-chain renewal price (rentPrice oracle) — and, optionally, the
+    ETH/USD rate — off the Qt thread, so the renew dialog can quote a cost
+    without blocking. Emits ``ready(price_wei, usd_per_eth)``; either is None if
+    that read didn't land. The renewal price is linear in duration, so the
+    caller quotes one year here and scales it locally per the chosen term."""
+
+    ready = Signal(object, object)        # (price_wei | None, usd_per_eth | None)
+
+    def __init__(self, chain, label: str, duration_s: int,
+                 *, with_usd: bool = False, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._label = label
+        self._duration = duration_s
+        self._with_usd = with_usd
+
+    def run(self) -> None:
+        from ..ens_app import rent_price
+        price = rent_price(self._chain, self._label, self._duration)
+        usd = _eth_usd_rate(self._chain) if self._with_usd else None
+        self.ready.emit(price, usd)
+
+
 class EnsPanel(QWidget):
     """The tree widget: names → owned subdomains → records."""
 
@@ -610,6 +649,12 @@ class EnsPanel(QWidget):
             if n.name.lower() in self._writable:
                 menu.addSeparator()
                 nm = n.name
+                # Renewal only for .eth 2LDs (subdomains have no registration of
+                # their own — they ride the parent's expiry).
+                if not n.is_subdomain and nm.endswith(".eth"):
+                    menu.addAction("Extend registration…",
+                                   lambda: self.write_requested.emit(nm, "renew"))
+                    menu.addSeparator()
                 menu.addAction("Set ETH address…",
                                lambda: self.write_requested.emit(nm, "addr"))
                 menu.addAction("Set content (IPFS)…",
@@ -650,6 +695,13 @@ def _checksum(text: str) -> str | None:
 def _fmt_expiry(ts: int) -> str:
     from datetime import datetime
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def _qdate_from_ts(ts: int) -> QDate:
+    """The local calendar day of a unix timestamp, as a ``QDate``."""
+    from datetime import datetime
+    d = datetime.fromtimestamp(ts)
+    return QDate(d.year, d.month, d.day)
 
 
 # Record types in the general chooser → (label, needs-key, needs-coin).
@@ -718,6 +770,112 @@ class _RecordDialog(Dialog):
         return kind, extra, self.value.text().strip()
 
 
+class _RenewDialog(Dialog):
+    """Pick a new expiry date for a .eth name, with a live cost.
+
+    A date field plus an inline ``QCalendarWidget`` (kept in sync) let the user
+    extend to any future day — step the year field to jump whole years, or click
+    an exact month/day. The renewal duration is ``new expiry − current expiry``
+    and the cost is linear in it, so a one-year quote (``set_quote``) scales to
+    any term locally; the ETH/USD figure updates instantly as the date changes.
+    ``selected_value_wei`` is what the caller sends (None until quoted)."""
+
+    # Renewal adds ``duration`` to the registrar's CURRENT expiry, so duration is
+    # measured from there. A name in its grace period (expiry already past) is
+    # measured from today instead, so the chosen date is the real new expiry.
+    def __init__(self, name: str, expiry_ts: int | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Extend · {name}")
+        self._price_1y: int | None = None      # wei to renew for one year
+        self._usd: Decimal | None = None       # USD per ETH
+        self._syncing = False                  # guards the date↔calendar echo
+        now = int(time.time())
+        self._base_ts = expiry_ts if expiry_ts else now
+        floor_ts = max(self._base_ts, now)     # can only extend into the future
+        floor_qd = _qdate_from_ts(floor_ts)
+        min_qd = floor_qd.addDays(1)           # strictly forward
+        default_qd = floor_qd.addYears(1)      # sensible default: +1y
+        form = QFormLayout(self)
+        if expiry_ts:
+            form.addRow("Current expiry", QLabel(_fmt_expiry(expiry_ts)))
+        # A compact date field (type / step the year) above an always-visible
+        # calendar (no fragile frameless popup) — the two stay in lock-step.
+        self.date = QDateEdit()
+        self.date.setDisplayFormat("yyyy-MM-dd")
+        self.date.setMinimumDate(min_qd)
+        self.date.setDate(default_qd)
+        form.addRow("New expiry", self.date)
+        self.cal = QCalendarWidget()
+        self.cal.setGridVisible(True)
+        self.cal.setMinimumDate(min_qd)
+        self.cal.setSelectedDate(default_qd)
+        form.addRow(self.cal)
+        self._cost_lbl = QLabel("Fetching price…")
+        form.addRow("Estimated cost", self._cost_lbl)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.date.dateChanged.connect(self._on_date_field)
+        self.cal.selectionChanged.connect(self._on_calendar)
+        self._refresh()
+
+    def _on_date_field(self) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        self.cal.setSelectedDate(self.date.date())
+        self._syncing = False
+        self._refresh()
+
+    def _on_calendar(self) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        self.date.setDate(self.cal.selectedDate())
+        self._syncing = False
+        self._refresh()
+
+    def set_quote(self, price_1y_wei: int | None, usd_per_eth: Decimal | None) -> None:
+        """Apply the one-year price quote (+ ETH/USD rate); refreshes the cost."""
+        self._price_1y = price_1y_wei
+        self._usd = usd_per_eth
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._cost_lbl.setText(self._cost_text())
+
+    def _cost_text(self) -> str:
+        price = self.selected_value_wei()
+        if price is None:
+            return "Fetching price…"
+        from ..chain import wei_to_ether
+        eth = wei_to_ether(price)
+        text = f"≈ {eth:.4f} ETH"
+        if self._usd is not None:
+            text += f"   (~${eth * self._usd:,.2f})"
+        return text
+
+    def target_ts(self) -> int:
+        """Chosen new-expiry instant (local midnight of the picked day)."""
+        qd = self.date.date()
+        return int(time.mktime((qd.year(), qd.month(), qd.day(),
+                                0, 0, 0, 0, 0, -1)))
+
+    def duration_seconds(self) -> int:
+        """Seconds to add to the registration = new expiry − the base instant."""
+        return max(0, self.target_ts() - self._base_ts)
+
+    def selected_value_wei(self) -> int | None:
+        """Total renewal price (wei) for the chosen term, or None if unpriced.
+        Linear in duration: the one-year quote scaled to the picked seconds."""
+        from .. import ens_write
+        if self._price_1y is None:
+            return None
+        return self._price_1y * self.duration_seconds() // ens_write.SECONDS_PER_YEAR
+
+
 class _SubnodeDialog(Dialog):
     """Add a subdomain: label + owner."""
 
@@ -776,6 +934,7 @@ class EnsPlugin(Plugin):
         self._names_by_l: dict[str, EnsName] = {}
         self._owned: set[str] = set()      # owned by the selected address
         self._wrapped: set[str] = set()    # held by the NameWrapper
+        self._renew_dlg: _RenewDialog | None = None   # open renewal dialog, if any
 
     # --- plugin contract --------------------------------------------------
 
@@ -1032,6 +1191,8 @@ class EnsPlugin(Plugin):
             self._write_record(name)
         elif kind == "subdomain":
             self._add_subdomain(name)
+        elif kind == "renew":
+            self._renew(name)
 
     def _on_edit_record(self, name: str, label: str, value: str) -> None:
         """Re-open the matching editor for an existing record row, prefilled.
@@ -1186,7 +1347,71 @@ class EnsPlugin(Plugin):
         to, data = ens_write.add_subnode(
             name, label, owner, wrapped=name.lower() in self._wrapped)
         self._submit_tx(name, to, data,
-                        f"Add {label}.{name}", subdomain=True)
+                        f"Add {label}.{name}", rediscover=True)
+
+    # --- renewal -----------------------------------------------------------
+
+    def _expiry_of(self, name: str) -> int | None:
+        n = self._names_by_l.get(name.lower())
+        return n.expiry_ts if n is not None else None
+
+    def _renew(self, name: str) -> None:
+        from ..ens_app import _is_eth_2ld
+        if self._panel is None or not _is_eth_2ld(name):
+            return
+        chain = self._mainnet()
+        if chain is None:
+            return
+        from .. import ens_write
+        label = name.split(".")[0]
+        dlg = _RenewDialog(name, self._expiry_of(name), parent=self._panel)
+        self._renew_dlg = dlg
+        # Quote one year's price + the ETH/USD rate once; the dialog scales it
+        # to the chosen term locally (renewal cost is linear in duration).
+        quote = EnsRenewPriceWorker(
+            chain, label, ens_write.SECONDS_PER_YEAR, with_usd=True)
+        quote.ready.connect(self._on_renew_quote)
+        self._start(quote)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        self._renew_dlg = None         # late quotes after this are dropped
+        if not accepted:
+            return
+        duration = dlg.duration_seconds()
+        target = dlg.target_ts()
+        if duration <= 0:
+            return
+        price = dlg.selected_value_wei()
+        if price is not None:
+            self._submit_renew(name, label, duration, target, price)
+            return
+        # The quote hadn't landed when the user accepted — fetch the exact price
+        # for the chosen term, then submit.
+        worker = EnsRenewPriceWorker(chain, label, duration)
+        worker.ready.connect(
+            lambda p, _usd: self._submit_renew(name, label, duration, target, p))
+        self._start(worker)
+
+    def _on_renew_quote(self, price_1y: int | None,
+                        usd: Decimal | None) -> None:
+        if self._renew_dlg is not None:
+            self._renew_dlg.set_quote(price_1y, usd)
+
+    def _submit_renew(self, name: str, label: str, duration_s: int,
+                      target_ts: int, price: int | None) -> None:
+        if price is None:
+            self._warn("Couldn't fetch the renewal price just now. "
+                       "Please try again.")
+            return
+        from .. import ens_write
+        # Overpay slightly: the price is USD-denominated and reconverted to wei
+        # at execution time, so ETH dropping between now and mining would make
+        # the exact amount short and revert. The controller refunds the excess,
+        # so a 10% buffer is free insurance.
+        value = price + price // 10
+        to, data = ens_write.renew(label, duration_s)
+        self._submit_tx(name, to, data,
+                        f"Renew {name} · to {_fmt_expiry(target_ts)}",
+                        value_wei=value, rediscover=True)
 
     # --- write plumbing ----------------------------------------------------
 
@@ -1224,7 +1449,7 @@ class EnsPlugin(Plugin):
         QMessageBox.warning(self._panel, "ENS", text)
 
     def _submit_tx(self, name: str, to: str, data: str, label: str,
-                   *, subdomain: bool = False) -> None:
+                   *, value_wei: int = 0, rediscover: bool = False) -> None:
         host = self.host
         chain = self._mainnet()
         addr = host.selected_address if host is not None else None
@@ -1237,16 +1462,17 @@ class EnsPlugin(Plugin):
             chain_id=ENS_CHAIN_ID,
             from_addr=to_checksum_address(addr),
             to_addr=to_checksum_address(to),
-            value_wei=0, data=data)
+            value_wei=value_wei, data=data)
         nm = name
 
         def _on_confirmed(_receipt: object) -> None:
             # The write mined: refresh against CONFIRMED (chain-head) state right
-            # away — a subdomain add re-discovers names; a record write force-
-            # re-reads so the new value shows now, marked "confirmed" until
-            # finality earns it the ✓ (rather than waiting on finality to show
-            # it at all).
-            if subdomain:
+            # away. ``rediscover`` re-runs name discovery — a subdomain add (a
+            # new name) or a renewal (a new expiry) shows up there, not in the
+            # resolver records; a plain record write force-re-reads instead so
+            # the new value shows now, marked "confirmed" until finality earns
+            # it the ✓ (rather than waiting on finality to show it at all).
+            if rediscover:
                 self._on_refresh()
             else:
                 self._on_records_requested(nm, force=True)

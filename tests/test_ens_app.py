@@ -178,6 +178,37 @@ def test_is_eth_2ld():
     assert not ea._is_eth_2ld("foo.xyz")            # other TLD
 
 
+def test_rent_price_sums_base_and_premium():
+    from eth_abi import encode as abi_encode
+
+    class _PriceClient:
+        def __init__(self):
+            self.to = None
+            self.data = None
+
+        def call(self, tx, block="latest"):
+            self.to = tx["to"]
+            self.data = tx["data"]
+            return "0x" + abi_encode(["uint256", "uint256"], [1000, 7]).hex()
+
+    cl = _PriceClient()
+    price = ea.rent_price(None, "vitalik", ea_year := 31_536_000, client=cl)
+    assert price == 1007                              # base + premium
+    assert cl.to == ea.ENS_ETH_CONTROLLER             # the controller, not registry
+    assert cl.data[2:10] == "83e7f6ff"                # rentPrice(string,uint256)
+    # The label (not the full name) is encoded, with the duration.
+    assert cl.data[10:] == abi_encode(
+        ["string", "uint256"], ["vitalik", ea_year]).hex()
+
+
+def test_rent_price_none_on_read_failure():
+    class _BoomClient:
+        def call(self, tx, block="latest"):
+            raise RuntimeError("rpc down")
+
+    assert ea.rent_price(None, "vitalik", 31_536_000, client=_BoomClient()) is None
+
+
 def test_decode_addr_word():
     addr = "d8da6bf26964af9d7eed9e03e53415d37aa96045"
     word = b"\x00" * 12 + bytes.fromhex(addr)

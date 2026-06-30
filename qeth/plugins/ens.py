@@ -477,9 +477,10 @@ class EnsPanel(QWidget):
         self._rec_icons = {
             # A chain link for "points to an address". Distinct SP_FileLinkIcon
             # last-resort so it can't collapse onto the generic document.
+            # (No emblem-* names — those are corner-badge overlays that render
+            # tiny and off-centre when used as a standalone icon.)
             "address": _icon(
-                ("insert-link", "emblem-symbolic-link", "mail-attachment",
-                 "edit-link", "gtk-jump-to"),
+                ("insert-link", "edit-link", "gtk-jump-to", "mail-attachment"),
                 QStyle.StandardPixmap.SP_FileLinkIcon),
             "content": _icon(
                 ("folder-remote", "folder-publicshare", "network-server"),

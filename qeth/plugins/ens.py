@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import ClassVar
+from typing import Any, ClassVar
+from collections.abc import Callable
 
 from PySide6.QtCore import QDate, QEvent, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
@@ -23,7 +25,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit,
-    QDialog, QDialogButtonBox, QFormLayout, QHeaderView, QLabel,
+    QDialogButtonBox, QFormLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
@@ -38,6 +40,8 @@ from ..ens_app import (
 )
 from ..plugin import Plugin
 from ..dialog import Dialog, address_field_min_width, prompt_text
+from ..signing import SignerError, SigningRequest
+from .transactions import _render_decoded, _TxComposerDialog
 
 log = logging.getLogger("qeth.plugins.ens")
 
@@ -719,17 +723,21 @@ _RECORD_KINDS = ["ETH address", "Content (IPFS)", "Text record",
                  "Other-chain address"]
 
 
-class _RecordDialog(Dialog):
-    """Choose a record type and enter its value. ``preset`` locks the type
-    (used by the quick 'Set text record…' entry); otherwise the type combo is
-    shown (the general 'Add / change record…')."""
+class _RecordFields(QWidget):
+    """The record-type/key/coin/value inputs as a reusable field group (no
+    buttons, no dialog chrome). ``preset`` locks the type (used by the quick
+    'Set text record…' / 'Set ETH address' entries); otherwise the type combo
+    is shown (the general 'Add / change record…'). Emits ``changed`` on any
+    edit so a host composer can re-preview / re-estimate."""
+
+    changed = Signal()
 
     def __init__(self, name: str, *, preset: str | None = None,
                  key: str = "", coin: str = "", value: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Record · {name}")
-        outer = QVBoxLayout(self)
-        self._form = form = QFormLayout()
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        self._form = form
         self.kind = QComboBox()
         self.kind.addItems(_RECORD_KINDS)
         if preset:
@@ -757,13 +765,12 @@ class _RecordDialog(Dialog):
         form.addRow("Key", self.key)
         form.addRow("Coin", self.coin)
         form.addRow("Value", self.value)
-        outer.addLayout(form)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
         self.kind.currentTextChanged.connect(self._sync)
+        # Re-preview / re-estimate on any input change.
+        self.kind.currentTextChanged.connect(self.changed)
+        self.key.currentTextChanged.connect(self.changed)
+        self.coin.currentTextChanged.connect(self.changed)
+        self.value.textChanged.connect(self.changed)
         self._sync(self.kind.currentText())
 
     def _sync(self, kind: str) -> None:
@@ -782,22 +789,64 @@ class _RecordDialog(Dialog):
         return kind, extra, self.value.text().strip()
 
 
-class _RenewDialog(Dialog):
-    """Pick a new expiry date for a .eth name, with a live cost.
+class _RecordDialog(Dialog):
+    """Thin standalone-dialog wrapper around ``_RecordFields`` (Ok/Cancel
+    chrome). The plugin's write flow now embeds the field group directly in the
+    rich composer; this wrapper stays for tests + any standalone use."""
+
+    def __init__(self, name: str, *, preset: str | None = None,
+                 key: str = "", coin: str = "", value: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Record · {name}")
+        outer = QVBoxLayout(self)
+        self.fields = _RecordFields(name, preset=preset, key=key, coin=coin,
+                                    value=value)
+        outer.addWidget(self.fields)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    # Backwards-compatible passthroughs to the field group.
+    @property
+    def kind(self) -> QComboBox:
+        return self.fields.kind
+
+    @property
+    def key(self) -> QComboBox:
+        return self.fields.key
+
+    @property
+    def coin(self) -> QComboBox:
+        return self.fields.coin
+
+    @property
+    def value(self) -> QLineEdit:
+        return self.fields.value
+
+    def result_values(self) -> tuple[str, str, str]:
+        return self.fields.result_values()
+
+
+class _RenewFields(QWidget):
+    """The renewal date-picker + live-cost inputs as a reusable field group.
 
     A date field plus an inline ``QCalendarWidget`` (kept in sync) let the user
     extend to any future day — step the year field to jump whole years, or click
     an exact month/day. The renewal duration is ``new expiry − current expiry``
     and the cost is linear in it, so a one-year quote (``set_quote``) scales to
     any term locally; the ETH/USD figure updates instantly as the date changes.
-    ``selected_value_wei`` is what the caller sends (None until quoted)."""
+    ``selected_value_wei`` is what the caller sends (None until quoted). Emits
+    ``changed`` whenever the term or the quote changes."""
+
+    changed = Signal()
 
     # Renewal adds ``duration`` to the registrar's CURRENT expiry, so duration is
     # measured from there. A name in its grace period (expiry already past) is
     # measured from today instead, so the chosen date is the real new expiry.
     def __init__(self, name: str, expiry_ts: int | None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Extend · {name}")
         self._price_1y: int | None = None      # wei to renew for one year
         self._usd: Decimal | None = None       # USD per ETH
         self._syncing = False                  # guards the date↔calendar echo
@@ -807,8 +856,8 @@ class _RenewDialog(Dialog):
         floor_qd = _qdate_from_ts(floor_ts)
         min_qd = floor_qd.addDays(1)           # strictly forward
         default_qd = floor_qd.addYears(1)      # sensible default: +1y
-        outer = QVBoxLayout(self)
-        form = QFormLayout()
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
         if expiry_ts:
             form.addRow("Current expiry", QLabel(_fmt_expiry(expiry_ts)))
         # A compact date field (type / step the year) above an always-visible
@@ -826,14 +875,6 @@ class _RenewDialog(Dialog):
             QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.cal.setMinimumDate(min_qd)
         self.cal.setSelectedDate(default_qd)
-        # Sit the calendar in a bordered panel so it reads as one block rather
-        # than floating loose on the dialog background. The border is drawn via
-        # a stylesheet, NOT QFrame.setFrameShape — some styles (qt6ct/Kvantum)
-        # suppress a QFrame's native frame entirely, so the shape-based border
-        # was invisible on the user's theme. A stylesheet ``border`` is honoured
-        # by Qt's own QStyleSheetStyle on top of whatever base style is active.
-        # Colour comes from the palette (theme-aware), scoped by object name so
-        # it can't cascade onto the calendar's own widgets.
         # Wrap the calendar in a QScrollArea purely to inherit the theme's own
         # sunken "view" frame — the inset border item-views and text fields get.
         # Drawing it ourselves (stylesheet bevel) looked synthetic, and a plain
@@ -853,12 +894,6 @@ class _RenewDialog(Dialog):
         form.addRow(cal_scroll)
         self._cost_lbl = QLabel("Fetching price…")
         form.addRow("Estimated cost", self._cost_lbl)
-        outer.addLayout(form)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
         self.date.dateChanged.connect(self._on_date_field)
         self.cal.selectionChanged.connect(self._on_calendar)
         self._refresh()
@@ -870,6 +905,7 @@ class _RenewDialog(Dialog):
         self.cal.setSelectedDate(self.date.date())
         self._syncing = False
         self._refresh()
+        self.changed.emit()
 
     def _on_calendar(self) -> None:
         if self._syncing:
@@ -878,12 +914,15 @@ class _RenewDialog(Dialog):
         self.date.setDate(self.cal.selectedDate())
         self._syncing = False
         self._refresh()
+        self.changed.emit()
 
     def set_quote(self, price_1y_wei: int | None, usd_per_eth: Decimal | None) -> None:
-        """Apply the one-year price quote (+ ETH/USD rate); refreshes the cost."""
+        """Apply the one-year price quote (+ ETH/USD rate); refreshes the cost
+        and signals ``changed`` so a host composer re-estimates with the value."""
         self._price_1y = price_1y_wei
         self._usd = usd_per_eth
         self._refresh()
+        self.changed.emit()
 
     def _refresh(self) -> None:
         self._cost_lbl.setText(self._cost_text())
@@ -918,30 +957,303 @@ class _RenewDialog(Dialog):
         return self._price_1y * self.duration_seconds() // ens_write.SECONDS_PER_YEAR
 
 
-class _SubnodeDialog(Dialog):
-    """Add a subdomain: label + owner."""
+class _RenewDialog(Dialog):
+    """Thin standalone-dialog wrapper around ``_RenewFields`` (Ok/Cancel
+    chrome). The plugin's renew flow now embeds the field group in the rich
+    composer; this wrapper stays for tests + any standalone use."""
 
-    def __init__(self, parent_name: str, self_addr: str, parent=None):
+    def __init__(self, name: str, expiry_ts: int | None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Add subdomain of {parent_name}")
+        self.setWindowTitle(f"Extend · {name}")
         outer = QVBoxLayout(self)
-        form = QFormLayout()
-        self.label = QLineEdit()
-        self.label.setPlaceholderText("label  (→ label." + parent_name + ")")
-        self.owner = QLineEdit(self_addr or "")
-        # Wide enough that a full 0x owner address shows without scrolling.
-        self.owner.setMinimumWidth(address_field_min_width(self))
-        form.addRow("Subdomain", self.label)
-        form.addRow("Owner", self.owner)
-        outer.addLayout(form)
+        self.fields = _RenewFields(name, expiry_ts)
+        outer.addWidget(self.fields)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+    # Backwards-compatible passthroughs to the field group.
+    @property
+    def date(self) -> QDateEdit:
+        return self.fields.date
+
+    @property
+    def cal(self) -> QCalendarWidget:
+        return self.fields.cal
+
+    @property
+    def _cost_lbl(self) -> QLabel:
+        return self.fields._cost_lbl
+
+    @property
+    def _price_1y(self) -> int | None:
+        return self.fields._price_1y
+
+    def set_quote(self, price_1y_wei: int | None,
+                  usd_per_eth: Decimal | None) -> None:
+        self.fields.set_quote(price_1y_wei, usd_per_eth)
+
+    def target_ts(self) -> int:
+        return self.fields.target_ts()
+
+    def duration_seconds(self) -> int:
+        return self.fields.duration_seconds()
+
+    def selected_value_wei(self) -> int | None:
+        return self.fields.selected_value_wei()
+
+
+class _SubnodeFields(QWidget):
+    """Add-a-subdomain inputs (label + owner) as a reusable field group. The
+    owner field reuses the host composer's address-book picker when given a
+    ``make_address_field`` factory; otherwise a plain wide address line. Emits
+    ``changed`` on any edit."""
+
+    changed = Signal()
+
+    def __init__(self, parent_name: str, self_addr: str, *,
+                 make_address_field=None, parent=None):
+        super().__init__(parent)
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        self.label = QLineEdit()
+        self.label.setPlaceholderText("label  (→ label." + parent_name + ")")
+        if make_address_field is not None:
+            owner_widget, self.owner = make_address_field(self_addr or "")
+        else:
+            self.owner = QLineEdit(self_addr or "")
+            # Wide enough that a full 0x owner address shows without scrolling.
+            self.owner.setMinimumWidth(address_field_min_width(self))
+            owner_widget = self.owner
+        form.addRow("Subdomain", self.label)
+        form.addRow("Owner", owner_widget)
+        self.label.textChanged.connect(self.changed)
+        self.owner.textChanged.connect(self.changed)
+
     def values(self) -> tuple[str, str]:
         return self.label.text().strip(), self.owner.text().strip()
+
+
+class _SubnodeDialog(Dialog):
+    """Thin standalone-dialog wrapper around ``_SubnodeFields`` (Ok/Cancel
+    chrome). The plugin's subdomain flow now embeds the field group in the rich
+    composer; this wrapper stays for tests + any standalone use."""
+
+    def __init__(self, parent_name: str, self_addr: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Add subdomain of {parent_name}")
+        outer = QVBoxLayout(self)
+        self.fields = _SubnodeFields(parent_name, self_addr)
+        outer.addWidget(self.fields)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    @property
+    def label(self) -> QLineEdit:
+        return self.fields.label
+
+    @property
+    def owner(self) -> QLineEdit:
+        return self.fields.owner
+
+    def values(self) -> tuple[str, str]:
+        return self.fields.values()
+
+
+class _RecipientFields(QWidget):
+    """A single recipient-address input (reusing the composer's address-book
+    picker when available) — for the name-transfer op. Emits ``changed`` on
+    edit."""
+
+    changed = Signal()
+
+    def __init__(self, *, make_address_field=None, parent=None):
+        super().__init__(parent)
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        if make_address_field is not None:
+            widget, self.recipient = make_address_field("")
+        else:
+            self.recipient = QLineEdit()
+            self.recipient.setMinimumWidth(address_field_min_width(self))
+            widget = self.recipient
+        self.recipient.setPlaceholderText("0x… recipient address")
+        form.addRow("Recipient", widget)
+        self.recipient.textChanged.connect(self.changed)
+
+    def value(self) -> str:
+        return self.recipient.text().strip()
+
+
+# --- rich write composer ---------------------------------------------------
+
+@dataclass
+class _EnsOp:
+    """Config for one ENS write operation, driving ``_EnsWriteComposer``.
+
+    ``make_fields`` builds the input field group (or None for an input-less op,
+    e.g. the set-resolver bootstrap). ``build`` produces ``(to, data)`` from the
+    name + the field group (calling an ``ens_write`` builder; may raise
+    ``ValueError`` on bad input). ``decoded`` yields a synthetic decoded-call
+    tree for the live preview. ``value_wei`` is the payable amount (renew); else
+    0. ``validate`` returns an error string while the inputs aren't a valid tx
+    (Confirm stays disabled), or None when good. ``rediscover`` picks the
+    post-confirm refresh (re-run discovery vs. force-reread records). ``payable``
+    adds Value/Total summary rows."""
+
+    title: str
+    confirm_label: str
+    make_fields: Callable[[_EnsWriteComposer], QWidget | None]
+    build: Callable[[str, Any], tuple[str, str]]
+    decoded: Callable[[str, Any], dict]
+    value_wei: Callable[[Any], int] = field(default=lambda _inputs: 0)
+    validate: Callable[[Any], str | None] = field(default=lambda _inputs: None)
+    rediscover: bool = False
+    payable: bool = False
+
+
+class _EnsWriteComposer(_TxComposerDialog):
+    """The rich Send-shaped composer for an ENS write, driven by an ``_EnsOp``.
+
+    Inherits the whole shell (Details/Events tabs, gas section, fee summary,
+    sign flow, address-book picker) from ``_TxComposerDialog``; supplies the
+    op's input field group + synthetic decoded preview + request construction
+    via the base hooks. The op's payable value (renew) flows through
+    ``_build_request`` into both the gas probe and the simulation, so an
+    underpaid renew is caught before signing."""
+
+    def __init__(self, op: _EnsOp, name: str, chain, from_addr: str, *,
+                 parent=None, **shared):
+        # Set before super().__init__ — the base runs our header/decoded hooks
+        # while constructing.
+        self._op = op
+        self._name = name
+        self._fields: QWidget | None = None
+        self._value_lbl: QLabel | None = None
+        self._total_lbl: QLabel | None = None
+        self._contract_lbl: QLabel | None = None
+        super().__init__(
+            chain, from_addr,
+            title=op.title,
+            confirm_text=op.confirm_label,
+            base_fee_text="(estimating…)",
+            parent=parent,
+            **shared,
+        )
+        # Kick an initial gas estimate + the sim if the inputs are already a
+        # valid tx (input-less ops, or ops with a sensible default).
+        try:
+            self._kick_gas(self._build_request())
+        except SignerError:
+            pass
+
+    # --- header / fields (base hooks) ------------------------------
+
+    def _build_header_rows(self, header: QFormLayout, outer) -> None:
+        header.addRow("Operating on:", self._value_label(self._name))
+        self._fields = self._op.make_fields(self)
+        if self._fields is not None:
+            header.addRow(self._fields)
+        # Static "Contract:" row — the on-chain target of this write (the
+        # resolver / registry / controller / NameWrapper). Filled once the
+        # inputs build a valid request (the target is input-independent, so it
+        # shows as soon as the call can be constructed).
+        self._contract_lbl = self._value_label("…", monospace=True)
+        header.addRow("Contract:", self._contract_lbl)
+
+    def _build_extra_summary_rows(self, summary: QFormLayout) -> None:
+        if not self._op.payable:
+            return
+        self._value_lbl = self._value_label("—")
+        summary.addRow("Value:", self._value_lbl)
+        self._total_lbl = self._value_label("—")
+        summary.addRow("Total:", self._total_lbl)
+
+    def _wire_inputs(self) -> None:
+        fields = self._fields
+        if fields is None:
+            return
+        changed = getattr(fields, "changed", None)
+        if changed is not None:
+            changed.connect(self._update_state)
+            changed.connect(self.request_simulation)
+            changed.connect(self._reestimate_timer.start)
+
+    # --- request construction (base hooks) -------------------------
+
+    def _build_request(self) -> SigningRequest:
+        from eth_utils import to_checksum_address
+        try:
+            to, data = self._op.build(self._name, self._fields)
+        except ValueError as e:
+            raise SignerError(str(e)) from e
+        msg = self._op.validate(self._fields)
+        if msg is not None:
+            raise SignerError(msg)
+        return SigningRequest(
+            chain_id=ENS_CHAIN_ID,
+            from_addr=self._from_addr,
+            to_addr=to_checksum_address(to),
+            value_wei=self._op.value_wei(self._fields),
+            data=data,
+        )
+
+    def _inputs_valid(self) -> bool:
+        if self._op.validate(self._fields) is not None:
+            return False
+        try:
+            self._build_request()
+        except SignerError:
+            return False
+        return True
+
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        if self._fields is not None:
+            self._fields.setEnabled(enabled)
+
+    def _reestimate_gas(self) -> None:
+        try:
+            probe = self._build_request()
+        except SignerError:
+            return
+        self._kick_gas(probe)
+
+    # --- preview + totals (base hooks) -----------------------------
+
+    def _refresh_decoded_view(self) -> None:
+        self._update_contract_row()
+        try:
+            decoded = self._op.decoded(self._name, self._fields)
+        except Exception:
+            self.decoded_view.setPlainText("(fill in the fields above)")
+            return
+        _render_decoded(self.decoded_view, decoded,
+                        known_addresses=self._known_addresses)
+
+    def _update_contract_row(self) -> None:
+        if self._contract_lbl is None:
+            return
+        from eth_utils import to_checksum_address
+        try:
+            to, _data = self._op.build(self._name, self._fields)
+        except ValueError:
+            return
+        self._contract_lbl.setText(to_checksum_address(to))
+
+    def _update_extra_totals(self, fee_wei: int) -> None:
+        if not self._op.payable or self._total_lbl is None:
+            return
+        from ..chain import wei_to_ether
+        value = self._op.value_wei(self._fields)
+        if self._value_lbl is not None:
+            self._value_lbl.setText(f"{wei_to_ether(value)} {self.chain.symbol}")
+        total = fee_wei + value
+        self._total_lbl.setText(f"{wei_to_ether(total)} {self.chain.symbol}")
 
 
 class EnsPlugin(Plugin):
@@ -982,7 +1294,6 @@ class EnsPlugin(Plugin):
         # only role that can transfer the name. A subset of _owned (which also
         # counts controller-only), tracked separately to gate "Transfer name…".
         self._registrant: set[str] = set()
-        self._renew_dlg: _RenewDialog | None = None   # open renewal dialog, if any
 
     # --- plugin contract --------------------------------------------------
 
@@ -1280,136 +1591,59 @@ class EnsPlugin(Plugin):
     def _write_addr(self, name: str, prefill: str = "") -> None:
         if self._panel is None:
             return
+        res = self._ensure_resolver(name)
+        if res is None:
+            return
         cur = prefill
         if not cur:
             n = self._names_by_l.get(name.lower())
             cur = (n.resolved_address or "") if n is not None else ""
-        text, ok = prompt_text(
-            self._panel, "Set ETH address", f"ETH address for {name}:",
-            cur or "", wide=True)
-        if not ok:
-            return
-        from .. import ens_write
-        addr = _checksum(text)
-        if text.strip() and addr is None:
-            self._warn("That doesn't look like a valid 0x address.")
-            return
-        res = self._ensure_resolver(name)
-        if res is None:
-            return
-        to, data = ens_write.set_addr(res, name, addr or ens_write.ZERO_ADDRESS)
-        self._submit_tx(name, to, data, f"Set address · {name}")
+        self._open_composer(name, self._record_op(
+            name, res, preset="ETH address", value=cur,
+            confirm_label="Set address"))
 
     def _write_content(self, name: str, prefill: str = "") -> None:
         if self._panel is None:
+            return
+        res = self._ensure_resolver(name)
+        if res is None:
             return
         cur = prefill
         if not cur:
             rec = self._cur_records(name)
             cur = (rec.contenthash or "") if rec is not None else ""
-        text, ok = prompt_text(
-            self._panel, "Set content", f"IPFS / IPNS URL for {name}:",
-            cur or "", wide=True)
-        if not ok:
-            return
-        res = self._ensure_resolver(name)
-        if res is None:
-            return
-        from .. import ens_write
-        try:
-            to, data = ens_write.set_contenthash(res, name, text.strip())
-        except ValueError as e:
-            self._warn(str(e))
-            return
-        self._submit_tx(name, to, data, f"Set content · {name}")
+        self._open_composer(name, self._record_op(
+            name, res, preset="Content (IPFS)", value=cur,
+            confirm_label="Set content"))
 
     def _write_text(self, name: str, key: str = "", value: str = "") -> None:
         if self._panel is None:
             return
-        dlg = _RecordDialog(name, preset="Text record", key=key, value=value,
-                            parent=self._panel)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        _, k, val = dlg.result_values()
-        k = k.strip()
-        if not k:
-            return
         res = self._ensure_resolver(name)
         if res is None:
             return
-        from .. import ens_write
-        to, data = ens_write.set_text(res, name, k, val)
-        self._submit_tx(name, to, data, f"Set {k} · {name}")
+        self._open_composer(name, self._record_op(
+            name, res, preset="Text record", key=key, value=value,
+            confirm_label="Set text record"))
 
     def _write_record(self, name: str, *, preset: str | None = None,
                       coin: str = "", value: str = "") -> None:
         if self._panel is None:
             return
-        dlg = _RecordDialog(name, preset=preset, coin=coin, value=value,
-                            parent=self._panel)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        kind, extra, val = dlg.result_values()
         res = self._ensure_resolver(name)
         if res is None:
             return
-        from .. import ens_write
-        if kind == "ETH address":
-            addr = _checksum(val)
-            if val and addr is None:
-                self._warn("That doesn't look like a valid 0x address.")
-                return
-            to, data = ens_write.set_addr(res, name, addr or ens_write.ZERO_ADDRESS)
-            label = f"Set address · {name}"
-        elif kind == "Content (IPFS)":
-            try:
-                to, data = ens_write.set_contenthash(res, name, val)
-            except ValueError as e:
-                self._warn(str(e))
-                return
-            label = f"Set content · {name}"
-        elif kind == "Text record":
-            if not extra:
-                return
-            to, data = ens_write.set_text(res, name, extra, val)
-            label = f"Set {extra} · {name}"
-        else:                                    # Other-chain address
-            coin_type = ens_write.COIN_TYPES.get(extra)
-            if coin_type is None:
-                return
-            addr = _checksum(val)
-            if val and addr is None:
-                self._warn("That doesn't look like a valid 0x address.")
-                return
-            payload = ens_write.eth_addr_bytes(addr) if addr else b""
-            to, data = ens_write.set_coin_addr(res, name, coin_type, payload)
-            label = f"Set {extra} address · {name}"
-        self._submit_tx(name, to, data, label)
+        self._open_composer(name, self._record_op(
+            name, res, preset=preset, coin=coin, value=value,
+            confirm_label="Save record"))
 
     def _add_subdomain(self, name: str) -> None:
         if self._panel is None:
             return
         host = self.host
         self_addr = host.selected_address if host is not None else ""
-        dlg = _SubnodeDialog(name, _checksum(self_addr or "") or "",
-                             parent=self._panel)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        label, owner_in = dlg.values()
-        label = label.strip().lower()
-        if not label or "." in label:
-            if label:
-                self._warn("A subdomain label can't contain a dot.")
-            return
-        owner = _checksum(owner_in)
-        if owner is None:
-            self._warn("The owner must be a valid 0x address.")
-            return
-        from .. import ens_write
-        to, data = ens_write.add_subnode(
-            name, label, owner, wrapped=name.lower() in self._wrapped)
-        self._submit_tx(name, to, data,
-                        f"Add {label}.{name}", rediscover=True)
+        self._open_composer(
+            name, self._subnode_op(name, _checksum(self_addr or "") or ""))
 
     # --- renewal -----------------------------------------------------------
 
@@ -1424,56 +1658,7 @@ class EnsPlugin(Plugin):
         chain = self._mainnet()
         if chain is None:
             return
-        from .. import ens_write
-        label = name.split(".")[0]
-        dlg = _RenewDialog(name, self._expiry_of(name), parent=self._panel)
-        self._renew_dlg = dlg
-        # Quote one year's price + the ETH/USD rate once; the dialog scales it
-        # to the chosen term locally (renewal cost is linear in duration).
-        quote = EnsRenewPriceWorker(
-            chain, label, ens_write.SECONDS_PER_YEAR, with_usd=True)
-        quote.ready.connect(self._on_renew_quote)
-        self._start(quote)
-        accepted = dlg.exec() == QDialog.DialogCode.Accepted
-        self._renew_dlg = None         # late quotes after this are dropped
-        if not accepted:
-            return
-        duration = dlg.duration_seconds()
-        target = dlg.target_ts()
-        if duration <= 0:
-            return
-        price = dlg.selected_value_wei()
-        if price is not None:
-            self._submit_renew(name, label, duration, target, price)
-            return
-        # The quote hadn't landed when the user accepted — fetch the exact price
-        # for the chosen term, then submit.
-        worker = EnsRenewPriceWorker(chain, label, duration)
-        worker.ready.connect(
-            lambda p, _usd: self._submit_renew(name, label, duration, target, p))
-        self._start(worker)
-
-    def _on_renew_quote(self, price_1y: int | None,
-                        usd: Decimal | None) -> None:
-        if self._renew_dlg is not None:
-            self._renew_dlg.set_quote(price_1y, usd)
-
-    def _submit_renew(self, name: str, label: str, duration_s: int,
-                      target_ts: int, price: int | None) -> None:
-        if price is None:
-            self._warn("Couldn't fetch the renewal price just now. "
-                       "Please try again.")
-            return
-        from .. import ens_write
-        # Overpay slightly: the price is USD-denominated and reconverted to wei
-        # at execution time, so ETH dropping between now and mining would make
-        # the exact amount short and revert. The controller refunds the excess,
-        # so a 10% buffer is free insurance.
-        value = price + price // 10
-        to, data = ens_write.renew(label, duration_s)
-        self._submit_tx(name, to, data,
-                        f"Renew {name} · to {_fmt_expiry(target_ts)}",
-                        value_wei=value, rediscover=True)
+        self._open_composer(name, self._renew_op(name, chain))
 
     # --- transfer ----------------------------------------------------------
 
@@ -1485,22 +1670,204 @@ class EnsPlugin(Plugin):
         addr = host.selected_address if host is not None else None
         if not addr:
             return
-        text, ok = prompt_text(
-            self._panel, "Transfer name",
-            f"Transfer {name} to:", wide=True)
-        if not ok:
-            return
-        to = _checksum(text)
-        if to is None:
-            self._warn("The recipient must be a valid 0x address.")
-            return
-        from eth_utils import to_checksum_address
+        self._open_composer(name, self._transfer_op(name, addr))
+
+    # --- op construction ---------------------------------------------------
+
+    def _record_op(self, name: str, res: str, *, preset: str | None = None,
+                   key: str = "", coin: str = "", value: str = "",
+                   confirm_label: str = "Save record") -> _EnsOp:
+        """One op covering every resolver-record write (addr / content / text /
+        coin). ``preset`` locks the type; the build/validate/decoded callables
+        dispatch on the field group's chosen kind, mirroring the old
+        ``_write_record`` logic — but now lazily, on Confirm, inside the rich
+        composer (validation surfaces as a disabled Confirm, not a popup)."""
         from .. import ens_write
-        tx_to, data = ens_write.transfer_name(
-            name, to_checksum_address(addr), to,
-            wrapped=name.lower() in self._wrapped)
-        # On confirm, re-discover: the name leaves this account's list.
-        self._submit_tx(name, tx_to, data, f"Transfer {name}", rediscover=True)
+
+        def make_fields(_composer: _EnsWriteComposer) -> QWidget:
+            return _RecordFields(name, preset=preset, key=key, coin=coin,
+                                 value=value)
+
+        def build(nm: str, fields: Any) -> tuple[str, str]:
+            kind, extra, val = fields.result_values()
+            if kind == "ETH address":
+                addr = _checksum(val)
+                if val and addr is None:
+                    raise ValueError("That doesn't look like a valid 0x address.")
+                return ens_write.set_addr(res, nm, addr or ens_write.ZERO_ADDRESS)
+            if kind == "Content (IPFS)":
+                return ens_write.set_contenthash(res, nm, val)
+            if kind == "Text record":
+                if not extra.strip():
+                    raise ValueError("Enter a record key.")
+                return ens_write.set_text(res, nm, extra.strip(), val)
+            coin_type = ens_write.COIN_TYPES.get(extra)
+            if coin_type is None:
+                raise ValueError("Pick a coin.")
+            addr = _checksum(val)
+            if val and addr is None:
+                raise ValueError("That doesn't look like a valid 0x address.")
+            payload = ens_write.eth_addr_bytes(addr) if addr else b""
+            return ens_write.set_coin_addr(res, nm, coin_type, payload)
+
+        def decoded(nm: str, fields: Any) -> dict:
+            kind, extra, val = fields.result_values()
+            node = {"name": "node", "type": "bytes32", "value": nm}
+            if kind == "ETH address":
+                return {"function": "setAddr", "args": [
+                    node, {"name": "a", "type": "address",
+                           "value": _checksum(val) or ens_write.ZERO_ADDRESS}]}
+            if kind == "Content (IPFS)":
+                return {"function": "setContenthash", "args": [
+                    node, {"name": "hash", "type": "bytes",
+                           "value": val or "(clear)"}]}
+            if kind == "Text record":
+                return {"function": "setText", "args": [
+                    node, {"name": "key", "type": "string", "value": extra},
+                    {"name": "value", "type": "string", "value": val}]}
+            return {"function": "setAddr", "args": [
+                node, {"name": "coinType", "type": "uint256",
+                       "value": str(ens_write.COIN_TYPES.get(extra, "?"))},
+                {"name": "a", "type": "bytes",
+                 "value": _checksum(val) or "(clear)"}]}
+
+        return _EnsOp(
+            title=f"{confirm_label} · {name}", confirm_label=confirm_label,
+            make_fields=make_fields, build=build, decoded=decoded)
+
+    def _subnode_op(self, name: str, self_addr: str) -> _EnsOp:
+        from .. import ens_write
+        wrapped = name.lower() in self._wrapped
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            return _SubnodeFields(
+                name, self_addr,
+                make_address_field=composer._make_address_field)
+
+        def _parse(fields: Any) -> tuple[str, str]:
+            label, owner_in = fields.values()
+            label = label.strip().lower()
+            if not label:
+                raise ValueError("Enter a subdomain label.")
+            if "." in label:
+                raise ValueError("A subdomain label can't contain a dot.")
+            owner = _checksum(owner_in)
+            if owner is None:
+                raise ValueError("The owner must be a valid 0x address.")
+            return label, owner
+
+        def build(nm: str, fields: Any) -> tuple[str, str]:
+            label, owner = _parse(fields)
+            return ens_write.add_subnode(nm, label, owner, wrapped=wrapped)
+
+        def decoded(nm: str, fields: Any) -> dict:
+            label, owner_in = fields.values()
+            return {"function": "setSubnodeRecord", "args": [
+                {"name": "parentNode", "type": "bytes32", "value": nm},
+                {"name": "label", "type": "string", "value": label or "…"},
+                {"name": "owner", "type": "address",
+                 "value": _checksum(owner_in) or owner_in or "0x…"}]}
+
+        return _EnsOp(
+            title=f"Add subdomain · {name}", confirm_label="Add subdomain",
+            make_fields=make_fields, build=build, decoded=decoded,
+            rediscover=True)
+
+    def _renew_op(self, name: str, chain) -> _EnsOp:
+        from .. import ens_write
+        label = name.split(".")[0]
+        expiry_ts = self._expiry_of(name)
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            fields = _RenewFields(name, expiry_ts)
+            # Quote one year's price + ETH/USD once; the field group scales it
+            # to the chosen term locally (renewal cost is linear in duration).
+            # The quote's ``set_quote`` emits ``changed`` → the composer re-
+            # estimates gas + re-simulates with the now-known payable value.
+            quote = EnsRenewPriceWorker(
+                chain, label, ens_write.SECONDS_PER_YEAR, with_usd=True)
+            quote.ready.connect(fields.set_quote)
+            composer._start_worker(quote)
+            return fields
+
+        def build(nm: str, fields: Any) -> tuple[str, str]:
+            return ens_write.renew(label, fields.duration_seconds())
+
+        def value_wei(fields: Any) -> int:
+            # Overpay slightly: the price is USD-denominated and reconverted to
+            # wei at execution time, so ETH dropping between now and mining would
+            # make the exact amount short and revert. The controller refunds the
+            # excess, so a 10% buffer is free insurance. This value flows through
+            # _build_request into the gas probe AND the simulation.
+            price = fields.selected_value_wei()
+            if price is None:
+                return 0
+            return price + price // 10
+
+        def validate(fields: Any) -> str | None:
+            if fields.duration_seconds() <= 0:
+                return "Pick a later expiry date."
+            if fields.selected_value_wei() is None:
+                return "Fetching renewal price…"
+            return None
+
+        def decoded(nm: str, fields: Any) -> dict:
+            return {"function": "renew", "args": [
+                {"name": "name", "type": "string", "value": label},
+                {"name": "duration", "type": "uint256",
+                 "value": str(fields.duration_seconds())}]}
+
+        return _EnsOp(
+            title=f"Renew · {name}", confirm_label="Renew",
+            make_fields=make_fields, build=build, decoded=decoded,
+            value_wei=value_wei, validate=validate, rediscover=True,
+            payable=True)
+
+    def _transfer_op(self, name: str, from_addr: str) -> _EnsOp:
+        from eth_utils import to_checksum_address
+
+        from .. import ens_write
+        wrapped = name.lower() in self._wrapped
+        sender = to_checksum_address(from_addr)
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            return _RecipientFields(
+                make_address_field=composer._make_address_field)
+
+        def build(nm: str, fields: Any) -> tuple[str, str]:
+            to = _checksum(fields.value())
+            if to is None:
+                raise ValueError("The recipient must be a valid 0x address.")
+            return ens_write.transfer_name(nm, sender, to, wrapped=wrapped)
+
+        def decoded(nm: str, fields: Any) -> dict:
+            to = _checksum(fields.value()) or fields.value() or "0x…"
+            return {"function": "safeTransferFrom", "args": [
+                {"name": "from", "type": "address", "value": sender},
+                {"name": "to", "type": "address", "value": to},
+                {"name": "tokenId", "type": "uint256", "value": nm}]}
+
+        return _EnsOp(
+            title=f"Transfer · {name}", confirm_label="Transfer name",
+            make_fields=make_fields, build=build, decoded=decoded,
+            rediscover=True)
+
+    def _set_resolver_op(self, name: str) -> _EnsOp:
+        """The input-less set-resolver bootstrap (the resolver-gate target)."""
+        from .. import ens_write
+
+        def build(nm: str, _fields: Any) -> tuple[str, str]:
+            return ens_write.set_resolver(nm)
+
+        def decoded(nm: str, _fields: Any) -> dict:
+            return {"function": "setResolver", "args": [
+                {"name": "node", "type": "bytes32", "value": nm},
+                {"name": "resolver", "type": "address",
+                 "value": ens_write.PUBLIC_RESOLVER}]}
+
+        return _EnsOp(
+            title=f"Set resolver · {name}", confirm_label="Set resolver",
+            make_fields=lambda _composer: None, build=build, decoded=decoded)
 
     # --- write plumbing ----------------------------------------------------
 
@@ -1513,7 +1880,9 @@ class EnsPlugin(Plugin):
     def _ensure_resolver(self, name: str) -> str | None:
         """The name's resolver, or None — in which case offer to point the name
         at the default public resolver first (records can't be stored without
-        one). The user then re-issues the record write after that confirms."""
+        one). A composer can't target a nonexistent resolver, so this stays a
+        PRE-STEP: on accept we open the set-resolver composer and defer the
+        record write (the user re-issues it once that confirms)."""
         res = self._resolver_for(name)
         if res is not None:
             return res
@@ -1526,9 +1895,7 @@ class EnsPlugin(Plugin):
             "Point it at the default public resolver first? You can set the "
             "record again once that transaction confirms.")
         if ans == QMessageBox.StandardButton.Yes:
-            from .. import ens_write
-            to, data = ens_write.set_resolver(name)
-            self._submit_tx(name, to, data, f"Set resolver · {name}")
+            self._open_composer(name, self._set_resolver_op(name))
         return None
 
     def _warn(self, text: str) -> None:
@@ -1537,21 +1904,18 @@ class EnsPlugin(Plugin):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.warning(self._panel, "ENS", text)
 
-    def _submit_tx(self, name: str, to: str, data: str, label: str,
-                   *, value_wei: int = 0, rediscover: bool = False) -> None:
+    def _open_composer(self, name: str, op: _EnsOp) -> None:
+        """Open the rich ``_EnsWriteComposer`` for ``op`` via the host opener,
+        wiring the post-confirm refresh (rediscover vs. force-reread records).
+        Falls back to a no-op when the host can't host a composer (mirrors the
+        old ``request_transaction`` capability check)."""
         host = self.host
         chain = self._mainnet()
         addr = host.selected_address if host is not None else None
         if (host is None or chain is None or not addr
-                or not hasattr(host, "request_transaction")):
+                or not hasattr(host, "open_ens_composer")):
             return
         from eth_utils import to_checksum_address
-        from ..signing import SigningRequest
-        req = SigningRequest(
-            chain_id=ENS_CHAIN_ID,
-            from_addr=to_checksum_address(addr),
-            to_addr=to_checksum_address(to),
-            value_wei=value_wei, data=data)
         nm = name
 
         def _on_confirmed(_receipt: object) -> None:
@@ -1561,12 +1925,13 @@ class EnsPlugin(Plugin):
             # resolver records; a plain record write force-re-reads instead so
             # the new value shows now, marked "confirmed" until finality earns
             # it the ✓ (rather than waiting on finality to show it at all).
-            if rediscover:
+            if op.rediscover:
                 self._on_refresh()
             else:
                 self._on_records_requested(nm, force=True)
 
-        host.request_transaction(req, chain, label, on_confirmed=_on_confirmed)
+        host.open_ens_composer(name, op, chain, to_checksum_address(addr),
+                               on_confirmed=_on_confirmed)
 
     # --- worker lifetime --------------------------------------------------
 

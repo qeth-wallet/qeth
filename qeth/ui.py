@@ -859,6 +859,25 @@ class MainWindow(QMainWindow):
         self._launch_composer(dialog, chain, label=label,
                               on_broadcast=on_broadcast, on_confirmed=on_confirmed)
 
+    def open_ens_composer(self, name: str, op, chain, from_addr: str, *,
+                          on_confirmed=None) -> None:
+        """Open the rich ENS write composer for ``op`` (built by the ENS
+        plugin) and drive it through the shared sign+broadcast pipeline. Same
+        machinery as Send: inline inputs + decoded calldata + Events sim + gas
+        settings; the op's payable value (renew) flows through ``_build_request``
+        into both the gas probe and the simulation. ``on_confirmed`` fires once
+        when the write mines, so the plugin can refresh against confirmed
+        state."""
+        from .plugins.ens import _EnsWriteComposer
+        dialog = _EnsWriteComposer(
+            op, name, chain, from_addr,
+            **self._composer_shared_kwargs(chain, from_addr),
+            address_book=self.account_book(),
+            parent=self,
+        )
+        self._launch_composer(dialog, chain, label=op.confirm_label,
+                              on_confirmed=on_confirmed)
+
     def _launch_composer(self, dialog, chain, *, label: str,
                          on_broadcast=None, on_confirmed=None) -> None:
         """Drive a composer / sign-style dialog through the shared

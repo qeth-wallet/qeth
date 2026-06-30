@@ -7,6 +7,9 @@ that the plugin renders from cache without a fetch.
 """
 
 
+from unittest.mock import MagicMock
+
+import pytest
 from eth_abi import encode as abi_encode
 from PySide6.QtCore import Qt
 
@@ -31,6 +34,9 @@ class _StubHost:
         self.selected_address = address
         self.started_workers: list = []
         self.tx_requests: list = []
+        # ENS writes now open a rich composer lazily; capture the op + the
+        # post-confirm callback instead of a pre-built request.
+        self.ens_ops: list = []
 
     def current_chain(self):
         return self._chain
@@ -44,6 +50,10 @@ class _StubHost:
     def request_transaction(self, req, chain, label, on_broadcast=None,
                             on_confirmed=None):
         self.tx_requests.append((req, chain, label, on_confirmed))
+
+    def open_ens_composer(self, name, op, chain, from_addr, *,
+                          on_confirmed=None):
+        self.ens_ops.append((name, op, chain, from_addr, on_confirmed))
 
 
 class _StubStore:
@@ -500,6 +510,18 @@ class TestEnsWriteActions:
             plugin._owned.add(n.lower())
         return plugin, host, store
 
+    def _composer(self, op, name="vitalik.eth", *, start_worker=None):
+        """Construct the real ``_EnsWriteComposer`` for an op with mocked
+        shared kwargs — so a test can drive its field group + assert what
+        ``_build_request`` produces (the request is now built lazily, on
+        Send-click, rather than up front)."""
+        from qeth.plugins.ens import _EnsWriteComposer
+        return _EnsWriteComposer(
+            op, name, ETH, ADDR,
+            abi_source=MagicMock(), abi_cache=MagicMock(),
+            start_worker=start_worker or (lambda w: None),
+            identity_source=None, identity_cache=None, tx_cache=None)
+
     def test_owned_signable_name_is_writable(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
         plugin._on_verified(ADDR, {
@@ -516,43 +538,46 @@ class TestEnsWriteActions:
         }, True)
         assert plugin.widget()._writable == set()
 
-    def test_set_text_builds_request_to_resolver(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
-        from qeth.plugins.ens import _RecordDialog
+    def test_set_text_builds_request_to_resolver(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(_RecordDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_RecordDialog, "result_values",
-                            lambda self: ("Text record", "url", "https://x"))
         plugin._write_text("vitalik.eth")
-        assert len(host.tx_requests) == 1
-        req, chain, label, cb = host.tx_requests[0]
+        assert len(host.ens_ops) == 1
+        name, op, chain, from_addr, cb = host.ens_ops[0]
+        dlg = self._composer(op, name)
+        qtbot.addWidget(dlg)
+        dlg._fields.key.setCurrentText("url")
+        dlg._fields.value.setText("https://x")
+        req = dlg._build_request()
         assert req.chain_id == 1
         assert req.from_addr.lower() == ADDR.lower()
         assert req.to_addr.lower() == self.RESOLVER.lower()
         assert req.data[2:10] == "10f13a8c"        # setText
         assert callable(cb)
 
-    def test_set_addr_validates_and_builds(self, qtbot, monkeypatch):
+    def test_set_addr_validates_and_builds(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: (self.OTHER, True)))
         plugin._write_addr("vitalik.eth")
-        req, *_ = host.tx_requests[0]
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.value.setText(self.OTHER)
+        req = dlg._build_request()
         assert req.to_addr.lower() == self.RESOLVER.lower()
         assert req.data[2:10] == "d5fa2b00"         # setAddr(node,address)
 
-    def test_set_addr_rejects_garbage(self, qtbot, monkeypatch):
-        warned: list = []
+    def test_set_addr_rejects_garbage(self, qtbot):
+        from qeth.signing import SignerError
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: ("not-an-address", True)))
-        monkeypatch.setattr(plugin, "_warn", lambda t: warned.append(t))
         plugin._write_addr("vitalik.eth")
-        assert host.tx_requests == []               # nothing submitted
-        assert warned                               # user told why
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.value.setText("not-an-address")
+        # Confirm stays disabled and the request won't build — the composer
+        # surfaces the error rather than a popup.
+        assert dlg._inputs_valid() is False
+        with pytest.raises(SignerError):
+            dlg._build_request()
 
     def test_no_resolver_offers_to_set_one_first(self, qtbot, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
@@ -560,61 +585,55 @@ class TestEnsWriteActions:
         plugin, host, store = self._plugin(qtbot)
         plugin._resolver_cache.clear()              # name has no resolver
         monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: (self.OTHER, True)))
-        monkeypatch.setattr(
             "PySide6.QtWidgets.QMessageBox.question",
             staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
         plugin._write_addr("vitalik.eth")
-        # only the resolver-setting tx is submitted (the addr write is deferred)
-        assert len(host.tx_requests) == 1
-        req, *_ = host.tx_requests[0]
+        # only the resolver-setting composer is opened (the addr write deferred)
+        assert len(host.ens_ops) == 1
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        assert dlg._fields is None                  # no input rows
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_REGISTRY.lower()
         assert req.data[2:10] == "1896f70a"         # setResolver
 
-    def test_add_subdomain_unwrapped_targets_registry(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
+    def test_add_subdomain_unwrapped_targets_registry(self, qtbot):
         from qeth.ens_app import ENS_REGISTRY
-        from qeth.plugins.ens import _SubnodeDialog
-        owner = self.OTHER
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(_SubnodeDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_SubnodeDialog, "values",
-                            lambda self: ("blog", owner))
         plugin._add_subdomain("vitalik.eth")
-        req, _c, _l, cb = host.tx_requests[0]
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.label.setText("blog")
+        dlg._fields.owner.setText(self.OTHER)
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_REGISTRY.lower()
         assert req.data[2:10] == "5ef2c7f0"         # registry.setSubnodeRecord
 
-    def test_add_subdomain_wrapped_targets_namewrapper(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
+    def test_add_subdomain_wrapped_targets_namewrapper(self, qtbot):
         from qeth.ens_app import ENS_NAME_WRAPPER
-        from qeth.plugins.ens import _SubnodeDialog
-        owner = self.OTHER
         plugin, host, store = self._plugin(qtbot)
         plugin._wrapped.add("vitalik.eth")
-        monkeypatch.setattr(_SubnodeDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_SubnodeDialog, "values",
-                            lambda self: ("blog", owner))
         plugin._add_subdomain("vitalik.eth")
-        req, *_ = host.tx_requests[0]
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.label.setText("blog")
+        dlg._fields.owner.setText(self.OTHER)
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
         assert req.data[2:10] == "24c1af44"         # NameWrapper.setSubnodeRecord
 
-    def test_subdomain_rejects_dotted_label(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
-        from qeth.plugins.ens import _SubnodeDialog
-        owner = self.OTHER
+    def test_subdomain_rejects_dotted_label(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(plugin, "_warn", lambda t: None)
-        monkeypatch.setattr(_SubnodeDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_SubnodeDialog, "values",
-                            lambda self: ("a.b", owner))
         plugin._add_subdomain("vitalik.eth")
-        assert host.tx_requests == []
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.label.setText("a.b")
+        dlg._fields.owner.setText(self.OTHER)
+        assert dlg._inputs_valid() is False         # dotted label rejected
 
     def test_edit_record_routes_by_label(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
@@ -633,20 +652,14 @@ class TestEnsWriteActions:
         assert calls[3][0] == "record" and calls[3][1]["coin"] == "OP"
 
     def test_confirmation_force_refreshes_records(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
-        from qeth.plugins.ens import _RecordDialog
         plugin, host, store = self._plugin(qtbot)
         forced: list = []
         monkeypatch.setattr(plugin, "_on_records_requested",
                             lambda name, force=False: forced.append((name, force)))
-        monkeypatch.setattr(_RecordDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_RecordDialog, "result_values",
-                            lambda self: ("Text record", "url", "v"))
         plugin._write_text("vitalik.eth")
-        # nothing refreshes on broadcast — only when the tx actually confirms
+        # nothing refreshes on open — only when the tx actually confirms
         assert forced == []
-        _req, _chain, _label, on_confirmed = host.tx_requests[0]
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert forced == [("vitalik.eth", True)]
 
@@ -666,18 +679,11 @@ class TestEnsWriteActions:
         assert plugin._rec_cache["vitalik.eth"] == (new, False)
 
     def test_subdomain_confirmation_rediscovers(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
-        from qeth.plugins.ens import _SubnodeDialog
-        owner = self.OTHER
         plugin, host, store = self._plugin(qtbot)
         refreshed: list = []
         monkeypatch.setattr(plugin, "_on_refresh", lambda: refreshed.append(True))
-        monkeypatch.setattr(_SubnodeDialog, "exec",
-                            lambda self: QDialog.DialogCode.Accepted)
-        monkeypatch.setattr(_SubnodeDialog, "values",
-                            lambda self: ("blog", owner))
         plugin._add_subdomain("vitalik.eth")
-        _req, _chain, _label, on_confirmed = host.tx_requests[0]
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
 
@@ -685,74 +691,83 @@ class TestEnsWriteActions:
 
     OWNED_EXP = 1_900_000_000        # a far-future expiry (year ~2030)
 
-    def test_renew_quotes_one_year_with_usd(self, qtbot, monkeypatch):
-        from PySide6.QtWidgets import QDialog
-        from qeth.plugins.ens import _RenewDialog, EnsRenewPriceWorker
+    def test_renew_quotes_one_year_with_usd(self, qtbot):
+        from qeth.plugins.ens import EnsRenewPriceWorker
         from qeth import ens_write
         plugin, host, store = self._plugin(qtbot)
         plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
-        # Reject so _renew returns after starting just the quote worker.
-        monkeypatch.setattr(_RenewDialog, "exec",
-                            lambda self: QDialog.DialogCode.Rejected)
         plugin._renew("vitalik.eth")
-        assert len(host.started_workers) == 1
-        w = host.started_workers[0]
-        assert isinstance(w, EnsRenewPriceWorker)
-        assert w._label == "vitalik"                       # bare label, no .eth
-        assert w._duration == ens_write.SECONDS_PER_YEAR   # one-year quote
-        assert w._with_usd is True
-        assert host.tx_requests == []
+        assert len(host.ens_ops) == 1
+        _name, op, *_rest = host.ens_ops[0]
+        # The quote worker is started by the composer's field-group factory.
+        started: list = []
+        dlg = self._composer(op, start_worker=started.append)
+        qtbot.addWidget(dlg)
+        quotes = [w for w in started if isinstance(w, EnsRenewPriceWorker)]
+        assert quotes
+        assert quotes[0]._label == "vitalik"               # bare label, no .eth
+        assert quotes[0]._duration == ens_write.SECONDS_PER_YEAR
+        assert quotes[0]._with_usd is True
 
     def test_renew_rejects_subdomain(self, qtbot):
         plugin, host, store = self._plugin(qtbot, owned=("blog.vitalik.eth",))
         plugin._renew("blog.vitalik.eth")                   # not a .eth 2LD
-        assert host.started_workers == []
+        assert host.ens_ops == []
 
-    def test_renew_quote_reaches_open_dialog_only(self, qtbot):
-        from qeth.plugins.ens import _RenewDialog
+    def test_renew_quote_reaches_field_group(self, qtbot):
         from decimal import Decimal
-        plugin, host, store = self._plugin(qtbot)
-        dlg = _RenewDialog("vitalik.eth", self.OWNED_EXP)
-        qtbot.addWidget(dlg)
-        plugin._renew_dlg = dlg
-        plugin._on_renew_quote(1000, Decimal("2000"))
-        assert dlg._price_1y == 1000
-        plugin._renew_dlg = None                            # dialog closed
-        plugin._on_renew_quote(9999, Decimal("1"))          # dropped, no crash
-        assert dlg._price_1y == 1000
+        from qeth.plugins.ens import _RenewFields
+        # The quote lands on the renew field group via set_quote → it prices the
+        # selected term and the live cost label shows ETH + USD.
+        fields = _RenewFields("vitalik.eth", self.OWNED_EXP)
+        qtbot.addWidget(fields)
+        assert fields.selected_value_wei() is None          # unpriced initially
+        fields.set_quote(1_000_000_000, Decimal("2000"))
+        assert fields.selected_value_wei() is not None
+        assert "ETH" in fields._cost_lbl.text()
 
-    def test_submit_renew_builds_payable_tx_to_controller(self, qtbot):
+    def test_renew_builds_payable_tx_to_controller(self, qtbot):
         from qeth.ens_app import ENS_ETH_CONTROLLER
-        from qeth import ens_write
         plugin, host, store = self._plugin(qtbot)
-        duration = 2 * ens_write.SECONDS_PER_YEAR
-        target = self.OWNED_EXP + duration
-        plugin._submit_renew("vitalik.eth", "vitalik", duration, target, 1_000_000)
-        req, _chain, label, cb = host.tx_requests[0]
+        plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
+        plugin._renew("vitalik.eth")
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.set_quote(1_000_000_000, None)          # 1e9 wei / year
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_ETH_CONTROLLER.lower()
         assert req.data[2:10] == "acf1a841"                 # renew(string,uint256)
-        # The duration is encoded raw (arbitrary seconds, not whole years).
+        # The duration is the chosen term in raw seconds.
+        duration = dlg._fields.duration_seconds()
         assert req.data[10:] == abi_encode(
             ["string", "uint256"], ["vitalik", duration]).hex()
-        assert req.value_wei == 1_000_000 + 1_000_000 // 10  # price + 10% buffer
-        assert "to " in label                               # "Renew … · to <date>"
+        # value = price + 10% buffer, and it reaches the request (→ sim + gas).
+        price = dlg._fields.selected_value_wei()
+        assert req.value_wei == price + price // 10
+        # _sim_params derives from _build_request, so the payable value is in the
+        # simulation params too (an underpaid renew would falsely revert).
+        assert dlg._sim_params()[3] == req.value_wei
 
-    def test_submit_renew_price_failure_warns_and_submits_nothing(self, qtbot):
-        warned: list = []
+    def test_renew_without_quote_is_not_signable(self, qtbot):
+        from qeth.signing import SignerError
         plugin, host, store = self._plugin(qtbot)
-        plugin._warn = lambda t: warned.append(t)
-        plugin._submit_renew("vitalik.eth", "vitalik", 31_536_000,
-                             self.OWNED_EXP, None)
-        assert host.tx_requests == []
-        assert warned
+        plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
+        plugin._renew("vitalik.eth")
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)                             # no quote landed
+        qtbot.addWidget(dlg)
+        assert dlg._inputs_valid() is False                 # Confirm disabled
+        with pytest.raises(SignerError):
+            dlg._build_request()
 
     def test_renew_confirmation_rediscovers(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
+        plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
         refreshed: list = []
         plugin._on_refresh = lambda: refreshed.append(True)
-        plugin._submit_renew("vitalik.eth", "vitalik", 31_536_000,
-                             self.OWNED_EXP, 1000)
-        _req, _chain, _label, on_confirmed = host.tx_requests[0]
+        plugin._renew("vitalik.eth")
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
 
@@ -790,51 +805,51 @@ class TestEnsWriteActions:
         assert "manager.eth" not in panel._transferable      # controller-only
         assert "manager.eth" in panel._writable              # but still writable
 
-    def test_transfer_unwrapped_targets_registrar(self, qtbot, monkeypatch):
+    def test_transfer_unwrapped_targets_registrar(self, qtbot):
         from qeth.ens_app import ENS_ETH_REGISTRAR
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: (self.OTHER, True)))
         plugin._transfer("vitalik.eth")
-        req, _c, label, _cb = host.tx_requests[0]
+        name, op, _chain, _from, _cb = host.ens_ops[0]
+        dlg = self._composer(op, name)
+        qtbot.addWidget(dlg)
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_ETH_REGISTRAR.lower()
         assert req.data[2:10] == "42842e0e"                  # ERC-721 safeTransferFrom
         assert req.from_addr.lower() == ADDR.lower()
-        assert "Transfer" in label
+        assert "Transfer" in op.confirm_label
 
-    def test_transfer_wrapped_targets_namewrapper(self, qtbot, monkeypatch):
+    def test_transfer_wrapped_targets_namewrapper(self, qtbot):
         from qeth.ens_app import ENS_NAME_WRAPPER
         plugin, host, store = self._plugin(qtbot)
         plugin._wrapped.add("vitalik.eth")
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: (self.OTHER, True)))
         plugin._transfer("vitalik.eth")
-        req, *_ = host.tx_requests[0]
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
         assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
         assert req.data[2:10] == "f242432a"                  # ERC-1155 safeTransferFrom
 
-    def test_transfer_rejects_garbage_recipient(self, qtbot, monkeypatch):
-        warned: list = []
+    def test_transfer_rejects_garbage_recipient(self, qtbot):
+        from qeth.signing import SignerError
         plugin, host, store = self._plugin(qtbot)
-        monkeypatch.setattr(plugin, "_warn", lambda t: warned.append(t))
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: ("not-an-address", True)))
         plugin._transfer("vitalik.eth")
-        assert host.tx_requests == []
-        assert warned
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.recipient.setText("not-an-address")
+        assert dlg._inputs_valid() is False
+        with pytest.raises(SignerError):
+            dlg._build_request()
 
-    def test_transfer_confirmation_rediscovers(self, qtbot, monkeypatch):
+    def test_transfer_confirmation_rediscovers(self, qtbot):
         plugin, host, store = self._plugin(qtbot)
         refreshed: list = []
         plugin._on_refresh = lambda: refreshed.append(True)
-        monkeypatch.setattr(
-            "qeth.plugins.ens.prompt_text",
-            staticmethod(lambda *a, **k: (self.OTHER, True)))
         plugin._transfer("vitalik.eth")
-        _req, _c, _l, on_confirmed = host.tx_requests[0]
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
 

@@ -722,6 +722,36 @@ class EnsPanel(QWidget):
         the "Set manager…" action."""
         self._reclaimable = set(names)
 
+    def _write_menu_groups(self, n: EnsName) -> list[list[tuple[str, str]]]:
+        """The write actions available for ``n`` as ``(label, kind)`` pairs,
+        split into the groups the menu separates. Registration-level actions
+        (renew / transfer / set-manager on a .eth 2LD) belong to the OWNER, so a
+        name you hold as registrant but don't manage — its controller delegated
+        elsewhere, e.g. crv.eth — still offers Transfer / Set manager. Record
+        actions need the manager (controller) role. Pure → unit-tested."""
+        nm = n.name
+        nl = nm.lower()
+        manages = nl in self._writable                  # controller — records
+        owns = nl in self._transferable or nl in self._reclaimable
+        is_2ld = not n.is_subdomain and nm.endswith(".eth")
+        groups: list[list[tuple[str, str]]] = []
+        if is_2ld and (manages or owns):
+            reg = [("Extend registration…", "renew")]   # anyone can renew
+            if nl in self._transferable:
+                reg.append(("Transfer name…", "transfer"))
+            if nl in self._reclaimable:
+                reg.append(("Set manager…", "manager"))
+            groups.append(reg)
+        if manages:
+            groups.append([
+                ("Set ETH address…", "addr"),
+                ("Set content (IPFS)…", "content"),
+                ("Set text record…", "text"),
+                ("Add / change record…", "record"),
+            ])
+            groups.append([("Add subdomain…", "subdomain")])
+        return groups
+
     def _on_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if item is None:
@@ -736,32 +766,13 @@ class EnsPanel(QWidget):
             if n.resolved_address:
                 menu.addAction("Copy resolved address",
                                lambda: _clip(n.resolved_address))
-            if n.name.lower() in self._writable:
+            nm = n.name
+            for group in self._write_menu_groups(n):
                 menu.addSeparator()
-                nm = n.name
-                # Renewal only for .eth 2LDs (subdomains have no registration of
-                # their own — they ride the parent's expiry).
-                if not n.is_subdomain and nm.endswith(".eth"):
-                    menu.addAction("Extend registration…",
-                                   lambda: self.write_requested.emit(nm, "renew"))
-                    if nm.lower() in self._transferable:
-                        menu.addAction("Transfer name…",
-                                       lambda: self.write_requested.emit(nm, "transfer"))
-                    if nm.lower() in self._reclaimable:
-                        menu.addAction("Set manager…",
-                                       lambda: self.write_requested.emit(nm, "manager"))
-                    menu.addSeparator()
-                menu.addAction("Set ETH address…",
-                               lambda: self.write_requested.emit(nm, "addr"))
-                menu.addAction("Set content (IPFS)…",
-                               lambda: self.write_requested.emit(nm, "content"))
-                menu.addAction("Set text record…",
-                               lambda: self.write_requested.emit(nm, "text"))
-                menu.addAction("Add / change record…",
-                               lambda: self.write_requested.emit(nm, "record"))
-                menu.addSeparator()
-                menu.addAction("Add subdomain…",
-                               lambda: self.write_requested.emit(nm, "subdomain"))
+                for label, kind in group:
+                    menu.addAction(
+                        label,
+                        lambda k=kind: self.write_requested.emit(nm, k))
         elif value:
             menu.addAction("Copy value", lambda: _clip(str(value)))
             # Record row → offer to edit it (the parent name must be writable).

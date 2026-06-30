@@ -365,6 +365,55 @@ class TestEnsPanel:
         sub = panel._items_by_name["dao.vitalik.eth"]
         assert set(self._role_rows(sub)) == {"manager"}
 
+    def _menu_kinds(self, panel, name):
+        n = EnsName(name)
+        return [kind for group in panel._write_menu_groups(n) for _label, kind in group]
+
+    def test_owner_only_name_offers_transfer_and_set_manager(self, qtbot):
+        # A name held as registrant but managed elsewhere (crv.eth) must still
+        # offer Transfer + Set manager (+ renew), and NOT the record actions.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.set_transferable({"crv.eth"})
+        panel.set_reclaimable({"crv.eth"})
+        kinds = self._menu_kinds(panel, "crv.eth")
+        assert kinds == ["renew", "transfer", "manager"]   # no record actions
+
+    def test_manager_only_name_offers_records_not_transfer(self, qtbot):
+        # The controller (manager) sets records + renews, but a manager who
+        # isn't the owner can't transfer or reclaim.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.set_writable({"dao.eth"})
+        kinds = self._menu_kinds(panel, "dao.eth")
+        assert "transfer" not in kinds and "manager" not in kinds
+        assert kinds == ["renew", "addr", "content", "text", "record", "subdomain"]
+
+    def test_owner_and_manager_name_offers_everything(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.set_writable({"me.eth"})
+        panel.set_transferable({"me.eth"})
+        panel.set_reclaimable({"me.eth"})
+        kinds = self._menu_kinds(panel, "me.eth")
+        assert kinds == ["renew", "transfer", "manager",
+                         "addr", "content", "text", "record", "subdomain"]
+
+    def test_unrelated_name_offers_no_write_actions(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        assert panel._write_menu_groups(EnsName("someoneelse.eth")) == []
+
+    def test_subdomain_manager_offers_records_no_registration(self, qtbot):
+        # A subdomain has no registration of its own → no renew/transfer, but
+        # its manager can still set records + add deeper subdomains.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.set_writable({"blog.me.eth"})
+        kinds = self._menu_kinds(panel, "blog.me.eth")
+        assert "renew" not in kinds and "transfer" not in kinds
+        assert kinds == ["addr", "content", "text", "record", "subdomain"]
+
     def test_subdomain_owned_uses_control_tooltip(self, qtbot):
         from qeth.plugins.ens import _CONTROL_TIP
         panel = EnsPanel()

@@ -392,7 +392,11 @@ def lookup_registrant_names(
         name = _ens_metadata_name(tid, get_json=get_json)
         if name and name.lower() not in seen:
             seen.add(name.lower())
-            out.append(EnsName(name, source="owned"))
+            # source="registrant": this came from a fresh on-chain NFT read, so
+            # the verify pass must not drop it when its (Helios-verified, head-
+            # lagging) ownership read still shows the previous registrant — a
+            # just-transferred name would otherwise flicker in and vanish.
+            out.append(EnsName(name, source="registrant"))
     return out
 
 

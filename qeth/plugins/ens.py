@@ -119,6 +119,8 @@ _MANAGER_TIP = ("Manager (registry controller) — the role that sets the "
                 "resolver, records and subdomains")
 _OWNER_TIP = ("Owner (registrant) — holds the name's NFT; can transfer it and "
               "reclaim the manager role")
+_PENDING_TIP = ("You hold this name's NFT (read on-chain) — the verified head "
+                "is still catching up, so cryptographic proof is pending")
 _WRAPPED_NOTE = " · wrapped"
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
@@ -479,11 +481,15 @@ class EnsPanel(QWidget):
 
         self._domain_icon = _icon("emblem-web", QStyle.StandardPixmap.SP_DriveNetIcon)
         self._sub_icon = _icon("folder", QStyle.StandardPixmap.SP_DirIcon)
-        # Status-column icons: verified-ok vs warning.
+        # Status-column icons: verified-ok, warning, and "owned but proof still
+        # catching up" (a sync/refresh glyph — distinct from the green ✓).
         self._ok_icon = _icon("emblem-ok",
                               QStyle.StandardPixmap.SP_DialogApplyButton)
         self._warn_icon = _icon("dialog-warning",
                                 QStyle.StandardPixmap.SP_MessageBoxWarning)
+        self._pending_icon = _icon(
+            ("view-refresh", "emblem-synchronizing-symbolic", "chronometer"),
+            QStyle.StandardPixmap.SP_BrowserReload)
         self._rec_icons = {
             # A chain link for "points to an address". Distinct SP_FileLinkIcon
             # last-resort so it can't collapse onto the generic document.
@@ -850,14 +856,24 @@ class EnsPanel(QWidget):
             if item is None:
                 continue
             n = item.data(0, _NAME_ROLE)
-            is_custom = isinstance(n, EnsName) and n.source == "custom"
-            # The chain definitively says this address owns neither role (a
-            # different owner, OR no owner — the node doesn't exist): an indexer
-            # lie. Drop it. Pinned names are exempt; a failed read isn't a drop.
-            if st.disowned_by(address) and not is_custom:
-                self._remove_item(item, name_l)
-                removed.append(name_l)
-                continue
+            src = n.source if isinstance(n, EnsName) else ""
+            if st.disowned_by(address):
+                # The verified read says this address owns neither role.
+                if src == "registrant":
+                    # …but a FRESH on-chain NFT read just surfaced it, and the
+                    # verified head lags (a just-transferred name). Trust the
+                    # fresher source: keep it, badge "proof catching up", and
+                    # don't paint the stale owner/manager rows. A later pass
+                    # (head caught up) verifies it green or a refresh drops it.
+                    self._set_status(item, "pending", _PENDING_TIP)
+                    item.setToolTip(0, _PENDING_TIP)
+                    continue
+                if src != "custom":
+                    # A real indexer lie (BENS over-reported). Drop it. Pinned
+                    # (custom) names are exempt — watching one is intentional.
+                    self._remove_item(item, name_l)
+                    removed.append(name_l)
+                    continue
             # Show the on-chain roles (manager / owner) for every kept name —
             # owned or merely watched — once the read definitively landed.
             if st.owner_known:
@@ -887,10 +903,11 @@ class EnsPanel(QWidget):
     def _set_status(self, item: QTreeWidgetItem, status: str,
                     tooltip: str) -> None:
         """Set the trailing status column's icon + tooltip for a line, ``status``
-        in ``{"ok", "warn"}``. An icon (not a text ✓/⚠) keeps the row height
-        uniform regardless of the theme's emoji rendering."""
-        item.setIcon(self._STATUS_COL,
-                     self._ok_icon if status == "ok" else self._warn_icon)
+        in ``{"ok", "warn", "pending"}``. An icon (not a text ✓/⚠) keeps the row
+        height uniform regardless of the theme's emoji rendering."""
+        icon = {"ok": self._ok_icon, "warn": self._warn_icon,
+                "pending": self._pending_icon}.get(status, self._warn_icon)
+        item.setIcon(self._STATUS_COL, icon)
         item.setData(0, _STATUS_ROLE, status)
         item.setToolTip(self._STATUS_COL, tooltip)
 

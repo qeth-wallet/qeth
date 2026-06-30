@@ -116,7 +116,7 @@ def test_lookup_registrant_names_skips_known_and_resolves():
     names = ea.lookup_registrant_names(
         1, "0xabc", skip_labelhashes={vit_id}, get_json=fake_get)
     assert [n.name for n in names] == ["crv.eth"]
-    assert names[0].source == "owned"
+    assert names[0].source == "registrant"   # tagged so verify won't drop it
     assert len(calls) == 1 and str(crv_id) in calls[0]   # vitalik never fetched
 
 

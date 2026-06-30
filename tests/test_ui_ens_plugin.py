@@ -313,6 +313,39 @@ class TestEnsPanel:
         assert removed == []
         assert panel.tree.topLevelItemCount() == 1
 
+    def test_registrant_name_kept_pending_when_verify_lags(self, qtbot):
+        # A name surfaced by the fresh NFT read (source="registrant") that the
+        # lagging verified head still attributes to the PREVIOUS owner must be
+        # kept (not dropped) and badged "pending", not green.
+        from qeth.plugins.ens import _STATUS_ROLE
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me, prev = "0x" + "39" * 20, "0x" + "7a" * 20
+        panel.populate(
+            build_tree([EnsName("curvelend.eth", source="registrant")]), NOW)
+        removed = panel.mark_verified({"curvelend.eth": OwnershipCheck(
+            controller=prev, registrant=prev, owner_known=True)}, me)
+        assert removed == []                       # NOT dropped
+        root = panel.tree.topLevelItem(0)
+        assert root.text(0) == "curvelend.eth"     # still there
+        assert root.data(0, _STATUS_ROLE) == "pending"
+        # no stale owner/manager rows painted from the lagging read
+        assert root.childCount() == 0 or all(
+            not root.child(i).data(0, _OWNERSHIP_ROLE)
+            for i in range(root.childCount()))
+
+    def test_registrant_name_verifies_green_once_head_catches_up(self, qtbot):
+        from qeth.plugins.ens import _STATUS_ROLE
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "39" * 20
+        panel.populate(
+            build_tree([EnsName("curvelend.eth", source="registrant")]), NOW)
+        panel.mark_verified({"curvelend.eth": OwnershipCheck(
+            controller=me, registrant=me, owner_known=True)}, me)
+        root = panel.tree.topLevelItem(0)
+        assert root.data(0, _STATUS_ROLE) == "ok"   # proven → green
+
     def _role_rows(self, item):
         """The manager/owner rows under a name → {label: shown-address}."""
         return {item.child(i).text(0): item.child(i).text(2)

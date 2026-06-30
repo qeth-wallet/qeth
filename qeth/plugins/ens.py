@@ -469,14 +469,14 @@ class EnsPanel(QWidget):
         self._warn_icon = _icon("dialog-warning",
                                 QStyle.StandardPixmap.SP_MessageBoxWarning)
         self._rec_icons = {
-            "address": _icon("avatar-default", QStyle.StandardPixmap.SP_FileIcon),
+            "address": _icon("insert-link", QStyle.StandardPixmap.SP_FileIcon),
             "content": _icon("folder-remote", QStyle.StandardPixmap.SP_FileLinkIcon),
             "text": _icon("text-x-generic", QStyle.StandardPixmap.SP_FileIcon),
         }
-        # The two on-chain role rows. Distinct icons so manager (operates the
+        # The two on-chain role rows. Distinct icons so manager (configures the
         # name) and owner (holds its NFT) read apart at a glance: a gear for the
         # manager, a certificate/seal for the owner.
-        self._manager_icon = _icon("preferences-system",
+        self._manager_icon = _icon("configure",
                                    QStyle.StandardPixmap.SP_FileIcon)
         self._owner_icon = _icon("application-certificate",
                                  QStyle.StandardPixmap.SP_FileIcon)

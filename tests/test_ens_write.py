@@ -9,7 +9,7 @@ routes to the registry (unwrapped) vs the NameWrapper (wrapped).
 from eth_abi import encode as abi_encode
 
 from qeth.ens_app import (
-    ENS_ETH_CONTROLLER, ENS_NAME_WRAPPER, ENS_REGISTRY,
+    ENS_ETH_CONTROLLER, ENS_ETH_REGISTRAR, ENS_NAME_WRAPPER, ENS_REGISTRY,
     _labelhash, decode_contenthash, namehash,
 )
 from qeth import ens_write
@@ -134,3 +134,32 @@ class TestRenew:
 
     def test_seconds_per_year_is_365_days(self):
         assert ens_write.SECONDS_PER_YEAR == 365 * 24 * 60 * 60
+
+
+class TestTransfer:
+    FROM = "0x" + "11" * 20
+    TO = "0x" + "22" * 20
+
+    def test_unwrapped_moves_erc721_on_registrar(self):
+        # Unwrapped: ERC-721 safeTransferFrom on the BaseRegistrar, tokenId =
+        # uint256(labelhash(label)).
+        to, data = ens_write.transfer_name(
+            NAME, self.FROM, self.TO, wrapped=False)
+        assert to == ENS_ETH_REGISTRAR
+        assert _selector(data) == "42842e0e"
+        token_id = int.from_bytes(_labelhash("vitalik"), "big")
+        assert _body(data) == abi_encode(
+            ["address", "address", "uint256"],
+            [self.FROM, self.TO, token_id])
+
+    def test_wrapped_moves_erc1155_on_namewrapper(self):
+        # Wrapped: ERC-1155 safeTransferFrom on the NameWrapper, id =
+        # uint256(namehash), amount 1, empty data.
+        to, data = ens_write.transfer_name(
+            NAME, self.FROM, self.TO, wrapped=True)
+        assert to == ENS_NAME_WRAPPER
+        assert _selector(data) == "f242432a"
+        token_id = int.from_bytes(namehash(NAME), "big")
+        assert _body(data) == abi_encode(
+            ["address", "address", "uint256", "uint256", "bytes"],
+            [self.FROM, self.TO, token_id, 1, b""])

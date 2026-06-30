@@ -16,7 +16,8 @@ from __future__ import annotations
 from base64 import b32decode
 
 from .ens_app import (
-    ENS_ETH_CONTROLLER, ENS_NAME_WRAPPER, ENS_REGISTRY, _labelhash, namehash,
+    ENS_ETH_CONTROLLER, ENS_ETH_REGISTRAR, ENS_NAME_WRAPPER, ENS_REGISTRY,
+    _labelhash, namehash,
 )
 
 # Latest canonical mainnet PublicResolver — the resolver to point a name at when
@@ -34,6 +35,12 @@ _SEL_SUBNODE_RECORD = bytes.fromhex("5ef2c7f0")
 # NameWrapper.setSubnodeRecord(bytes32,string,address,address,uint64,uint32,uint64)
 _SEL_WRAPPED_SUBNODE = bytes.fromhex("24c1af44")
 _SEL_RENEW = bytes.fromhex("acf1a841")             # controller.renew(string,uint256)
+# Ownership transfer — the .eth name is an NFT: ERC-721 on the BaseRegistrar
+# (unwrapped, tokenId = labelhash) or ERC-1155 on the NameWrapper (wrapped,
+# id = namehash). safeTransferFrom for both (reverts if the recipient is a
+# contract that can't receive the token, which protects against loss).
+_SEL_SAFE_TRANSFER_721 = bytes.fromhex("42842e0e")   # (address,address,uint256)
+_SEL_SAFE_TRANSFER_1155 = bytes.fromhex("f242432a")  # (addr,addr,uint256,uint256,bytes)
 
 ZERO_ADDRESS = "0x" + "00" * 20
 
@@ -155,6 +162,32 @@ def renew(label: str, duration_s: int) -> Tx:
     overpayment). Anyone may renew any name, so this needs no ownership."""
     body = _abi(["string", "uint256"], [label, duration_s])
     return _tx(ENS_ETH_CONTROLLER, _SEL_RENEW, body)
+
+
+def transfer_name(name: str, from_addr: str, to_addr: str, *,
+                  wrapped: bool) -> Tx:
+    """Transfer ownership of a ``.eth`` 2LD to ``to_addr`` by moving its NFT.
+
+    Wrapped names move as an ERC-1155 on the NameWrapper (token id =
+    ``uint256(namehash)``); unwrapped names as the ERC-721 on the BaseRegistrar
+    (token id = ``uint256(labelhash(label))``). ``from_addr`` is the current
+    registrant (the signing account). Only the registrant can transfer — a
+    controller-only account's call reverts, which the sign dialog surfaces.
+
+    Note for unwrapped names: this moves the *registrant* (the NFT/ownership).
+    The registry *manager* (who sets records) is a separate role that stays put
+    until the new owner reclaims it — standard ENS behaviour. Wrapped names
+    carry both in the one ERC-1155 transfer."""
+    if wrapped:
+        token_id = int.from_bytes(namehash(name), "big")
+        body = _abi(
+            ["address", "address", "uint256", "uint256", "bytes"],
+            [from_addr, to_addr, token_id, 1, b""])
+        return _tx(ENS_NAME_WRAPPER, _SEL_SAFE_TRANSFER_1155, body)
+    token_id = int.from_bytes(_labelhash(name.split(".")[0]), "big")
+    body = _abi(["address", "address", "uint256"],
+                [from_addr, to_addr, token_id])
+    return _tx(ENS_ETH_REGISTRAR, _SEL_SAFE_TRANSFER_721, body)
 
 
 def eth_addr_bytes(address: str) -> bytes:

@@ -393,6 +393,7 @@ class EnsPanel(QWidget):
         super().__init__(parent)
         self._items_by_name: dict[str, QTreeWidgetItem] = {}
         self._writable: set[str] = set()   # names the user can sign writes for
+        self._transferable: set[str] = set()   # names the user can transfer (NFT owner)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = _EnsTree()
@@ -633,6 +634,11 @@ class EnsPanel(QWidget):
         actions in the context menu."""
         self._writable = set(names)
 
+    def set_transferable(self, names: set[str]) -> None:
+        """Names (lower-case) the user owns as the registrant (NFT owner) and
+        can sign for — gates the "Transfer name…" action."""
+        self._transferable = set(names)
+
     def _on_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if item is None:
@@ -655,6 +661,9 @@ class EnsPanel(QWidget):
                 if not n.is_subdomain and nm.endswith(".eth"):
                     menu.addAction("Extend registration…",
                                    lambda: self.write_requested.emit(nm, "renew"))
+                    if nm.lower() in self._transferable:
+                        menu.addAction("Transfer name…",
+                                       lambda: self.write_requested.emit(nm, "transfer"))
                     menu.addSeparator()
                 menu.addAction("Set ETH address…",
                                lambda: self.write_requested.emit(nm, "addr"))
@@ -969,6 +978,10 @@ class EnsPlugin(Plugin):
         self._names_by_l: dict[str, EnsName] = {}
         self._owned: set[str] = set()      # owned by the selected address
         self._wrapped: set[str] = set()    # held by the NameWrapper
+        # Names the selected address is the *registrant* (NFT owner) of — the
+        # only role that can transfer the name. A subset of _owned (which also
+        # counts controller-only), tracked separately to gate "Transfer name…".
+        self._registrant: set[str] = set()
         self._renew_dlg: _RenewDialog | None = None   # open renewal dialog, if any
 
     # --- plugin contract --------------------------------------------------
@@ -1025,8 +1038,10 @@ class EnsPlugin(Plugin):
             self._denied.clear()              # denials are per-account
             self._owned.clear()
             self._wrapped.clear()
+            self._registrant.clear()
             if self._panel is not None:
                 self._panel.set_writable(set())
+                self._panel.set_transferable(set())
         self._loaded_for = address
         if not address:
             self._panel.populate([], int(time.time()))
@@ -1107,6 +1122,13 @@ class EnsPlugin(Plugin):
                 self._wrapped.add(name_l)
             else:
                 self._wrapped.discard(name_l)
+            # Registrant (NFT owner) — for a wrapped name this is the ERC-1155
+            # holder (substituted in by the verify read). Only the registrant
+            # can transfer; controller-only ownership can't.
+            if st.registrant and st.registrant.lower() == address.lower():
+                self._registrant.add(name_l)
+            else:
+                self._registrant.discard(name_l)
         self._denied.update(self._panel.mark_verified(states, address))
         self._refresh_writable(address)
 
@@ -1119,10 +1141,13 @@ class EnsPlugin(Plugin):
 
     def _refresh_writable(self, address: str) -> None:
         # Writable = names the chain proved this address owns, AND the account
-        # can actually sign. (Watch-only → read-only.)
-        writable = self._owned if self._can_sign(address) else set()
+        # can actually sign. (Watch-only → read-only.) Transferable is the
+        # narrower registrant-owned subset (only the NFT owner can transfer).
+        can_sign = self._can_sign(address)
         if self._panel is not None:
-            self._panel.set_writable(writable)
+            self._panel.set_writable(self._owned if can_sign else set())
+            self._panel.set_transferable(
+                self._registrant if can_sign else set())
 
     # --- records (lazy) ---------------------------------------------------
 
@@ -1228,6 +1253,8 @@ class EnsPlugin(Plugin):
             self._add_subdomain(name)
         elif kind == "renew":
             self._renew(name)
+        elif kind == "transfer":
+            self._transfer(name)
 
     def _on_edit_record(self, name: str, label: str, value: str) -> None:
         """Re-open the matching editor for an existing record row, prefilled.
@@ -1447,6 +1474,36 @@ class EnsPlugin(Plugin):
         self._submit_tx(name, to, data,
                         f"Renew {name} · to {_fmt_expiry(target_ts)}",
                         value_wei=value, rediscover=True)
+
+    # --- transfer ----------------------------------------------------------
+
+    def _transfer(self, name: str) -> None:
+        from ..ens_app import _is_eth_2ld
+        if self._panel is None or not _is_eth_2ld(name):
+            return
+        host = self.host
+        addr = host.selected_address if host is not None else None
+        if not addr:
+            return
+        text, ok = prompt_text(
+            self._panel, "Transfer name",
+            f"Transfer ownership of {name} to another address.\n"
+            "This hands the name over and cannot be undone — make sure the "
+            "recipient address is correct.\n\nRecipient 0x address:",
+            wide=True)
+        if not ok:
+            return
+        to = _checksum(text)
+        if to is None:
+            self._warn("The recipient must be a valid 0x address.")
+            return
+        from eth_utils import to_checksum_address
+        from .. import ens_write
+        tx_to, data = ens_write.transfer_name(
+            name, to_checksum_address(addr), to,
+            wrapped=name.lower() in self._wrapped)
+        # On confirm, re-discover: the name leaves this account's list.
+        self._submit_tx(name, tx_to, data, f"Transfer {name}", rediscover=True)
 
     # --- write plumbing ----------------------------------------------------
 

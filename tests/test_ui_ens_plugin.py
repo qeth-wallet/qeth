@@ -772,6 +772,72 @@ class TestEnsWriteActions:
         assert dlg.selected_value_wei() > one_year * 9 // 5  # clearly grew
         assert "ETH" in dlg._cost_lbl.text() and "$" in dlg._cost_lbl.text()
 
+    # --- transfer ---------------------------------------------------------
+
+    def test_registrant_ownership_gates_transferable(self, qtbot):
+        # Only registrant (NFT-owner) names become transferable; controller-only
+        # ownership is writable but NOT transferable.
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=ADDR, registrant=ADDR, owner_known=True,
+                resolver=self.RESOLVER),
+            "manager.eth": OwnershipCheck(
+                controller=ADDR, registrant=self.OTHER, owner_known=True),
+        }, True)
+        panel = plugin.widget()
+        assert "vitalik.eth" in panel._transferable
+        assert "manager.eth" not in panel._transferable      # controller-only
+        assert "manager.eth" in panel._writable              # but still writable
+
+    def test_transfer_unwrapped_targets_registrar(self, qtbot, monkeypatch):
+        from qeth.ens_app import ENS_ETH_REGISTRAR
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(
+            "qeth.plugins.ens.prompt_text",
+            staticmethod(lambda *a, **k: (self.OTHER, True)))
+        plugin._transfer("vitalik.eth")
+        req, _c, label, _cb = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_ETH_REGISTRAR.lower()
+        assert req.data[2:10] == "42842e0e"                  # ERC-721 safeTransferFrom
+        assert req.from_addr.lower() == ADDR.lower()
+        assert "Transfer" in label
+
+    def test_transfer_wrapped_targets_namewrapper(self, qtbot, monkeypatch):
+        from qeth.ens_app import ENS_NAME_WRAPPER
+        plugin, host, store = self._plugin(qtbot)
+        plugin._wrapped.add("vitalik.eth")
+        monkeypatch.setattr(
+            "qeth.plugins.ens.prompt_text",
+            staticmethod(lambda *a, **k: (self.OTHER, True)))
+        plugin._transfer("vitalik.eth")
+        req, *_ = host.tx_requests[0]
+        assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
+        assert req.data[2:10] == "f242432a"                  # ERC-1155 safeTransferFrom
+
+    def test_transfer_rejects_garbage_recipient(self, qtbot, monkeypatch):
+        warned: list = []
+        plugin, host, store = self._plugin(qtbot)
+        monkeypatch.setattr(plugin, "_warn", lambda t: warned.append(t))
+        monkeypatch.setattr(
+            "qeth.plugins.ens.prompt_text",
+            staticmethod(lambda *a, **k: ("not-an-address", True)))
+        plugin._transfer("vitalik.eth")
+        assert host.tx_requests == []
+        assert warned
+
+    def test_transfer_confirmation_rediscovers(self, qtbot, monkeypatch):
+        plugin, host, store = self._plugin(qtbot)
+        refreshed: list = []
+        plugin._on_refresh = lambda: refreshed.append(True)
+        monkeypatch.setattr(
+            "qeth.plugins.ens.prompt_text",
+            staticmethod(lambda *a, **k: (self.OTHER, True)))
+        plugin._transfer("vitalik.eth")
+        _req, _c, _l, on_confirmed = host.tx_requests[0]
+        on_confirmed({"status": "0x1"})
+        assert refreshed == [True]
+
 
 # --- EnsPlugin: name-row resolution follows the head address read ----------
 

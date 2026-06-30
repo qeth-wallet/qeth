@@ -1438,6 +1438,10 @@ class _EnsOp:
     rediscover: bool = False
     payable: bool = False
     note: str | None = None    # a wrapped caveat shown under the inputs
+    # Confirm-button icon (themed names → SP fallback). Default matches the
+    # base composer; transfer overrides it to the shared right-arrow.
+    confirm_icon_names: tuple[str, ...] = ()
+    confirm_fallback: QStyle.StandardPixmap = QStyle.StandardPixmap.SP_ArrowUp
 
 
 class _EnsWriteComposer(_TxComposerDialog):
@@ -1462,6 +1466,8 @@ class _EnsWriteComposer(_TxComposerDialog):
             chain, from_addr,
             title=op.title,
             confirm_text=op.confirm_label,
+            confirm_icon_names=op.confirm_icon_names,
+            confirm_fallback=op.confirm_fallback,
             base_fee_text="(estimating…)",
             parent=parent,
             **shared,
@@ -2198,7 +2204,10 @@ class EnsPlugin(Plugin):
         return _EnsOp(
             title=f"Transfer · {name}", confirm_label="Transfer name",
             make_fields=make_fields, build=build, decoded=decoded,
-            rediscover=True, note=note)
+            rediscover=True, note=note,
+            # Same right-arrow as the Transfer button (and the tokens Send).
+            confirm_icon_names=("go-next",),
+            confirm_fallback=QStyle.StandardPixmap.SP_ArrowForward)
 
     def _set_manager_op(self, name: str, self_addr: str) -> _EnsOp:
         from .. import ens_write

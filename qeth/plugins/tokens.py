@@ -1647,16 +1647,14 @@ class TokenListPanel(QWidget):
         # until a row is selected. Sends either the selected ERC-20
         # or the native asset (when the native row is selected).
         self.btn_send = QPushButton("&Send")
+        # Right-arrow ("go-next"), shared with the ENS Transfer button + the
+        # send/transfer composer confirm buttons so "move value out" reads the
+        # same everywhere.
         _send_icon = QIcon.fromTheme(
-            "mail-send",
-            QIcon.fromTheme(
-                "document-send",
-                style.standardIcon(QStyle.StandardPixmap.SP_ArrowUp),
-            ),
-        )
+            "go-next", style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
         if _send_icon.isNull() or not _send_icon.availableSizes():
-            # Fall back to a unicode paper-plane in environments
-            # whose icon theme lacks the freedesktop send glyphs.
+            # Fall back to a unicode arrow in environments whose icon theme
+            # lacks even go-next.
             self.btn_send.setText("➤ &Send")
         else:
             self.btn_send.setIcon(_send_icon)

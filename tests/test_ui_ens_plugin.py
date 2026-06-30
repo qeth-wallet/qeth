@@ -1187,6 +1187,26 @@ class TestEnsWriteActions:
         _name, wop, *_rest = host.ens_ops[1]
         assert wop.note and "move together" in wop.note
 
+    def test_transfer_confirm_shares_the_arrow_icon(self, qtbot):
+        # The transfer dialog's confirm button uses the same right-arrow as the
+        # Transfer action button (and the tokens Send button).
+        from PySide6.QtCore import QBuffer, QByteArray, QSize
+        plugin, host, store = self._plugin(qtbot)
+        plugin._transfer("vitalik.eth")
+        _name, op, *_rest = host.ens_ops[0]
+        assert op.confirm_icon_names == ("go-next",)
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+
+        def png(ic):
+            px = ic.pixmap(QSize(16, 16))
+            ba = QByteArray(); buf = QBuffer(ba)
+            buf.open(QBuffer.OpenModeFlag.WriteOnly)
+            px.toImage().save(buf, "PNG")
+            return bytes(ba)
+
+        assert png(dlg.confirm_btn.icon()) == png(plugin.widget()._b_transfer.icon())
+
     # --- set manager (reclaim) --------------------------------------------
 
     def test_registrant_only_manages_via_role_split(self, qtbot):

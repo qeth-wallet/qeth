@@ -5263,10 +5263,11 @@ class SendTokenDialog(_TxComposerDialog):
             chain, from_addr,
             title=f"Send {asset['symbol']}",
             confirm_text="&Send",
-            # Same mail-send icon as the toolbar Send button on the tokens
-            # panel — same meaning across all the places a send launches.
-            confirm_icon_names=("mail-send", "document-send"),
-            confirm_fallback=QStyle.StandardPixmap.SP_ArrowUp,
+            # Right-arrow ("go-next"), shared with the tokens Send button and
+            # the ENS Transfer button/dialog — "move value out" reads the same
+            # everywhere.
+            confirm_icon_names=("go-next",),
+            confirm_fallback=QStyle.StandardPixmap.SP_ArrowForward,
             abi_source=abi_source, abi_cache=abi_cache,
             start_worker=start_worker, token_info=token_info,
             icon_cache=icon_cache, native_price_usd=native_price_usd,

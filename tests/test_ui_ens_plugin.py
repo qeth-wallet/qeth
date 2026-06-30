@@ -140,6 +140,57 @@ class TestEnsPanel:
         assert root.text(1) == text
         assert root.foreground(1).color() == colour
 
+    def test_identical_reemit_does_not_churn_children(self, qtbot):
+        # An identical re-emit (fast→verified same value, a no-op refresh) must
+        # NOT rebuild the rows — rebuilding mid-interaction can eat the user's
+        # expand/collapse. A marker on a child survives only if it's not rebuilt.
+        from qeth.ens_app import OwnershipCheck
+        marker = Qt.ItemDataRole.UserRole + 99
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        panel.populate(build_tree([EnsName("a.eth", source="custom")]), NOW)
+        rec = EnsRecords(texts={"url": "x"})
+        panel.add_records("a.eth", rec)
+        st = {"a.eth": OwnershipCheck(controller=me, registrant=me,
+                                      owner_known=True)}
+        panel.mark_verified(st, me)
+        root = panel.tree.topLevelItem(0)
+
+        def child(label):
+            return next(root.child(i) for i in range(root.childCount())
+                        if root.child(i).text(0) == label)
+        child("url").setData(0, marker, "rec")
+        child("manager").setData(0, marker, "own")
+        panel.add_records("a.eth", rec)          # identical → skip
+        panel.mark_verified(st, me)              # identical → skip
+        assert child("url").data(0, marker) == "rec"      # record row kept
+        assert child("manager").data(0, marker) == "own"  # role row kept
+
+    def test_record_reload_keeps_collapse_state(self, qtbot):
+        # A changed re-emit rebuilds the record rows but must not toggle the fold.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([EnsName("a.eth", source="custom")]), NOW)
+        root = panel.tree.topLevelItem(0)
+        panel.add_records("a.eth", EnsRecords(texts={"url": "x"}))
+        root.setExpanded(False)
+        panel.add_records("a.eth", EnsRecords(texts={"url": "y"}))   # changed
+        assert not root.isExpanded()             # still folded
+
+    def test_record_reload_does_not_drop_role_rows(self, qtbot):
+        from qeth.ens_app import OwnershipCheck
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        panel.populate(build_tree([EnsName("a.eth", source="custom")]), NOW)
+        panel.mark_verified({"a.eth": OwnershipCheck(
+            controller=me, registrant=me, owner_known=True)}, me)
+        panel.add_records("a.eth", EnsRecords(texts={"url": "x"}))   # reload
+        root = panel.tree.topLevelItem(0)
+        labels = {root.child(i).text(0) for i in range(root.childCount())}
+        assert {"manager", "owner", "url"} <= labels
+
     def test_add_records_replaces_placeholder_with_rows(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

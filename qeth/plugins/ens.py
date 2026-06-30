@@ -556,6 +556,10 @@ class EnsPanel(QWidget):
         # rows can be (re-)rendered whenever a name's records reload.
         self._ownership: dict[str, OwnershipCheck] = {}
         self._ownership_verified: set[str] = set()   # names with a proven ✓
+        # Last-rendered signatures, so an identical re-emit is a no-op (no child
+        # churn that could race with the user's expand/collapse).
+        self._ownership_sig: dict[str, object] = {}
+        self._records_sig: dict[str, object] = {}
         # Context-menu action icons. The write actions reuse the row icons that
         # already stand for those things (gear = manager, link = address,
         # folder-remote = content, text glyph = text record, folder = subdomain)
@@ -792,6 +796,8 @@ class EnsPanel(QWidget):
         self._items_by_name.clear()
         self._ownership.clear()
         self._ownership_verified.clear()
+        self._ownership_sig.clear()
+        self._records_sig.clear()
         for node in roots:
             self.tree.addTopLevelItem(self._build(node, now_ts, is_sub=False))
         self.tree.setSortingEnabled(True)
@@ -840,18 +846,27 @@ class EnsPanel(QWidget):
         if item is None:
             return
         item.setData(0, _LOADED_ROLE, True)
-        # Drop the placeholder AND any previously-rendered record rows (a re-emit
-        # — fast→verified upgrade, or a refresh — replaces them). Record rows and
-        # the placeholder carry no _NAME_ROLE; owned subdomains do, so they stay.
+        nl = name.lower()
+        # Idempotent: an identical re-emit (fast→verified with the same values,
+        # a refresh that didn't change anything) must not churn the children —
+        # rebuilding them mid-interaction can swallow the user's expand/collapse.
+        sig = (rec, verified)
+        if self._records_sig.get(nl) == sig:
+            return
+        self._records_sig[nl] = sig
+        was_expanded = item.isExpanded()
+        # Drop only the placeholder + previously-rendered record rows. The owner/
+        # manager role rows (and owned subdomains) are NOT ours to touch — they
+        # carry _OWNERSHIP_ROLE / _NAME_ROLE and are managed by the verify pass,
+        # so a records reload no longer rebuilds them.
         for i in range(item.childCount() - 1, -1, -1):
             ch = item.child(i)
-            if ch.data(0, _NAME_ROLE) is None:
+            if (ch.data(0, _NAME_ROLE) is None
+                    and not ch.data(0, _OWNERSHIP_ROLE)):
                 item.removeChild(ch)
         # No "no records" placeholder: a 2LD always shows its owner + manager
-        # rows (and a subdomain its manager), so an expanded name is never
-        # empty and the note would be misleading.
-        rows = _record_rows(rec)
-        for icon_key, label, value in rows:
+        # rows (and a subdomain its manager), so an expanded name is never empty.
+        for icon_key, label, value in _record_rows(rec):
             ch = _SortItem([label, "", value])
             ch.setData(0, _TYPE_RANK_ROLE,
                        _RANK_CONTENT if icon_key == "content" else _RANK_RECORD)
@@ -861,23 +876,28 @@ class EnsPanel(QWidget):
             if verified:                # status icon, same as the name rows
                 self._set_status(ch, "ok", _RECORD_TIP)
             item.addChild(ch)
-        # The clearing loop above drops the (role-less) manager/owner rows too;
-        # re-assert them so they survive a records (re)load and keep sitting at
-        # the top (rank _RANK_OWNERSHIP).
-        self._render_ownership_rows(item, name.lower())
+        item.setExpanded(was_expanded)   # mutating children can't toggle the fold
 
     def _render_ownership_rows(self, item: QTreeWidgetItem,
                                name_l: str) -> None:
         """(Re)build the manager + owner rows at the top of ``item`` from the
-        stored OwnershipCheck. Idempotent — removes any it added before. Shows a
+        stored OwnershipCheck. Idempotent + skips when nothing changed (so a
+        no-op verify pass doesn't churn the children mid-interaction). Shows a
         manager row whenever the registry controller is known and, for .eth
         2LDs, an owner row for the registrant (subdomains have no registrant)."""
+        st = self._ownership.get(name_l)
+        proven = name_l in self._ownership_verified
+        sig = None if st is None else (st.controller, st.registrant, proven)
+        if self._ownership_sig.get(name_l) == sig:
+            return                       # rows already reflect this state
+        self._ownership_sig[name_l] = sig
+        was_expanded = item.isExpanded()
         for i in range(item.childCount() - 1, -1, -1):
             ch = item.child(i)
             if ch.data(0, _OWNERSHIP_ROLE):
                 item.removeChild(ch)
-        st = self._ownership.get(name_l)
         if st is None:
+            item.setExpanded(was_expanded)
             return
         rows = []
         if st.controller:
@@ -900,6 +920,7 @@ class EnsPanel(QWidget):
             if proven:
                 self._set_status(ch, "ok", _RECORD_TIP)
             item.addChild(ch)
+        item.setExpanded(was_expanded)   # mutating children can't toggle the fold
 
     def update_resolved(self, name: str, address: str | None) -> None:
         """Update a name row's 'Resolves to' column from a fresh head read of its

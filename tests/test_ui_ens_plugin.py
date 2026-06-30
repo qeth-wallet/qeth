@@ -365,6 +365,74 @@ class TestEnsPanel:
         sub = panel._items_by_name["dao.vitalik.eth"]
         assert set(self._role_rows(sub)) == {"manager"}
 
+    def _bar_panel(self, qtbot, *, writable=(), transferable=(), reclaimable=()):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([EnsName("crv.eth", source="custom")]), NOW)
+        panel.set_writable(set(writable))
+        panel.set_transferable(set(transferable))
+        panel.set_reclaimable(set(reclaimable))
+        return panel, panel.tree.topLevelItem(0)
+
+    def test_action_bar_name_mode_full_rights(self, qtbot):
+        panel, root = self._bar_panel(
+            qtbot, writable={"crv.eth"}, transferable={"crv.eth"},
+            reclaimable={"crv.eth"})
+        panel.tree.setCurrentItem(root)
+        assert not any(b.isHidden() for b in panel._name_btns)
+        assert all(b.isHidden() for b in panel._rec_btns)
+        for b in (panel._b_transfer, panel._b_renew, panel._b_manager,
+                  panel._b_addr, panel._b_content, panel._b_copyname):
+            assert b.isEnabled()
+
+    def test_action_bar_owner_only_disables_record_buttons(self, qtbot):
+        # registrant but not manager → can transfer / extend / set-manager /
+        # copy, but the record-write buttons are disabled.
+        panel, root = self._bar_panel(
+            qtbot, transferable={"crv.eth"}, reclaimable={"crv.eth"})
+        panel.tree.setCurrentItem(root)
+        assert panel._b_transfer.isEnabled()
+        assert panel._b_renew.isEnabled()
+        assert panel._b_manager.isEnabled()
+        assert panel._b_copyname.isEnabled()
+        assert not panel._b_addr.isEnabled()
+        assert not panel._b_content.isEnabled()
+
+    def test_action_bar_switches_to_copy_edit_on_record(self, qtbot):
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
+        url = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "url")
+        panel.tree.setCurrentItem(url)
+        assert all(b.isHidden() for b in panel._name_btns)
+        assert not any(b.isHidden() for b in panel._rec_btns)
+        assert panel._b_reccopy.isEnabled()
+        assert panel._b_recedit.isEnabled()           # parent is writable
+
+    def test_action_bar_edit_disabled_on_role_row(self, qtbot):
+        # The manager/owner rows are not editable records → Copy yes, Edit no.
+        from qeth.ens_app import OwnershipCheck
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        me = "0x" + "11" * 20
+        panel.mark_verified({"crv.eth": OwnershipCheck(
+            controller=me, registrant=me, owner_known=True)}, me)
+        mgr = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "manager")
+        panel.tree.setCurrentItem(mgr)
+        assert panel._b_reccopy.isEnabled()
+        assert not panel._b_recedit.isEnabled()
+
+    def test_action_bar_buttons_emit_and_copy(self, qtbot):
+        from PySide6.QtWidgets import QApplication
+        panel, root = self._bar_panel(qtbot, transferable={"crv.eth"})
+        panel.tree.setCurrentItem(root)
+        seen = []
+        panel.write_requested.connect(lambda nm, k: seen.append((nm, k)))
+        panel._b_transfer.click()
+        assert seen == [("crv.eth", "transfer")]
+        panel._b_copyname.click()
+        assert QApplication.clipboard().text() == "crv.eth"
+
     def test_every_menu_action_has_an_icon(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

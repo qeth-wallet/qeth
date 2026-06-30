@@ -25,11 +25,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit,
-    QDialogButtonBox, QFormLayout, QHeaderView, QLabel,
+    QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QStyle,
     QStyledItemDelegate,
-    QStyleOptionViewItem, QTableWidget, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QStyleOptionViewItem, QTableWidget, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..ens_app import (
@@ -502,6 +502,134 @@ class EnsPanel(QWidget):
             "record": _icon("document-properties", _sp.SP_FileIcon),
             "subdomain": _icon("folder-new", _sp.SP_FileDialogNewFolder),
         }
+        # Bottom action bar — quick-access buttons that track the tree
+        # selection (a curated subset of the context menu): a name row shows its
+        # write actions, a record row collapses to Copy + Edit. The current
+        # selection's target is cached for the button slots.
+        self._cur_name: EnsName | None = None
+        self._cur_value: str | None = None
+        self._cur_edit: tuple[str, str, str] | None = None
+        layout.addWidget(self._build_action_bar())
+        self.tree.itemSelectionChanged.connect(self._update_action_bar)
+        self._update_action_bar()
+
+    # --- bottom action bar ------------------------------------------------
+
+    def _build_action_bar(self) -> QWidget:
+        bar = QWidget()
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 4, 0, 0)
+        h.setSpacing(4)
+        ic = self._act_icons
+
+        def mk(icon: QIcon, *, text: str = "", tip: str) -> QToolButton:
+            b = QToolButton()
+            b.setIcon(icon)
+            b.setIconSize(QSize(16, 16))
+            b.setAutoRaise(True)
+            if text:
+                b.setText(text)
+                b.setToolButtonStyle(
+                    Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setToolTip(tip)
+            return b
+
+        # Name-mode buttons (Transfer + Extend carry a label; the rest are
+        # icon-only with a tooltip).
+        self._b_transfer = mk(ic["transfer"], text="Transfer",
+                              tip="Transfer name")
+        self._b_renew = mk(ic["renew"], text="Extend",
+                           tip="Extend registration")
+        self._b_manager = mk(ic["manager"], tip="Set manager")
+        self._b_addr = mk(ic["addr"], tip="Set ETH address")
+        self._b_content = mk(ic["content"], tip="Set content (IPFS)")
+        self._b_copyname = mk(ic["copy"], tip="Copy name")
+        self._b_transfer.clicked.connect(lambda: self._emit_name("transfer"))
+        self._b_renew.clicked.connect(lambda: self._emit_name("renew"))
+        self._b_manager.clicked.connect(lambda: self._emit_name("manager"))
+        self._b_addr.clicked.connect(lambda: self._emit_name("addr"))
+        self._b_content.clicked.connect(lambda: self._emit_name("content"))
+        self._b_copyname.clicked.connect(self._copy_name)
+        self._name_btns = [self._b_transfer, self._b_renew, self._b_manager,
+                           self._b_addr, self._b_content, self._b_copyname]
+
+        # Record-mode buttons.
+        self._b_reccopy = mk(ic["copy"], tip="Copy value")
+        self._b_recedit = mk(ic["edit"], tip="Edit record")
+        self._b_reccopy.clicked.connect(self._copy_value)
+        self._b_recedit.clicked.connect(self._edit_record)
+        self._rec_btns = [self._b_reccopy, self._b_recedit]
+
+        for b in self._name_btns + self._rec_btns:
+            h.addWidget(b)
+        h.addStretch(1)
+        return bar
+
+    def _update_action_bar(self) -> None:
+        sel = self.tree.selectedItems()
+        item = sel[0] if sel else None
+        n = item.data(0, _NAME_ROLE) if item is not None else None
+        if isinstance(n, EnsName):
+            self._set_name_mode(n)
+        elif item is not None and item.data(0, _VALUE_ROLE) is not None:
+            self._set_record_mode(item)
+        else:
+            self._set_name_mode(None)
+
+    def _set_name_mode(self, n: EnsName | None) -> None:
+        for b in self._rec_btns:
+            b.setVisible(False)
+        for b in self._name_btns:
+            b.setVisible(True)
+        self._cur_name = n
+        if n is None:
+            for b in self._name_btns:
+                b.setEnabled(False)
+            return
+        nl = n.name.lower()
+        is_2ld = not n.is_subdomain and n.name.endswith(".eth")
+        manages = nl in self._writable
+        owns = nl in self._transferable or nl in self._reclaimable
+        self._b_copyname.setEnabled(True)
+        self._b_transfer.setEnabled(nl in self._transferable)
+        self._b_renew.setEnabled(is_2ld and (manages or owns))
+        self._b_manager.setEnabled(nl in self._reclaimable)
+        self._b_addr.setEnabled(manages)
+        self._b_content.setEnabled(manages)
+
+    def _set_record_mode(self, item: QTreeWidgetItem) -> None:
+        for b in self._name_btns:
+            b.setVisible(False)
+        for b in self._rec_btns:
+            b.setVisible(True)
+        val = item.data(0, _VALUE_ROLE)
+        self._cur_value = None if val is None else str(val)
+        self._b_reccopy.setEnabled(self._cur_value is not None)
+        # Edit only real, editable records — not the manager/owner role rows.
+        parent = item.parent()
+        pn = parent.data(0, _NAME_ROLE) if parent is not None else None
+        editable = (not item.data(0, _OWNERSHIP_ROLE)
+                    and isinstance(pn, EnsName)
+                    and pn.name.lower() in self._writable)
+        self._cur_edit = ((pn.name, item.text(0), self._cur_value or "")
+                          if editable and isinstance(pn, EnsName) else None)
+        self._b_recedit.setEnabled(editable)
+
+    def _emit_name(self, kind: str) -> None:
+        if self._cur_name is not None:
+            self.write_requested.emit(self._cur_name.name, kind)
+
+    def _copy_name(self) -> None:
+        if self._cur_name is not None:
+            _clip(self._cur_name.name)
+
+    def _copy_value(self) -> None:
+        if self._cur_value is not None:
+            _clip(self._cur_value)
+
+    def _edit_record(self) -> None:
+        if self._cur_edit is not None:
+            self.edit_record_requested.emit(*self._cur_edit)
 
     # --- rendering --------------------------------------------------------
 
@@ -729,17 +857,20 @@ class EnsPanel(QWidget):
         """Names (lower-case) the user can sign writes for — gates the edit
         actions in the context menu."""
         self._writable = set(names)
+        self._update_action_bar()
 
     def set_transferable(self, names: set[str]) -> None:
         """Names (lower-case) the user owns as the registrant (NFT owner) and
         can sign for — gates the "Transfer name" action."""
         self._transferable = set(names)
+        self._update_action_bar()
 
     def set_reclaimable(self, names: set[str]) -> None:
         """Names (lower-case) the user owns as the registrant of an *unwrapped*
         .eth 2LD — only these can reclaim the manager role (``reclaim``); gates
         the "Set manager" action."""
         self._reclaimable = set(names)
+        self._update_action_bar()
 
     def _write_menu_groups(self, n: EnsName) -> list[list[tuple[str, str]]]:
         """The write actions available for ``n`` as ``(label, kind)`` pairs,

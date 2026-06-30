@@ -3654,10 +3654,11 @@ class TransactionDetailsDialog(Dialog):
         if _id_label is not None and _id_kick is not None:
             form.addRow("Contract:", _id_label)
             _id_kick()
-        # Value rendered through wei_to_ether (Decimal) — never float.
+        # Value rendered through wei_to_ether (Decimal) — never float. USD
+        # estimate matches the fee row below (at the current native price).
         if tx.value_wei:
-            ether = wei_to_ether(tx.value_wei)
-            value_text = f"{ether} {chain.symbol}  ({tx.value_wei} wei)"
+            value_text = _native_value_with_usd(
+                tx.value_wei, chain.symbol, self._native_price_usd)
         else:
             value_text = "0"
         form.addRow("Value:", self._value_label(value_text))
@@ -4050,6 +4051,18 @@ def _format_usd(usd) -> str:
     if usd >= Decimal("0.01"):
         return f"{usd:.4f} USD"
     return f"{usd:.6f} USD"
+
+
+def _native_value_with_usd(wei: int, symbol: str, price) -> str:
+    """A native amount as ``X SYMBOL  (≈$Y)`` — the USD parenthetical matches
+    the Expected-fee line; dropped when no price is known. Used for the
+    Value / Total rows so they read like the fee instead of trailing a raw
+    ``(… wei)`` (which the exact ether Decimal already conveys)."""
+    ether = wei_to_ether(wei)
+    text = f"{ether} {symbol}"
+    if price is not None:
+        text += f"  ({_format_usd(ether * price)})"
+    return text
 
 
 # A chain's absolute minimum priority fee. Gnosis (Nethermind/Erigon)
@@ -4871,6 +4884,11 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self.max_total_lbl.setText(fee_text)
         self._update_extra_totals(fee_wei)
 
+    def _native_value_text(self, wei: int) -> str:
+        """A native amount with a USD estimate, like the fee line."""
+        return _native_value_with_usd(wei, self.chain.symbol,
+                                      self._native_price_usd)
+
     def set_signing_in_progress(self, busy: bool) -> None:
         """Lock / unlock the dialog while the host runs the
         sign-and-broadcast worker. Symmetric across all composer
@@ -5066,11 +5084,9 @@ class SignTransactionDialog(_TxComposerDialog):
             header.addRow("Contract:", _id_label)
             _id_kick()
         if req.value_wei > 0:
-            ether = wei_to_ether(req.value_wei)
             header.addRow(
                 "Value:",
-                self._value_label(
-                    f"{ether} {self.chain.symbol}  ({req.value_wei} wei)"),
+                self._value_label(self._native_value_text(req.value_wei)),
             )
         else:
             header.addRow("Value:", self._value_label("0"))

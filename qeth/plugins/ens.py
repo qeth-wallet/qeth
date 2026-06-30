@@ -1248,12 +1248,10 @@ class _EnsWriteComposer(_TxComposerDialog):
     def _update_extra_totals(self, fee_wei: int) -> None:
         if not self._op.payable or self._total_lbl is None:
             return
-        from ..chain import wei_to_ether
         value = self._op.value_wei(self._fields)
         if self._value_lbl is not None:
-            self._value_lbl.setText(f"{wei_to_ether(value)} {self.chain.symbol}")
-        total = fee_wei + value
-        self._total_lbl.setText(f"{wei_to_ether(total)} {self.chain.symbol}")
+            self._value_lbl.setText(self._native_value_text(value))
+        self._total_lbl.setText(self._native_value_text(fee_wei + value))
 
 
 class EnsPlugin(Plugin):

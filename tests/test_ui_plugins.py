@@ -2948,6 +2948,31 @@ class TestEventPreviewTab:
         qtbot.addWidget(dlg)
         return dlg
 
+    def test_value_row_shows_usd_estimate_not_wei(self, qtbot):
+        # The Value row should read like the fee line — "X ETH (≈$Y)" — not
+        # trail a raw "(… wei)". Drops the USD when no price is known.
+        from decimal import Decimal
+        from unittest.mock import MagicMock
+        from PySide6.QtWidgets import QLabel
+        from qeth.plugins.transactions import (
+            SignTransactionDialog, _native_value_with_usd)
+        from qeth.signing import SigningRequest
+
+        assert _native_value_with_usd(15 * 10 ** 17, "ETH", Decimal("3000")) \
+            == "1.5 ETH  (4500.00 USD)"
+        assert _native_value_with_usd(10 ** 18, "ETH", None) == "1 ETH"
+
+        abi_cache = MagicMock(); abi_cache.load.return_value = None
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr="0x" + "22" * 20,
+                             value_wei=15 * 10 ** 17, data="0x")
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=lambda w: None, native_price_usd=Decimal("3000"))
+        qtbot.addWidget(dlg)
+        texts = [w.text() for w in dlg.findChildren(QLabel)]
+        assert any("1.5 ETH" in t and "4500.00 USD" in t for t in texts)
+        assert not any("wei)" in t for t in texts)
+
     def test_replace_mode_locks_nonce_and_floors_fees(self, qtbot, tmp_qeth):
         """Speed up / cancel re-uses SignTransactionDialog in replace mode:
         the nonce is locked to the pending tx's and the suggested fees are

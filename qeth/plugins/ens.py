@@ -1487,10 +1487,7 @@ class EnsPlugin(Plugin):
             return
         text, ok = prompt_text(
             self._panel, "Transfer name",
-            f"Transfer ownership of {name} to another address.\n"
-            "This hands the name over and cannot be undone — make sure the "
-            "recipient address is correct.\n\nRecipient 0x address:",
-            wide=True)
+            f"Transfer {name} to:", wide=True)
         if not ok:
             return
         to = _checksum(text)

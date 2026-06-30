@@ -263,13 +263,7 @@ class ComposeMessageDialog(Dialog):
 
         outer = QVBoxLayout(self)
         # Margins + paragraph spacing come from the Dialog base (font-derived).
-        intro = QLabel(
-            "Paste a plain text message (will be signed via "
-            "<b>personal_sign</b>) <br>or an EIP-712 typed-data JSON "
-            "object (signed via <b>eth_signTypedData_v4</b>). The "
-            "wallet sniffs the shape automatically."
-        )
-        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro = QLabel("Sign plain text message or JSON")
         intro.setWordWrap(True)
         outer.addWidget(intro)
 

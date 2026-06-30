@@ -483,6 +483,25 @@ class EnsPanel(QWidget):
         # name_lower → the last verified OwnershipCheck, so the manager/owner
         # rows can be (re-)rendered whenever a name's records reload.
         self._ownership: dict[str, OwnershipCheck] = {}
+        # Context-menu action icons. The write actions reuse the row icons that
+        # already stand for those things (gear = manager, link = address,
+        # folder-remote = content, text glyph = text record, folder = subdomain)
+        # so the menu entry and the row it edits read as the same concept.
+        _sp = QStyle.StandardPixmap
+        copy_ic = _icon("edit-copy", _sp.SP_FileIcon)
+        self._act_icons = {
+            "open": _icon("internet-web-browser", _sp.SP_DialogOpenButton),
+            "copy": copy_ic,
+            "edit": _icon("document-edit", _sp.SP_FileIcon),
+            "renew": _icon("office-calendar", _sp.SP_FileIcon),
+            "transfer": _icon("go-next", _sp.SP_ArrowForward),
+            "manager": self._manager_icon,
+            "addr": self._rec_icons["address"],
+            "content": self._rec_icons["content"],
+            "text": self._rec_icons["text"],
+            "record": _icon("document-properties", _sp.SP_FileIcon),
+            "subdomain": _icon("folder-new", _sp.SP_FileDialogNewFolder),
+        }
 
     # --- rendering --------------------------------------------------------
 
@@ -756,34 +775,41 @@ class EnsPanel(QWidget):
         item = self.tree.itemAt(pos)
         if item is None:
             return
+        menu = self._build_menu(item)
+        if not menu.isEmpty():
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_menu(self, item: QTreeWidgetItem) -> QMenu:
         menu = QMenu(self.tree)
         n = item.data(0, _NAME_ROLE)
         value = item.data(0, _VALUE_ROLE)
+        ic = self._act_icons
         if isinstance(n, EnsName):
-            menu.addAction("Open in ENS app", lambda: QDesktopServices.openUrl(
-                QUrl(ENS_APP_URL.format(name=n.name))))
-            menu.addAction("Copy name", lambda: _clip(n.name))
+            menu.addAction(ic["open"], "Open in ENS app",
+                           lambda: QDesktopServices.openUrl(
+                               QUrl(ENS_APP_URL.format(name=n.name))))
+            menu.addAction(ic["copy"], "Copy name", lambda: _clip(n.name))
             if n.resolved_address:
-                menu.addAction("Copy resolved address",
+                menu.addAction(ic["copy"], "Copy resolved address",
                                lambda: _clip(n.resolved_address))
             nm = n.name
             for group in self._write_menu_groups(n):
                 menu.addSeparator()
                 for label, kind in group:
                     menu.addAction(
-                        label,
+                        ic[kind], label,
                         lambda k=kind: self.write_requested.emit(nm, k))
         elif value:
-            menu.addAction("Copy value", lambda: _clip(str(value)))
+            menu.addAction(ic["copy"], "Copy value", lambda: _clip(str(value)))
             # Record row → offer to edit it (the parent name must be writable).
             parent = item.parent()
             pn = parent.data(0, _NAME_ROLE) if parent is not None else None
             if (isinstance(pn, EnsName) and pn.name.lower() in self._writable):
                 label = item.text(0)
-                menu.addAction("Edit", lambda: self.edit_record_requested.emit(
-                    pn.name, label, str(value)))
-        if not menu.isEmpty():
-            menu.exec(self.tree.viewport().mapToGlobal(pos))
+                menu.addAction(ic["edit"], "Edit",
+                               lambda: self.edit_record_requested.emit(
+                                   pn.name, label, str(value)))
+        return menu
 
 
 def _clip(text: str) -> None:

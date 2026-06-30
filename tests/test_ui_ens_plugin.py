@@ -365,6 +365,22 @@ class TestEnsPanel:
         sub = panel._items_by_name["dao.vitalik.eth"]
         assert set(self._role_rows(sub)) == {"manager"}
 
+    def test_every_menu_action_has_an_icon(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([EnsName("vitalik.eth",
+                                            resolved_address="0x" + "11" * 20)]),
+                       NOW)
+        panel.set_writable({"vitalik.eth"})
+        panel.set_transferable({"vitalik.eth"})
+        panel.set_reclaimable({"vitalik.eth"})
+        menu = panel._build_menu(panel._items_by_name["vitalik.eth"])
+        actions = [a for a in menu.actions() if not a.isSeparator()]
+        assert actions and all(not a.icon().isNull() for a in actions)
+        # the Set manager entry reuses the manager row icon
+        sm = next(a for a in actions if a.text() == "Set manager")
+        assert sm.icon().cacheKey() == panel._manager_icon.cacheKey()
+
     def _menu_kinds(self, panel, name):
         n = EnsName(name)
         return [kind for group in panel._write_menu_groups(n) for _label, kind in group]

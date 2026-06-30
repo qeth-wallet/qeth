@@ -563,8 +563,11 @@ class EnsPanel(QWidget):
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             return b
 
-        self._b_transfer = named(ic["transfer"], "Transfer", "Transfer name")
-        self._b_renew = named(ic["renew"], "Extend", "Extend registration")
+        # &-mnemonics like the other panels' labelled buttons (Send / Add
+        # Account). T and E are free in the main window (Wallets uses A/C/R/S,
+        # Tokens uses S; the other &E/&T live in modal dialogs).
+        self._b_transfer = named(ic["transfer"], "&Transfer", "Transfer name")
+        self._b_renew = named(ic["renew"], "&Extend", "Extend registration")
         self._b_manager = util(ic["manager"], "Set manager")
         self._b_addr = util(ic["addr"], "Set ETH address")
         self._b_content = util(ic["content"], "Set content (IPFS)")

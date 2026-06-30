@@ -422,6 +422,16 @@ class TestEnsPanel:
         assert panel._b_reccopy.isEnabled()
         assert not panel._b_recedit.isEnabled()
 
+    def test_named_buttons_have_mnemonics(self, qtbot):
+        # Transfer / Extend carry &-mnemonics like Send / Add Account; the
+        # icon-only utilities have no label (so no mnemonic).
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        assert panel._b_transfer.text() == "&Transfer"
+        assert panel._b_renew.text() == "&Extend"
+        assert not panel._b_transfer.shortcut().isEmpty()
+        assert panel._b_manager.text() == ""
+
     def test_add_button_emits_add_custom(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

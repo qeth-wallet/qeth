@@ -530,13 +530,13 @@ class EnsPanel(QWidget):
             ("view-refresh", "emblem-synchronizing-symbolic", "chronometer"),
             QStyle.StandardPixmap.SP_BrowserReload)
         self._rec_icons = {
-            # A chain link for "points to an address". Distinct SP_FileLinkIcon
-            # last-resort so it can't collapse onto the generic document.
-            # (No emblem-* names — those are corner-badge overlays that render
-            # tiny and off-centre when used as a standalone icon.)
+            # A chain link for "points to an address". The SP_* last-resort is a
+            # plain forward arrow ("→ resolves to") — NOT SP_FileLinkIcon, whose
+            # tiny corner shortcut-arrow badge reads as a stray glyph standalone.
+            # (No emblem-* names either — those are corner-badge overlays too.)
             "address": _icon(
                 ("insert-link", "edit-link", "gtk-jump-to", "mail-attachment"),
-                QStyle.StandardPixmap.SP_FileLinkIcon),
+                QStyle.StandardPixmap.SP_ArrowForward),
             "content": _icon(
                 ("folder-remote", "folder-publicshare", "network-server"),
                 QStyle.StandardPixmap.SP_DirLinkIcon),

@@ -26,7 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCalendarWidget, QComboBox, QDateEdit,
     QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QStyle,
+    QLineEdit, QMenu, QScrollArea, QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -563,6 +563,17 @@ class EnsPanel(QWidget):
         for b in self._name_btns + self._rec_btns:
             h.addWidget(b)
         h.addStretch(1)
+        # "Add a name" is a global action (not selection-bound) — pin it to the
+        # right, past the stretch, so it stays put as the contextual buttons on
+        # the left change with the selection.
+        self._add_btn = QToolButton()
+        self._add_btn.setIcon(
+            _icon("list-add", QStyle.StandardPixmap.SP_FileDialogNewFolder))
+        self._add_btn.setIconSize(QSize(16, 16))
+        self._add_btn.setAutoRaise(True)
+        self._add_btn.setToolTip("Add a name")
+        self._add_btn.clicked.connect(lambda: self.add_custom_requested.emit())
+        h.addWidget(self._add_btn)
         return bar
 
     def _update_action_bar(self) -> None:
@@ -1511,7 +1522,6 @@ class EnsPlugin(Plugin):
         self._cache = EnsCache()
         self._panel: EnsPanel | None = None
         self._loaded_for: str | None = None
-        self._add_btn: QPushButton | None = None
         # In-memory records cache (name → (records, verified)) layered over the
         # disk cache, so re-expanding a name is instant within a session too.
         # Both the fast (unverified RPC) and the Helios reads are at the chain
@@ -1557,23 +1567,9 @@ class EnsPlugin(Plugin):
             self._panel.edit_record_requested.connect(self._on_edit_record)
         return self._panel
 
-    def action_widgets(self) -> list[QWidget]:
-        if self._add_btn is None:
-            # Match the Tokens pane's add button exactly: a flat 28×28
-            # list-add ("+") icon button, not a framed text button.
-            btn = QPushButton()
-            btn.setIcon(QIcon.fromTheme(
-                "list-add",
-                btn.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)))
-            btn.setToolTip("Add a name")
-            btn.setFlat(True)
-            btn.setMaximumSize(28, 28)
-            btn.setIconSize(QSize(16, 16))
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(self._on_add_custom)
-            self._add_btn = btn
-        assert self._add_btn is not None
-        return [self._add_btn]
+    # The "add a name" button now lives in the panel's own bottom action bar
+    # (alongside the selection-driven write buttons), not the slot's shared
+    # action row — so action_widgets() stays the base empty default.
 
     def on_account_changed(self, address: str | None) -> None:
         self._load(address)

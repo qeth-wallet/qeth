@@ -422,6 +422,23 @@ class TestEnsPanel:
         assert panel._b_reccopy.isEnabled()
         assert not panel._b_recedit.isEnabled()
 
+    def test_add_button_lives_in_the_bar_and_emits(self, qtbot):
+        # The "add a name" button moved from the slot's action row into the
+        # panel's own bottom bar; it emits add_custom_requested.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        seen = []
+        panel.add_custom_requested.connect(lambda: seen.append(True))
+        panel._add_btn.click()
+        assert seen == [True]
+
+    def test_plugin_exposes_no_slot_action_widgets(self, qtbot):
+        # The add button no longer rides the shared slot action row.
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        assert plugin.action_widgets() == []
+
     def test_action_bar_buttons_emit_and_copy(self, qtbot):
         from PySide6.QtWidgets import QApplication
         panel, root = self._bar_panel(qtbot, transferable={"crv.eth"})

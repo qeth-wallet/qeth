@@ -146,6 +146,18 @@ def _build_session() -> Any:
                 s = requests.Session()
                 s.headers["User-Agent"] = USER_AGENT
                 s.headers["Content-Type"] = "application/json"
+                # Size the per-host connection pool to our concurrency. With
+                # ONE shared session, every concurrent sync worker (simulate,
+                # gas, balance, the multicall sweep) draws from the same pool;
+                # urllib3's default maxsize of 10 overflows under a discovery
+                # burst and logs "Connection pool is full, discarding
+                # connection" while it reopens churned sockets. A roomier
+                # bounded pool reuses keep-alive connections instead (still
+                # bounded — not the per-client-pool fd blowup of issue #24).
+                from requests.adapters import HTTPAdapter
+                adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32)
+                s.mount("http://", adapter)
+                s.mount("https://", adapter)
                 _shared_session = s
     return _shared_session
 

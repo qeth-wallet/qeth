@@ -205,6 +205,18 @@ class LiveWatcher(QThread):
             await asyncio.gather(
                 *(self._cancel(t) for t, _ in tasks.values()),
                 return_exceptions=True)
+            # web3's legacy-websockets provider leaves a couple of internal
+            # tasks (transfer_data / close_connection) finishing the close
+            # handshake after our `async with` exits. If asyncio.run tears the
+            # loop down before they settle, asyncio logs "Task was destroyed
+            # but it is pending". Cancel + await whatever's left so shutdown is
+            # tidy; bounded so a task that ignores cancellation can't hang it.
+            leftovers = [t for t in asyncio.all_tasks()
+                         if t is not asyncio.current_task() and not t.done()]
+            if leftovers:
+                for t in leftovers:
+                    t.cancel()
+                await asyncio.wait(leftovers, timeout=2.0)
 
     def _desired_targets(self) -> "dict[int, tuple[Chain, str | None]]":
         """Chains to watch and, for the on-screen chain, the account whose

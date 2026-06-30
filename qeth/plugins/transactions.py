@@ -3266,7 +3266,7 @@ class _EventPreviewMixin:
         lay = QVBoxLayout(self._events_page)
         # Match the Details page's in-frame left/right padding (font-derived).
         _pad = self.fontMetrics().height() // 2
-        lay.setContentsMargins(_pad, 6, _pad, 0)
+        lay.setContentsMargins(_pad, 6, _pad, _pad)
         lay.addWidget(self._events, 1)
         tabs.addTab(self._events_page, "&Events")
         tabs.currentChanged.connect(self._on_sim_tab_changed)
@@ -3596,11 +3596,11 @@ class TransactionDetailsDialog(Dialog):
         tabs = QTabWidget()
         details_page = QWidget()
         details_layout = QVBoxLayout(details_page)
-        details_layout.setContentsMargins(_pad, 8, _pad, 0)
+        details_layout.setContentsMargins(_pad, 8, _pad, _pad)
         details_layout.setSpacing(8)
         events_page = QWidget()
         events_layout = QVBoxLayout(events_page)
-        events_layout.setContentsMargins(_pad, 8, _pad, 0)
+        events_layout.setContentsMargins(_pad, 8, _pad, _pad)
         events_layout.setSpacing(6)
         tabs.addTab(details_page, "&Details")
         tabs.addTab(events_page, "&Events")
@@ -4389,7 +4389,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         _pad = self.fontMetrics().height() // 2
         _details_page = QWidget()
         outer = QVBoxLayout(_details_page)
-        outer.setContentsMargins(_pad, 6, _pad, 0)
+        outer.setContentsMargins(_pad, 6, _pad, _pad)
         outer.setSpacing(8)
         self._tabs.addTab(_details_page, "&Details")
 

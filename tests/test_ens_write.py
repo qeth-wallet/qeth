@@ -163,3 +163,17 @@ class TestTransfer:
         assert _body(data) == abi_encode(
             ["address", "address", "uint256", "uint256", "bytes"],
             [self.FROM, self.TO, token_id, 1, b""])
+
+
+class TestSetManager:
+    MANAGER = "0x" + "33" * 20
+
+    def test_set_manager_reclaims_on_registrar(self):
+        # Set the registry manager via BaseRegistrar.reclaim(id, owner), id =
+        # uint256(labelhash(label)) — takes the full name, encodes the label.
+        to, data = ens_write.set_manager(NAME, self.MANAGER)
+        assert to == ENS_ETH_REGISTRAR
+        assert _selector(data) == "28ed4f6c"
+        token_id = int.from_bytes(_labelhash("vitalik"), "big")
+        assert _body(data) == abi_encode(
+            ["uint256", "address"], [token_id, self.MANAGER])

@@ -41,6 +41,9 @@ _SEL_RENEW = bytes.fromhex("acf1a841")             # controller.renew(string,uin
 # contract that can't receive the token, which protects against loss).
 _SEL_SAFE_TRANSFER_721 = bytes.fromhex("42842e0e")   # (address,address,uint256)
 _SEL_SAFE_TRANSFER_1155 = bytes.fromhex("f242432a")  # (addr,addr,uint256,uint256,bytes)
+# BaseRegistrar.reclaim(uint256 id, address owner) — set the registry manager
+# (controller) of an unwrapped .eth 2LD. id = labelhash(label).
+_SEL_RECLAIM = bytes.fromhex("28ed4f6c")
 
 ZERO_ADDRESS = "0x" + "00" * 20
 
@@ -188,6 +191,24 @@ def transfer_name(name: str, from_addr: str, to_addr: str, *,
     body = _abi(["address", "address", "uint256"],
                 [from_addr, to_addr, token_id])
     return _tx(ENS_ETH_REGISTRAR, _SEL_SAFE_TRANSFER_721, body)
+
+
+def set_manager(name: str, manager: str) -> Tx:
+    """Set the registry *manager* (controller) of an unwrapped ``.eth`` 2LD to
+    ``manager``, via ``BaseRegistrar.reclaim(id, owner)`` (id = labelhash).
+
+    The manager is the registry owner — the role that sets records, the
+    resolver and subdomains. Only the *registrant* (the NFT owner) may reclaim;
+    a manager-only account's call reverts. The common use is reclaiming the
+    manager role to yourself so you can edit records on a name whose ownership
+    (the NFT) you hold but whose manager is still someone else.
+
+    Wrapped names hold both roles in the NameWrapper token and manage the
+    controller through it, not through ``reclaim`` — this builder is for
+    unwrapped names."""
+    token_id = int.from_bytes(_labelhash(name.split(".")[0]), "big")
+    body = _abi(["uint256", "address"], [token_id, manager])
+    return _tx(ENS_ETH_REGISTRAR, _SEL_RECLAIM, body)
 
 
 def eth_addr_bytes(address: str) -> bytes:

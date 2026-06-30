@@ -61,13 +61,16 @@ _UNSAFE_ROLE = Qt.ItemDataRole.UserRole + 3    # confusable / non-normalized nam
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 4    # "ok" | "warn" — the line's status
 _EXPIRY_SORT_ROLE = Qt.ItemDataRole.UserRole + 5  # expiry timestamp for sorting
 _TYPE_RANK_ROLE = Qt.ItemDataRole.UserRole + 6    # sort tier (see _RANK_*)
+_OWNERSHIP_ROLE = Qt.ItemDataRole.UserRole + 7    # flags a manager/owner row
 
 _NAME_COL = 0
 _EXPIRES_COL = 1
 
-# Rows sort by type tier first (alphabetically within each tier): real domains
-# (2LDs), then subdomains — including orphan subdomains that surface at the top
-# level — then a name's contenthash, then its other records.
+# Rows sort by type tier first (alphabetically within each tier): the name's
+# manager/owner (its on-chain roles), then real domains (2LDs), then subdomains
+# — including orphan subdomains that surface at the top level — then a name's
+# contenthash, then its other records.
+_RANK_OWNERSHIP = -1
 _RANK_DOMAIN = 0
 _RANK_SUBDOMAIN = 1
 _RANK_CONTENT = 2
@@ -112,6 +115,10 @@ _OWNED_TIP = "Owner — cryptographically verified"
 _CONTROL_TIP = "Subdomain you control — verified"
 _RESOLVED_TIP = "Address cryptographically verified"
 _RECORD_TIP = "Cryptographically verified"
+_MANAGER_TIP = ("Manager (registry controller) — the role that sets the "
+                "resolver, records and subdomains")
+_OWNER_TIP = ("Owner (registrant) — holds the name's NFT; can transfer it and "
+              "reclaim the manager role")
 _WRAPPED_NOTE = " · wrapped"
 
 # Expiry-status → (column-1 text, colour). Theme-neutral fixed colours: this is
@@ -396,8 +403,9 @@ class EnsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items_by_name: dict[str, QTreeWidgetItem] = {}
-        self._writable: set[str] = set()   # names the user can sign writes for
+        self._writable: set[str] = set()   # names the user manages (can set records)
         self._transferable: set[str] = set()   # names the user can transfer (NFT owner)
+        self._reclaimable: set[str] = set()    # owner can reclaim manager (unwrapped)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = _EnsTree()
@@ -452,6 +460,16 @@ class EnsPanel(QWidget):
             "content": _icon("folder-remote", QStyle.StandardPixmap.SP_FileLinkIcon),
             "text": _icon("text-x-generic", QStyle.StandardPixmap.SP_FileIcon),
         }
+        # The two on-chain role rows. Distinct icons so manager (operates the
+        # name) and owner (holds its NFT) read apart at a glance: a gear for the
+        # manager, a certificate/seal for the owner.
+        self._manager_icon = _icon("preferences-system",
+                                   QStyle.StandardPixmap.SP_FileIcon)
+        self._owner_icon = _icon("application-certificate",
+                                 QStyle.StandardPixmap.SP_FileIcon)
+        # name_lower → the last verified OwnershipCheck, so the manager/owner
+        # rows can be (re-)rendered whenever a name's records reload.
+        self._ownership: dict[str, OwnershipCheck] = {}
 
     # --- rendering --------------------------------------------------------
 
@@ -461,6 +479,7 @@ class EnsPanel(QWidget):
         self.tree.setSortingEnabled(False)
         self.tree.clear()
         self._items_by_name.clear()
+        self._ownership.clear()
         for node in roots:
             self.tree.addTopLevelItem(self._build(node, now_ts, is_sub=False))
         self.tree.setSortingEnabled(True)
@@ -522,7 +541,6 @@ class EnsPanel(QWidget):
             note.setData(0, _TYPE_RANK_ROLE, _RANK_RECORD)
             note.setForeground(0, QBrush(QColor(120, 120, 120)))
             item.addChild(note)
-            return
         for icon_key, label, value in rows:
             ch = _SortItem([label, "", value])
             ch.setData(0, _TYPE_RANK_ROLE,
@@ -532,6 +550,43 @@ class EnsPanel(QWidget):
             ch.setToolTip(2, value)
             if verified:                # status icon, same as the name rows
                 self._set_status(ch, "ok", _RECORD_TIP)
+            item.addChild(ch)
+        # The clearing loop above drops the (role-less) manager/owner rows too;
+        # re-assert them so they survive a records (re)load and keep sitting at
+        # the top (rank _RANK_OWNERSHIP).
+        self._render_ownership_rows(item, name.lower())
+
+    def _render_ownership_rows(self, item: QTreeWidgetItem,
+                               name_l: str) -> None:
+        """(Re)build the manager + owner rows at the top of ``item`` from the
+        stored OwnershipCheck. Idempotent — removes any it added before. Shows a
+        manager row whenever the registry controller is known and, for .eth
+        2LDs, an owner row for the registrant (subdomains have no registrant)."""
+        for i in range(item.childCount() - 1, -1, -1):
+            ch = item.child(i)
+            if ch.data(0, _OWNERSHIP_ROLE):
+                item.removeChild(ch)
+        st = self._ownership.get(name_l)
+        if st is None:
+            return
+        rows = []
+        if st.controller:
+            rows.append((self._manager_icon, "manager", st.controller,
+                         _MANAGER_TIP))
+        if st.registrant:
+            rows.append((self._owner_icon, "owner", st.registrant, _OWNER_TIP))
+        for icon, label, addr, tip in rows:
+            shown = _checksum(addr) or addr
+            ch = _SortItem([label, "", shown])
+            ch.setData(0, _OWNERSHIP_ROLE, True)
+            ch.setData(0, _TYPE_RANK_ROLE, _RANK_OWNERSHIP)
+            ch.setData(0, _VALUE_ROLE, shown)
+            ch.setIcon(0, icon)
+            ch.setToolTip(0, tip)
+            ch.setToolTip(2, shown)
+            # mark_verified only ever runs on proof-verified state, so these are
+            # verified facts — badge them like the records.
+            self._set_status(ch, "ok", _RECORD_TIP)
             item.addChild(ch)
 
     def update_resolved(self, name: str, address: str | None) -> None:
@@ -575,6 +630,11 @@ class EnsPanel(QWidget):
                 self._remove_item(item, name_l)
                 removed.append(name_l)
                 continue
+            # Show the on-chain roles (manager / owner) for every kept name —
+            # owned or merely watched — once the read definitively landed.
+            if st.owner_known:
+                self._ownership[name_l] = st
+                self._render_ownership_rows(item, name_l)
             if item.data(0, _UNSAFE_ROLE):
                 continue          # keep the ⚠; never add a ✓ to a look-alike
             # Resolved-to: the proof is read at the chain head, so it IS the
@@ -643,6 +703,12 @@ class EnsPanel(QWidget):
         can sign for — gates the "Transfer name…" action."""
         self._transferable = set(names)
 
+    def set_reclaimable(self, names: set[str]) -> None:
+        """Names (lower-case) the user owns as the registrant of an *unwrapped*
+        .eth 2LD — only these can reclaim the manager role (``reclaim``); gates
+        the "Set manager…" action."""
+        self._reclaimable = set(names)
+
     def _on_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if item is None:
@@ -668,6 +734,9 @@ class EnsPanel(QWidget):
                     if nm.lower() in self._transferable:
                         menu.addAction("Transfer name…",
                                        lambda: self.write_requested.emit(nm, "transfer"))
+                    if nm.lower() in self._reclaimable:
+                        menu.addAction("Set manager…",
+                                       lambda: self.write_requested.emit(nm, "manager"))
                     menu.addSeparator()
                 menu.addAction("Set ETH address…",
                                lambda: self.write_requested.emit(nm, "addr"))
@@ -1066,24 +1135,27 @@ class _SubnodeDialog(Dialog):
 
 
 class _RecipientFields(QWidget):
-    """A single recipient-address input (reusing the composer's address-book
-    picker when available) — for the name-transfer op. Emits ``changed`` on
-    edit."""
+    """A single address input (reusing the composer's address-book picker when
+    available) — for the name-transfer op (label "Recipient") and the
+    set-manager op (label "Manager", prefilled with the user's own address).
+    Emits ``changed`` on edit."""
 
     changed = Signal()
 
-    def __init__(self, *, make_address_field=None, parent=None):
+    def __init__(self, *, make_address_field=None, label: str = "Recipient",
+                 initial: str = "", placeholder: str = "0x… recipient address",
+                 parent=None):
         super().__init__(parent)
         form = QFormLayout(self)
         form.setContentsMargins(0, 0, 0, 0)
         if make_address_field is not None:
-            widget, self.recipient = make_address_field("")
+            widget, self.recipient = make_address_field(initial)
         else:
-            self.recipient = QLineEdit()
+            self.recipient = QLineEdit(initial)
             self.recipient.setMinimumWidth(address_field_min_width(self))
             widget = self.recipient
-        self.recipient.setPlaceholderText("0x… recipient address")
-        form.addRow("Recipient", widget)
+        self.recipient.setPlaceholderText(placeholder)
+        form.addRow(label, widget)
         self.recipient.textChanged.connect(self.changed)
 
     def value(self) -> str:
@@ -1115,6 +1187,7 @@ class _EnsOp:
     validate: Callable[[Any], str | None] = field(default=lambda _inputs: None)
     rediscover: bool = False
     payable: bool = False
+    note: str | None = None    # a wrapped caveat shown under the inputs
 
 
 class _EnsWriteComposer(_TxComposerDialog):
@@ -1157,6 +1230,16 @@ class _EnsWriteComposer(_TxComposerDialog):
         self._fields = self._op.make_fields(self)
         if self._fields is not None:
             header.addRow(self._fields)
+        # An op-specific caveat (e.g. transfer moves ownership but leaves the
+        # manager role behind) — a wrapped, dimmed note under the inputs.
+        if self._op.note:
+            note = QLabel(f"ⓘ {self._op.note}")
+            note.setWordWrap(True)
+            pal = note.palette()
+            pal.setColor(QPalette.ColorRole.WindowText,
+                         pal.color(QPalette.ColorRole.PlaceholderText))
+            note.setPalette(pal)
+            header.addRow(note)
         # Static "Contract:" row — the on-chain target of this write (the
         # resolver / registry / controller / NameWrapper). Filled once the
         # inputs build a valid request (the target is input-independent, so it
@@ -1276,6 +1359,11 @@ class EnsPlugin(Plugin):
         # only role that can transfer the name. A subset of _owned (which also
         # counts controller-only), tracked separately to gate "Transfer name…".
         self._registrant: set[str] = set()
+        # Names the selected address *manages* (is the registry controller of) —
+        # the role that can set records/resolver/subdomains. The other subset of
+        # _owned, used to gate the record-write actions (a registrant who isn't
+        # the manager can't set records until they reclaim the manager role).
+        self._controller: set[str] = set()
 
     # --- plugin contract --------------------------------------------------
 
@@ -1332,9 +1420,11 @@ class EnsPlugin(Plugin):
             self._owned.clear()
             self._wrapped.clear()
             self._registrant.clear()
+            self._controller.clear()
             if self._panel is not None:
                 self._panel.set_writable(set())
                 self._panel.set_transferable(set())
+                self._panel.set_reclaimable(set())
         self._loaded_for = address
         if not address:
             self._panel.populate([], int(time.time()))
@@ -1422,6 +1512,12 @@ class EnsPlugin(Plugin):
                 self._registrant.add(name_l)
             else:
                 self._registrant.discard(name_l)
+            # Controller (registry manager) — the role that can set records. A
+            # registrant who isn't also the controller can't, until they reclaim.
+            if st.controller and st.controller.lower() == address.lower():
+                self._controller.add(name_l)
+            else:
+                self._controller.discard(name_l)
         self._denied.update(self._panel.mark_verified(states, address))
         self._refresh_writable(address)
 
@@ -1433,14 +1529,19 @@ class EnsPlugin(Plugin):
                    for acc in self._store.accounts)
 
     def _refresh_writable(self, address: str) -> None:
-        # Writable = names the chain proved this address owns, AND the account
-        # can actually sign. (Watch-only → read-only.) Transferable is the
-        # narrower registrant-owned subset (only the NFT owner can transfer).
+        # Each action gates on the role that can actually sign it (and the
+        # account must be a signer at all — watch-only → read-only):
+        #   • record/resolver/subdomain writes → the manager (controller);
+        #   • transfer → the registrant (NFT owner);
+        #   • set-manager (reclaim) → the registrant of an *unwrapped* name
+        #     (a wrapped name's controller is managed through the NameWrapper).
         can_sign = self._can_sign(address)
         if self._panel is not None:
-            self._panel.set_writable(self._owned if can_sign else set())
+            self._panel.set_writable(self._controller if can_sign else set())
             self._panel.set_transferable(
                 self._registrant if can_sign else set())
+            self._panel.set_reclaimable(
+                (self._registrant - self._wrapped) if can_sign else set())
 
     # --- records (lazy) ---------------------------------------------------
 
@@ -1548,6 +1649,8 @@ class EnsPlugin(Plugin):
             self._renew(name)
         elif kind == "transfer":
             self._transfer(name)
+        elif kind == "manager":
+            self._set_manager(name)
 
     def _on_edit_record(self, name: str, label: str, value: str) -> None:
         """Re-open the matching editor for an existing record row, prefilled.
@@ -1653,6 +1756,18 @@ class EnsPlugin(Plugin):
         if not addr:
             return
         self._open_composer(name, self._transfer_op(name, addr))
+
+    # --- set manager (reclaim) --------------------------------------------
+
+    def _set_manager(self, name: str) -> None:
+        from ..ens_app import _is_eth_2ld
+        if (self._panel is None or not _is_eth_2ld(name)
+                or name.lower() in self._wrapped):
+            return
+        host = self.host
+        addr = host.selected_address if host is not None else ""
+        self._open_composer(
+            name, self._set_manager_op(name, _checksum(addr or "") or ""))
 
     # --- op construction ---------------------------------------------------
 
@@ -1829,10 +1944,46 @@ class EnsPlugin(Plugin):
                 {"name": "to", "type": "address", "value": to},
                 {"name": "tokenId", "type": "uint256", "value": nm}]}
 
+        note = (
+            "This transfers the wrapped name — both ownership and the manager "
+            "role move together." if wrapped else
+            "This moves ownership (the name's NFT). The manager role stays with "
+            "you until the new owner reclaims it.")
         return _EnsOp(
             title=f"Transfer · {name}", confirm_label="Transfer name",
             make_fields=make_fields, build=build, decoded=decoded,
-            rediscover=True)
+            rediscover=True, note=note)
+
+    def _set_manager_op(self, name: str, self_addr: str) -> _EnsOp:
+        from .. import ens_write
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            # Default to the user's own address — reclaiming the manager role to
+            # yourself (so you can set records) is the common case.
+            return _RecipientFields(
+                make_address_field=composer._make_address_field,
+                label="Manager", initial=self_addr,
+                placeholder="0x… manager address")
+
+        def build(nm: str, fields: Any) -> tuple[str, str]:
+            mgr = _checksum(fields.value())
+            if mgr is None:
+                raise ValueError("The manager must be a valid 0x address.")
+            return ens_write.set_manager(nm, mgr)
+
+        def decoded(nm: str, fields: Any) -> dict:
+            mgr = _checksum(fields.value()) or fields.value() or "0x…"
+            return {"function": "reclaim", "args": [
+                {"name": "id", "type": "uint256", "value": nm},
+                {"name": "owner", "type": "address", "value": mgr}]}
+
+        return _EnsOp(
+            title=f"Set manager · {name}", confirm_label="Set manager",
+            make_fields=make_fields, build=build, decoded=decoded,
+            rediscover=True,
+            note="The manager (registry controller) is the role that sets the "
+                 "resolver, records and subdomains. As the owner you can "
+                 "reclaim it — to yourself or anyone else.")
 
     def _set_resolver_op(self, name: str) -> _EnsOp:
         """The input-less set-resolver bootstrap (the resolver-gate target)."""

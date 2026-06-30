@@ -18,8 +18,8 @@ from qeth.ens_app import (
     EnsName, EnsRecords, OwnershipCheck, build_tree,
 )
 from qeth.plugins.ens import (
-    _EXPIRY_STYLE, _NAME_ROLE, _STATUS_ROLE, _UNSAFE_ROLE, _VALUE_ROLE,
-    EnsPanel, EnsPlugin,
+    _EXPIRY_STYLE, _NAME_ROLE, _OWNERSHIP_ROLE, _STATUS_ROLE, _UNSAFE_ROLE,
+    _VALUE_ROLE, EnsPanel, EnsPlugin,
 )
 
 
@@ -277,6 +277,62 @@ class TestEnsPanel:
             {"maybe.eth": OwnershipCheck(controller=None, owner_known=False)}, me)
         assert removed == []
         assert panel.tree.topLevelItemCount() == 1
+
+    def _role_rows(self, item):
+        """The manager/owner rows under a name → {label: shown-address}."""
+        return {item.child(i).text(0): item.child(i).text(2)
+                for i in range(item.childCount())
+                if item.child(i).data(0, _OWNERSHIP_ROLE)}
+
+    def test_mark_verified_renders_manager_and_owner_rows(self, qtbot):
+        from eth_utils import to_checksum_address
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        # crv.eth: distinct manager (controller) and owner (registrant).
+        mgr = "0x39415255619783A2E71fcF7d8f708A951d92e1b6"
+        own = "0x7a16fF8270133F063aAb6C9977183D9e72835428"
+        panel.populate(build_tree([EnsName("crv.eth", source="custom")]), NOW)
+        panel.mark_verified({"crv.eth": OwnershipCheck(
+            controller=mgr, registrant=own, owner_known=True)}, own)
+        root = panel.tree.topLevelItem(0)
+        rows = self._role_rows(root)
+        assert rows["manager"] == to_checksum_address(mgr)
+        assert rows["owner"] == to_checksum_address(own)
+        # both carry their address as the copyable value
+        mrow = next(root.child(i) for i in range(root.childCount())
+                    if root.child(i).text(0) == "manager")
+        assert mrow.data(0, _VALUE_ROLE) == to_checksum_address(mgr)
+
+    def test_ownership_rows_survive_records_reload(self, qtbot):
+        # Records load lazily after verification; the manager/owner rows must
+        # not be wiped when the record rows arrive.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        panel.populate(build_tree([EnsName("alice.eth")]), NOW)
+        panel.mark_verified({"alice.eth": OwnershipCheck(
+            controller=me, registrant=me, owner_known=True)}, me)
+        root = panel.tree.topLevelItem(0)
+        assert set(self._role_rows(root)) == {"manager", "owner"}
+        panel.add_records("alice.eth", EnsRecords(texts={"url": "x"}))
+        assert set(self._role_rows(root)) == {"manager", "owner"}   # still there
+        labels = [root.child(i).text(0) for i in range(root.childCount())]
+        assert "url" in labels                                      # records too
+
+    def test_subdomain_shows_manager_only(self, qtbot):
+        # A subdomain has a controller but no registrant → just a manager row.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me = "0x" + "11" * 20
+        panel.populate(build_tree([
+            EnsName("vitalik.eth"), EnsName("dao.vitalik.eth")]), NOW)
+        panel.mark_verified({
+            "vitalik.eth": OwnershipCheck(controller=me, registrant=me,
+                                          owner_known=True),
+            "dao.vitalik.eth": OwnershipCheck(controller=me, owner_known=True),
+        }, me)
+        sub = panel._items_by_name["dao.vitalik.eth"]
+        assert set(self._role_rows(sub)) == {"manager"}
 
     def test_subdomain_owned_uses_control_tooltip(self, qtbot):
         from qeth.plugins.ens import _CONTROL_TIP
@@ -852,6 +908,72 @@ class TestEnsWriteActions:
         _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
+
+    def test_transfer_note_warns_manager_stays(self, qtbot):
+        # The unwrapped transfer carries the caveat that the manager role stays
+        # behind; the wrapped one says both roles move.
+        plugin, host, store = self._plugin(qtbot)
+        plugin._transfer("vitalik.eth")
+        _name, op, *_rest = host.ens_ops[0]
+        assert op.note and "manager role stays" in op.note
+        plugin._wrapped.add("vitalik.eth")
+        plugin._transfer("vitalik.eth")
+        _name, wop, *_rest = host.ens_ops[1]
+        assert wop.note and "move together" in wop.note
+
+    # --- set manager (reclaim) --------------------------------------------
+
+    def test_registrant_only_manages_via_role_split(self, qtbot):
+        # A registrant who is NOT the controller can transfer + reclaim the
+        # manager, but can't set records (that needs the manager role).
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=self.OTHER, registrant=ADDR, owner_known=True),
+        }, True)
+        panel = plugin.widget()
+        assert "vitalik.eth" not in panel._writable      # not the manager
+        assert "vitalik.eth" in panel._transferable      # is the owner
+        assert "vitalik.eth" in panel._reclaimable       # can reclaim manager
+
+    def test_wrapped_registrant_cannot_reclaim(self, qtbot):
+        # Wrapped names manage the controller through the NameWrapper, not
+        # reclaim → never offered "Set manager…".
+        plugin, host, store = self._plugin(qtbot)
+        plugin._wrapped.add("vitalik.eth")
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=ADDR, registrant=ADDR, wrapped=True,
+                owner_known=True),
+        }, True)
+        assert "vitalik.eth" not in plugin.widget()._reclaimable
+
+    def test_set_manager_builds_reclaim_to_registrar(self, qtbot):
+        from qeth.ens_app import ENS_ETH_REGISTRAR, _labelhash
+        plugin, host, store = self._plugin(qtbot)
+        plugin._registrant.add("vitalik.eth")
+        plugin._set_manager("vitalik.eth")
+        name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        # Defaults the manager field to the signer (reclaim to self).
+        assert dlg._fields.value().lower() == ADDR.lower()
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_ETH_REGISTRAR.lower()
+        assert req.data[2:10] == "28ed4f6c"              # reclaim(uint256,address)
+        token_id = int.from_bytes(_labelhash("vitalik"), "big")
+        assert req.data[10:] == abi_encode(
+            ["uint256", "address"], [token_id, self.OTHER]).hex()
+        assert "Set manager" in op.confirm_label
+
+    def test_set_manager_rejects_subdomain_and_wrapped(self, qtbot):
+        plugin, host, store = self._plugin(qtbot, owned=("blog.vitalik.eth",))
+        plugin._set_manager("blog.vitalik.eth")          # not a .eth 2LD
+        assert host.ens_ops == []
+        plugin._wrapped.add("vitalik.eth")
+        plugin._set_manager("vitalik.eth")               # wrapped → no reclaim
+        assert host.ens_ops == []
 
 
 # --- EnsPlugin: name-row resolution follows the head address read ----------

@@ -467,6 +467,26 @@ class TestEnsPanel:
         assert emits[0] == (False, "0x394")    # fast, fresh — shown at once
         assert emits[-1] == (True, "0x394")    # verified, caught up (not 0x7a)
 
+    def test_verify_worker_never_emits_stale_proof(self, monkeypatch):
+        # Helios stays behind the whole budget (a just-transferred name): the
+        # worker must NOT emit the stale verified read — it would regress the
+        # fresh fast read back to the previous owner. Only the fast read lands.
+        import qeth.plugins.ens as ens
+        new = {"s.eth": OwnershipCheck(controller="0x425", registrant="0xNEW",
+                                       owner_known=True)}
+        old = {"s.eth": OwnershipCheck(controller="0x425", registrant="0x425",
+                                       owner_known=True)}
+        monkeypatch.setattr(ens, "read_name_states", lambda c, n: new)
+        monkeypatch.setattr(ens, "verify_names",
+                            lambda c, n, wait_s=0: (old, True))   # always stale
+        monkeypatch.setattr(ens, "_VERIFY_CATCHUP_DELAY_S", 0.0)
+        monkeypatch.setattr(ens, "_VERIFY_CATCHUP_TRIES", 3)
+        w = ens.EnsVerifyWorker(None, "0x425", ["s.eth"], catchup=True)
+        emits = []
+        w.ready.connect(lambda a, s, v: emits.append((v, s["s.eth"].registrant)))
+        w.run()
+        assert emits == [(False, "0xNEW")]     # only the fresh read, no stale ✓
+
     def _role_rows(self, item):
         """The manager/owner rows under a name → {label: shown-address}."""
         return {item.child(i).text(0): item.child(i).text(2)

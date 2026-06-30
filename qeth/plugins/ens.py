@@ -392,11 +392,15 @@ class EnsVerifyWorker(QThread):
                 wait_s=self._wait_s if attempt == 0 else 0.0)
             if not verified:           # no sidecar / can't prove → stop trying
                 return
-            if (not fast or _states_agree(states, fast)
-                    or attempt == tries - 1):
+            if not fast or _states_agree(states, fast):
                 self.ready.emit(self._address, states, True)
                 return
-            self.msleep(int(_VERIFY_CATCHUP_DELAY_S * 1000))
+            if attempt < tries - 1:
+                self.msleep(int(_VERIFY_CATCHUP_DELAY_S * 1000))
+        # Helios never caught up to the fresh read within budget. DON'T emit a
+        # proof that still shows the pre-change owner — it would regress the fast
+        # read (the freshest truth), revert a just-transferred name's owner and
+        # wrongly keep offering Set-manager. The ✓ lands on a later refresh.
 
 
 def _eth_usd_rate(chain) -> Decimal | None:

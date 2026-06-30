@@ -3232,6 +3232,7 @@ class _EventPreviewMixin:
         _sim_floor_provider: Callable[[int, str], int | None] | None
 
         def _sim_params(self) -> Any: ...
+        def fontMetrics(self) -> Any: ...   # noqa: N802 — the host QWidget's
 
     # How long the UI waits for a simulation before giving up. The fast
     # path (eth_simulateV1) returns in well under this; the local fork
@@ -3263,7 +3264,9 @@ class _EventPreviewMixin:
         )
         self._events_page = QWidget()
         lay = QVBoxLayout(self._events_page)
-        lay.setContentsMargins(0, 6, 0, 0)
+        # Match the Details page's in-frame left/right padding (font-derived).
+        _pad = self.fontMetrics().height() // 2
+        lay.setContentsMargins(_pad, 6, _pad, 0)
         lay.addWidget(self._events, 1)
         tabs.addTab(self._events_page, "&Events")
         tabs.currentChanged.connect(self._on_sim_tab_changed)
@@ -3587,14 +3590,17 @@ class TransactionDetailsDialog(Dialog):
         # Two tabs: "Details" (record + decoded call) and "Events" (the
         # receipt's logs), so the events list gets a full pane of space
         # instead of being squeezed under the decoded call.
+        # Left/right padding inside the tab frame so content doesn't sit flush
+        # against its border (font-derived, matching the window edge margin).
+        _pad = self.fontMetrics().height() // 2
         tabs = QTabWidget()
         details_page = QWidget()
         details_layout = QVBoxLayout(details_page)
-        details_layout.setContentsMargins(0, 8, 0, 0)
+        details_layout.setContentsMargins(_pad, 8, _pad, 0)
         details_layout.setSpacing(8)
         events_page = QWidget()
         events_layout = QVBoxLayout(events_page)
-        events_layout.setContentsMargins(0, 8, 0, 0)
+        events_layout.setContentsMargins(_pad, 8, _pad, 0)
         events_layout.setSpacing(6)
         tabs.addTab(details_page, "&Details")
         tabs.addTab(events_page, "&Events")
@@ -4377,9 +4383,13 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         root.setSpacing(8)
         self._tabs = QTabWidget()
         root.addWidget(self._tabs, 1)
+        # Left/right padding INSIDE the tab frame so content doesn't sit flush
+        # against its border (the same breathing room the window gets at its
+        # edge). Font-derived, matching the dialog's edge margin.
+        _pad = self.fontMetrics().height() // 2
         _details_page = QWidget()
         outer = QVBoxLayout(_details_page)
-        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setContentsMargins(_pad, 6, _pad, 0)
         outer.setSpacing(8)
         self._tabs.addTab(_details_page, "&Details")
 

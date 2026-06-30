@@ -2948,12 +2948,12 @@ class TestEventPreviewTab:
         qtbot.addWidget(dlg)
         return dlg
 
-    def test_value_row_shows_usd_estimate_not_wei(self, qtbot):
-        # The Value row should read like the fee line — "X ETH (≈$Y)" — not
-        # trail a raw "(… wei)". Drops the USD when no price is known.
+    def test_value_total_in_summary_with_usd_not_wei(self, qtbot):
+        # Value + Total sit in the fee summary (next to Expected fee), read
+        # like the fee line — "X ETH (≈$Y)", never a raw "(… wei)" — and hide
+        # entirely for a value-0 call.
         from decimal import Decimal
         from unittest.mock import MagicMock
-        from PySide6.QtWidgets import QLabel
         from qeth.plugins.transactions import (
             SignTransactionDialog, _native_value_with_usd)
         from qeth.signing import SigningRequest
@@ -2962,16 +2962,31 @@ class TestEventPreviewTab:
             == "1.5 ETH  (4500.00 USD)"
         assert _native_value_with_usd(10 ** 18, "ETH", None) == "1 ETH"
 
-        abi_cache = MagicMock(); abi_cache.load.return_value = None
-        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr="0x" + "22" * 20,
-                             value_wei=15 * 10 ** 17, data="0x")
-        dlg = SignTransactionDialog(
-            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
-            start_worker=lambda w: None, native_price_usd=Decimal("3000"))
-        qtbot.addWidget(dlg)
-        texts = [w.text() for w in dlg.findChildren(QLabel)]
-        assert any("1.5 ETH" in t and "4500.00 USD" in t for t in texts)
-        assert not any("wei)" in t for t in texts)
+        def _dlg(value_wei, data):
+            abi_cache = MagicMock(); abi_cache.load.return_value = None
+            req = SigningRequest(chain_id=1, from_addr=ADDR,
+                                 to_addr="0x" + "22" * 20,
+                                 value_wei=value_wei, data=data)
+            d = SignTransactionDialog(
+                req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+                start_worker=lambda w: None, native_price_usd=Decimal("3000"))
+            qtbot.addWidget(d)
+            d.show()
+            return d
+
+        # value > 0 → Value + Total revealed once the fee lands, with USD.
+        d1 = _dlg(15 * 10 ** 17, "0x")
+        d1._update_extra_totals(int(21000 * 30e9))
+        assert d1._summary_form.isRowVisible(d1._value_row_lbl)
+        assert d1._value_row_lbl.text() == "1.5 ETH  (4500.00 USD)"
+        assert "1.5006" in d1._total_row_lbl.text()      # value + fee
+        assert "wei)" not in d1._value_row_lbl.text()
+
+        # value == 0 → neither row shown.
+        d0 = _dlg(0, "0xa9059cbb")
+        d0._update_extra_totals(int(21000 * 30e9))
+        assert not d0._summary_form.isRowVisible(d0._value_row_lbl)
+        assert not d0._summary_form.isRowVisible(d0._total_row_lbl)
 
     def test_replace_mode_locks_nonce_and_floors_fees(self, qtbot, tmp_qeth):
         """Speed up / cancel re-uses SignTransactionDialog in replace mode:

@@ -1134,8 +1134,6 @@ class _EnsWriteComposer(_TxComposerDialog):
         self._op = op
         self._name = name
         self._fields: QWidget | None = None
-        self._value_lbl: QLabel | None = None
-        self._total_lbl: QLabel | None = None
         self._contract_lbl: QLabel | None = None
         super().__init__(
             chain, from_addr,
@@ -1166,13 +1164,6 @@ class _EnsWriteComposer(_TxComposerDialog):
         self._contract_lbl = self._value_label("…", monospace=True)
         header.addRow("Contract:", self._contract_lbl)
 
-    def _build_extra_summary_rows(self, summary: QFormLayout) -> None:
-        if not self._op.payable:
-            return
-        self._value_lbl = self._value_label("—")
-        summary.addRow("Value:", self._value_lbl)
-        self._total_lbl = self._value_label("—")
-        summary.addRow("Total:", self._total_lbl)
 
     def _wire_inputs(self) -> None:
         fields = self._fields
@@ -1245,13 +1236,6 @@ class _EnsWriteComposer(_TxComposerDialog):
             return
         self._contract_lbl.setText(to_checksum_address(to))
 
-    def _update_extra_totals(self, fee_wei: int) -> None:
-        if not self._op.payable or self._total_lbl is None:
-            return
-        value = self._op.value_wei(self._fields)
-        if self._value_lbl is not None:
-            self._value_lbl.setText(self._native_value_text(value))
-        self._total_lbl.setText(self._native_value_text(fee_wei + value))
 
 
 class EnsPlugin(Plugin):

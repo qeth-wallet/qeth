@@ -4959,7 +4959,18 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         ...
 
     def _build_extra_summary_rows(self, summary: QFormLayout) -> None:
-        ...
+        """Default: a Value + Total row right under Expected fee, shown only
+        when the tx actually moves native value (hidden for a plain contract
+        call). Keeps value next to the fee, where the eye already is — the
+        dapp-sign dialog used to bury it up in the header. A subclass with a
+        different notion of value (Send's token amount) overrides this."""
+        self._summary_form = summary
+        self._value_row_lbl = self._value_label("—")
+        summary.addRow("Value:", self._value_row_lbl)
+        self._total_row_lbl = self._value_label("—")
+        summary.addRow("Total:", self._total_row_lbl)
+        summary.setRowVisible(self._value_row_lbl, False)
+        summary.setRowVisible(self._total_row_lbl, False)
 
     def _refresh_decoded_view(self) -> None:
         ...
@@ -4971,7 +4982,21 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         ...
 
     def _update_extra_totals(self, fee_wei: int) -> None:
-        ...
+        """Default: fill + reveal the Value/Total rows when the tx moves
+        native value, hide them otherwise (so a value-0 call shows neither)."""
+        if getattr(self, "_value_row_lbl", None) is None:
+            return
+        try:
+            value = self._build_request().value_wei
+        except SignerError:
+            value = 0
+        show = value > 0
+        self._summary_form.setRowVisible(self._value_row_lbl, show)
+        self._summary_form.setRowVisible(self._total_row_lbl, show)
+        if show:
+            self._value_row_lbl.setText(self._native_value_text(value))
+            self._total_row_lbl.setText(
+                self._native_value_text(value + fee_wei))
 
     def _on_gas_ready(self) -> None:
         ...
@@ -5083,13 +5108,9 @@ class SignTransactionDialog(_TxComposerDialog):
         if _id_label is not None and _id_kick is not None:
             header.addRow("Contract:", _id_label)
             _id_kick()
-        if req.value_wei > 0:
-            header.addRow(
-                "Value:",
-                self._value_label(self._native_value_text(req.value_wei)),
-            )
-        else:
-            header.addRow("Value:", self._value_label("0"))
+        # Value (+ Total) live in the fee summary now, next to Expected fee —
+        # see the base _build_extra_summary_rows / _update_extra_totals, which
+        # also hide them for a value-0 call.
 
     # --- decoded call (base hook) — async, Sign-specific -----------
 

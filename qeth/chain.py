@@ -389,14 +389,17 @@ class EthClient:
 
     def multicall_erc20_balances(
         self, tokens: list[str], holder: str, batch_size: int = 100,
+        block: str = "latest",
     ) -> dict[str, int]:
         """Fetch ERC-20 ``balanceOf(holder)`` for every address in
         ``tokens``. Tokens whose inner call reverted or returned
         malformed data are silently omitted, so the caller should treat
-        absence as "unknown" rather than zero."""
+        absence as "unknown" rather than zero. ``block`` pins the read to a
+        specific block (the worker reads at a fixed height so the result can be
+        ordered against other concurrent reads)."""
         if not tokens:
             return {}
-        with self.multicall(batch_size=batch_size) as mc:
+        with self.multicall(batch_size=batch_size, block=block) as mc:
             queued = [(t, mc.balance_of(t, holder)) for t in tokens]
         return {t.lower(): f.value for t, f in queued
                 if f.success and f.value is not None}

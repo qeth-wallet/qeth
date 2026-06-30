@@ -244,6 +244,328 @@ def test_tokens_on_native_balance_applies_only_for_current_view(qtbot, monkeypat
     assert touched == [(100, "0xABC", 9 * 10**18)]
 
 
+def test_on_balance_dirty_targeted_runs_off_view(qtbot):
+    """A ws Transfer queues a targeted balanceOf re-read for exactly the named
+    token even when it's NOT the on-screen view — so switching to the Tokens
+    tab after a (browser) tx confirms is instant rather than waiting on the
+    slow sweep. Firing fans out one cheap BalanceWorker over the dirtied set."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import BalanceWorker, TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp.host = Mock()
+    tp._displayed_view = (1, "0xother")        # not the dirtied account
+
+    ch = SimpleNamespace(chain_id=100)
+    tp.on_balance_dirty(ch, "0xABC", "0xToK")
+    # queued under the lowercased key, token lowercased; account case preserved
+    assert tp._dirty_balances[(100, "0xabc")][1] == "0xABC"
+    assert tp._dirty_balances[(100, "0xabc")][2] == {"0xtok"}
+
+    # a second leg folds into the same slot (one round-trip per burst)
+    tp.on_balance_dirty(ch, "0xABC", "0xToK2")
+    assert tp._dirty_balances[(100, "0xabc")][2] == {"0xtok", "0xtok2"}
+
+    tp._on_targeted_balance()
+    assert tp._dirty_balances == {}
+    worker = tp.host.start_worker.call_args.args[0]
+    assert isinstance(worker, BalanceWorker)
+    assert worker.address == "0xABC"
+    assert sorted(worker.contracts) == ["0xtok", "0xtok2"]
+
+
+def test_apply_targeted_balances_persists_then_renders_on_view(qtbot, monkeypatch):
+    """The authoritative result is persisted for any account (so an off-view tx
+    is ready on tab switch), and the on-screen view is re-rendered from that
+    cache. Off-view instead flags the view for the next tab activation."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    rerendered: list = []
+    persisted: list = []
+    monkeypatch.setattr(
+        tp, "_rerender_view_from_cache",
+        lambda ch, acct: rerendered.append(acct))
+    monkeypatch.setattr(
+        tp, "_persist_targeted_balances",
+        lambda ch, acct, wei, bals: persisted.append((acct, bals)))
+    ch = SimpleNamespace(chain_id=100)
+
+    tp._displayed_view = (1, "0xother")        # off-view: persist + flag only
+    tp._apply_targeted_balances(ch, "0xABC", 9, {"0xToK": 7})
+    assert persisted == [("0xABC", {"0xtok": 7})]
+    assert rerendered == []
+    assert (100, "0xabc") in tp._pending_rerender
+
+    tp._displayed_view = (100, "0xabc")        # on-view: persist + re-render
+    tp._pending_rerender.clear()
+    tp._apply_targeted_balances(ch, "0xABC", 9, {"0xToK": 7})
+    assert rerendered == ["0xABC"]
+    assert tp._pending_rerender == set()
+
+
+def test_on_activated_rerenders_flag_and_reconciles_balances(qtbot, monkeypatch,
+                                                             tmp_path):
+    """Switching to the Tokens tab (1) re-renders a flagged background update
+    from cache, and (2) ALWAYS reconciles the displayed balances against the
+    chain via one multicall — the safety net for a confirmation we never got a
+    ws event for (the real bug: a fully-sent token lingered on tab switch)."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import BalanceWorker, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    tp = TokensPlugin(Mock())
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=100, address="0xabc", native_balance_wei=1,
+        tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
+                            decimals=18, balance_raw=5)]))
+    workers: list = []
+    tp.host = SimpleNamespace(
+        selected_address="0xABC",
+        current_chain=lambda: SimpleNamespace(chain_id=100),
+        start_worker=workers.append)
+    tp._panel = object()
+    rerendered: list = []
+    monkeypatch.setattr(
+        tp, "_rerender_view_from_cache",
+        lambda ch, acct: rerendered.append(acct))
+
+    # not flagged → no cache re-render, but STILL reconciles (kicks a worker)
+    tp.on_activated()
+    assert rerendered == []
+    assert len(workers) == 1
+    assert isinstance(workers[0], BalanceWorker)
+    assert workers[0].contracts == ["0xtok"]            # over the displayed set
+
+    # flagged (an off-view tx persisted to cache) → also re-render from cache
+    workers.clear()
+    tp._pending_rerender.add((100, "0xabc"))
+    tp.on_activated()
+    assert rerendered == ["0xABC"]
+    assert tp._pending_rerender == set()                 # consumed
+    assert len(workers) == 1                             # and reconciles too
+
+
+def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_path):
+    """End-to-end: a real panel + cache. The in-place path updates a held
+    token's balance AND recomputes its USD even with a user-hidden token in the
+    cache (the case that used to silently no-op), and a re-render keeps USD."""
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    tok = "0x" + "11" * 20
+    hid = "0x" + "22" * 20
+    store = Store.load()
+    store.hide_token(1, hid)
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+
+    cached = CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=2 * 10**18,
+        native_price_usd="1000", native_price_updated=1,
+        tokens=[
+            CachedToken(contract=tok, symbol="TKN", name="T", decimals=18,
+                        balance_raw=100 * 10**18, price_usd="1.0", price_updated=1),
+            CachedToken(contract=hid, symbol="HID", name="H", decimals=18,
+                        balance_raw=9 * 10**18, price_usd="1.0", price_updated=1),
+        ])
+    tp._wallet_cache.save(cached)
+    panel.show_cached(eth, tp._filter_hidden_from_cache(eth, cached))
+    tp._displayed_view = (1, acc)
+
+    # Token sent: balance 100 -> 50, persisted; re-render the on-screen view.
+    tp._persist_targeted_balances(eth, acc, 2 * 10**18, {tok: 50 * 10**18})
+    tp._rerender_view_from_cache(eth, acc)
+
+    def cell(addr, col):
+        for r in range(panel.table.rowCount()):
+            it = panel.table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) and \
+                    it.data(Qt.ItemDataRole.UserRole)[1] == addr:
+                c = panel.table.item(r, col)
+                return c.text() if c else None
+        return None
+
+    assert cell(tok, 1) == "50"            # balance updated despite hidden token
+    assert cell(tok, 2) == "$50.00"        # USD recomputed, not stale/blank
+
+
+def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_path):
+    """On the on-screen view, the live-refresh (≈1.5 s after a ws event) must
+    kick a fresh balance reconcile over the displayed set — the later read that
+    catches a token the eager 400 ms targeted read missed (RPC a block behind).
+    Without it 'be on the Tokens tab when the tx confirms' left a sent token
+    listed until the slow sweep, while 'switch tabs after' worked."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import BalanceWorker, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    tp = TokensPlugin(Mock())
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=100, address="0xabc", native_balance_wei=1,
+        tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
+                            decimals=18, balance_raw=5)]))
+    workers: list = []
+    tp.host = SimpleNamespace(
+        selected_address="0xABC",
+        current_chain=lambda: SimpleNamespace(chain_id=100),
+        start_worker=workers.append)
+    monkeypatch.setattr(tp, "_refresh", lambda a: None)   # isolate the reconcile
+    tp._displayed_view = (100, "0xabc")
+    tp._live_refresh_addr = "0xABC"
+
+    tp._on_live_refresh()
+    assert len(workers) == 1
+    assert isinstance(workers[0], BalanceWorker)
+    assert workers[0].contracts == ["0xtok"]              # over the displayed set
+
+
+def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
+    """Race guard: a balance worker kicked BEFORE a send (reads the token still
+    non-zero) that finishes AFTER the drop must not resurrect it. Reads are
+    ordered by block — an older block than one already applied is discarded.
+    (The 'cbBTC dropped then reappeared a moment later' bug.)"""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    cb = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+    cached = CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18,
+        native_price_usd="2000", native_price_updated=1, tokens=[
+            CachedToken(contract=cb, symbol="cbBTC", name="cb", decimals=8,
+                        balance_raw=100000, price_usd="60000", price_updated=1)])
+    tp._wallet_cache.save(cached)
+    panel.show_cached(eth, cached)
+    tp._displayed_view = (1, acc)
+
+    def held():
+        return {t.contract.lower() for t in tp._wallet_cache.load(1, acc).tokens}
+
+    # Fresh read at block 100: cbBTC fully sent → drop.
+    tp._apply_targeted_balances(eth, acc, 10**18, {cb: 0}, 100)
+    assert cb not in held()
+
+    # STALE read from block 99 (worker kicked before the send) lands late with
+    # cbBTC still non-zero → must be ignored, NOT re-added.
+    tp._apply_targeted_balances(eth, acc, 10**18, {cb: 100000}, 99)
+    assert cb not in held()
+
+    # A genuine re-receive at a NEWER block (101) is applied.
+    tp._apply_targeted_balances(eth, acc, 10**18, {cb: 5}, 101)
+    assert cb in held()
+
+
+def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
+    """A full send: a live targeted read drops the now-zero token. A DISCOVERY
+    whose balance snapshot predates the send then completes — it must NOT bring
+    the token back in the panel or the cache (the bug a wallet-switch 'fixed').
+    """
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.prices import Price
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    wbtc = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+
+    cached = CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18,
+        native_price_usd="2000", native_price_updated=1, tokens=[
+            CachedToken(contract=wbtc, symbol="WBTC", name="W", decimals=8,
+                        balance_raw=100000, price_usd="60000", price_updated=1),
+            CachedToken(contract=usdc, symbol="USDC", name="U", decimals=6,
+                        balance_raw=50 * 10**6, price_usd="1", price_updated=1)])
+    tp._wallet_cache.save(cached)
+    panel.show_cached(eth, cached)
+    tp._displayed_view = (1, acc)
+
+    def visible():
+        out = set()
+        for r in range(panel.table.rowCount()):
+            it = panel.table.item(r, 0)
+            key = it.data(Qt.ItemDataRole.UserRole) if it else None
+            if key and key[1] and not panel.table.isRowHidden(r):
+                out.add(key[1])
+        return out
+
+    # Live read: WBTC fully sent → drop.
+    tp._apply_targeted_balances(eth, acc, 10**18, {wbtc: 0})
+    assert wbtc not in visible()
+
+    # A stale discovery (captured WBTC>0 before the send) now completes.
+    pv = {"chain": eth, "address": acc, "view_key": (1, acc),
+          "native_wei": 10**18,
+          "balances_raw": {wbtc: 100000, usdc: 50 * 10**6},
+          "metadata": {wbtc: ("WBTC", "W", 8), usdc: ("USDC", "U", 6)}}
+    prices = {wbtc: Price(Decimal("60000"), 1, "x"),
+              usdc: Price(Decimal("1"), 1, "x"),
+              "": Price(Decimal("2000"), 1, "x")}
+    tp._on_combined_ready(pv, 1, prices)
+
+    assert wbtc not in visible()                          # not resurrected on panel
+    reloaded = tp._wallet_cache.load(1, acc)
+    assert wbtc not in {t.contract.lower() for t in reloaded.tokens}   # nor cache
+
+
+def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):
+    """Persist writes ABSOLUTE native + per-token balances (unlike the receipt
+    path's delta): a held token is overwritten in place; an unknown new token
+    with no metadata is left for discovery, not invented."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    tp = TokensPlugin(Mock())
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=100, address="0xabc", native_balance_wei=1,
+        tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
+                            decimals=18, balance_raw=42)]))
+    ch = SimpleNamespace(chain_id=100)
+
+    tp._persist_targeted_balances(ch, "0xABC", 5 * 10**18, {"0xtok": 7})
+    reloaded = tp._wallet_cache.load(100, "0xabc")
+    assert reloaded is not None
+    assert reloaded.native_balance_wei == 5 * 10**18
+    assert [(t.contract, t.balance_raw) for t in reloaded.tokens] == [("0xtok", 7)]
+
+    # an unrecognised new token (no metadata to render it) is NOT added
+    tp._persist_targeted_balances(ch, "0xABC", 5 * 10**18, {"0xnew": 99})
+    reloaded = tp._wallet_cache.load(100, "0xabc")
+    assert reloaded is not None
+    assert [t.contract for t in reloaded.tokens] == ["0xtok"]
+
+
 def test_touch_cached_native_updates_only_native(qtbot, tmp_path):
     """_touch_cached_native persists the new native balance while leaving the
     cached tokens intact (so the slow sweep + cross-session reopen stay sane)."""

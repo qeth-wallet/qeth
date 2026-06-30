@@ -713,13 +713,13 @@ class EnsPanel(QWidget):
 
     def set_transferable(self, names: set[str]) -> None:
         """Names (lower-case) the user owns as the registrant (NFT owner) and
-        can sign for — gates the "Transfer name…" action."""
+        can sign for — gates the "Transfer name" action."""
         self._transferable = set(names)
 
     def set_reclaimable(self, names: set[str]) -> None:
         """Names (lower-case) the user owns as the registrant of an *unwrapped*
         .eth 2LD — only these can reclaim the manager role (``reclaim``); gates
-        the "Set manager…" action."""
+        the "Set manager" action."""
         self._reclaimable = set(names)
 
     def _write_menu_groups(self, n: EnsName) -> list[list[tuple[str, str]]]:
@@ -736,20 +736,20 @@ class EnsPanel(QWidget):
         is_2ld = not n.is_subdomain and nm.endswith(".eth")
         groups: list[list[tuple[str, str]]] = []
         if is_2ld and (manages or owns):
-            reg = [("Extend registration…", "renew")]   # anyone can renew
+            reg = [("Extend registration", "renew")]   # anyone can renew
             if nl in self._transferable:
-                reg.append(("Transfer name…", "transfer"))
+                reg.append(("Transfer name", "transfer"))
             if nl in self._reclaimable:
-                reg.append(("Set manager…", "manager"))
+                reg.append(("Set manager", "manager"))
             groups.append(reg)
         if manages:
             groups.append([
-                ("Set ETH address…", "addr"),
-                ("Set content (IPFS)…", "content"),
-                ("Set text record…", "text"),
-                ("Add / change record…", "record"),
+                ("Set ETH address", "addr"),
+                ("Set content (IPFS)", "content"),
+                ("Set text record", "text"),
+                ("Add / change record", "record"),
             ])
-            groups.append([("Add subdomain…", "subdomain")])
+            groups.append([("Add subdomain", "subdomain")])
         return groups
 
     def _on_menu(self, pos) -> None:
@@ -780,7 +780,7 @@ class EnsPanel(QWidget):
             pn = parent.data(0, _NAME_ROLE) if parent is not None else None
             if (isinstance(pn, EnsName) and pn.name.lower() in self._writable):
                 label = item.text(0)
-                menu.addAction("Edit…", lambda: self.edit_record_requested.emit(
+                menu.addAction("Edit", lambda: self.edit_record_requested.emit(
                     pn.name, label, str(value)))
         if not menu.isEmpty():
             menu.exec(self.tree.viewport().mapToGlobal(pos))

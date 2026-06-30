@@ -1018,7 +1018,7 @@ class TestEnsWriteActions:
 
     def test_wrapped_registrant_cannot_reclaim(self, qtbot):
         # Wrapped names manage the controller through the NameWrapper, not
-        # reclaim → never offered "Set manager…".
+        # reclaim → never offered "Set manager".
         plugin, host, store = self._plugin(qtbot)
         plugin._wrapped.add("vitalik.eth")
         plugin._on_verified(ADDR, {

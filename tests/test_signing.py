@@ -1568,13 +1568,18 @@ class TestRpcProxyFailFast:
         return _Client()
 
     def test_transient_failure_marks_the_host(self):
-        from aiohttp import ServerDisconnectedError
+        from qeth.rpc import RpcError
         server, host = self._make_server()
         server._client = self._client("fail")
 
         async def go():
-            with pytest.raises(ServerDisconnectedError):
+            # The raw aiohttp transport error is sanitized to a generic
+            # RpcError before it reaches the dapp (its string would otherwise
+            # leak the upstream RPC host:port — see _proxy). The host is still
+            # marked for the fail-fast cooldown, which is what this test guards.
+            with pytest.raises(RpcError) as ei:
                 await server._proxy("eth_blockNumber", [])
+            assert host not in str(ei.value)   # no upstream URL leak
             return host in server._host_last_fail
 
         assert asyncio.run(go()) is True

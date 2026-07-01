@@ -894,8 +894,18 @@ class RpcServer:
             if err:
                 raise RpcError(err.get("code", -32603), err.get("message", "upstream error"))
             return data.get("result")
-        # Every provider failed or is on cooldown. Surface the last error — a
-        # connection error gets demoted to a one-line WARNING by _handle_one.
-        if last_err is not None:
+        # Every provider failed or is on cooldown. Surface the last error, but
+        # NEVER leak a raw transport exception to the dapp: aiohttp's
+        # ClientConnectorError stringifies to the upstream RPC host:port — often
+        # a private/LAN node ("Cannot connect to host 192.168.x.x:8545 …") — and
+        # a dapp has no business learning which endpoint the wallet talks to.
+        # RpcErrors built above are already sanitized (provider message / HTTP
+        # status, no URL) and pass through; a raw connector error is logged here
+        # in full for us and replaced with a generic message for the dapp.
+        if isinstance(last_err, RpcError):
             raise last_err
+        if last_err is not None:
+            log.warning("proxy %s: all upstreams unreachable: %s: %s",
+                        method, type(last_err).__name__, last_err)
+            raise RpcError(-32603, "upstream RPC unreachable")
         raise RpcError(-32603, "upstream temporarily unreachable")

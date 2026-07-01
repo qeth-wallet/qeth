@@ -77,6 +77,46 @@ def test_proxy_upstream_json_error_is_surfaced():
     assert ei.value.code == -32000
 
 
+def test_proxy_transport_error_does_not_leak_upstream_url():
+    """A raw aiohttp connector error stringifies to the upstream RPC host:port —
+    often a private/LAN node. It must NOT reach the dapp: the surfaced error is
+    generic. Regression for the leak where a Safe App's console showed
+    'Cannot connect to host 192.168.x.x:8545 …' straight from the wallet."""
+    from aiohttp import ClientOSError
+    from qeth.chains import Chain
+
+    secret = "192.168.81.3:8545"
+    leak = f"Cannot connect to host {secret} ssl:default [Connect call failed]"
+
+    class _RaisingResp:
+        async def __aenter__(self):
+            raise ClientOSError(leak)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _RaisingClient:
+        closed = False
+
+        def post(self, *a, **k):
+            return _RaisingResp()
+
+    # Single private RPC, no fallbacks → every attempt raises and we hit the
+    # final "all upstreams unreachable" surface path.
+    chain = Chain(name="Local", chain_id=1, rpc_url=f"http://{secret}/")
+    store = MagicMock()
+    store.current_chain.return_value = chain
+    store.chains = [chain]
+    srv = RpcServer(store)
+    srv._client = _RaisingClient()
+
+    with pytest.raises(RpcError) as ei:
+        asyncio.run(srv._proxy("eth_call", []))
+    msg = str(ei.value)
+    assert "192.168.81.3" not in msg and "8545" not in msg, msg
+    assert ei.value.code == -32603
+
+
 def test_proxy_fails_over_to_fallback_on_transport_error():
     """A transport blip (e.g. a DNS timeout) on the primary RPC fails over to
     the chain's fallback_rpcs instead of failing the dapp — the DNS-outage fix."""

@@ -218,6 +218,18 @@ def main() -> int:
     from .chain import _ensure_heavy_imports
     _ensure_heavy_imports()
 
+    # aiohttp picks the c-ares (pycares) resolver whenever aiodns is
+    # importable — it is here, via system site-packages. That resolver's
+    # Channel spins up a shutdown thread (pycares._run_safe_shutdown_loop) on
+    # teardown/GC that can segfault when it overlaps the Qt event loop at app
+    # exit. Force aiohttp's ThreadedResolver — plenty for our handful of
+    # connections — before the RPC server / live watcher create any connector,
+    # so no pycares Channel is ever created.
+    import aiohttp.connector as _aiohttp_connector
+    import aiohttp.resolver as _aiohttp_resolver
+    _aiohttp_connector.DefaultResolver = _aiohttp_resolver.ThreadedResolver
+    _aiohttp_resolver.DefaultResolver = _aiohttp_resolver.ThreadedResolver
+
     store = Store.load()
     rpc = RpcServer(store)
     rpc.start()

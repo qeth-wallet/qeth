@@ -29,6 +29,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # it for the suite; the watcher's own tests opt back in via monkeypatch.
 os.environ.setdefault("QETH_LIVE_WS", "0")
 
+# aiohttp defaults to the c-ares (pycares) resolver whenever aiodns is
+# importable — and it is here, pulled in via --system-site-packages. That
+# resolver's Channel spins up a shutdown thread
+# (pycares._run_safe_shutdown_loop) on teardown/GC, which segfaults flakily
+# when it overlaps a Qt event loop (a later UI test spinning qtbot). Force
+# aiohttp's ThreadedResolver so no pycares Channel is ever created in the suite.
+import aiohttp.connector as _aiohttp_connector
+import aiohttp.resolver as _aiohttp_resolver
+_aiohttp_connector.DefaultResolver = _aiohttp_resolver.ThreadedResolver
+_aiohttp_resolver.DefaultResolver = _aiohttp_resolver.ThreadedResolver
+
 # Same for the Helios verified-simulation sidecar: the developer machine
 # may have a real `helios` binary installed, and any simulate_logs call
 # on a supported chain would otherwise SPAWN it mid-test. Helios's own

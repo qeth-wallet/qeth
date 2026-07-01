@@ -3053,6 +3053,73 @@ class TestEventPreviewTab:
         assert fin.nonce == 7                        # fixed, not the suggested 99
         assert fin.max_fee_per_gas == 60_000_000_000
 
+    def test_nonce_reresolved_at_signing_time(self, qtbot, tmp_qeth):
+        """Two composer dialogs for one account can be open at once (a dapp
+        sign alongside a GUI Send). Each captured its nonce at open; the
+        second to Confirm must re-resolve against the floor so it doesn't
+        reuse — and replace — the first's tx. Regression for the same-nonce
+        collision."""
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import SignTransactionDialog
+        from qeth.signing import SigningRequest
+        _, started = self._started()
+        # Mutable floor: None at open (nothing in flight), then a sibling tx
+        # broadcasts and the floor jumps past the captured nonce.
+        floor = {"v": None}
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr="0x" + "22" * 20,
+                             value_wei=0, data="0x")
+        abi_cache = MagicMock(); abi_cache.load.return_value = None
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=started, token_info=lambda c, a: None,
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+            nonce_floor_provider=lambda cid, a: floor["v"],
+        )
+        qtbot.addWidget(dlg)
+        # Gas came back with the mined-count nonce 5 (no floor at open).
+        dlg._on_gas_suggested({
+            "base_fee": 20_000_000_000, "estimated_gas": 21000, "gas": 21000,
+            "max_fee_per_gas": 25_000_000_000,
+            "max_priority_fee_per_gas": 1_000_000_000, "nonce": 5,
+        })
+        assert dlg.finalised_request().nonce == 5    # nothing in flight yet
+        # A sibling composer confirms nonce 5 → floor is now 6.
+        floor["v"] = 6
+        assert dlg.finalised_request().nonce == 6    # bumped, no collision
+        # A stale/lower floor never drags the nonce back down.
+        floor["v"] = 3
+        assert dlg.finalised_request().nonce == 5
+
+    def test_fixed_nonce_never_bumped_by_floor(self, qtbot, tmp_qeth):
+        """Replace mode pins the nonce (speed-up / cancel targets a specific
+        pending tx); the floor must not bump it even when a provider is
+        wired and reports a higher value."""
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import SignTransactionDialog
+        from qeth.signing import ReplacementFloor, SigningRequest
+        _, started = self._started()
+        floor = ReplacementFloor(max_fee_per_gas=60_000_000_000,
+                                 max_priority_fee_per_gas=3_000_000_000)
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr="0x" + "22" * 20,
+                             value_wei=0, data="0x", nonce=7,
+                             max_fee_per_gas=60_000_000_000,
+                             max_priority_fee_per_gas=3_000_000_000)
+        abi_cache = MagicMock(); abi_cache.load.return_value = None
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=started, token_info=lambda c, a: None,
+            icon_cache=None, native_price_usd=None, known_addresses=[ADDR],
+            fixed_nonce=7, fee_floor=floor, replace_label="Speed Up Transaction",
+            nonce_floor_provider=lambda cid, a: 99,   # would bump if not pinned
+        )
+        qtbot.addWidget(dlg)
+        dlg._on_gas_suggested({
+            "base_fee": 20_000_000_000, "estimated_gas": 21000, "gas": 21000,
+            "max_fee_per_gas": 25_000_000_000,
+            "max_priority_fee_per_gas": 1_000_000_000, "nonce": 99,
+        })
+        assert dlg.finalised_request().nonce == 7    # pinned, not 99
+
     def test_gnosis_tiny_tip_survives_the_spinbox(self, qtbot, tmp_qeth):
         """Gnosis idle: base fee ~610 kwei → suggested tip ~30 kwei =
         0.000030528 gwei, below the spinbox's default 4 decimals.

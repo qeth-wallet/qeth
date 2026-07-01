@@ -1134,15 +1134,29 @@ class TransactionsPlugin(Plugin):
 
     def pending_nonce_floor(self, chain_id: int, address: str) -> int | None:
         """One past the highest nonce among the txs WE broadcast from
-        ``address`` and are still tracking as pending — the nonce a brand-new
-        send must use so it doesn't collide with one of ours that's still in
-        flight. ``None`` when nothing is in flight (the mined count is then
-        authoritative). We're the sole signer for the account, so this is
-        exact and needs no trust in the node's flaky "pending" view."""
+        ``address`` and still track (in flight OR already mined) — the lowest
+        nonce a brand-new send may use without colliding with one of ours.
+        ``None`` when we track nothing for the address (the node's mined
+        count is then authoritative).
+
+        We're the sole signer for the account, so our own cache is the full
+        picture: a just-broadcast tx (still pending), or one that mined but
+        whose receipt the node's load balancer hasn't propagated to every
+        backend yet (confirmed in our cache), both bump the floor. Dropped
+        entries are excluded — their nonce was freed for reuse.
+
+        Scans the tx cache directly (main-thread only) rather than the ws
+        live snapshot, so the floor holds with the live watcher disabled
+        (``QETH_LIVE_WS=0``), whose snapshot stays empty — that gap used to
+        let a back-to-back send reuse the mined nonce and silently replace
+        the first tx."""
         addr = address.lower()
         nonces = [
-            t.nonce for t in self._live_pending_provider(chain_id)
-            if t.from_addr.lower() == addr and t.nonce is not None
+            t.nonce
+            for (cid, _acct), txs in self._cache.items() if cid == chain_id
+            for t in txs
+            if not t.dropped and t.nonce is not None
+            and (t.from_addr or "").lower() == addr
         ]
         return max(nonces) + 1 if nonces else None
 
@@ -4934,9 +4948,25 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
             raise SignerError("gas suggestion did not complete")
         from dataclasses import replace
         base = self._build_request()  # raises SignerError if invalid
+        # Re-resolve the nonce at signing time, not just at dialog-open. Two
+        # composer dialogs for the same account can be open at once (a dapp
+        # eth_sendTransaction alongside a GUI Send, or two dapp requests); each
+        # captured its nonce when it opened, so without this the second to
+        # confirm would reuse the first's nonce and replace it in the mempool.
+        # The floor reflects our own txs broadcast since — pending or already
+        # mined — so it bumps past a sibling that confirmed while this dialog
+        # sat open. Replace-mode pins the nonce (_fixed_nonce) and must not be
+        # bumped.
+        nonce = self._suggested_nonce
+        if (self._fixed_nonce is None and nonce is not None
+                and self._nonce_floor_provider is not None):
+            floor = self._nonce_floor_provider(
+                self.chain.chain_id, self._from_addr)
+            if floor is not None:
+                nonce = max(nonce, floor)
         kwargs: dict = {
             "gas": self.spin_gas.value(),
-            "nonce": self._suggested_nonce,
+            "nonce": nonce,
         }
         if self.chain.eip1559:
             assert self.spin_max_fee is not None and self.spin_priority is not None

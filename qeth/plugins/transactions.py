@@ -4430,6 +4430,11 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self._known_addresses_list = list(known_addresses or ())
         # Gas state, populated by _on_gas_suggested.
         self._gas_ready = False
+        # Generation of the latest gas probe. A recipient edit re-kicks
+        # GasSuggestionWorker; workers finish out of order, so only the newest
+        # probe's result may land (ERC-20 transfer gas differs per recipient —
+        # cold vs warm slot — so applying a stale estimate mis-sizes the limit).
+        self._gas_gen = 0
         self._base_fee_wei = 0
         self._estimated_gas = 0
         self._suggested_nonce: int | None = None
@@ -4881,12 +4886,18 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         shared spinners. Applies the host's nonce floor, if any."""
         floor = (self._nonce_floor_provider(self.chain.chain_id, self._from_addr)
                  if self._nonce_floor_provider is not None else None)
+        self._gas_gen += 1
+        gen = self._gas_gen
         gas_worker = GasSuggestionWorker(self.chain, probe, nonce_floor=floor)
-        gas_worker.suggested.connect(self._on_gas_suggested)
-        gas_worker.failed.connect(self._on_gas_failed)
+        gas_worker.suggested.connect(
+            lambda info, g=gen: self._on_gas_suggested(info, gen=g))
+        gas_worker.failed.connect(
+            lambda msg, g=gen: self._on_gas_failed(msg, gen=g))
         self._start_worker(gas_worker)
 
-    def _on_gas_suggested(self, info: dict) -> None:
+    def _on_gas_suggested(self, info: dict, *, gen: int | None = None) -> None:
+        if gen is not None and gen != self._gas_gen:
+            return                    # a newer probe (recipient edit) supersedes
         self._base_fee_wei = int(info.get("base_fee") or 0)
         self._estimated_gas = int(info.get("estimated_gas") or 0)
         self.spin_gas.setValue(info["gas"])
@@ -4924,7 +4935,9 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self._on_gas_ready()
         self._update_state()
 
-    def _on_gas_failed(self, msg: str) -> None:
+    def _on_gas_failed(self, msg: str, *, gen: int | None = None) -> None:
+        if gen is not None and gen != self._gas_gen:
+            return                    # a newer probe supersedes this failure
         self.base_fee_lbl.setText(f"(failed: {msg})")
 
     def _update_max_total(self) -> None:

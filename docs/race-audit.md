@@ -14,6 +14,31 @@ symbols.
 code (several were additionally hand-verified). PLAUSIBLE = the mechanism
 is real but the trigger needs conditions that were not reproduced.
 
+## Progress (branch `race-fixes`)
+
+Done and committed:
+- **1a/1b** — both nonce collisions (re-resolve at sign time; cache-scan
+  floor, ws-independent, counts confirmed).
+- **1c/1d** — confirmation dedupe (`_confirmed_seen` + snapshot rebuild) and
+  drop-reading wall-clock spacing.
+- **1e/1f** — `Dialog` blocks reject/close mid-sign; `eth_accounts` single
+  read; signing-request setup rejects the bridge future on failure. (Finding
+  6 intentionally skipped — can't-happen.)
+- **2a/2b** — `chain.head_balances` co-reads native (`getEthBalance`) and a
+  per-chunk block, returns the conservative min. (P2 step 0 / ledger
+  prerequisite.)
+- **4b** — `Store.save` copies `accounts` under the lock + seq-ordered writes.
+- **3a/3g** — ENS per-generation `_epoch` drops stale discovery/verify
+  landings.
+
+Deferred / not yet done:
+- **P2 BalanceLedger (steps 1–4)** — the big consolidation; 2c/2d/finding-5
+  remain until then (2a/2b already de-risk the worst token races). Best done
+  as a dedicated, reviewed effort.
+- **P3 records block-stamp (steps 2–5)** — 3b/3c/3e remain.
+- **4a single-instance lock** — UX call (forbid vs focus-raise) for the user.
+- **P5** — being picked off individually.
+
 ## The unifying diagnosis
 
 Every guard the recent series added approximates one invariant:

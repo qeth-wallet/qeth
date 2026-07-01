@@ -3202,6 +3202,26 @@ class TestEventPreviewTab:
         dlg.reject()                       # user genuinely cancels now
         assert rejected == [True]
 
+    def test_stale_gas_estimate_dropped_by_generation(self, qtbot, tmp_qeth):
+        """A recipient edit re-kicks gas estimation; the workers finish out of
+        order, so only the NEWEST probe's result may land — a stale estimate is
+        for the wrong recipient (ERC-20 transfer gas differs, cold vs warm
+        slot). Regression for 5d."""
+        _, started = self._started()
+        dlg = self._sign(qtbot, started)
+        dlg._gas_gen = 5                    # the newest probe outstanding is gen 5
+        dlg._on_gas_suggested({
+            "base_fee": 1, "estimated_gas": 21000, "gas": 21000,
+            "max_fee_per_gas": 2, "max_priority_fee_per_gas": 1, "nonce": 0,
+        }, gen=4)                          # a stale worker lands late
+        assert not dlg._gas_ready          # dropped — nothing applied
+        dlg._on_gas_suggested({
+            "base_fee": 1, "estimated_gas": 50000, "gas": 50000,
+            "max_fee_per_gas": 2, "max_priority_fee_per_gas": 1, "nonce": 0,
+        }, gen=5)                          # the current worker lands
+        assert dlg._gas_ready
+        assert dlg.spin_gas.value() == 50000
+
     def test_gnosis_tiny_tip_survives_the_spinbox(self, qtbot, tmp_qeth):
         """Gnosis idle: base fee ~610 kwei → suggested tip ~30 kwei =
         0.000030528 gwei, below the spinbox's default 4 decimals.

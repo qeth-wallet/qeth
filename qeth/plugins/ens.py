@@ -462,6 +462,7 @@ class EnsPanel(QWidget):
         self._writable: set[str] = set()   # names the user manages (can set records)
         self._transferable: set[str] = set()   # names the user can transfer (NFT owner)
         self._reclaimable: set[str] = set()    # owner can reclaim manager (unwrapped)
+        self._subnode_manageable: set[str] = set()  # subdomains you own the parent of
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tree = _EnsTree()
@@ -699,7 +700,8 @@ class EnsPanel(QWidget):
         self._b_copyname.setEnabled(True)
         self._b_transfer.setEnabled(nl in self._transferable)
         self._b_renew.setEnabled(is_2ld and (manages or owns))
-        self._b_manager.setEnabled(nl in self._reclaimable)
+        self._b_manager.setEnabled(
+            nl in self._reclaimable or nl in self._subnode_manageable)
         self._b_addr.setEnabled(manages)
         self._b_content.setEnabled(manages)
 
@@ -730,7 +732,8 @@ class EnsPanel(QWidget):
         nl = pn.name.lower()
         if item.data(0, _OWNERSHIP_ROLE):
             label = item.text(0)
-            if label == "manager" and nl in self._reclaimable:
+            if label == "manager" and (nl in self._reclaimable
+                                       or nl in self._subnode_manageable):
                 return ("write", pn.name, "manager")
             if label == "owner" and nl in self._transferable:
                 return ("write", pn.name, "transfer")
@@ -1068,6 +1071,13 @@ class EnsPanel(QWidget):
         self._reclaimable = set(names)
         self._update_action_bar()
 
+    def set_subnode_manageable(self, names: set[str]) -> None:
+        """Subdomains (lower-case) the user owns the *parent* of — so they can
+        (re)assign the subnode's manager via ``setSubnodeOwner``. Also gates
+        "Set manager" (the subdomain variant)."""
+        self._subnode_manageable = set(names)
+        self._update_action_bar()
+
     def _write_menu_groups(self, n: EnsName) -> list[list[tuple[str, str]]]:
         """The write actions available for ``n`` as ``(label, kind)`` pairs,
         split into the groups the menu separates. Registration-level actions
@@ -1088,6 +1098,9 @@ class EnsPanel(QWidget):
             if nl in self._reclaimable:
                 reg.append(("Set manager", "manager"))
             groups.append(reg)
+        elif n.is_subdomain and nl in self._subnode_manageable:
+            # You own the parent → you can (re)assign this subdomain's manager.
+            groups.append([("Set manager", "manager")])
         if manages:
             groups.append([
                 ("Set ETH address", "addr"),
@@ -1750,6 +1763,10 @@ class EnsPlugin(Plugin):
         # _owned, used to gate the record-write actions (a registrant who isn't
         # the manager can't set records until they reclaim the manager role).
         self._controller: set[str] = set()
+        # Subdomains whose PARENT this account controls — can (re)assign the
+        # subnode's manager via setSubnodeOwner (gates the subdomain "Set
+        # manager"). Recomputed in _refresh_writable.
+        self._subnode_manageable: set[str] = set()
         # One-shot: the next verify pass should wait for the verified head to
         # catch up (set after a write confirms; see _on_refresh).
         self._verify_catchup = False
@@ -1811,6 +1828,7 @@ class EnsPlugin(Plugin):
                 self._panel.set_writable(set())
                 self._panel.set_transferable(set())
                 self._panel.set_reclaimable(set())
+                self._panel.set_subnode_manageable(set())
         self._loaded_for = address
         if not address:
             self._panel.populate([], int(time.time()))
@@ -1961,12 +1979,25 @@ class EnsPlugin(Plugin):
         #   • set-manager (reclaim) → the registrant of an *unwrapped* name
         #     (a wrapped name's controller is managed through the NameWrapper).
         can_sign = self._can_sign(address)
+        # Subdomains whose PARENT this account controls (and both unwrapped) —
+        # the owner of a name can (re)assign its subnodes' managers via
+        # registry.setSubnodeOwner, so gate "Set manager" on those too.
+        self._subnode_manageable = {
+            nl for nl, n in self._names_by_l.items()
+            if n.is_subdomain and n.parent
+            and n.parent.lower() in self._controller
+            and n.parent.lower() not in self._wrapped
+            and nl not in self._wrapped
+        }
+        subnode_mgr = self._subnode_manageable
         if self._panel is not None:
             self._panel.set_writable(self._controller if can_sign else set())
             self._panel.set_transferable(
                 self._registrant if can_sign else set())
             self._panel.set_reclaimable(
                 (self._registrant - self._wrapped) if can_sign else set())
+            self._panel.set_subnode_manageable(
+                subnode_mgr if can_sign else set())
 
     # --- records (lazy) ---------------------------------------------------
 
@@ -2186,13 +2217,22 @@ class EnsPlugin(Plugin):
 
     def _set_manager(self, name: str) -> None:
         from ..ens_app import _is_eth_2ld
-        if (self._panel is None or not _is_eth_2ld(name)
-                or name.lower() in self._wrapped):
+        if self._panel is None:
             return
         host = self.host
         addr = host.selected_address if host is not None else ""
-        self._open_composer(
-            name, self._set_manager_op(name, _checksum(addr or "") or ""))
+        self_addr = _checksum(addr or "") or ""
+        nl = name.lower()
+        if EnsName(name).is_subdomain:
+            # Subdomain: (re)assign its manager through the parent, if we own the
+            # parent. Wrapped subnodes go through the NameWrapper — not yet.
+            if nl in self._subnode_manageable:
+                self._open_composer(
+                    name, self._set_subnode_manager_op(name, self_addr))
+        elif _is_eth_2ld(name) and nl not in self._wrapped:
+            # 2LD: the registrant reclaims via the BaseRegistrar.
+            self._open_composer(
+                name, self._set_manager_op(name, self_addr))
 
     # --- op construction ---------------------------------------------------
 
@@ -2412,6 +2452,40 @@ class EnsPlugin(Plugin):
             note="The manager (registry controller) is the role that sets the "
                  "resolver, records and subdomains. As the owner you can "
                  "reclaim it — to yourself or anyone else.")
+
+    def _set_subnode_manager_op(self, name: str, self_addr: str) -> _EnsOp:
+        """Set the manager of a subdomain you own the PARENT of, via
+        registry.setSubnodeOwner — the parent controller's power to reassign a
+        subnode. Defaults to yourself (so you can then edit its records)."""
+        from .. import ens_write
+        parent = name.split(".", 1)[1]
+        label = name.split(".", 1)[0]
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            return _RecipientFields(
+                make_address_field=composer._make_address_field,
+                label="Manager", initial=self_addr,
+                placeholder="0x… manager address")
+
+        def build(_nm: str, fields: Any) -> tuple[str, str]:
+            mgr = _checksum(fields.value())
+            if mgr is None:
+                raise ValueError("The manager must be a valid 0x address.")
+            return ens_write.set_subnode_manager(parent, label, mgr)
+
+        def decoded(_nm: str, fields: Any) -> dict:
+            mgr = _checksum(fields.value()) or fields.value() or "0x…"
+            return {"function": "setSubnodeOwner", "args": [
+                {"name": "node", "type": "bytes32", "value": parent},
+                {"name": "label", "type": "bytes32", "value": label},
+                {"name": "owner", "type": "address", "value": mgr}]}
+
+        return _EnsOp(
+            title=f"Set manager · {name}", confirm_label="Set manager",
+            make_fields=make_fields, build=build, decoded=decoded,
+            rediscover=True,
+            note=f"You own {parent}, so you can set this subdomain's manager. "
+                 "Set it to yourself to then edit its records.")
 
     def _set_resolver_op(self, name: str) -> _EnsOp:
         """The input-less set-resolver bootstrap (the resolver-gate target)."""

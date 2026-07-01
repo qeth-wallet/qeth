@@ -800,6 +800,15 @@ class TestEnsPanel:
         n = EnsName(name)
         return [kind for group in panel._write_menu_groups(n) for _label, kind in group]
 
+    def test_subnode_manageable_offers_only_set_manager(self, qtbot):
+        # A subdomain you own the parent of offers "Set manager" (reassign the
+        # subnode) — not the record actions, until you actually control it.
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.set_subnode_manageable({"ops.parent.eth"})
+        assert self._menu_kinds(panel, "ops.parent.eth") == ["manager"]
+        assert self._menu_kinds(panel, "nope.parent.eth") == []   # not ours
+
     def test_owner_only_name_offers_transfer_and_set_manager(self, qtbot):
         # A name held as registrant but managed elsewhere (crv.eth) must still
         # offer Transfer + Set manager (+ renew), and NOT the record actions.
@@ -1539,13 +1548,34 @@ class TestEnsWriteActions:
             ["uint256", "address"], [token_id, self.OTHER]).hex()
         assert "Set manager" in op.confirm_label
 
-    def test_set_manager_rejects_subdomain_and_wrapped(self, qtbot):
+    def test_set_manager_rejects_unmanageable_subdomain_and_wrapped(self, qtbot):
         plugin, host, store = self._plugin(qtbot, owned=("blog.vitalik.eth",))
-        plugin._set_manager("blog.vitalik.eth")          # not a .eth 2LD
+        plugin._set_manager("blog.vitalik.eth")   # subdomain we don't own the parent of
         assert host.ens_ops == []
         plugin._wrapped.add("vitalik.eth")
         plugin._set_manager("vitalik.eth")               # wrapped → no reclaim
         assert host.ens_ops == []
+
+    def test_set_manager_on_owned_parent_subdomain_uses_setsubnodeowner(self, qtbot):
+        from qeth.ens_app import ENS_REGISTRY, namehash, _labelhash
+        plugin, host, store = self._plugin(qtbot, owned=("vitalik.eth",))
+        # We control vitalik.eth and blog.vitalik.eth is surfaced under it →
+        # "Set manager" reassigns the subnode via registry.setSubnodeOwner.
+        plugin._names_by_l["blog.vitalik.eth"] = EnsName(
+            "blog.vitalik.eth", source="subnode")
+        plugin._subnode_manageable.add("blog.vitalik.eth")
+        plugin._set_manager("blog.vitalik.eth")
+        name, op, *_ = host.ens_ops[0]
+        assert name == "blog.vitalik.eth"
+        dlg = self._composer(op, name="blog.vitalik.eth")
+        qtbot.addWidget(dlg)
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_REGISTRY.lower()
+        assert req.data[2:10] == "06ab5923"              # setSubnodeOwner
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "bytes32", "address"],
+            [namehash("vitalik.eth"), _labelhash("blog"), self.OTHER]).hex()
 
 
 # --- EnsPlugin: name-row resolution follows the head address read ----------

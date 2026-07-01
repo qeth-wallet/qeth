@@ -379,13 +379,17 @@ class EthClient:
     # --- batch helpers (built on Multicall context manager) ---------------
 
     def multicall(self, *, batch_size: int = 100,
-                  block: str = "latest") -> "Multicall":
+                  block: str = "latest",
+                  track_blocks: bool = False) -> "Multicall":
         """Open a batching context. Calls queued via ``mc.add(...)`` or the
         ERC-20 helpers (``balance_of``, ``name``, ``symbol``, ``decimals``)
         are flushed as ``aggregate3`` batches when the context exits. ``block``
         pins the batch's block tag (default ``latest``; pass ``finalized`` for
-        verified reads against irreversible state)."""
-        return Multicall(self, batch_size=batch_size, block=block)
+        verified reads against irreversible state). ``track_blocks`` co-reads a
+        per-chunk getBlockNumber so every pending carries ``.block`` and
+        ``mc.min_block()`` is available (see :meth:`Multicall.min_block`)."""
+        return Multicall(self, batch_size=batch_size, block=block,
+                         track_blocks=track_blocks)
 
     def multicall_erc20_balances(
         self, tokens: list[str], holder: str, batch_size: int = 100,
@@ -406,22 +410,28 @@ class EthClient:
 
     def head_balances(
         self, tokens: list[str], holder: str, batch_size: int = 100,
-    ) -> "tuple[int | None, dict[str, int]]":
-        """``multicall_erc20_balances`` at ``latest`` PLUS the block the read
-        actually ran at (from ``Multicall3.getBlockNumber()`` in the same
-        aggregate). Reading at ``latest`` never fails with "block in the future"
-        on a lagging backend, and the co-read block lets the caller order this
-        result against other concurrent reads. Returns ``(block, balances)``;
-        ``block`` is ``None`` if the height couldn't be read."""
-        if not tokens:
-            return None, {}
-        with self.multicall(batch_size=batch_size, block="latest") as mc:
-            blk = mc.block_number()
+    ) -> "tuple[int | None, int | None, dict[str, int]]":
+        """Read the holder's NATIVE balance (``getEthBalance``), each token's
+        ``balanceOf``, and the block each chunk ran at (``getBlockNumber``, one
+        per chunk) — all in one ``aggregate3`` at ``latest``. Returns
+        ``(block, native_wei, balances)``.
+
+        Co-reading everything in a single aggregate keeps native, tokens and
+        height on the same backend per chunk: no separate ``eth_getBalance`` /
+        ``eth_blockNumber`` a load balancer could serve from a lagging backend
+        (which is how a native or per-token value used to get stamped with a
+        height it wasn't read at). Reading at ``latest`` never fails "block in
+        the future". ``block`` is the MINIMUM height across chunks
+        (conservative — see :meth:`Multicall.min_block`), ``None`` if none
+        reported; ``native_wei`` is ``None`` if that read failed."""
+        with self.multicall(batch_size=batch_size, block="latest",
+                            track_blocks=True) as mc:
+            nat = mc.eth_balance(holder)
             queued = [(t, mc.balance_of(t, holder)) for t in tokens]
         balances = {t.lower(): f.value for t, f in queued
                     if f.success and f.value is not None}
-        block = int(blk.value) if (blk.success and blk.value is not None) else None
-        return block, balances
+        native = int(nat.value) if (nat.success and nat.value is not None) else None
+        return mc.min_block(), native, balances
 
     def multicall_erc20_metadata(
         self, tokens: list[str], batch_size: int = 30,
@@ -471,7 +481,7 @@ class _Pending:
     ``.success`` first.
     """
 
-    __slots__ = ("success", "raw", "value", "_decoder")
+    __slots__ = ("success", "raw", "value", "block", "_decoder")
 
     def __init__(self, decoder: Callable | None = None):
         self.success: bool | None = None  # None until flushed
@@ -479,6 +489,10 @@ class _Pending:
         # None until flushed; then the decoded call result (int, str,
         # tuple, …) or the raw bytes when there's no decoder.
         self.value: Any = None
+        # The block THIS pending's chunk executed at — set on flush when the
+        # enclosing Multicall was opened with ``track_blocks``; ``None``
+        # otherwise, or when the chunk's getBlockNumber read failed.
+        self.block: int | None = None
         self._decoder = decoder
 
 
@@ -496,7 +510,7 @@ class Multicall:
     """
 
     def __init__(self, client: EthClient, *, batch_size: int = 100,
-                 block: str = "latest"):
+                 block: str = "latest", track_blocks: bool = False):
         self.client = client
         self.batch_size = batch_size
         # Block tag the aggregate3 eth_calls run at. "latest" for the usual
@@ -506,6 +520,11 @@ class Multicall:
         # optimistic head outruns the execution RPC ("header for hash not
         # found").
         self.block = block
+        # When True, prepend getBlockNumber to EACH flushed chunk so every
+        # pending learns the height its own chunk ran at (behind a load
+        # balancer, chunks land on backends at different heads). See _flush.
+        self.track_blocks = track_blocks
+        self._chunk_blocks: list[int | None] = []
         self._queued: list[tuple[str, bytes, _Pending]] = []
 
     def __enter__(self) -> "Multicall":
@@ -551,6 +570,30 @@ class Multicall:
         calldata = _SEL_BALANCE_OF + b"\x00" * 12 + bytes.fromhex(addr_hex)
         return self.add(token, calldata, decoder=_decode_uint256)
 
+    def eth_balance(self, holder: str) -> _Pending:
+        """Queue ``Multicall3.getEthBalance(holder)`` — the holder's NATIVE
+        balance. Co-reading it in the same aggregate as the token balanceOfs
+        keeps native on the same backend (and block) per chunk; a separate
+        ``eth_getBalance`` can be served by a lagging backend behind a load
+        balancer, so its value wouldn't match the block the tokens were read
+        at."""
+        addr_hex = (
+            holder[2:].lower() if holder.startswith("0x") else holder.lower()
+        )
+        # keccak256("getEthBalance(address)")[:4]
+        calldata = bytes.fromhex("4d2301cc") + b"\x00" * 12 + bytes.fromhex(addr_hex)
+        return self.add(MULTICALL3, calldata, decoder=_decode_uint256)
+
+    def min_block(self) -> int | None:
+        """The lowest block any flushed chunk ran at (populated only when
+        ``track_blocks``). A conservative single stamp for the whole batch:
+        never NEWER than the block a value was actually read at, so a chunk
+        served by a lagging backend can't make its values look fresher than
+        they are (which would let a stale read override a fresh one under the
+        consumer's block-ordering). ``None`` if no chunk reported a height."""
+        blocks = [b for b in self._chunk_blocks if b is not None]
+        return min(blocks) if blocks else None
+
     def name(self, token: str) -> _Pending:
         return self.add(token, _SEL_NAME, decoder=_decode_string_or_bytes32)
 
@@ -563,9 +606,14 @@ class Multicall:
     # ---- internal -------------------------------------------------------
 
     def _flush(self) -> None:
+        self._chunk_blocks = []
         for start in range(0, len(self._queued), self.batch_size):
             batch = self._queued[start:start + self.batch_size]
             calls = [(target, True, data) for target, data, _ in batch]
+            if self.track_blocks:
+                # Prepend getBlockNumber so THIS chunk reports the height it
+                # actually ran at. keccak256("getBlockNumber()")[:4] = 42cbb15c.
+                calls.insert(0, (MULTICALL3, True, bytes.fromhex("42cbb15c")))
             calldata = _SEL_AGGREGATE3 + abi_encode(
                 ["(address,bool,bytes)[]"], [calls]
             )
@@ -581,8 +629,17 @@ class Multicall:
                 log.debug("multicall batch failed: %s", e)
                 for _, _, pending in batch:
                     pending.success = False
+                if self.track_blocks:
+                    self._chunk_blocks.append(None)
                 continue
+            chunk_block: int | None = None
+            if self.track_blocks:
+                blk_success, blk_ret = decoded[0]
+                chunk_block = _decode_uint256(blk_ret) if blk_success else None
+                self._chunk_blocks.append(chunk_block)
+                decoded = decoded[1:]   # drop the injected block result
             for (_, _, pending), (success, retdata) in zip(batch, decoded):
+                pending.block = chunk_block
                 pending.success = bool(success)
                 if not success:
                     continue

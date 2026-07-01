@@ -123,12 +123,13 @@ def test_head_balances_reads_at_latest_with_a_consistent_block(anvil):
     height matches the values. This is what makes reads reliable behind a
     load-balanced / multi-backend node — the bug where pinning to
     hex(get_block_number()) failed when the read hit a backend without that
-    block yet."""
+    block yet. Native is co-read in the same aggregate (getEthBalance)."""
     from qeth.chain import EthClient
     c = EthClient(anvil.chain)
     head = int(anvil.rpc("eth_blockNumber"), 16)
-    block, bals = c.head_balances([USDC], WHALE)
+    block, native, bals = c.head_balances([USDC], WHALE)
     assert block is not None and block >= head - 2      # co-read block, current
+    assert native == c.get_balance(WHALE, "latest")     # co-read native matches
     assert USDC.lower() in bals                          # whale holds USDC
     assert bals[USDC.lower()] == anvil.erc20_balance(USDC, WHALE)
 

@@ -293,6 +293,88 @@ class TestMulticallContextManager:
         assert sym_f.value == "MKR"
         assert dec_f.value == 18
 
+    def test_no_track_blocks_leaves_pending_block_none(self, eth_client,
+                                                       monkeypatch):
+        token = "0x" + "a" * 40
+        holder = "0x" + "b" * 40
+        response = _aggregate3_response([(True, (5).to_bytes(32, "big"))])
+        monkeypatch.setattr(eth_client, "call",
+                            lambda tx, block="latest": response)
+        with eth_client.multicall() as mc:   # track_blocks defaults False
+            p = mc.balance_of(token, holder)
+        assert p.value == 5
+        assert p.block is None
+        assert mc.min_block() is None
+
+    def test_track_blocks_stamps_each_pending_with_its_chunk_block(
+            self, eth_client, monkeypatch):
+        """With track_blocks, each chunk carries an injected getBlockNumber
+        (result 0); every pending in that chunk is stamped with it, and
+        min_block() is the lowest — the conservative whole-batch stamp."""
+        tokens = ["0x" + c * 40 for c in "ab"]
+        holder = "0x" + "d" * 40
+        # batch_size=1 → one token per chunk; simulate an LB serving the two
+        # chunks at DIFFERENT heights.
+        responses = iter([
+            _aggregate3_response([(True, (50).to_bytes(32, "big")),   # block
+                                  (True, (1).to_bytes(32, "big"))]),   # bal a
+            _aggregate3_response([(True, (60).to_bytes(32, "big")),   # block
+                                  (True, (2).to_bytes(32, "big"))]),   # bal b
+        ])
+        monkeypatch.setattr(eth_client, "call",
+                            lambda tx, block="latest": next(responses))
+        with eth_client.multicall(batch_size=1, track_blocks=True) as mc:
+            a = mc.balance_of(tokens[0], holder)
+            b = mc.balance_of(tokens[1], holder)
+        assert a.value == 1 and a.block == 50
+        assert b.value == 2 and b.block == 60
+        assert mc.min_block() == 50
+
+    def test_head_balances_coreads_native_block_and_tokens(
+            self, eth_client, monkeypatch):
+        """head_balances co-reads getBlockNumber + getEthBalance + balanceOf in
+        one aggregate and returns (block, native, balances). Fixes 2b (native
+        no longer a separate eth_getBalance that could lag the multicall)."""
+        token = "0x" + "a" * 40
+        holder = "0x" + "b" * 40
+        response = _aggregate3_response([
+            (True, (0x1234).to_bytes(32, "big")),   # getBlockNumber (injected)
+            (True, (999).to_bytes(32, "big")),       # getEthBalance (native)
+            (True, (500).to_bytes(32, "big")),       # balanceOf(token)
+        ])
+        monkeypatch.setattr(eth_client, "call",
+                            lambda tx, block="latest": response)
+        block, native, bals = eth_client.head_balances([token], holder)
+        assert block == 0x1234
+        assert native == 999
+        assert bals[token.lower()] == 500
+
+    def test_head_balances_stamps_the_minimum_chunk_block(
+            self, eth_client, monkeypatch):
+        """Behind a load balancer the chunks can land on backends at different
+        heights. head_balances returns the MINIMUM so a value is never stamped
+        NEWER than it was read — the fix for 2a, where a stale chunk-2 read got
+        chunk-1's fresher block and resurrected a just-sent token."""
+        tokens = ["0x" + c * 40 for c in "ab"]
+        holder = "0x" + "d" * 40
+        # batch_size=1 → chunks [native], [tokA], [tokB]; the tokA chunk lags.
+        responses = iter([
+            _aggregate3_response([(True, (100).to_bytes(32, "big")),   # block
+                                  (True, (7).to_bytes(32, "big"))]),    # native
+            _aggregate3_response([(True, (98).to_bytes(32, "big")),    # LAGS
+                                  (True, (11).to_bytes(32, "big"))]),   # tokA
+            _aggregate3_response([(True, (101).to_bytes(32, "big")),   # block
+                                  (True, (13).to_bytes(32, "big"))]),   # tokB
+        ])
+        monkeypatch.setattr(eth_client, "call",
+                            lambda tx, block="latest": next(responses))
+        block, native, bals = eth_client.head_balances(
+            tokens, holder, batch_size=1)
+        assert block == 98          # the minimum — conservative stamp
+        assert native == 7
+        assert bals[tokens[0].lower()] == 11
+        assert bals[tokens[1].lower()] == 13
+
     def test_add_with_custom_decoder(self, eth_client, monkeypatch):
         token = "0x" + "a" * 40
         response = _aggregate3_response([(True, b"\x00" * 31 + b"\x2a")])  # 42

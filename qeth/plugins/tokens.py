@@ -215,22 +215,21 @@ class BalanceWorker(QThread):
     def run(self) -> None:
         try:
             client = EthClient(self.chain)
-            # Read at "latest" (never fails with "block in the future" on a
-            # lagging backend) and take the block from the SAME multicall, so
-            # the height matches the values behind a load balancer. The block
-            # lets consumers order this result against other concurrent reads
-            # (per-token block-ordering in _persist_targeted_balances); a lagging
-            # read just carries a lower block and is superseded by a fresher one.
-            native = client.get_balance(self.address, "latest")
-            if self.contracts:
-                block, balances = client.head_balances(
-                    self.contracts, self.address)
-            else:
-                block, balances = None, {}
-                try:
-                    block = client.get_block_number()
-                except Exception:
-                    pass
+            # Co-read native + token balances + block in ONE aggregate at
+            # "latest" (never "block in the future" on a lagging backend), so
+            # the native value shares the tokens' backend/height per chunk
+            # rather than coming from a separate eth_getBalance a load balancer
+            # could serve stale. The block lets consumers order this result
+            # against concurrent reads (per-token block-ordering); a lagging
+            # read carries a lower block and is superseded by a fresher one.
+            block, native, balances = client.head_balances(
+                self.contracts, self.address)
+            if native is None:
+                # getEthBalance didn't come back (aggregate chunk-0 failure) —
+                # fall back to a plain read so we still emit a native value.
+                # No block consistency lost: a failed aggregate carries no
+                # block for the consumer to order against anyway.
+                native = client.get_balance(self.address, "latest")
             self.refreshed.emit(self.chain.chain_id, native, balances, block)
         except Exception as e:
             self.failed.emit(str(e))

@@ -972,9 +972,11 @@ class EnsPanel(QWidget):
                     self._set_status(item, "pending", _PENDING_TIP)
                     item.setToolTip(0, _PENDING_TIP)
                     continue
-                if src != "custom":
+                if src not in ("custom", "subnode"):
                     # A real indexer lie (BENS over-reported). Drop it. Pinned
-                    # (custom) names are exempt — watching one is intentional.
+                    # (custom) names and parent-owned subdomains (subnode) are
+                    # exempt — showing them even when this account doesn't
+                    # control them is the point (you own the parent).
                     self._remove_item(item, name_l)
                     removed.append(name_l)
                     continue
@@ -1844,18 +1846,47 @@ class EnsPlugin(Plugin):
         host = self.host
         if host is None or host.selected_address != address:
             return                                  # view moved on
+        # Cache only the account's OWN discovered names (the cross-account
+        # surfacing below is derived, not this account's).
         self._cache.save(ENS_CHAIN_ID, address, names)
-        self._render(names)
-        self._verify(address, [n.name for n in names])
+        self._render(names)                          # augments + sets _names_by_l
+        self._verify(address, list(self._names_by_l))  # verify the surfaced set too
+
+    def _with_cross_account_subdomains(
+            self, names: list[EnsName]) -> list[EnsName]:
+        """Surface subdomains discovered under the wallet's OTHER accounts whose
+        parent the current account owns — so a name's owner sees (and can then
+        manage) its subdomains even when another of their accounts still holds
+        them. Sourced from the per-account cache (a hint; verify confirms), so
+        no manual pinning is needed. Tagged ``source="subnode"`` — kept even
+        when the current account doesn't control them (it owns the parent)."""
+        owned = {n.name.lower() for n in names}
+        have = set(owned)
+        cur = (self._loaded_for or "").lower()
+        extra: list[EnsName] = []
+        for acct in self._store.accounts:
+            addr = acct.get("address", "")
+            if not addr or addr.lower() == cur:
+                continue
+            for n in (self._cache.load(ENS_CHAIN_ID, addr) or []):
+                nl, p = n.name.lower(), n.parent
+                if (n.is_subdomain and p and p.lower() in owned
+                        and nl not in have):
+                    have.add(nl)
+                    extra.append(EnsName(n.name, owner=n.owner,
+                                         source="subnode"))
+        return names + extra
 
     def _render(self, names: list[EnsName]) -> None:
         if self._panel is None:
             return
         # Keep names the chain already disowned this session filtered out, so a
-        # refresh doesn't flash the dropped indexer lies back in. Pinned names
-        # are exempt (intentionally watched even when unowned).
+        # refresh doesn't flash the dropped indexer lies back in. Pinned +
+        # parent-owned subdomains are exempt (intentionally shown even unowned).
         names = [n for n in names
-                 if n.source == "custom" or n.name.lower() not in self._denied]
+                 if n.source in ("custom", "subnode")
+                 or n.name.lower() not in self._denied]
+        names = self._with_cross_account_subdomains(names)
         self._names_by_l = {n.name.lower(): n for n in names}
         self._panel.populate(build_tree(names), int(time.time()))
 

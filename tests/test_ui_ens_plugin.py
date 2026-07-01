@@ -298,6 +298,30 @@ class TestEnsPanel:
         assert labels() == ["zsub.vitalik.eth", "asub.vitalik.eth",
                             "content", "url", "com.github", "address"]
 
+    def test_parent_owned_subnode_kept_not_dropped(self, qtbot):
+        # A subdomain surfaced because you own its parent (source="subnode") is
+        # NOT dropped even though the chain says another account controls it —
+        # and its manager row shows that other account.
+        me, other = "0x" + "11" * 20, "0x" + "22" * 20
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([
+            EnsName("parent.eth"),
+            EnsName("ops.parent.eth", source="subnode")]), NOW)
+        removed = panel.mark_verified({
+            "parent.eth": OwnershipCheck(controller=me, registrant=me,
+                                         owner_known=True),
+            "ops.parent.eth": OwnershipCheck(controller=other,
+                                             owner_known=True),   # not ours
+        }, me)
+        assert "ops.parent.eth" not in removed
+        ops = panel._items_by_name.get("ops.parent.eth")
+        assert ops is not None                       # kept, nested under parent
+        from eth_utils import to_checksum_address
+        mgr = next(ops.child(i) for i in range(ops.childCount())
+                   if ops.child(i).text(0) == "manager")
+        assert mgr.text(2) == to_checksum_address(other)
+
     def test_verified_records_get_check_prefix(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)
@@ -1064,6 +1088,33 @@ class TestEnsWriteActions:
             abi_source=MagicMock(), abi_cache=MagicMock(),
             start_worker=start_worker or (lambda w: None),
             identity_source=None, identity_cache=None, tx_cache=None)
+
+    def test_cross_account_subdomain_surfaced_from_cache(self, qtbot, tmp_path):
+        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens import ENS_CHAIN_ID
+        store = _StubStore()
+        store.accounts = [{"address": ADDR, "source": "hot"},
+                          {"address": self.OTHER, "source": "hot"}]
+        plugin = EnsPlugin(store)
+        plugin._cache = EnsCache(tmp_path)           # isolated
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        plugin._loaded_for = ADDR
+        # OTHER account controls a subdomain of a name ADDR owns
+        plugin._cache.save(ENS_CHAIN_ID, self.OTHER,
+                           [EnsName("ops.swiss.eth", owner=self.OTHER)])
+        by = {n.name: n.source
+              for n in plugin._with_cross_account_subdomains(
+                  [EnsName("swiss.eth")])}
+        assert by.get("ops.swiss.eth") == "subnode"          # surfaced
+        # not when we don't own the parent
+        assert "ops.swiss.eth" not in {
+            n.name for n in
+            plugin._with_cross_account_subdomains([EnsName("nope.eth")])}
+        # not duplicated when we already have it
+        dup = plugin._with_cross_account_subdomains(
+            [EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        assert [n.name for n in dup].count("ops.swiss.eth") == 1
 
     def test_owned_signable_name_is_writable(self, qtbot):
         plugin, host, store = self._plugin(qtbot)

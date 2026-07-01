@@ -196,7 +196,13 @@ _lock = threading.Lock()
 
 
 def _stop_all() -> None:
-    for sc in _sidecars.values():
+    # Snapshot under the lock: a worker spawning a sidecar during interpreter
+    # shutdown would otherwise mutate _sidecars mid-iteration (RuntimeError,
+    # leaking the remaining helios processes). stop() runs outside the lock (it
+    # can block on process teardown).
+    with _lock:
+        scs = list(_sidecars.values())
+    for sc in scs:
         sc.stop()
 
 

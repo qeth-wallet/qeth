@@ -63,10 +63,13 @@ def _ensure_heavy_imports() -> None:
     g["requests"] = requests
     g["abi_decode"] = abi_decode
     g["abi_encode"] = abi_encode
-    g["Web3"] = Web3
     g["Web3RPCError"] = Web3RPCError
     g["ExtraDataToPOAMiddleware"] = ExtraDataToPOAMiddleware
     g["HTTPProvider"] = HTTPProvider
+    # Publish the guard symbol LAST: a second thread that passes the
+    # `"Web3" in g` check must find every other name already published, or it
+    # NameErrors in _failover_provider between here and the other assignments.
+    g["Web3"] = Web3
 
 from . import USER_AGENT
 

@@ -52,10 +52,12 @@ def _ensure_async_imports() -> None:
     from web3.providers.persistent import WebSocketProvider
     from web3.providers.rpc import AsyncHTTPProvider
     g["aiohttp"] = aiohttp
-    g["AsyncWeb3"] = AsyncWeb3
     g["ExtraDataToPOAMiddleware"] = ExtraDataToPOAMiddleware
     g["WebSocketProvider"] = WebSocketProvider
     g["AsyncHTTPProvider"] = AsyncHTTPProvider
+    # Publish the guard symbol LAST so a second thread passing the
+    # `"AsyncWeb3" in g` check finds every other name already set.
+    g["AsyncWeb3"] = AsyncWeb3
 
 
 def is_ws_url(url: str) -> bool:

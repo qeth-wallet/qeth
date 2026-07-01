@@ -47,12 +47,16 @@ class LedgerHidService:
 
     def submit(self, fn: Callable[[], T]) -> Future[T]:
         """Queue ``fn`` for execution on the Ledger HID thread."""
+        future: Future[T] = Future()
         with self._lock:
             if self._stopped:
                 raise RuntimeError("Ledger HID service has been stopped")
             self._ensure_started_locked()
-        future: Future[T] = Future()
-        self._queue.put(_QueuedJob(future=cast("Future[Any]", future), fn=fn))
+            # Enqueue INSIDE the lock: shutdown_for_tests also holds it while
+            # setting _stopped and putting the sentinel, so a job can't be
+            # queued after the sentinel (which the worker never drains → the
+            # caller would block for the full timeout).
+            self._queue.put(_QueuedJob(future=cast("Future[Any]", future), fn=fn))
         return future
 
     def call(

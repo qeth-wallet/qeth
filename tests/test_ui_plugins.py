@@ -3202,23 +3202,26 @@ class TestEventPreviewTab:
         dlg.reject()                       # user genuinely cancels now
         assert rejected == [True]
 
-    def test_stale_gas_estimate_dropped_by_generation(self, qtbot, tmp_qeth):
-        """A recipient edit re-kicks gas estimation; the workers finish out of
-        order, so only the NEWEST probe's result may land — a stale estimate is
-        for the wrong recipient (ERC-20 transfer gas differs, cold vs warm
-        slot). Regression for 5d."""
+    def test_stale_gas_estimate_dropped(self, qtbot, tmp_qeth):
+        """A recipient edit re-kicks GasSuggestionWorker; the workers finish out
+        of order, so only the LATEST one's result may land (a stale estimate is
+        for the wrong recipient — ERC-20 transfer gas differs, cold vs warm
+        slot). Dropped by emitting-worker identity. Regression for 5d."""
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import GasSuggestionWorker
         _, started = self._started()
         dlg = self._sign(qtbot, started)
-        dlg._gas_gen = 5                    # the newest probe outstanding is gen 5
-        dlg._on_gas_suggested({
-            "base_fee": 1, "estimated_gas": 21000, "gas": 21000,
-            "max_fee_per_gas": 2, "max_priority_fee_per_gas": 1, "nonce": 0,
-        }, gen=4)                          # a stale worker lands late
+        info = {"base_fee": 1, "estimated_gas": 21000, "gas": 21000,
+                "max_fee_per_gas": 2, "max_priority_fee_per_gas": 1, "nonce": 0}
+        cur = dlg._gas_worker              # the worker kicked on construction
+        assert cur is not None
+        # A stale (superseded) worker emits late — must be dropped.
+        stale = GasSuggestionWorker(dlg.chain, MagicMock())
+        stale.suggested.connect(dlg._on_gas_suggested)
+        stale.suggested.emit({**info, "gas": 99999})
         assert not dlg._gas_ready          # dropped — nothing applied
-        dlg._on_gas_suggested({
-            "base_fee": 1, "estimated_gas": 50000, "gas": 50000,
-            "max_fee_per_gas": 2, "max_priority_fee_per_gas": 1, "nonce": 0,
-        }, gen=5)                          # the current worker lands
+        # The latest worker's result applies.
+        cur.suggested.emit({**info, "gas": 50000})
         assert dlg._gas_ready
         assert dlg.spin_gas.value() == 50000
 

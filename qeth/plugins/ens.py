@@ -1890,13 +1890,18 @@ class EnsPlugin(Plugin):
         # change (so a lagging proof can't overwrite it); a normal load doesn't.
         self._verify_catchup = catchup
         worker = EnsNamesWorker(addr, sorted(self._store.custom_ens_names))
-        epoch = self._epoch
-        worker.ready.connect(
-            lambda a, n, ep=epoch: self._on_names_ready(a, n, epoch=ep))
+        # Tag the worker with its generation and connect a BOUND method (not a
+        # lambda): a lambda isn't receiver-tracked, so a worker outliving a torn-
+        # down plugin would fire into the deleted object (segfault). The slot
+        # reads the generation off the emitting worker (self.sender()).
+        worker._epoch = self._epoch     # type: ignore[attr-defined]
+        worker.ready.connect(self._on_names_ready)
         self._start(worker)
 
     def _on_names_ready(self, address: str, names: list[EnsName],
                         *, epoch: int | None = None) -> None:
+        if epoch is None:
+            epoch = getattr(self.sender(), "_epoch", None)
         if epoch is not None and epoch != self._epoch:
             return                                  # superseded generation
         host = self.host
@@ -1959,9 +1964,10 @@ class EnsPlugin(Plugin):
         worker = EnsVerifyWorker(chain, address, names, wait_s=_OWNERSHIP_WAIT_S,
                                  catchup=self._verify_catchup)
         self._verify_catchup = False        # consume the one-shot flag
-        epoch = self._epoch
-        worker.ready.connect(
-            lambda a, s, v, ep=epoch: self._on_verified(a, s, v, epoch=ep))
+        # Bound method + worker tag, not a lambda (receiver-tracked → no fire
+        # into a torn-down plugin; see _on_refresh).
+        worker._epoch = self._epoch     # type: ignore[attr-defined]
+        worker.ready.connect(self._on_verified)
         self._start(worker)
 
     def _on_verified(self, address: str, states: dict[str, OwnershipCheck],
@@ -1970,6 +1976,8 @@ class EnsPlugin(Plugin):
         # immediate owner/manager/role-gate update, then the Helios-proven read
         # (verified=True) that earns the ✓ and decides drops. Both carry fresh
         # roles — the verified one only after it caught up (see EnsVerifyWorker).
+        if epoch is None:
+            epoch = getattr(self.sender(), "_epoch", None)
         if epoch is not None and epoch != self._epoch:
             # A newer refresh superseded the generation this worker was spawned
             # in — dropping it stops a lagging verified pass from repainting the

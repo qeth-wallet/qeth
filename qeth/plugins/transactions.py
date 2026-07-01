@@ -4430,11 +4430,15 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self._known_addresses_list = list(known_addresses or ())
         # Gas state, populated by _on_gas_suggested.
         self._gas_ready = False
-        # Generation of the latest gas probe. A recipient edit re-kicks
+        # The latest gas probe's worker. A recipient edit re-kicks
         # GasSuggestionWorker; workers finish out of order, so only the newest
-        # probe's result may land (ERC-20 transfer gas differs per recipient —
-        # cold vs warm slot — so applying a stale estimate mis-sizes the limit).
-        self._gas_gen = 0
+        # one's result may land (ERC-20 transfer gas differs per recipient —
+        # cold vs warm slot — so a stale estimate mis-sizes the limit). We
+        # compare the emitting worker (self.sender()) against this rather than
+        # binding a generation into a lambda: a lambda isn't receiver-tracked,
+        # so a worker that outlives a closed dialog would fire into the deleted
+        # dialog (segfault). A bound-method connection auto-disconnects.
+        self._gas_worker: GasSuggestionWorker | None = None
         self._base_fee_wei = 0
         self._estimated_gas = 0
         self._suggested_nonce: int | None = None
@@ -4886,17 +4890,24 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         shared spinners. Applies the host's nonce floor, if any."""
         floor = (self._nonce_floor_provider(self.chain.chain_id, self._from_addr)
                  if self._nonce_floor_provider is not None else None)
-        self._gas_gen += 1
-        gen = self._gas_gen
         gas_worker = GasSuggestionWorker(self.chain, probe, nonce_floor=floor)
-        gas_worker.suggested.connect(
-            lambda info, g=gen: self._on_gas_suggested(info, gen=g))
-        gas_worker.failed.connect(
-            lambda msg, g=gen: self._on_gas_failed(msg, gen=g))
+        self._gas_worker = gas_worker
+        # Bound-method connections (receiver-tracked: auto-disconnect if the
+        # dialog is destroyed while the worker runs); the slots drop a result
+        # from any worker but the latest (self.sender() identity).
+        gas_worker.suggested.connect(self._on_gas_suggested)
+        gas_worker.failed.connect(self._on_gas_failed)
         self._start_worker(gas_worker)
 
-    def _on_gas_suggested(self, info: dict, *, gen: int | None = None) -> None:
-        if gen is not None and gen != self._gas_gen:
+    def _is_stale_gas(self) -> bool:
+        """True when the emitting gas worker isn't the latest probe. A direct
+        call (no signal in flight → sender() is None) is never stale, so tests
+        that drive the slot directly still apply."""
+        w = self.sender()
+        return w is not None and w is not self._gas_worker
+
+    def _on_gas_suggested(self, info: dict) -> None:
+        if self._is_stale_gas():
             return                    # a newer probe (recipient edit) supersedes
         self._base_fee_wei = int(info.get("base_fee") or 0)
         self._estimated_gas = int(info.get("estimated_gas") or 0)
@@ -4935,8 +4946,8 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self._on_gas_ready()
         self._update_state()
 
-    def _on_gas_failed(self, msg: str, *, gen: int | None = None) -> None:
-        if gen is not None and gen != self._gas_gen:
+    def _on_gas_failed(self, msg: str) -> None:
+        if self._is_stale_gas():
             return                    # a newer probe supersedes this failure
         self.base_fee_lbl.setText(f"(failed: {msg})")
 

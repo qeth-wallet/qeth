@@ -82,6 +82,42 @@ class TestRoundTrip:
         assert s2.splitter_state_main == "01020304"
 
 
+class TestSaveConcurrency:
+    """save() is called from more than one thread (the GUI and the aiohttp
+    RPC thread's add_chain). The snapshot must be decoupled from live state,
+    and an out-of-order write must not regress the file."""
+
+    def test_accounts_snapshot_isolated_from_later_mutation(self, tmp_qeth,
+                                                             monkeypatch):
+        """save() copies each account dict, so a set_label mutating a live dict
+        after the snapshot (json.dumps runs outside the lock) can't leak into
+        this write — nor raise 'dict changed size during iteration'."""
+        import qeth.store as store_mod
+        s = Store()
+        s.accounts = [{"address": "0xAAA", "path": "", "source": "hot"}]
+        real_dumps = store_mod.json.dumps
+
+        def mutating_dumps(obj, **kw):
+            s.accounts[0]["label"] = "renamed"   # concurrent set_label
+            return real_dumps(obj, **kw)
+        monkeypatch.setattr(store_mod.json, "dumps", mutating_dumps)
+
+        s.save()   # must not raise
+        assert "renamed" not in (tmp_qeth / "config.json").read_text()
+
+    def test_stale_snapshot_write_is_dropped(self, tmp_qeth):
+        """A lower-seq write reaching disk after a higher one is out of order
+        and must be dropped, not allowed to regress the file."""
+        s = Store()
+        s.default_account = "0xAAA"
+        s.save()                       # seq 1 → written
+        # Pretend a newer snapshot (higher seq) already landed on disk.
+        s._last_written_seq = 999
+        s.default_account = "0xBBB"
+        s.save()                       # seq 2 < 999 → dropped
+        assert Store.load().default_account == "0xAAA"   # not regressed
+
+
 class TestAddAccount:
     def test_first_account_becomes_default(self, tmp_qeth):
         s = Store()

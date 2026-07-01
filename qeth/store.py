@@ -77,6 +77,14 @@ class Store:
 
     def __init__(self):
         self._lock = threading.RLock()
+        # Save ordering: _save_seq is bumped with each snapshot under _lock;
+        # _io_lock serializes the file write and _last_written_seq drops a
+        # stale one — two threads (the GUI and the aiohttp RPC thread's
+        # add_chain) can snapshot in one order and reach disk in the other,
+        # which would regress the file to older state.
+        self._io_lock = threading.Lock()
+        self._save_seq = 0
+        self._last_written_seq = 0
         self.accounts: list[dict] = []  # {address, path, source, scheme, label}
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
@@ -175,8 +183,15 @@ class Store:
 
     def save(self) -> None:
         with self._lock:
+            self._save_seq += 1
+            seq = self._save_seq
             data = {
-                "accounts": self.accounts,
+                # Copy each account dict: json.dumps runs after the lock is
+                # released, and a concurrent set_label inserting a "label" key
+                # into a live dict would raise "dictionary changed size during
+                # iteration" mid-serialize (everything else here is already a
+                # fresh list/dict).
+                "accounts": [dict(a) for a in self.accounts],
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
                 "default_account": self.default_account,
@@ -201,8 +216,17 @@ class Store:
                 "custom_ens_names": sorted(self.custom_ens_names),
             }
         ensure_private_root()
-        # Atomic: a crash mid-write must not torch the accounts list.
-        atomic_write_text(CONFIG_FILE, json.dumps(data, indent=2))
+        payload = json.dumps(data, indent=2)
+        # Serialize the write and drop a stale snapshot: `seq` was taken with
+        # the snapshot under _lock, so a lower seq reaching disk after a higher
+        # one is an out-of-order write that would regress the file (the higher
+        # snapshot is strictly newer — it saw every mutation the lower one did).
+        with self._io_lock:
+            if seq < self._last_written_seq:
+                return
+            self._last_written_seq = seq
+            # Atomic: a crash mid-write must not torch the accounts list.
+            atomic_write_text(CONFIG_FILE, payload)
 
     def add_account(self, account: dict) -> bool:
         with self._lock:

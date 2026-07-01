@@ -49,7 +49,14 @@ def test_parse_name_item():
         "expiry_date": "2048-03-27T13:25:30.000Z",
     })
     assert n.name == "vitalik.eth" and n.resolved_address == "0xRES"
-    assert n.owner == "0xOWN" and n.expiry_ts == _utc(2048, 3, 27, 13, 25, 30)
+    # BENS expiry_date is grace-inclusive (nameExpires + 90d); the real .eth
+    # registration expiry is 90 days earlier (what expiry_status expects).
+    assert n.owner == "0xOWN"
+    assert n.expiry_ts == _utc(2048, 3, 27, 13, 25, 30) - ea.GRACE_PERIOD_S
+    # a non-.eth name has no grace period → date passes through unchanged
+    dns = ea._parse_name_item(
+        {"name": "foo.box", "expiry_date": "2048-03-27T13:25:30.000Z"})
+    assert dns.expiry_ts == _utc(2048, 3, 27, 13, 25, 30)
     assert ea._parse_name_item({"name": ""}) is None
     # a cleared record reads back as the zero address → shown as "no address"
     cleared = ea._parse_name_item(
@@ -350,6 +357,8 @@ def test_read_name_states_orchestration():
             return True, RESOLVER
         if target == ea.ENS_ETH_REGISTRAR and sel == ea._SEL_OWNER_OF:
             return True, "0xReg1strant"
+        if target == ea.ENS_ETH_REGISTRAR and sel == ea._SEL_NAME_EXPIRES:
+            return True, 1801533201             # nameExpires (a 2LD only)
         if target == RESOLVER and sel == ea._SEL_ADDR_COIN:
             return True, "0xReso1ved"
         return False, None        # legacy addr + everything else
@@ -359,10 +368,12 @@ def test_read_name_states_orchestration():
     vit = states["vitalik.eth"]
     assert vit.controller == "0xC0ntr0ller"
     assert vit.registrant == "0xReg1strant"     # 2LD → registrar queried
+    assert vit.expiry == 1801533201             # ...and its nameExpires
     assert vit.resolved_address == "0xReso1ved"
     sub = states["blog.vitalik.eth"]
     assert sub.controller == "0xC0ntr0ller"
     assert sub.registrant is None               # subdomain → not an NFT
+    assert sub.expiry is None                   # subdomain → no registration
     assert sub.resolved_address == "0xReso1ved"
 
 

@@ -943,6 +943,23 @@ class EnsPanel(QWidget):
         item.setText(2, address or "")
         item.setToolTip(2, _RESOLVED_TIP if address else "")
 
+    def update_expiry(self, name: str, expiry_ts: int | None) -> None:
+        """Set a name row's Expires column from the authoritative on-chain
+        nameExpires (verify pass) — re-styling the status chip (active /
+        expiring / grace / expired) like _build does."""
+        item = self._items_by_name.get(name.lower())
+        if item is None or not expiry_ts:
+            return
+        n = item.data(0, _NAME_ROLE)
+        if isinstance(n, EnsName):
+            n.expiry_ts = expiry_ts
+        status = expiry_status(expiry_ts, int(time.time()))
+        text, colour = _EXPIRY_STYLE.get(status, (None, None))
+        item.setText(_EXPIRES_COL, text or _fmt_expiry(expiry_ts))
+        item.setData(_EXPIRES_COL, _EXPIRY_SORT_ROLE, expiry_ts)
+        item.setForeground(_EXPIRES_COL,
+                           QBrush(colour) if colour is not None else QBrush())
+
     def mark_verified(self, states: dict[str, OwnershipCheck],
                       address: str, *, verified: bool = True) -> list[str]:
         """Apply an ownership read to the rows and return the names DROPPED.
@@ -983,6 +1000,10 @@ class EnsPanel(QWidget):
                     self._remove_item(item, name_l)
                     removed.append(name_l)
                     continue
+            # Authoritative on-chain expiry (nameExpires) → correct the Expires
+            # column over BENS's grace-inclusive hint.
+            if st.expiry:
+                self.update_expiry(name_l, st.expiry)
             # Show the on-chain roles (manager / owner) for every kept name —
             # owned or merely watched — once the read definitively landed.
             if st.owner_known:

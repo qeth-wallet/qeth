@@ -322,6 +322,26 @@ class TestEnsPanel:
                    if ops.child(i).text(0) == "manager")
         assert mgr.text(2) == to_checksum_address(other)
 
+    def test_verify_corrects_expiry_from_onchain(self, qtbot):
+        # BENS hands a grace-inclusive expiry; the verify pass reads the true
+        # on-chain nameExpires (90d earlier) and corrects the Expires column.
+        from qeth.plugins.ens import (
+            _EXPIRES_COL, _EXPIRY_SORT_ROLE, _NAME_ROLE, _fmt_expiry)
+        from qeth.ens_app import GRACE_PERIOD_S
+        me = "0x" + "11" * 20
+        name_expires = 1801533201                       # 2027-02-02
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree([EnsName(
+            "crv.eth", expiry_ts=name_expires + GRACE_PERIOD_S)]), NOW)
+        root = panel.tree.topLevelItem(0)
+        panel.mark_verified({"crv.eth": OwnershipCheck(
+            controller=me, registrant=me, expiry=name_expires,
+            owner_known=True)}, me)
+        assert root.data(0, _NAME_ROLE).expiry_ts == name_expires   # corrected
+        assert root.text(_EXPIRES_COL) == _fmt_expiry(name_expires)
+        assert root.data(_EXPIRES_COL, _EXPIRY_SORT_ROLE) == name_expires
+
     def test_verified_records_get_check_prefix(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

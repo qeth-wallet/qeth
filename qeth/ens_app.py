@@ -81,6 +81,7 @@ ENS_ETH_CONTROLLER = "0x253553366Da8546fC250F225fe3d25d0C782303b"
 _SEL_OWNER = bytes.fromhex("02571be3")      # registry.owner(bytes32)
 _SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
 _SEL_OWNER_OF = bytes.fromhex("6352211e")   # ERC721.ownerOf(uint256)
+_SEL_NAME_EXPIRES = bytes.fromhex("d6e4fa86")  # BaseRegistrar.nameExpires(uint256)
 _SEL_ADDR = bytes.fromhex("3b3b57de")       # resolver.addr(bytes32) — legacy
 _SEL_ADDR_COIN = bytes.fromhex("f1cb7e06")  # resolver.addr(bytes32,uint256)
 _SEL_TEXT = bytes.fromhex("59d1d43c")       # resolver.text(bytes32,string)
@@ -178,6 +179,9 @@ class OwnershipCheck:
     registrant: str | None = None
     resolved_address: str | None = None
     resolver: str | None = None      # registry.resolver(node) — for records
+    # BaseRegistrar.nameExpires (.eth 2LDs): the TRUE registration expiry — the
+    # authority for the Expires column, vs BENS's grace-inclusive expiry_date.
+    expiry: int | None = None
     wrapped: bool = False               # held by the ENS NameWrapper
     # True when the ownership read DEFINITIVELY landed — so a None controller
     # means "the node has no owner / doesn't exist" (a droppable indexer lie),
@@ -262,8 +266,20 @@ def _parse_name_item(it: dict) -> EnsName | None:
         name=str(name),
         resolved_address=nonzero_addr((it.get("resolved_address") or {}).get("hash")),
         owner=(it.get("owner") or {}).get("hash"),
-        expiry_ts=_iso_to_unix(it.get("expiry_date")),
+        expiry_ts=_bens_registration_expiry(str(name), it.get("expiry_date")),
     )
+
+
+def _bens_registration_expiry(name: str, iso: str | None) -> int | None:
+    """BENS's ``expiry_date`` for a .eth 2LD is the grace-INCLUSIVE date
+    (``nameExpires + GRACE_PERIOD``); the real registration expiry — what the
+    ENS app shows, and what ``expiry_status`` expects (it adds the grace itself)
+    — is 90 days earlier. Normalise it so the instant paint matches; the verify
+    pass then confirms it against the authoritative on-chain ``nameExpires``."""
+    ts = _iso_to_unix(iso)
+    if ts is not None and _is_eth_2ld(name):
+        return ts - GRACE_PERIOD_S
+    return ts
 
 
 def lookup_owned_names(
@@ -551,6 +567,16 @@ def _decode_addr_word(raw) -> str | None:
     return to_checksum_address("0x" + word[12:32].hex())
 
 
+def _decode_uint(raw) -> int | None:
+    """Decode a 32-byte uint256 word (e.g. nameExpires) to int. None on empty
+    data or a zero result (unregistered / not a .eth name)."""
+    b = bytes(raw) if not isinstance(raw, (bytes, bytearray)) else raw
+    if len(b) < 32:
+        return None
+    v = int.from_bytes(b[:32], "big")
+    return v or None
+
+
 def _decode_addr_bytes(raw) -> str | None:
     """Decode ``addr(bytes32,uint256)``'s dynamic-bytes return (a 20-byte
     address payload) to a checksummed address, or None."""
@@ -638,6 +664,7 @@ def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
     owner_p: dict = {}
     resolver_p: dict = {}
     registrant_p: dict = {}
+    expiry_p: dict = {}
     wrapped_p: dict = {}
     # Read at "latest": show the MOST RECENT on-chain state (Helios still proves
     # it — the chain head is sync-committee-verified, just not finalized), so a
@@ -658,6 +685,10 @@ def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
                 tid = _labelhash(n.split(".")[0])
                 registrant_p[n] = mc.add(ENS_ETH_REGISTRAR, _SEL_OWNER_OF + tid,
                                          decoder=_decode_addr_word)
+                # The TRUE registration expiry — authoritative over BENS's
+                # grace-inclusive expiry_date (which is this + 90 days).
+                expiry_p[n] = mc.add(ENS_ETH_REGISTRAR, _SEL_NAME_EXPIRES + tid,
+                                     decoder=_decode_uint)
 
     wrapper = ENS_NAME_WRAPPER.lower()
     resolvers: dict = {}
@@ -678,6 +709,8 @@ def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
                 registrant = wrapped_owner
         st.controller = controller
         st.registrant = registrant
+        if n in expiry_p and expiry_p[n].success:
+            st.expiry = expiry_p[n].value
         # The ownership answer is definitive iff the registry.owner read landed
         # — and, when wrapped, the NameWrapper.ownerOf read too (else a failed
         # wrapper read would look like "no owner" and wrongly drop the name).

@@ -3179,6 +3179,29 @@ class TestEventPreviewTab:
         })
         assert dlg.finalised_request().nonce == 7    # pinned, not 99
 
+    def test_reject_blocked_while_signing(self, qtbot, tmp_qeth):
+        """Esc / window-close must not reject the dialog while a sign worker is
+        running — the signing continues on the device and the tx broadcasts,
+        so emitting `rejected` (→ dapp 'User cancelled') would be a lie. It
+        re-enables on failure so the user can then genuinely cancel.
+        Regression for 1e."""
+        from PySide6.QtGui import QCloseEvent
+        _, started = self._started()
+        dlg = self._sign(qtbot, started)
+        rejected: list = []
+        dlg.rejected.connect(lambda: rejected.append(True))
+
+        dlg.set_signing_in_progress(True)
+        dlg.reject()                       # Esc mid-signing
+        assert rejected == []              # swallowed
+        ev = QCloseEvent()
+        dlg.closeEvent(ev)                 # WM close mid-signing
+        assert not ev.isAccepted()         # refused
+
+        dlg.set_signing_in_progress(False)   # signing failed → re-enabled
+        dlg.reject()                       # user genuinely cancels now
+        assert rejected == [True]
+
     def test_gnosis_tiny_tip_survives_the_spinbox(self, qtbot, tmp_qeth):
         """Gnosis idle: base fee ~610 kwei → suggested tip ~30 kwei =
         0.000030528 gwei, below the spinbox's default 4 decimals.

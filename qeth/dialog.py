@@ -24,7 +24,7 @@ with a ``wide`` flag for fields that hold a full address.
 
 from __future__ import annotations
 
-from PySide6.QtGui import QFont, QFontMetrics, QShowEvent
+from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
     QVBoxLayout, QWidget,
@@ -92,6 +92,25 @@ class Dialog(QDialog):
         super().__init__(*args, **kwargs)
         self._spacing_applied = False
         self._height_checked = False
+        # Set True (via set_signing_in_progress) while a sign-and-broadcast
+        # worker is running for this dialog, to block dismissal — see reject().
+        self._signing = False
+
+    def reject(self) -> None:
+        # Ignore Esc / window-close / Cancel while signing is in progress. The
+        # signing continues on the device regardless and the tx will broadcast,
+        # so emitting `rejected` (which tells a dapp "User cancelled") while the
+        # tx lands on-chain would be a lie. The dialog re-enables itself on
+        # failure (set_signing_in_progress(False)), restoring normal dismissal.
+        if self._signing:
+            return
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt name
+        if self._signing:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def setVisible(self, visible: bool) -> None:  # noqa: N802 — Qt name
         if visible and not self._spacing_applied:

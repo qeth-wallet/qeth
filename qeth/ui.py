@@ -683,9 +683,24 @@ class MainWindow(QMainWindow):
         bridge future is resolved / rejected from the worker
         callbacks below.
 
-        ``req`` is one of: ``SigningRequest`` (transactions),
+        Any exception while building/showing the dialog rejects the future,
+        so ``submit_async`` never awaits it forever — an unresolved future
+        hangs the dapp request and, since a WS socket's messages are handled
+        serially, its whole connection."""
+        try:
+            self._launch_signing_dialog(req, fut)
+        except Exception as e:
+            import logging
+            logging.getLogger("qeth.ui").exception(
+                "signing request setup failed")
+            self.signer_bridge.reject(fut, SignerError(str(e)))
+
+    def _launch_signing_dialog(self, req, fut) -> None:
+        """Build + show the dialog for a signing request, dispatching by
+        request type. ``req`` is one of ``SigningRequest`` (transactions),
         ``MessageSigningRequest`` (personal_sign), or
-        ``TypedDataSigningRequest`` (EIP-712). Dispatch by type."""
+        ``TypedDataSigningRequest`` (EIP-712). Raising is safe — the caller
+        rejects the future."""
         from .signing import (
             MessageSigningRequest as _MR, TypedDataSigningRequest as _TR,
         )

@@ -54,6 +54,21 @@ class TestCorsHeaders:
         assert resp.headers["Access-Control-Allow-Private-Network"] == "true"
 
 
+def test_eth_accounts_never_returns_a_null_entry():
+    """eth_accounts reads default_account ONCE. Reading it twice let the GUI
+    thread null it (account removed) between the truthiness check and the
+    build, yielding [None] — dapps treat entries as address strings and choke
+    on a null. Empty must be []. Regression for 1f."""
+    store = MagicMock()
+    server = RpcServer(store, port=0)
+
+    store.default_account = None
+    assert _run(server._dispatch("eth_accounts", [])) == []
+
+    store.default_account = "0x" + "11" * 20
+    assert _run(server._dispatch("eth_accounts", [])) == ["0x" + "11" * 20]
+
+
 def test_rpc_stop_joins_background_thread():
     """stop() now blocks until the server is actually down: the asyncio
     loop stops and the background thread is joined (not left dangling)."""

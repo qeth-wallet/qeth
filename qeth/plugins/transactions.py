@@ -4958,6 +4958,10 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         sign-and-broadcast worker. Symmetric across all composer
         subclasses so the host's ``_begin_sign`` flow can drive any of
         them identically."""
+        # Blocks Esc / window-close from rejecting the dialog mid-signing
+        # (Dialog.reject), so the dapp isn't told "cancelled" while the tx
+        # broadcasts.
+        self._signing = busy
         ok_to_enable = not busy and self._gas_ready and self._inputs_valid()
         self.confirm_btn.setEnabled(ok_to_enable)
         for btn in self.buttons.buttons():

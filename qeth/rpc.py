@@ -588,7 +588,11 @@ class RpcServer:
             return True
 
         if method in ("eth_accounts", "eth_requestAccounts"):
-            return [self.store.default_account] if self.store.default_account else []
+            # Read once: the GUI thread can null default_account (account
+            # removed) between two reads, which would build [None] — dapps
+            # treat the entries as address strings and choke on a null.
+            acct = self.store.default_account
+            return [acct] if acct else []
 
         if method == "eth_chainId":
             return hex(self._chain_for_origin(origin))

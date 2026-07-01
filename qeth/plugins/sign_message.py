@@ -240,6 +240,9 @@ class SignMessageDialog(Dialog):
     def set_signing_in_progress(self, busy: bool) -> None:
         """Match ``SignTransactionDialog``'s lifecycle hook so the
         same host code can lock/unlock both."""
+        # Blocks Esc / window-close from rejecting the dialog mid-signing
+        # (Dialog.reject), so the dapp isn't told "cancelled" while it signs.
+        self._signing = busy
         self.confirm_btn.setEnabled(not busy)
         for btn in self.buttons.buttons():
             if btn is not self.confirm_btn:

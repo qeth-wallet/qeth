@@ -226,6 +226,28 @@ class TestEffectiveOrigin:
         assert self._eff("https://x.org", "https://x.org") == "https://x.org"
 
 
+def test_signing_request_setup_failure_rejects_future(qtbot):
+    """If building/showing the sign dialog raises, the bridge future must be
+    rejected — otherwise submit_async awaits it forever, hanging the dapp
+    request and (WS messages are handled serially) its whole socket.
+    Regression for 1f."""
+    from types import SimpleNamespace
+
+    from qeth.ui import MainWindow
+
+    def _boom(req, fut):
+        raise RuntimeError("dialog ctor blew up")
+
+    fake = SimpleNamespace(
+        _launch_signing_dialog=_boom, signer_bridge=SignerBridge())
+    fut: Future = Future()
+    # Unbound call with a stub self — avoids building a real MainWindow.
+    MainWindow._on_signing_request(fake, object(), fut)
+    assert fut.done()
+    with pytest.raises(SignerError):
+        fut.result()
+
+
 # --- apply_gas_policy (pure) --------------------------------------------
 
 # Import the policy from the plugins module; this isn't a UI test —

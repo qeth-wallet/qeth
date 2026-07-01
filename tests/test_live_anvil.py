@@ -117,6 +117,23 @@ def anvil():
 
 
 @pytest.mark.network
+def test_head_balances_reads_at_latest_with_a_consistent_block(anvil):
+    """head_balances reads at 'latest' (never fails with 'block in the future'
+    on a lagging backend) and returns the block from the SAME multicall, so the
+    height matches the values. This is what makes reads reliable behind a
+    load-balanced / multi-backend node — the bug where pinning to
+    hex(get_block_number()) failed when the read hit a backend without that
+    block yet."""
+    from qeth.chain import EthClient
+    c = EthClient(anvil.chain)
+    head = int(anvil.rpc("eth_blockNumber"), 16)
+    block, bals = c.head_balances([USDC], WHALE)
+    assert block is not None and block >= head - 2      # co-read block, current
+    assert USDC.lower() in bals                          # whale holds USDC
+    assert bals[USDC.lower()] == anvil.erc20_balance(USDC, WHALE)
+
+
+@pytest.mark.network
 def test_ws_captures_transfer_log_as_balance_dirty(anvil, qtbot):
     """A real ERC-20 Transfer to the watched account, mined on the fork, is
     captured by the logs subscription and surfaced as balance_dirty."""
@@ -313,6 +330,224 @@ def test_on_view_when_confirmed_drops_token_via_live_path(anvil, qtbot, tmp_qeth
     qtbot.waitUntil(
         lambda: USDC.lower() not in _visible_tokens(panel), timeout=15_000)
     assert not tp._wallet_cache.load(1, ACCT.lower()).tokens
+
+
+@pytest.mark.network
+def test_on_view_qeth_send_confirm_drops_token(anvil, qtbot, tmp_qeth):
+    """Faithful repro of a qeth-originated send while ON the Tokens tab (token
+    row selected): the receipt-confirm path (note_receipt_logs ->
+    _invalidate_view_and_refresh -> _refresh) runs CONCURRENTLY with the ws
+    targeted drop. The fully-sent token must drop off the on-screen panel — not
+    just the cache (a tab switch must not be needed)."""
+    from PySide6.QtCore import Qt
+    from qeth.store import Store
+    start = 100 * 10 ** USDC_DECIMALS
+    _ensure_usdc(anvil, ACCT, start)
+
+    tp, panel, workers = _make_tokens_plugin(anvil, tmp_qeth)
+    # the account must be known to the store for note_receipt_logs to act
+    store = Store.load()
+    store.accounts = [{"address": ACCT.lower()}]
+    tp._store = store
+    _seed_usdc(tp, panel, anvil, start)
+    # select the token row (the user had it selected to open Send)
+    for r in range(panel.table.rowCount()):
+        it = panel.table.item(r, 0)
+        key = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if key and key[1] == USDC.lower():
+            panel.table.selectRow(r)
+    assert USDC.lower() in _visible_tokens(panel)
+
+    anvil.impersonate(ACCT)
+    anvil.erc20_transfer(USDC, ACCT, ANY, start)
+    anvil.mine()
+    assert anvil.erc20_balance(USDC, ACCT) == 0
+
+    def pad(a):
+        return "0x" + a[2:].lower().rjust(64, "0")
+    receipt = {
+        "from": ACCT.lower(), "to": USDC.lower(),
+        "logs": [{
+            "address": USDC.lower(),
+            "topics": [tp._TRANSFER_TOPIC0, pad(ACCT), pad(ANY)],
+            "data": hex(start),
+        }],
+    }
+    # both arrive ~together for a qeth send: the receipt-confirm and the ws log
+    tp.note_receipt_logs(anvil.chain, receipt)
+    tp.on_balance_dirty(anvil.chain, ACCT, USDC)
+
+    qtbot.waitUntil(
+        lambda: USDC.lower() not in _visible_tokens(panel), timeout=15_000)
+    assert USDC.lower() not in _visible_tokens(panel)
+
+
+@pytest.mark.network
+def test_on_view_qeth_partial_send_updates_balance(anvil, qtbot, tmp_qeth):
+    """Repro of 'partial send-out never updates the balance': a qeth-originated
+    PARTIAL send while ON the Tokens tab (row selected). note_receipt_logs +
+    on_balance_dirty run together; the token must show its NEW (lower) balance,
+    not stay stale."""
+    from PySide6.QtCore import Qt
+    from qeth.store import Store
+    start = 100 * 10 ** USDC_DECIMALS
+    keep = 60 * 10 ** USDC_DECIMALS            # send 40, keep 60
+    _ensure_usdc(anvil, ACCT, start)
+
+    tp, panel, workers = _make_tokens_plugin(anvil, tmp_qeth)
+    store = Store.load()
+    store.accounts = [{"address": ACCT.lower()}]
+    tp._store = store
+    _seed_usdc(tp, panel, anvil, start)
+    for r in range(panel.table.rowCount()):
+        it = panel.table.item(r, 0)
+        key = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if key and key[1] == USDC.lower():
+            panel.table.selectRow(r)
+
+    anvil.impersonate(ACCT)
+    anvil.erc20_transfer(USDC, ACCT, ANY, start - keep)
+    anvil.mine()
+    block = int(anvil.rpc("eth_blockNumber"), 16)
+    assert anvil.erc20_balance(USDC, ACCT) == keep
+
+    def pad(a):
+        return "0x" + a[2:].lower().rjust(64, "0")
+    receipt = {
+        "blockNumber": hex(block), "from": ACCT.lower(), "to": USDC.lower(),
+        "logs": [{
+            "address": USDC.lower(),
+            "topics": [tp._TRANSFER_TOPIC0, pad(ACCT), pad(ANY)],
+            "data": hex(start - keep),
+        }],
+    }
+    tp.note_receipt_logs(anvil.chain, receipt)
+    tp.on_balance_dirty(anvil.chain, ACCT, USDC)
+
+    def _updated():
+        c = tp._wallet_cache.load(1, ACCT.lower())
+        t = next((x for x in c.tokens if x.contract == USDC.lower()), None)
+        return t is not None and t.balance_raw == keep
+    qtbot.waitUntil(_updated, timeout=15_000)
+    cached = tp._wallet_cache.load(1, ACCT.lower())
+    tok = next(x for x in cached.tokens if x.contract == USDC.lower())
+    assert tok.balance_raw == keep
+
+
+@pytest.mark.network
+def test_confirmed_tx_authoritatively_drops_token(anvil, qtbot, tmp_qeth):
+    """A confirmed tx is the source of truth: note_receipt_logs reads the moved
+    token AT THE RECEIPT'S BLOCK and drops a sent-to-zero token — on its OWN,
+    with NO ws balance_dirty. Proves the confirmation has precedence (the racy
+    ws read is not required)."""
+    from PySide6.QtCore import Qt
+    from qeth.store import Store
+    start = 100 * 10 ** USDC_DECIMALS
+    _ensure_usdc(anvil, ACCT, start)
+
+    tp, panel, workers = _make_tokens_plugin(anvil, tmp_qeth)
+    store = Store.load()
+    store.accounts = [{"address": ACCT.lower()}]
+    tp._store = store
+    _seed_usdc(tp, panel, anvil, start)
+    for r in range(panel.table.rowCount()):       # token row selected (as user did)
+        it = panel.table.item(r, 0)
+        key = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if key and key[1] == USDC.lower():
+            panel.table.selectRow(r)
+    assert USDC.lower() in _visible_tokens(panel)
+
+    anvil.impersonate(ACCT)
+    anvil.erc20_transfer(USDC, ACCT, ANY, start)
+    anvil.mine()
+    block = int(anvil.rpc("eth_blockNumber"), 16)
+    assert anvil.erc20_balance(USDC, ACCT) == 0
+
+    def pad(a):
+        return "0x" + a[2:].lower().rjust(64, "0")
+    receipt = {
+        "blockNumber": hex(block), "from": ACCT.lower(), "to": USDC.lower(),
+        "logs": [{
+            "address": USDC.lower(),
+            "topics": [tp._TRANSFER_TOPIC0, pad(ACCT), pad(ANY)],
+            "data": hex(start),
+        }],
+    }
+    # ONLY the confirm path — no on_balance_dirty at all.
+    tp.note_receipt_logs(anvil.chain, receipt)
+
+    qtbot.waitUntil(
+        lambda: USDC.lower() not in _visible_tokens(panel), timeout=15_000)
+    assert not tp._wallet_cache.load(1, ACCT.lower()).tokens
+
+
+@pytest.mark.network
+def test_confirmed_receive_adds_and_prices_recognised_token(anvil, qtbot, tmp_qeth):
+    """A swap's RECEIVED recognised token (the tBTC/cbBTC case): the confirm path
+    reads it authoritatively at the receipt block and adds it, it shows even
+    before a price loads (recognised → not hidden), AND the live path fetches
+    its USD price (the '...but never fetched the price' bug) — the real
+    DefiLlama source prices USDC."""
+    from types import SimpleNamespace
+    from qeth.store import Store
+    from qeth.tokenlists import TokenListEntry
+    amount = 25 * 10 ** USDC_DECIMALS
+    _ensure_usdc(anvil, ACCT, 0)                # start with none
+
+    tp, panel, workers = _make_tokens_plugin(anvil, tmp_qeth)
+    store = Store.load()
+    store.accounts = [{"address": ACCT.lower()}]
+    tp._store = store
+    # USDC recognised, but no price available in this harness
+    lists = SimpleNamespace(
+        loaded=False,          # skip discovery — the confirm reconcile adds it
+        is_known=lambda cid, a: a.lower() == USDC.lower(),
+        is_likely_scam=lambda *a, **k: False,
+        get=lambda cid, a: (TokenListEntry(
+            chain_id=1, address=USDC.lower(), symbol="USDC", name="USD Coin",
+            decimals=USDC_DECIMALS, source="t", logo_uri=None)
+            if a.lower() == USDC.lower() else None))
+    tp._token_lists = lists
+    panel._token_lists = lists
+    # render an (empty) view for ACCT
+    from qeth.wallet_cache import CachedWallet
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=1, address=ACCT.lower(), native_balance_wei=10**18, tokens=[]))
+    panel.show_cached(anvil.chain, tp._wallet_cache.load(1, ACCT.lower()))
+    tp._displayed_view = (1, ACCT.lower())
+    assert USDC.lower() not in _visible_tokens(panel)
+
+    # ACCT receives USDC
+    anvil.impersonate(WHALE)
+    anvil.erc20_transfer(USDC, WHALE, ACCT, amount)
+    anvil.mine()
+    block = int(anvil.rpc("eth_blockNumber"), 16)
+    assert anvil.erc20_balance(USDC, ACCT) == amount
+
+    def pad(a):
+        return "0x" + a[2:].lower().rjust(64, "0")
+    receipt = {
+        "blockNumber": hex(block), "from": WHALE.lower(), "to": USDC.lower(),
+        "logs": [{
+            "address": USDC.lower(),
+            "topics": [tp._TRANSFER_TOPIC0, pad(WHALE), pad(ACCT)],
+            "data": hex(amount),
+        }],
+    }
+    tp.note_receipt_logs(anvil.chain, receipt)
+
+    qtbot.waitUntil(
+        lambda: USDC.lower() in _visible_tokens(panel), timeout=15_000)
+    assert USDC.lower() in _visible_tokens(panel)
+
+    # …and the live path fetches its price (via the real DefiLlama source).
+    def _priced():
+        c = tp._wallet_cache.load(1, ACCT.lower())
+        return bool(c and c.tokens and c.tokens[0].price_usd)
+    qtbot.waitUntil(_priced, timeout=15_000)
+    cached = tp._wallet_cache.load(1, ACCT.lower())
+    assert cached.tokens[0].contract == USDC.lower()
+    assert cached.tokens[0].price_usd            # non-empty USD price
 
 
 @pytest.mark.network

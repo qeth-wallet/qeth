@@ -202,6 +202,38 @@ class TestTokenListPanel:
         assert shown[cusN] is True     # custom, non-zero dust → shown
         assert shown[ordy] is False    # ordinary dust → hidden
 
+    def test_recognised_token_shows_before_its_price_loads(self, qtbot, tmp_qeth):
+        """A just-received RECOGNISED token (in the curated lists) is added to
+        the cache without a price; it must still show — 'no price → hide' is
+        only for unrecognised spam. An unrecognised no-price token stays hidden.
+        (The 'swapped LT→WETH but WETH didn't appear' bug.)"""
+        from types import SimpleNamespace
+        from qeth.tokens import TokenBalance
+        store = Store.load()
+        weth = "0x" + "c0" * 20      # pretend-recognised
+        spam = "0x" + "5e" * 20      # unrecognised, no price
+        panel = TokenListPanel(IconCache(), store)
+        qtbot.addWidget(panel)
+        panel._token_lists = SimpleNamespace(
+            is_known=lambda cid, a: a.lower() == weth,
+            is_likely_scam=lambda *a, **k: False)
+        toks = [
+            TokenBalance(contract=weth, symbol="WETH", name="", decimals=18,
+                         balance_raw=10**15),
+            TokenBalance(contract=spam, symbol="SPAM", name="", decimals=18,
+                         balance_raw=10**21),
+        ]
+        # No prices for either (price fetch hasn't landed / spam has none).
+        panel.render_full(ETH, 0, toks, {}, {}, apply_dust_filter=True)
+        shown = {}
+        for row in range(panel.table.rowCount()):
+            it = panel.table.item(row, 0)
+            key = it.data(Qt.ItemDataRole.UserRole) if it else None
+            if key and key[1]:
+                shown[key[1]] = not panel.table.isRowHidden(row)
+        assert shown[weth] is True     # recognised, price pending → shown
+        assert shown[spam] is False    # unrecognised, no price → hidden
+
     def test_native_row_pinned_at_index_zero(self, token_panel):
         token_panel.show_balances(ETH, native_wei=10**18, tokens=[], list_entries={})
         assert token_panel.table.rowCount() == 1

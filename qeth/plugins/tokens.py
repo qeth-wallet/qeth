@@ -204,7 +204,8 @@ class BalanceWorker(QThread):
     refreshed = Signal(QULONGLONG, object, object, object)
     failed = Signal(str)
 
-    def __init__(self, chain, address: str, token_contracts: list[str], parent=None):
+    def __init__(self, chain, address: str, token_contracts: list[str],
+                 parent=None):
         super().__init__(parent)
         self.chain = chain
         self.address = address
@@ -213,19 +214,22 @@ class BalanceWorker(QThread):
     def run(self) -> None:
         try:
             client = EthClient(self.chain)
-            # Pin every read to ONE block so native + token balances are
-            # mutually consistent AND the result is orderable against other
-            # concurrent reads.
-            block: int | None
-            try:
-                block = client.get_block_number()
-                tag = hex(block)
-            except Exception:
-                block, tag = None, "latest"
-            native = client.get_balance(self.address, tag)
-            balances = (client.multicall_erc20_balances(
-                self.contracts, self.address, block=tag)
-                if self.contracts else {})
+            # Read at "latest" (never fails with "block in the future" on a
+            # lagging backend) and take the block from the SAME multicall, so
+            # the height matches the values behind a load balancer. The block
+            # lets consumers order this result against other concurrent reads
+            # (per-token block-ordering in _persist_targeted_balances); a lagging
+            # read just carries a lower block and is superseded by a fresher one.
+            native = client.get_balance(self.address, "latest")
+            if self.contracts:
+                block, balances = client.head_balances(
+                    self.contracts, self.address)
+            else:
+                block, balances = None, {}
+                try:
+                    block = client.get_block_number()
+                except Exception:
+                    pass
             self.refreshed.emit(self.chain.chain_id, native, balances, block)
         except Exception as e:
             self.failed.emit(str(e))
@@ -268,14 +272,6 @@ class TokensPlugin(Plugin):
     # user's perception of "the tx landed". Still long enough to fold a swap's
     # several same-block legs into one round-trip.
     TARGETED_BALANCE_DEBOUNCE_MS = 400
-    # After a live read sees a token at exactly zero (the whole holding was
-    # sent), suppress that token for this long even if a *discovery* reports it
-    # non-zero. A discovery pipeline (indexer → metadata → balances → prices)
-    # takes seconds; one that captured the balance BEFORE the send completes
-    # AFTER the drop and would otherwise resurrect the row (panel + cache) until
-    # a wallet switch forced a fresh pass. The guard is cleared early by any
-    # later read that confirms zero or sees a non-zero balance (a re-receive).
-    ZERO_GUARD_TTL_S = 180.0
     # When the on-screen chain has a live ws, Transfer logs carry token
     # balances and the ws also reads native ~once a minute (on_native_balance),
     # so the HTTP sweep slows to this deep backstop instead of polling every
@@ -328,15 +324,21 @@ class TokensPlugin(Plugin):
         # panel is stale relative to disk. Consumed by on_activated to re-render
         # the moment the user switches to the tab. Keyed (chain_id, addr_lower).
         self._pending_rerender: set[tuple[int, str]] = set()
-        # (chain_id, addr_lower, token_lower) -> monotonic deadline. A token a
-        # live read just saw at zero; a stale discovery must not resurrect it
-        # before the deadline. See ZERO_GUARD_TTL_S.
-        self._recently_zeroed: dict[tuple[int, str, str], float] = {}
         # (chain_id, addr_lower) -> highest block whose targeted/reconcile read
         # we've applied. A concurrent worker that read an OLDER block (kicked
         # before a send, finishing after the drop) must NOT overwrite a fresher
         # read and resurrect the token. See _apply_targeted_balances.
         self._last_applied_block: dict[tuple[int, str], int] = {}
+        # (chain_id, addr_lower, token_lower) -> block of the last AUTHORITATIVE
+        # balance we recorded for that token (from any path). A read/discovery
+        # that saw the token at an OLDER block must not drop or regress it — this
+        # is the per-token ordering that stops a stale discovery from dropping a
+        # freshly-claimed token (the per-account _last_applied_block can't, since
+        # a token can arrive at a block newer than the account's last read).
+        self._balance_block: dict[tuple[int, str, str], int] = {}
+        # Views with a live price fetch in flight (for displayed-but-unpriced
+        # tokens) — coalesces a burst of live updates into one fetch.
+        self._prices_in_flight: set[tuple[int, str]] = set()
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()
@@ -681,23 +683,88 @@ class TokensPlugin(Plugin):
         (not an in-place diff against a possibly-mismatched displayed set) is
         what makes this reliable when tokens are hidden/dust-filtered.
 
-        ``block`` orders concurrent reads: a result from an OLDER block than one
-        already applied is dropped, so a worker kicked before a send (reading
-        the token still non-zero) that finishes AFTER the drop can't resurrect
-        it. ``None`` (the RPC didn't report a height) is treated as current."""
+        ``block`` orders reads PER TOKEN (in _persist_targeted_balances): a read
+        older than the block last recorded for a given token is ignored for that
+        token. Ordering must NOT be per-account — an unrelated read (native, or
+        another token) landing at a higher block would otherwise skip a fresh,
+        correct read for THIS token (the 'USDT balance didn't update' bug behind
+        a load-balanced node whose backends report different heads)."""
         key = (chain.chain_id, account.lower())
-        if block is not None:
-            last = self._last_applied_block.get(key)
-            if last is not None and int(block) < last:
-                return
-            self._last_applied_block[key] = int(block)
         raw = {k.lower(): int(v) for k, v in balances_raw.items()}
-        self._persist_targeted_balances(chain, account, native_wei, raw)
-        key = (chain.chain_id, account.lower())
-        if self._displayed_view == key:
+        self._persist_targeted_balances(chain, account, native_wei, raw, block)
+        # Decide on-screen from the HOST's actual selection, not the internal
+        # _displayed_view — the latter is transiently reset to None by
+        # _invalidate_view_and_refresh (the qeth-send confirm path), and if the
+        # drop landed in that window the panel was left stale (cache emptied but
+        # the row still shown) until a tab switch. The host's selected account +
+        # chain is the ground truth for "what the user is looking at".
+        if self._is_current_view(chain, account):
             self._rerender_view_from_cache(chain, account)
         else:
             self._pending_rerender.add(key)
+        # A token added by the live path (a received/swapped-in token) has no
+        # price yet, and discovery doesn't reliably cover it (receipt-extras is
+        # one-shot; it may be neither top-N nor Blockscout-indexed yet), so it
+        # would show a blank USD value indefinitely. Fetch prices for any
+        # displayed-but-unpriced token directly.
+        self._ensure_prices_for_unpriced(chain, account)
+
+    def _ensure_prices_for_unpriced(self, chain, account: str) -> None:
+        """Fetch USD prices for cached tokens that don't have one yet and apply
+        them (cache + panel). Bounded to the wallet's own holdings and guarded
+        so a burst of live updates coalesces into one fetch per view."""
+        if self.host is None:
+            return
+        cached = self._wallet_cache.load(chain.chain_id, account)
+        if cached is None:
+            return
+        unpriced = [t.contract for t in cached.tokens if not t.price_usd]
+        key = (chain.chain_id, account.lower())
+        if not unpriced or key in self._prices_in_flight:
+            return
+        self._prices_in_flight.add(key)
+        pw = PricesWorker(self._price_source, chain, unpriced,
+                          include_native=False)
+        pw.prices_ready.connect(
+            lambda cid, prices, ch=chain, acct=account:
+            self._apply_fetched_prices(ch, acct, prices))
+        pw.finished.connect(
+            lambda k=key: self._prices_in_flight.discard(k))
+        self.host.start_worker(pw)
+
+    def _apply_fetched_prices(self, chain, account: str, prices: dict) -> None:
+        """Write freshly-fetched token prices into the cache and repaint the USD
+        column if this view is on screen."""
+        cached = self._wallet_cache.load(chain.chain_id, account)
+        if cached is None:
+            return
+        changed = False
+        for t in cached.tokens:
+            p = prices.get(t.contract.lower())
+            if p is not None and t.price_usd != str(p.price_usd):
+                t.price_usd = str(p.price_usd)
+                t.price_updated = p.timestamp or 0
+                changed = True
+        if not changed:
+            return
+        self._wallet_cache.save(cached)
+        if self._is_current_view(chain, account):
+            self._rerender_view_from_cache(chain, account)
+
+    def _is_current_view(self, chain, account: str) -> bool:
+        """Whether the host is currently showing ``(chain, account)`` — the
+        authoritative 'is this on screen' check (see _apply_targeted_balances)."""
+        host = self.host
+        if host is None:
+            return False
+        sel = getattr(host, "selected_address", None)
+        if not sel:
+            return False
+        try:
+            cur = host.current_chain()
+        except Exception:
+            return False
+        return cur.chain_id == chain.chain_id and sel.lower() == account.lower()
 
     def _rerender_view_from_cache(self, chain, account: str) -> None:
         """Reflect the wallet cache for ``(chain, account)`` in the panel.
@@ -726,46 +793,50 @@ class TokensPlugin(Plugin):
         self._displayed_view = (chain.chain_id, account.lower())
 
     def _persist_targeted_balances(
-        self, chain, account: str, native_wei, balances_raw: dict,
+        self, chain, account: str, native_wei, balances_raw: dict, block=None,
     ) -> None:
         """Write the authoritative native + per-token balances into the wallet
-        cache (absolute values, unlike the receipt path's delta). A token
-        already cached is updated in place; one whose new balance is ZERO (the
-        whole holding was sent) is DROPPED — discovery never caches a zero, and
-        keeping it would leave a stale row in the list that the in-place render
-        can't remove. An uncached token is added only when we have metadata to
-        render it AND a non-zero balance (a genuinely unknown token waits for
-        discovery, exactly as before)."""
+        cache (absolute values, unlike the receipt path's delta). Each token is
+        PER-TOKEN block-ordered via ``_balance_block``: a read at an older block
+        than the one we last recorded for that token is ignored, so a stale read
+        can't drop or regress a freshly-claimed token. A token read ZERO at a
+        fresh-enough block is dropped; an uncached token is added only when we
+        have metadata AND a non-zero balance."""
         import time
         now = int(time.time())
         cached = self._wallet_cache.load(chain.chain_id, account)
+        nkey = (chain.chain_id, account.lower())
+        native_stale = (block is not None
+                        and block < self._last_applied_block.get(nkey, 0))
         if cached is None:
             cached = CachedWallet(
                 chain_id=chain.chain_id, address=account.lower(),
                 native_balance_wei=int(native_wei), native_balance_updated=now)
-        else:
+        elif not native_stale:
+            # Native is block-ordered per account (a stale read can't regress
+            # it); tokens are ordered individually below.
             cached.native_balance_wei = int(native_wei)
             cached.native_balance_updated = now
-        import time as _t
-        deadline = _t.monotonic() + self.ZERO_GUARD_TTL_S
+        if block is not None and not native_stale:
+            self._last_applied_block[nkey] = int(block)
         existing = {t.contract.lower(): t for t in cached.tokens}
         emptied: set[str] = set()
         for contract_lower, raw in balances_raw.items():
-            gkey = (chain.chain_id, account.lower(), contract_lower)
+            bkey = (chain.chain_id, account.lower(), contract_lower)
+            if block is not None and block < self._balance_block.get(bkey, 0):
+                continue   # stale read for this token — ignore
+            if block is not None:
+                self._balance_block[bkey] = int(block)
             tok = existing.get(contract_lower)
             if tok is not None:
                 if int(raw) <= 0:
                     emptied.add(contract_lower)   # fully spent → drop the row
-                    self._recently_zeroed[gkey] = deadline   # guard vs stale rediscovery
                 else:
                     tok.balance_raw = int(raw)
                     tok.balance_updated = now
-                    self._recently_zeroed.pop(gkey, None)     # re-received → unguard
                 continue
             if int(raw) <= 0:
-                self._recently_zeroed[gkey] = deadline
                 continue
-            self._recently_zeroed.pop(gkey, None)
             entry = self._token_lists.get(chain.chain_id, contract_lower)
             meta = self._token_metadata.get(chain.chain_id, contract_lower)
             if meta is not None:
@@ -784,6 +855,17 @@ class TokensPlugin(Plugin):
             cached.tokens = [
                 t for t in cached.tokens if t.contract.lower() not in emptied]
         self._wallet_cache.save(cached)
+
+    def _record_nonzero_block(self, chain_id: int, account: str,
+                              contract: str, block) -> None:
+        """Mark a token as seen NON-ZERO at ``block`` so a later stale read
+        (older block) can't drop it. Used by the receipt path, which knows a
+        received token is non-zero as of the receipt's block without a read."""
+        if block is None:
+            return
+        bkey = (chain_id, account.lower(), contract.lower())
+        self._balance_block[bkey] = max(self._balance_block.get(bkey, 0),
+                                        int(block))
 
     def on_native_balance(self, chain, account: str, native_wei) -> None:
         """The on-screen account's native balance, read over the live ws every
@@ -951,6 +1033,10 @@ class TokensPlugin(Plugin):
         our_addrs = {a["address"].lower() for a in self._store.accounts}
         chain_id = chain.chain_id
         affected_wallets: set[str] = set()
+        # token contracts that moved for each of our wallets in THIS tx — read
+        # authoritatively below, at the receipt's own block.
+        touched: dict[str, set[str]] = {}
+        receipt_block = self._parse_block(receipt.get("blockNumber"))
         # The tx's own endpoints are affected regardless of its events:
         # the sender's NATIVE balance changed by construction (gas +
         # value), a plain value transfer has no logs at all, and a tx
@@ -962,13 +1048,13 @@ class TokensPlugin(Plugin):
             if isinstance(party, str) and party.lower() in our_addrs:
                 affected_wallets.add(party.lower())
         logs = receipt.get("logs") or []
-        for log in logs:
-            topics = log.get("topics") or []
+        for lg in logs:      # NB: not `log` — that's the module logger
+            topics = lg.get("topics") or []
             if len(topics) != 3:
                 continue
             if self._topic_hex(topics[0]) != self._TRANSFER_TOPIC0:
                 continue
-            token = log.get("address")
+            token = lg.get("address")
             if not token:
                 continue
             # Topic addresses are 32-byte left-padded; take the
@@ -977,7 +1063,7 @@ class TokensPlugin(Plugin):
             to_lower = "0x" + self._topic_hex(topics[2])[-40:]
             # Parse the value (uint256 in log.data, not in topics).
             try:
-                value = int(self._topic_hex(log.get("data") or "0x0"), 16)
+                value = int(self._topic_hex(lg.get("data") or "0x0"), 16)
             except ValueError:
                 value = 0
             for party, is_recipient in ((from_lower, False),
@@ -987,6 +1073,7 @@ class TokensPlugin(Plugin):
                     self._receipt_contracts.setdefault(
                         key, set()
                     ).add(token)
+                    touched.setdefault(party, set()).add(token.lower())
                     affected_wallets.add(party)
                     # On the RECEIVING side, apply the credit
                     # straight to the wallet's cache so the new
@@ -1003,8 +1090,33 @@ class TokensPlugin(Plugin):
                         self._apply_receipt_credit_to_cache(
                             chain, party, token, value,
                         )
+                        # We KNOW this token is non-zero as of the receipt's
+                        # block, so record it: a stale balanceOf read (from an
+                        # LB backend still behind, or a worker kicked before the
+                        # claim) that returns 0 at an older block can no longer
+                        # drop the just-claimed token. This is the receive-side
+                        # counterpart to a read's own block-ordering.
+                        self._record_nonzero_block(
+                            chain_id, party, token, receipt_block)
         if not affected_wallets or self.host is None:
             return
+        # Confirm-driven reconcile: a confirmed tx is the source of truth, so
+        # re-read the moved tokens (at the node's current head) and route them
+        # through the same drop/persist/repaint path as a live event. This
+        # covers the sender side (dropping a sent-to-zero token) that the old
+        # code left to discovery. It reads at latest (NOT a pinned/awaited
+        # block — that blocked a worker thread for up to 10s under LB skew,
+        # which delayed unrelated work like the signing dialog); per-token
+        # block-ordering + the receive-side _record_nonzero_block above keep it
+        # correct without waiting.
+        for wallet, tokens in touched.items():
+            bw = BalanceWorker(chain, wallet, sorted(tokens))
+            bw.refreshed.connect(
+                lambda cid, nat, bals, blk, ch=chain, acct=wallet:
+                self._apply_targeted_balances(ch, acct, nat, bals, blk))
+            bw.failed.connect(
+                lambda msg: log.warning("confirm reconcile failed: %s", msg))
+            self.host.start_worker(bw)
         current = self.host.selected_address
         if current is None:
             return
@@ -1012,6 +1124,16 @@ class TokensPlugin(Plugin):
         if (chain_now.chain_id == chain_id
                 and current.lower() in affected_wallets):
             self._invalidate_view_and_refresh()
+
+    @staticmethod
+    def _parse_block(value) -> int | None:
+        """A receipt ``blockNumber`` as an int — hex string or already-int."""
+        if value is None:
+            return None
+        try:
+            return int(value, 16) if isinstance(value, str) else int(value)
+        except (ValueError, TypeError):
+            return None
 
     def _apply_receipt_credit_to_cache(
         self, chain, address_lower: str, contract: str, delta: int,
@@ -1143,7 +1265,17 @@ class TokensPlugin(Plugin):
             bw = BalanceWorker(
                 chain, address, [t.contract for t in cached.tokens],
             )
-            bw.refreshed.connect(self._on_balance_refresh)
+            # Route through the block-ordered persist+render path, NOT the raw
+            # in-place _on_balance_refresh: this read fires on the confirm path
+            # (_invalidate_view_and_refresh) right after a send, so it can land
+            # on a lagging backend and read the PRE-send balance. Applied
+            # in-place + un-ordered it regressed the panel over the correct
+            # value the targeted read had just written (the 'send-out never
+            # updates' bug — the cache was right, the panel stale). Block
+            # ordering drops the stale read per token.
+            bw.refreshed.connect(
+                lambda cid, nat, bals, blk, ch=chain, acct=address:
+                self._apply_targeted_balances(ch, acct, nat, bals, blk))
             bw.failed.connect(
                 lambda msg: log.warning("BalanceWorker failed: %s", msg)
             )
@@ -1305,6 +1437,7 @@ class TokensPlugin(Plugin):
             def on_balances(cid: int, mc_native, mc_balances: dict,
                             block=None) -> None:
                 pv["native_wei"] = int(mc_native)
+                pv["block"] = block
                 raw = {k.lower(): int(v) for k, v in mc_balances.items()}
                 # A queried token ABSENT from the result had its balanceOf
                 # read fail (rate-limited upstream / lagging node), not
@@ -1318,6 +1451,13 @@ class TokensPlugin(Plugin):
             def on_balances_fail(msg: str) -> None:
                 log.warning("post-discovery multicall failed: %s", msg)
                 pv["native_wei"] = int(blockscout_native_wei)
+                # The multicall failed → we have NO fresh on-chain balances.
+                # Do not seed the view from the explorer's stale numbers (they
+                # can blink out a just-claimed token the indexer hasn't seen).
+                # Mark the read as failed so the merge in _on_combined_ready
+                # preserves the existing cache and only refreshes prices.
+                pv["read_failed"] = True
+                pv["block"] = None
                 raw = {
                     b.contract.lower(): int(b.balance_raw) for b in blockscout_tokens
                 }
@@ -1406,36 +1546,52 @@ class TokensPlugin(Plugin):
         native_wei = pv["native_wei"]
         metadata = pv["metadata"]
         balances_raw = pv["balances_raw"]
+        block = pv.get("block")
 
-        import time as _t
-        now_mono = _t.monotonic()
-        tokens: list[TokenBalance] = []
-        for addr, raw in balances_raw.items():
-            # Drop exactly-zero balances unless in spotlight mode. A pinned
-            # (force-shown) or custom token is still checked + kept in the set,
-            # but an empty one is noise — pin/custom mean "show when non-zero",
-            # not "show a zero forever". Only show_all reveals zero balances.
-            gkey = (chain.chain_id, address.lower(), addr.lower())
-            if raw == 0 and not self._show_all:
-                self._recently_zeroed.pop(gkey, None)   # discovery confirms zero
-                continue
-            # A token a live read just saw at zero must not be resurrected by a
-            # discovery whose balance snapshot predates the send (it completes
-            # AFTER the targeted drop). Suppress until the guard expires or a
-            # later read confirms the new state. See ZERO_GUARD_TTL_S.
-            guard = self._recently_zeroed.get(gkey)
-            if guard is not None and not self._show_all:
-                if now_mono < guard:
+        # MERGE discovery's read into the cached set (do NOT replace it):
+        #  - start from the current cache (carry every held token forward),
+        #  - apply each fresh read PER-TOKEN block-ordered — a read older than
+        #    the block we last recorded for a token is ignored, so a stale
+        #    discovery can't drop a freshly-claimed token,
+        #  - only an authoritative zero at a fresh-enough block drops a token,
+        #  - a failed multicall (block is None) applies NO balances — it just
+        #    refreshes prices over the preserved cache.
+        # This is what stops the "claimed token appeared then got hidden /
+        # flickered" bug: discovery used to rebuild the whole view from its own
+        # (possibly stale or failed) read and drop everything else.
+        cached_now = self._wallet_cache.load(chain.chain_id, address)
+        cached_by = {t.contract.lower(): t
+                     for t in (cached_now.tokens if cached_now else [])}
+        merged: dict[str, TokenBalance] = {
+            cl: TokenBalance(contract=t.contract, symbol=t.symbol, name=t.name,
+                             decimals=t.decimals, balance_raw=t.balance_raw)
+            for cl, t in cached_by.items()
+        }
+        # A FAILED multicall reports read_failed → we have no fresh balances, so
+        # apply none (preserve the cache, just refresh prices). A successful
+        # read applies its balances; ``block`` (when present) orders per token.
+        if not pv.get("read_failed"):
+            for addr, raw in balances_raw.items():
+                cl = addr.lower()
+                bkey = (chain.chain_id, address.lower(), cl)
+                if block is not None and block < self._balance_block.get(bkey, 0):
+                    continue   # stale read for this token — keep cached value
+                if block is not None:
+                    self._balance_block[bkey] = int(block)
+                if raw == 0 and not self._show_all:
+                    merged.pop(cl, None)      # authoritative zero → drop
                     continue
-                self._recently_zeroed.pop(gkey, None)
-            meta = metadata.get(addr)
-            if meta is None:
-                continue
-            sym, name, decimals = meta
-            tokens.append(TokenBalance(
-                contract=addr, symbol=sym, name=name,
-                decimals=decimals, balance_raw=raw,
-            ))
+                meta = metadata.get(cl)
+                if meta is None and cl in cached_by:
+                    c = cached_by[cl]
+                    meta = (c.symbol, c.name, c.decimals)
+                if meta is None:
+                    continue
+                sym, name, decimals = meta
+                merged[cl] = TokenBalance(
+                    contract=addr, symbol=sym, name=name,
+                    decimals=decimals, balance_raw=raw)
+        tokens: list[TokenBalance] = list(merged.values())
 
         entries = {
             (chain.chain_id, b.contract.lower()): e
@@ -1513,6 +1669,11 @@ class TokensPlugin(Plugin):
                 continue
             price = prices.get(addr)
             if price is None:
+                # A recognised (curated) token whose price didn't load still
+                # shows — it's a held, non-spam token; only unrecognised
+                # no-price tokens are dropped. Matches set_prices' known_pending.
+                if self._token_lists.is_known(chain.chain_id, addr):
+                    out.append(b)
                 continue
             if b.balance * price.price_usd < dust:
                 continue
@@ -2411,12 +2572,23 @@ class TokenListPanel(QWidget):
                 #   - native always shows;
                 #   - an EXACTLY-zero balance never shows — even pinned/custom
                 #     ("pin"/"add" mean show-when-held, not show-a-zero);
-                #   - otherwise show if pinned, custom-added, or above the dust
-                #     USD threshold.
+                #   - otherwise show if pinned, custom-added, above the dust
+                #     USD threshold, OR a RECOGNISED token whose price hasn't
+                #     loaded yet. The last clause is what makes a just-received
+                #     curated token (a swap's output, e.g. WETH) appear at once
+                #     instead of staying hidden — the targeted read adds it to
+                #     the cache without a price, and "no price → hide" is only
+                #     meant for unrecognised spam, not a token in the lists.
+                #     Once it IS priced the normal dust rule takes over.
                 is_zero = balance is not None and balance == 0
+                known_pending = (
+                    price is None
+                    and self._token_lists is not None
+                    and self._token_lists.is_known(cid, addr))
                 show = is_native or (not is_zero and (
                     self._store.is_force_shown(cid, addr)
                     or self._store.is_custom_token(cid, addr)
+                    or known_pending
                     or (value is not None and value >= self.DUST_USD_THRESHOLD)))
                 self.table.setRowHidden(row, not show)
         self.table.setSortingEnabled(True)

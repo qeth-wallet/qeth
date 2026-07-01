@@ -404,6 +404,25 @@ class EthClient:
         return {t.lower(): f.value for t, f in queued
                 if f.success and f.value is not None}
 
+    def head_balances(
+        self, tokens: list[str], holder: str, batch_size: int = 100,
+    ) -> "tuple[int | None, dict[str, int]]":
+        """``multicall_erc20_balances`` at ``latest`` PLUS the block the read
+        actually ran at (from ``Multicall3.getBlockNumber()`` in the same
+        aggregate). Reading at ``latest`` never fails with "block in the future"
+        on a lagging backend, and the co-read block lets the caller order this
+        result against other concurrent reads. Returns ``(block, balances)``;
+        ``block`` is ``None`` if the height couldn't be read."""
+        if not tokens:
+            return None, {}
+        with self.multicall(batch_size=batch_size, block="latest") as mc:
+            blk = mc.block_number()
+            queued = [(t, mc.balance_of(t, holder)) for t in tokens]
+        balances = {t.lower(): f.value for t, f in queued
+                    if f.success and f.value is not None}
+        block = int(blk.value) if (blk.success and blk.value is not None) else None
+        return block, balances
+
     def multicall_erc20_metadata(
         self, tokens: list[str], batch_size: int = 30,
     ) -> dict[str, dict]:
@@ -512,6 +531,16 @@ class Multicall:
         p = _Pending(decoder)
         self._queued.append((target, calldata, p))
         return p
+
+    def block_number(self) -> _Pending:
+        """Queue ``Multicall3.getBlockNumber()`` — the block THIS aggregate
+        executes at. Reading it from the same call as the balances (rather than
+        a separate ``eth_blockNumber``) makes the height consistent with the
+        values even behind a load balancer, where a separate head query can name
+        a block a different backend hasn't got yet."""
+        # keccak256("getBlockNumber()")[:4]
+        return self.add(MULTICALL3, bytes.fromhex("42cbb15c"),
+                        decoder=_decode_uint256)
 
     def balance_of(self, token: str, holder: str) -> _Pending:
         """Queue ``ERC20.balanceOf(holder)`` on ``token``; ``.value`` is

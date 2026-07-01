@@ -287,16 +287,19 @@ def test_apply_targeted_balances_persists_then_renders_on_view(qtbot, monkeypatc
         lambda ch, acct: rerendered.append(acct))
     monkeypatch.setattr(
         tp, "_persist_targeted_balances",
-        lambda ch, acct, wei, bals: persisted.append((acct, bals)))
+        lambda ch, acct, wei, bals, block=None: persisted.append((acct, bals)))
     ch = SimpleNamespace(chain_id=100)
 
-    tp._displayed_view = (1, "0xother")        # off-view: persist + flag only
+    # on/off-view is decided from the HOST's selection, not _displayed_view.
+    tp.host = SimpleNamespace(
+        selected_address="0xOTHER", current_chain=lambda: ch)   # off-view
     tp._apply_targeted_balances(ch, "0xABC", 9, {"0xToK": 7})
     assert persisted == [("0xABC", {"0xtok": 7})]
     assert rerendered == []
     assert (100, "0xabc") in tp._pending_rerender
 
-    tp._displayed_view = (100, "0xabc")        # on-view: persist + re-render
+    tp.host = SimpleNamespace(
+        selected_address="0xABC", current_chain=lambda: ch)     # on-view
     tp._pending_rerender.clear()
     tp._apply_targeted_balances(ch, "0xABC", 9, {"0xToK": 7})
     assert rerendered == ["0xABC"]
@@ -428,6 +431,208 @@ def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_p
     assert workers[0].contracts == ["0xtok"]              # over the displayed set
 
 
+def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tmp_path):
+    """The qeth-send confirm path (_invalidate_view_and_refresh) transiently
+    resets _displayed_view to None. A targeted drop landing in that window must
+    STILL repaint the on-screen panel — the decision uses the host's selection,
+    not the stale _displayed_view. Otherwise the cache empties but the row stays
+    until a tab switch (the reported 'sent WBTC, didn't disappear' bug)."""
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    wbtc = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+    cached = CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18,
+        native_price_usd="2000", native_price_updated=1, tokens=[
+            CachedToken(contract=wbtc, symbol="WBTC", name="W", decimals=8,
+                        balance_raw=15450, price_usd="60000", price_updated=1)])
+    tp._wallet_cache.save(cached)
+    panel.show_cached(eth, cached)
+    tp._displayed_view = (1, acc)
+
+    def visible():
+        return {panel.table.item(r, 0).data(Qt.ItemDataRole.UserRole)[1]
+                for r in range(panel.table.rowCount())
+                if panel.table.item(r, 0)
+                and panel.table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+                and panel.table.item(r, 0).data(Qt.ItemDataRole.UserRole)[1]
+                and not panel.table.isRowHidden(r)}
+    assert wbtc in visible()
+
+    tp._displayed_view = None              # the _invalidate_view_and_refresh window
+    tp._apply_targeted_balances(eth, acc, 10**18, {wbtc: 0}, 100)
+
+    assert wbtc not in visible()           # repainted from the host view
+    assert tp._pending_rerender == set()   # treated as on-view, no deferral
+    assert not tp._wallet_cache.load(1, acc).tokens
+
+
+def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
+    """The systemic bug: a token claimed on-view was DROPPED when a concurrent
+    discovery — whose balance snapshot predated the claim, or whose multicall
+    failed — completed and rebuilt the view from its own stale/absent read.
+    Discovery now MERGES + is per-token block-ordered: a read older than the
+    token's recorded block is ignored, a FAILED read applies nothing, and only
+    an authoritative zero at a fresh block drops the token."""
+    from types import SimpleNamespace
+    from decimal import Decimal
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.prices import Price
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    tok = "0x1111111111111111111111111111111111111111"
+    store = Store.load()
+    store.add_custom_token(1, tok)                 # custom → shows if non-zero
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._token_metadata.put_many(
+        1, {tok: {"symbol": "CUS", "name": "Custom", "decimals": 18}})
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
+    tp._wallet_cache.save(CachedWallet(chain_id=1, address=acc,
+                                       native_balance_wei=10**18, tokens=[]))
+    panel.show_cached(eth, tp._wallet_cache.load(1, acc))
+    tp._displayed_view = (1, acc)
+
+    def held():
+        return {t.contract.lower() for t in tp._wallet_cache.load(1, acc).tokens}
+
+    def discover(balances, block=None, read_failed=False):
+        pv = {"chain": eth, "address": acc, "view_key": (1, acc),
+              "native_wei": 10**18, "block": block, "read_failed": read_failed,
+              "balances_raw": balances,
+              "metadata": {tok: ("CUS", "Custom", 18)}}
+        tp._on_combined_ready(pv, 1, {"": Price(Decimal("2000"), 1, "x")})
+
+    # claim the custom token at block 100
+    tp._apply_targeted_balances(eth, acc, 10**18, {tok: 5000}, 100)
+    assert tok in held()
+
+    # a stale discovery read it 0 at block 99 (before the claim) → NOT dropped
+    discover({tok: 0}, block=99)
+    assert tok in held()
+
+    # a failed discovery (Blockscout fallback, no fresh read) → NOT dropped
+    discover({}, read_failed=True)
+    assert tok in held()
+
+    # a FRESH discovery reads it 0 at block 101 → authoritative drop
+    discover({tok: 0}, block=101)
+    assert tok not in held()
+
+
+def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_path):
+    """The 'qeth send-out never updates' bug: the confirm path's is_new_view
+    read fires right after a send and can read the PRE-send balance from a
+    lagging backend. Routed through the block-ordered _apply_targeted_balances
+    (not the raw in-place path), a stale read is dropped per token, so it can't
+    regress the panel over the correct value a fresher read already wrote."""
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    usdt = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18,
+        native_price_usd="2000", native_price_updated=1, tokens=[
+            CachedToken(contract=usdt, symbol="USDT", name="Tether",
+                        decimals=6, balance_raw=644_000000, price_usd="1",
+                        price_updated=1)]))
+    panel.show_cached(eth, tp._wallet_cache.load(1, acc))
+    tp._displayed_view = (1, acc)
+
+    def panel_usdt():
+        for r in range(panel.table.rowCount()):
+            it = panel.table.item(r, 0)
+            key = it.data(Qt.ItemDataRole.UserRole) if it else None
+            if key and key[1] == usdt:
+                return panel.table.item(r, 1).text()
+        return None
+
+    # the correct post-send balance lands at block 810
+    tp._apply_targeted_balances(eth, acc, 10**18, {usdt: 423_000000}, 810)
+    assert panel_usdt() == "423"
+    # the confirm path's fast read (lagging backend) reads PRE-send 644 @805
+    tp._apply_targeted_balances(eth, acc, 10**18, {usdt: 644_000000}, 805)
+    assert panel_usdt() == "423"        # NOT regressed to 644
+
+
+def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_path):
+    """A fresh read for one token must not be skipped because an UNRELATED read
+    (native only, or another token) landed at a higher block. Ordering is
+    per-token — the 'partial USDT send didn't update' bug behind a
+    load-balanced node whose backends report different heads. But a genuinely
+    stale read for the SAME token (older than its own last block) is ignored."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    usdt = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18, tokens=[
+            CachedToken(contract=usdt, symbol="USDT", name="Tether",
+                        decimals=6, balance_raw=644_000000, price_usd="1",
+                        price_updated=1)]))
+    panel.show_cached(eth, tp._wallet_cache.load(1, acc))
+    tp._displayed_view = (1, acc)
+
+    def usdt_bal():
+        c = tp._wallet_cache.load(1, acc)
+        return next((t.balance_raw for t in c.tokens
+                     if t.contract.lower() == usdt), None)
+
+    # an UNRELATED read (native only) lands at a higher block 105
+    tp._apply_targeted_balances(eth, acc, 10**18, {}, 105)
+    # the partial-send USDT read comes back at block 101 → must still apply
+    tp._apply_targeted_balances(eth, acc, 10**18, {usdt: 423_000000}, 101)
+    assert usdt_bal() == 423_000000
+
+    # a genuinely stale USDT read (block 100 < its last block 101) is ignored
+    tp._apply_targeted_balances(eth, acc, 10**18, {usdt: 999_000000}, 100)
+    assert usdt_bal() == 423_000000
+
+
 def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
     """Race guard: a balance worker kicked BEFORE a send (reads the token still
     non-zero) that finishes AFTER the drop must not resurrect it. Reads are
@@ -447,7 +652,9 @@ def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
     tp = TokensPlugin(store)
     tp._panel = panel
     tp._wallet_cache = WalletCache(cache_dir=tmp_path)
-    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+    # re-adding a token with no price kicks a price fetch → needs start_worker
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
     cached = CachedWallet(
         chain_id=1, address=acc, native_balance_wei=10**18,
         native_price_usd="2000", native_price_updated=1, tokens=[
@@ -519,13 +726,15 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
                 out.add(key[1])
         return out
 
-    # Live read: WBTC fully sent → drop.
-    tp._apply_targeted_balances(eth, acc, 10**18, {wbtc: 0})
+    # Live read at block 100: WBTC fully sent → drop.
+    tp._apply_targeted_balances(eth, acc, 10**18, {wbtc: 0}, 100)
     assert wbtc not in visible()
 
-    # A stale discovery (captured WBTC>0 before the send) now completes.
+    # A stale discovery whose balances were read at block 99 (before the send)
+    # now completes — its WBTC>0 is OLDER than the drop, so block-ordering must
+    # reject it.
     pv = {"chain": eth, "address": acc, "view_key": (1, acc),
-          "native_wei": 10**18,
+          "native_wei": 10**18, "block": 99,
           "balances_raw": {wbtc: 100000, usdc: 50 * 10**6},
           "metadata": {wbtc: ("WBTC", "W", 8), usdc: ("USDC", "U", 6)}}
     prices = {wbtc: Price(Decimal("60000"), 1, "x"),

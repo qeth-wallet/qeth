@@ -1214,15 +1214,15 @@ class TransactionsPlugin(Plugin):
             (chain, addr.lower()) if (chain is not None and addr) else None)
 
     def _on_balance_dirty(self, chain, account: str, token: str,
-                          block=None) -> None:
+                          block=None, native=None, balance=None) -> None:
         """A ws Transfer touched the account (LiveWatcher.balance_dirty).
-        Relay it to TokensPlugin, which re-reads that balance — mirrors the
-        _on_receipt_confirmed → note_receipt_logs cross-plugin hop. ``block`` is
-        the log's block so the re-read can wait for the RPC to reach it."""
+        Relay it to TokensPlugin. ``native``/``balance`` are the ws-read values
+        at the log's ``block`` (None if the ws read failed → http fallback)."""
         tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
         if tokens is not None and hasattr(tokens, "on_balance_dirty"):
             try:
-                tokens.on_balance_dirty(chain, account, token, block)
+                tokens.on_balance_dirty(chain, account, token, block,
+                                        native, balance)
             except Exception:
                 log.exception("on_balance_dirty failed")
 

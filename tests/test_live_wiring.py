@@ -103,9 +103,9 @@ def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
     assert plugin._live_account == (gnosis, "0xabc")
     assert plugin._live_account_provider() == (gnosis, "0xabc")
 
-    plugin._on_balance_dirty(gnosis, "0xabc", "0xToken", 123)
+    plugin._on_balance_dirty(gnosis, "0xabc", "0xToken", 123, 10**18, 5)
     tokens.on_balance_dirty.assert_called_once_with(
-        gnosis, "0xabc", "0xToken", 123)
+        gnosis, "0xabc", "0xToken", 123, 10**18, 5)
 
     plugin._on_native_balance(gnosis, "0xabc", 5 * 10**18)
     tokens.on_native_balance.assert_called_once_with(gnosis, "0xabc", 5 * 10**18)

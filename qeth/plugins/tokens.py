@@ -601,12 +601,15 @@ class TokensPlugin(Plugin):
         return str(topic).lower()
 
     def on_balance_dirty(self, chain, account: str, token: str,
-                         block=None) -> None:
+                         block=None, native=None, balance=None) -> None:
         """A ws ERC-20 Transfer touched ``account`` on ``chain`` (the
         LiveWatcher, relayed by TransactionsPlugin). We never trust the log's
         value — instead it names the token whose ``balanceOf`` changed.
-        ``block`` is the log's block: the re-read waits for the RPC to reach it,
-        so a lagging http backend behind the ws doesn't read the PRE-event value.
+        ``native``/``balance`` are the LiveWatcher's authoritative re-read OVER
+        THE WS CONNECTION at the log's ``block`` (the backend that streamed the
+        log has that block, so no http skew). When present they're applied
+        directly, block-ordered; when None (ws read failed) we fall back to an
+        http re-read that waits for the RPC to reach ``block``.
 
         Two responses, deliberately split:
 
@@ -619,7 +622,15 @@ class TokensPlugin(Plugin):
         - **On the on-screen view only**, also schedule the full discovery
           refresh (prices, and surfacing a brand-new token not yet cached)."""
         if token:
-            self._queue_targeted_balance(chain, account, token, block)
+            if balance is not None and native is not None:
+                # authoritative ws read at the event's block → apply now, no
+                # http round-trip and no waiting (block-ordering still guards
+                # against an out-of-order apply).
+                self._apply_targeted_balances(
+                    chain, account, native, {token.lower(): int(balance)}, block)
+            else:
+                # ws read unavailable → http re-read that waits for the block.
+                self._queue_targeted_balance(chain, account, token, block)
         if self._displayed_view != (chain.chain_id, account.lower()):
             return
         # The discovery multicall set deliberately omits the full curated list

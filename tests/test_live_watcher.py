@@ -317,15 +317,58 @@ def test_transfer_filters_topics():
     assert outgoing == [TRANSFER_TOPIC0, padded, None]   # from = account
 
 
+class _FakeWsW3:
+    """Minimal AsyncWeb3 stand-in for _handle_log: its provider answers the
+    balanceOf (eth_call) and native (eth_getBalance) reads the watcher does over
+    the ws connection."""
+    def __init__(self, native=10**18, balance=500):
+        async def make_request(method, params):
+            if method == "eth_call":
+                return {"result": hex(balance)}
+            if method == "eth_getBalance":
+                return {"result": hex(native)}
+            return {"result": None}
+        self.provider = type("P", (), {"make_request": staticmethod(make_request)})()
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
+
 def test_handle_log_emits_balance_dirty(qapp):
     w = _watcher()
     got: list = []
-    w.balance_dirty.connect(lambda c, acct, tok: got.append((acct, tok)))
+    w.balance_dirty.connect(
+        lambda c, acct, tok, blk, nat, bal: got.append((acct, tok, blk, nat, bal)))
     chain = _chain(100)
-    w._handle_log(chain, "0xacc", {"address": "0xTok", "removed": False})
+    w3 = _FakeWsW3(native=10**18, balance=500)
+    lg = {"address": "0xTok", "blockNumber": "0x64", "removed": False}
+    _run(w._handle_log(chain, "0xacc", lg, w3))
     # reorg-removed log re-reads too — we never trust the log's value
-    w._handle_log(chain, "0xacc", {"address": "0xTok", "removed": True})
-    assert got == [("0xacc", "0xTok"), ("0xacc", "0xTok")]
+    _run(w._handle_log(chain, "0xacc", {**lg, "removed": True}, w3))
+    # the ws re-read balance + native ride the signal, tagged with the block
+    assert got == [("0xacc", "0xTok", 100, 10**18, 500),
+                   ("0xacc", "0xTok", 100, 10**18, 500)]
+
+
+def test_handle_log_ws_read_failure_emits_none(qapp):
+    """If the ws balance read fails (e.g. the LB moved the socket to a backend
+    lacking the block), native/balance are None so the consumer falls back to
+    an http re-read."""
+    w = _watcher()
+    got: list = []
+    w.balance_dirty.connect(
+        lambda c, acct, tok, blk, nat, bal: got.append((nat, bal)))
+
+    class _Failing:
+        provider = type("P", (), {
+            "make_request": staticmethod(
+                lambda method, params: (_ for _ in ()).throw(RuntimeError("boom")))
+        })()
+    _run(w._handle_log(_chain(100), "0xacc",
+                       {"address": "0xTok", "blockNumber": "0x64"}, _Failing()))
+    assert got == [(None, None)]
 
 
 def _padded(addr: str) -> str:
@@ -341,19 +384,20 @@ def test_handle_log_decodes_transfer_seen_both_directions(qapp):
     chain = _chain(100)
     acct = "0x" + "ac" * 20
     other = "0x" + "11" * 20
+    w3 = _FakeWsW3()
 
     # other -> acct : incoming, counterparty is the sender
-    w._handle_log(chain, acct, {
+    _run(w._handle_log(chain, acct, {
         "address": "0xTok",
         "topics": [TRANSFER_TOPIC0, _padded(other), _padded(acct)],
         "data": hex(1000),
-    })
+    }, w3))
     # acct -> other : outgoing, counterparty is the recipient
-    w._handle_log(chain, acct, {
+    _run(w._handle_log(chain, acct, {
         "address": "0xTok",
         "topics": [TRANSFER_TOPIC0, _padded(acct), _padded(other)],
         "data": hex(42),
-    })
+    }, w3))
     assert seen == [
         ("0xTok", other, False, 1000),
         ("0xTok", other, True, 42),
@@ -366,9 +410,9 @@ def test_handle_log_without_topics_skips_transfer_seen(qapp):
     w = _watcher()
     dirty: list = []
     seen: list = []
-    w.balance_dirty.connect(lambda c, a, t: dirty.append(t))
+    w.balance_dirty.connect(lambda c, a, t, blk, nat, bal: dirty.append(t))
     w.transfer_seen.connect(lambda *a: seen.append(a))
-    w._handle_log(_chain(100), "0xacc", {"address": "0xTok"})   # no topics
+    _run(w._handle_log(_chain(100), "0xacc", {"address": "0xTok"}, _FakeWsW3()))
     assert dirty == ["0xTok"] and seen == []
 
 

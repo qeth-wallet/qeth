@@ -136,26 +136,34 @@ def test_head_balances_reads_at_latest_with_a_consistent_block(anvil):
 @pytest.mark.network
 def test_ws_captures_transfer_log_as_balance_dirty(anvil, qtbot):
     """A real ERC-20 Transfer to the watched account, mined on the fork, is
-    captured by the logs subscription and surfaced as balance_dirty."""
+    captured by the logs subscription and surfaced as balance_dirty — WITH the
+    token + native balance re-read over the SAME ws connection at the log's
+    block (native/balance non-None, and balance == the amount received)."""
     if anvil.erc20_balance(USDC, WHALE) < 10 ** 6:
         pytest.skip("whale lacks USDC at this fork block")
     dirty: list = []
     up: list = []
     w = LiveWatcher(lambda: [anvil.chain],
                     account_provider=lambda: (anvil.chain, ACCT))
-    w.balance_dirty.connect(lambda c, a, t: dirty.append(t.lower()))
+    w.balance_dirty.connect(
+        lambda c, a, t, blk, nat, bal: dirty.append((t.lower(), blk, nat, bal)))
     w.link_state.connect(lambda c, on: up.append(on) if on else None)
     w.start()
     try:
         qtbot.waitUntil(lambda: bool(up), timeout=10_000)   # connected + subscribed
+        before = anvil.erc20_balance(USDC, ACCT)
         anvil.impersonate(WHALE)
         anvil.send(WHALE, USDC,
                    "0xa9059cbb" + _pad(ACCT) + hex(10 ** 6)[2:].rjust(64, "0"))
         anvil.mine()
-        qtbot.waitUntil(lambda: USDC.lower() in dirty, timeout=10_000)
+        qtbot.waitUntil(
+            lambda: any(d[0] == USDC.lower() for d in dirty), timeout=10_000)
     finally:
         w.stop()
-    assert USDC.lower() in dirty
+    hit = next(d for d in dirty if d[0] == USDC.lower())
+    _, block, native, balance = hit
+    assert block is not None and native is not None      # ws re-read succeeded
+    assert balance == before + 10 ** 6                   # authoritative, at the block
 
 
 @pytest.mark.network

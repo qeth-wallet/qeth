@@ -99,11 +99,13 @@ class LiveWatcher(QThread):
     confirmed = Signal(object, str, object)  # (chain, hash, raw receipt dict)
     dropped = Signal(object, str)            # (chain, hash) — nonce consumed
     still_pending = Signal(object, str)      # (chain, hash) — probe saw it open
-    # (chain, account, token_address, block) — block is the Transfer log's
-    # block, so the consumer can wait for its RPC to reach that height before
-    # trusting a re-read (a lagging http backend behind the ws that pushed us
-    # the log would otherwise read the PRE-event balance).
-    balance_dirty = Signal(object, str, str, object)
+    # (chain, account, token, block, native_wei, token_balance). We re-read the
+    # token + native balance OVER THE SAME WS CONNECTION that streamed the log,
+    # at the log's own block — that backend provably has the block, so the read
+    # reflects the event with no http skew and no waiting. native/balance are
+    # None if the ws read failed (e.g. the LB moved the socket to a backend that
+    # doesn't have the block yet); the consumer then falls back to an http read.
+    balance_dirty = Signal(object, str, str, object, object, object)
     native_balance = Signal(object, str, object)  # (chain, account, wei)
     # (chain, account, token, counterparty, outgoing, raw_value) — a Transfer
     # touching the account, decoded for a sent/received desktop notification.
@@ -308,7 +310,8 @@ class LiveWatcher(QThread):
                                 last_native = time.monotonic()
                                 await self._emit_native(chain, account, w3)
                         elif account is not None and sub in log_subs:
-                            self._handle_log(chain, account, msg["result"])
+                            await self._handle_log(
+                                chain, account, msg["result"], w3)
                 return
             except asyncio.CancelledError:
                 raise
@@ -349,13 +352,41 @@ class LiveWatcher(QThread):
         h = cls._log_hexstr(data)
         return int(h, 16) if h not in ("", "0x") else 0
 
-    def _handle_log(self, chain: "Chain", account: str, log: Any) -> None:
-        """A Transfer touching the account → the token's balance changed.
-        Emit ``balance_dirty`` so the consumer re-reads ``balanceOf`` — we
-        never trust the log's value, so a removed (reorg) log is treated the
-        same: re-read gives the truth. Also emit ``transfer_seen`` with the
-        decoded direction + value for a desktop notification (value display-
-        only; a malformed log degrades to just the balance re-read)."""
+    async def _read_token_and_native(
+        self, w3: Any, token: str, account: str, block: "int | None",
+    ) -> "tuple[int | None, int | None]":
+        """Read ``account``'s ``token`` balanceOf AND native balance over THIS
+        ws connection, at ``block`` (the log's block — the backend that streamed
+        it has it, so this reflects the event exactly). Returns
+        ``(native_wei, token_balance)``, or ``(None, None)`` on any failure (the
+        consumer then re-reads over http). Never trusts the log's value."""
+        tag = hex(block) if block is not None else "latest"
+        calldata = "0x70a08231" + "00" * 12 + account[2:].lower()
+        try:
+            bal = await self._rpc(w3, "eth_call",
+                                  [{"to": token, "data": calldata}, tag])
+            nat = await self._rpc(w3, "eth_getBalance", [account, tag])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("ws balance read: %s", e)
+            return None, None
+        if bal is None or nat is None:
+            return None, None
+        try:
+            return _to_int(nat), _to_int(bal)
+        except (ValueError, TypeError):
+            return None, None
+
+    async def _handle_log(self, chain: "Chain", account: str, log: Any,
+                          w3: Any) -> None:
+        """A Transfer touching the account → the token's balance changed. Re-read
+        the token + native balance OVER THIS WS CONNECTION at the log's block (no
+        http skew) and emit ``balance_dirty`` with them — we never trust the
+        log's own value, so a removed (reorg) log is treated the same: the
+        re-read gives the truth. Also emit ``transfer_seen`` with the decoded
+        direction + value for a desktop notification (value display-only; a
+        malformed log degrades to just the balance re-read)."""
         get = log.get if hasattr(log, "get") else log.__getitem__
         token = get("address")
         if not token:
@@ -366,7 +397,10 @@ class LiveWatcher(QThread):
             block = _to_int(bn) if bn is not None else None
         except Exception:
             block = None
-        self.balance_dirty.emit(chain, account, str(token), block)
+        native, balance = await self._read_token_and_native(
+            w3, str(token), account, block)
+        self.balance_dirty.emit(
+            chain, account, str(token), block, native, balance)
         try:
             topics = get("topics") or []
             if len(topics) < 3:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -272,6 +273,14 @@ class TokensPlugin(Plugin):
     # user's perception of "the tx landed". Still long enough to fold a swap's
     # several same-block legs into one round-trip.
     TARGETED_BALANCE_DEBOUNCE_MS = 400
+    # A recognised (curated-list) token we hold but CAN'T value — the price
+    # source doesn't cover it (DefiLlama has no quote for e.g. sUSD / EURT) —
+    # shows only for this grace window after it first appears unpriced, then
+    # hides (unless pinned/custom). The window lets a just-received token's price
+    # load (a few discovery/price cycles) before we give up on valuing it; a
+    # token whose price never arrives stops cluttering the list. Pin it to keep
+    # it visible regardless.
+    KNOWN_UNPRICED_GRACE_S = 150.0
     # When the on-screen chain has a live ws, Transfer logs carry token
     # balances and the ws also reads native ~once a minute (on_native_balance),
     # so the HTTP sweep slows to this deep backstop instead of polling every
@@ -339,6 +348,10 @@ class TokensPlugin(Plugin):
         # Views with a live price fetch in flight (for displayed-but-unpriced
         # tokens) — coalesces a burst of live updates into one fetch.
         self._prices_in_flight: set[tuple[int, str]] = set()
+        # (chain_id, addr) → monotonic time a recognised token was FIRST seen
+        # unpriced. Drives KNOWN_UNPRICED_GRACE_S: show while its price might
+        # still load, then hide. Reset when it gets a price or is re-received.
+        self._unpriced_since: dict[tuple[int, str], float] = {}
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()
@@ -893,6 +906,10 @@ class TokensPlugin(Plugin):
                 symbol, name, decimals = entry.symbol, entry.name, entry.decimals
             else:
                 continue
+            # Freshly (re-)received → restart its unpriced grace window, so a
+            # token that was hidden after a past window shows again while its
+            # price gets another chance to load.
+            self._unpriced_since.pop((chain.chain_id, contract_lower), None)
             cached.tokens.append(CachedToken(
                 contract=contract_lower, symbol=symbol, name=name,
                 decimals=decimals, logo_uri=entry.logo_uri if entry else None,
@@ -1677,6 +1694,17 @@ class TokensPlugin(Plugin):
         from dataclasses import replace
         return replace(cached, tokens=kept)
 
+    def _within_unpriced_grace(self, chain_id: int, addr: str) -> bool:
+        """True while a recognised-but-unpriced token is still inside its grace
+        window (``KNOWN_UNPRICED_GRACE_S`` from when first seen unpriced). Starts
+        the timer on first call. Shared by the discovery filter and the panel's
+        display-time hiding so both agree on when to drop it. Reset elsewhere
+        when the token gets a price or is re-received from zero."""
+        import time as _t
+        key = (chain_id, addr.lower())
+        since = self._unpriced_since.setdefault(key, _t.monotonic())
+        return _t.monotonic() - since < self.KNOWN_UNPRICED_GRACE_S
+
     def _compute_visible_tokens(self, chain, tokens: list, prices,
                                 show_all: bool | None = None) -> list:
         """Apply hide + dust + force-show filter and sort by USD
@@ -1711,12 +1739,15 @@ class TokensPlugin(Plugin):
                 continue
             price = prices.get(addr)
             if price is None:
-                # A recognised (curated) token whose price didn't load still
-                # shows — it's a held, non-spam token; only unrecognised
-                # no-price tokens are dropped. Matches set_prices' known_pending.
-                if self._token_lists.is_known(chain.chain_id, addr):
+                # Unrecognised + no price → spam → drop. A recognised token we
+                # can't value shows only inside its grace window (so a just-
+                # received token isn't hidden while its price loads), then hides
+                # if the price never arrives. Pinned/custom already returned.
+                if (self._token_lists.is_known(chain.chain_id, addr)
+                        and self._within_unpriced_grace(chain.chain_id, addr)):
                     out.append(b)
                 continue
+            self._unpriced_since.pop((chain.chain_id, addr), None)  # priced
             if b.balance * price.price_usd < dust:
                 continue
             out.append(b)
@@ -1951,6 +1982,10 @@ class TokensPlugin(Plugin):
             # combined scam check for the alarm-icon decision.
             self._panel._token_lists = self._token_lists
             self._panel._risk_cache = self._risk_cache
+            # Share the unpriced-grace clock so the panel's display-time hiding
+            # agrees with the discovery filter on when to drop a token we can't
+            # value (else it'd linger on screen until the next discovery).
+            self._panel._unpriced_grace = self._within_unpriced_grace
         # Prefill the on-chain metadata cache from the curated
         # lists. The curated entries already carry symbol/name/
         # decimals (the JSON we just downloaded HAS this) so
@@ -2238,6 +2273,10 @@ class TokenListPanel(QWidget):
         # Set externally by MainWindow so we can mark scams with an alarm
         # icon and short-circuit `is_likely_scam` against the curated lists.
         self._token_lists: TokenLists | None = None
+        # Injected by TokensPlugin: (chain_id, addr) → is this recognised-but-
+        # unpriced token still inside its show-then-hide grace window? None until
+        # wired (then known_pending shows unpriced recognised tokens forever).
+        self._unpriced_grace: Callable[[int, str], bool] | None = None
         # Same — MainWindow injects so the alarm icon also reflects GoPlus
         # high-risk verdicts (honeypot / hidden owner / >50% sell tax).
         self._risk_cache: RiskCache | None = None
@@ -2626,7 +2665,12 @@ class TokenListPanel(QWidget):
                 known_pending = (
                     price is None
                     and self._token_lists is not None
-                    and self._token_lists.is_known(cid, addr))
+                    and self._token_lists.is_known(cid, addr)
+                    # ...but only while inside the grace window — a recognised
+                    # token the price source can't value (sUSD/EURT) stops
+                    # showing once its window lapses (pin it to keep it).
+                    and (self._unpriced_grace is None
+                         or self._unpriced_grace(cid, addr)))
                 show = is_native or (not is_zero and (
                     self._store.is_force_shown(cid, addr)
                     or self._store.is_custom_token(cid, addr)

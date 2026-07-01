@@ -1680,6 +1680,32 @@ class TestTokensPlugin:
         assert "CUS" in visible        # custom: shown despite dust value
         assert "ORD" not in visible    # ordinary dust token: filtered
 
+    def test_recognised_unpriced_token_hides_after_grace_window(
+        self, tokens_plugin, monkeypatch,
+    ):
+        """A recognised token the price source can't value (sUSD/EURT) shows only
+        inside its grace window so a just-received token isn't hidden while its
+        price loads — then hides once the window lapses, unless pinned."""
+        import time
+        from qeth.tokens import TokenBalance
+        monkeypatch.setattr(tokens_plugin._token_lists, "is_known",
+                            lambda cid, a: True)          # everything recognised
+        known = "0x" + "ab" * 20
+        toks = [TokenBalance(contract=known, symbol="SUSD", name="sUSD",
+                             decimals=18, balance_raw=10 ** 18)]
+
+        def vis():
+            return {t.contract.lower()
+                    for t in tokens_plugin._compute_visible_tokens(ETH, toks, {})}
+
+        assert known in vis()            # first sighting → inside grace → shown
+        # age the clock past the window
+        tokens_plugin._unpriced_since[(1, known)] = (
+            time.monotonic() - tokens_plugin.KNOWN_UNPRICED_GRACE_S - 1)
+        assert known not in vis()        # window lapsed → hidden
+        tokens_plugin._store.force_show_token(1, known)
+        assert known in vis()            # pinned → shown regardless of price
+
     def test_fresh_wallet_sets_displayed_view_before_discovery(
         self, tokens_plugin,
     ):

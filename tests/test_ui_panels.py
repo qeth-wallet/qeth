@@ -234,6 +234,39 @@ class TestTokenListPanel:
         assert shown[weth] is True     # recognised, price pending → shown
         assert shown[spam] is False    # unrecognised, no price → hidden
 
+    def test_recognised_unpriced_token_hidden_once_grace_lapses(
+        self, qtbot, tmp_qeth,
+    ):
+        """Display-time: with the grace clock wired in, the panel hides a
+        recognised-but-unpriced token once its window lapses (so it agrees with
+        the discovery filter instead of lingering until the next discovery)."""
+        from types import SimpleNamespace
+        from qeth.tokens import TokenBalance
+        store = Store.load()
+        addr = "0x" + "c0" * 20
+        panel = TokenListPanel(IconCache(), store)
+        qtbot.addWidget(panel)
+        panel._token_lists = SimpleNamespace(
+            is_known=lambda cid, a: True, is_likely_scam=lambda *a, **k: False)
+        expired: set = set()
+        panel._unpriced_grace = lambda cid, a: (cid, a.lower()) not in expired
+        toks = [TokenBalance(contract=addr, symbol="SUSD", name="", decimals=18,
+                             balance_raw=10 ** 18)]
+
+        def hidden():
+            for row in range(panel.table.rowCount()):
+                it = panel.table.item(row, 0)
+                key = it.data(Qt.ItemDataRole.UserRole) if it else None
+                if key and key[1] == addr:
+                    return panel.table.isRowHidden(row)
+            return None
+
+        panel.render_full(ETH, 0, toks, {}, {}, apply_dust_filter=True)
+        assert hidden() is False              # inside grace → shown
+        expired.add((1, addr))                # window lapses
+        panel.render_full(ETH, 0, toks, {}, {}, apply_dust_filter=True)
+        assert hidden() is True               # now hidden
+
     def test_native_row_pinned_at_index_zero(self, token_panel):
         token_panel.show_balances(ETH, native_wei=10**18, tokens=[], list_entries={})
         assert token_panel.table.rowCount() == 1

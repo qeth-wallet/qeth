@@ -481,6 +481,50 @@ def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tm
     assert not tp._wallet_cache.load(1, acc).tokens
 
 
+def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_path):
+    """A held token the user HID must stay in the disk cache after a discovery
+    (so unhiding brings it back) even though the display filters it — discovery's
+    replace-save dropped it, contradicting _filter_hidden_from_cache."""
+    from types import SimpleNamespace
+    from decimal import Decimal
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.prices import Price
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    tok = "0x1111111111111111111111111111111111111111"
+    store = Store.load()
+    store.hide_token(1, tok)                       # the user hid it
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._token_metadata.put_many(
+        1, {tok: {"symbol": "HID", "name": "Hidden", "decimals": 18}})
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
+    tp._wallet_cache.save(CachedWallet(chain_id=1, address=acc,
+                                       native_balance_wei=10**18, tokens=[]))
+    panel.show_cached(eth, tp._wallet_cache.load(1, acc))
+    tp._displayed_view = (1, acc)
+
+    pv = {"chain": eth, "address": acc, "view_key": (1, acc),
+          "native_wei": 10**18, "block": 100, "read_failed": False,
+          "balances_raw": {tok: 5000},
+          "metadata": {tok: ("HID", "Hidden", 18)}}
+    tp._on_combined_ready(pv, 1, {"": Price(Decimal("2000"), 1, "x"),
+                                  tok: Price(Decimal("1"), 1, "x")})
+
+    # filtered from the display …
+    assert (1, tok) not in panel._balances
+    # … but kept in the disk cache, so unhiding brings it back
+    held = {t.contract.lower() for t in tp._wallet_cache.load(1, acc).tokens}
+    assert tok in held
+
+
 def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
     """The systemic bug: a token claimed on-view was DROPPED when a concurrent
     discovery — whose balance snapshot predated the claim, or whose multicall

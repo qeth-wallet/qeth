@@ -1543,13 +1543,26 @@ class TokensPlugin(Plugin):
                 apply_dust_filter=apply_dust,
             )
 
-        # Cache only the normal-mode visible set (post-dust + force-show);
-        # never persist the spotlight superset.
+        # Cache the normal-mode visible set (post-dust + force-show; never the
+        # spotlight superset) PLUS any held tokens the user HID. The disk cache
+        # must keep hidden holdings — the display filters them at render time
+        # (_filter_hidden_from_cache), but dropping them from disk means
+        # unhiding can't bring a token back until the next discovery happens to
+        # re-read it. Dust/zero stay filtered so the fast in-place rerender
+        # (contract-set match) still applies for the common case.
         cache_visible = (
             self._compute_visible_tokens(chain, tokens, prices, show_all=False)
             if self._show_all else visible
         )
-        self._save_wallet_cache(chain, address, native_wei, cache_visible, prices, entries)
+        shown = {b.contract.lower() for b in cache_visible}
+        hidden_held = [
+            b for b in tokens
+            if int(b.balance_raw) > 0 and b.contract.lower() not in shown
+            and self._store.is_hidden(chain.chain_id, b.contract)
+        ]
+        self._save_wallet_cache(
+            chain, address, native_wei, cache_visible + hidden_held,
+            prices, entries)
 
     def _filter_hidden_from_cache(self, chain, cached):
         """Return a shallow copy of ``cached`` with user-hidden

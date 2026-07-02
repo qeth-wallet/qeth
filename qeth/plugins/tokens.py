@@ -55,6 +55,7 @@ from ..tokens import (
     TokenSource,
 )
 from ..toptokens import COINGECKO_PLATFORMS, TopTokens
+from ..balance_ledger import BalanceLedger
 from ..wallet_cache import CachedToken, CachedWallet, WalletCache
 
 
@@ -336,18 +337,6 @@ class TokensPlugin(Plugin):
         # panel is stale relative to disk. Consumed by on_activated to re-render
         # the moment the user switches to the tab. Keyed (chain_id, addr_lower).
         self._pending_rerender: set[tuple[int, str]] = set()
-        # (chain_id, addr_lower) -> highest block whose targeted/reconcile read
-        # we've applied. A concurrent worker that read an OLDER block (kicked
-        # before a send, finishing after the drop) must NOT overwrite a fresher
-        # read and resurrect the token. See _apply_targeted_balances.
-        self._last_applied_block: dict[tuple[int, str], int] = {}
-        # (chain_id, addr_lower, token_lower) -> block of the last AUTHORITATIVE
-        # balance we recorded for that token (from any path). A read/discovery
-        # that saw the token at an OLDER block must not drop or regress it — this
-        # is the per-token ordering that stops a stale discovery from dropping a
-        # freshly-claimed token (the per-account _last_applied_block can't, since
-        # a token can arrive at a block newer than the account's last read).
-        self._balance_block: dict[tuple[int, str, str], int] = {}
         # Views with a live price fetch in flight (for displayed-but-unpriced
         # tokens) — coalesces a burst of live updates into one fetch.
         self._prices_in_flight: set[tuple[int, str]] = set()
@@ -355,6 +344,14 @@ class TokensPlugin(Plugin):
         # unpriced. Drives KNOWN_UNPRICED_GRACE_S: show while its price might
         # still load, then hide. Reset when it gets a price or is re-received.
         self._unpriced_since: dict[tuple[int, str], float] = {}
+        # Block-ordered balance writer: the single owner of the per-token /
+        # per-account-native freshness stamps and the cache mutation that
+        # honours them (was two dicts + duplicated ordering logic here). Shares
+        # the wallet cache, token sources and the unpriced-grace map so a
+        # (re-)received token restarts its grace window on add.
+        self._ledger = BalanceLedger(
+            lambda: self._wallet_cache, self._token_lists,
+            self._token_metadata, self._unpriced_since)
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()
@@ -858,81 +855,16 @@ class TokensPlugin(Plugin):
     def _persist_targeted_balances(
         self, chain, account: str, native_wei, balances_raw: dict, block=None,
     ) -> None:
-        """Write the authoritative native + per-token balances into the wallet
-        cache (absolute values, unlike the receipt path's delta). Each token is
-        PER-TOKEN block-ordered via ``_balance_block``: a read at an older block
-        than the one we last recorded for that token is ignored, so a stale read
-        can't drop or regress a freshly-claimed token. A token read ZERO at a
-        fresh-enough block is dropped; an uncached token is added only when we
-        have metadata AND a non-zero balance."""
-        import time
-        now = int(time.time())
-        cached = self._wallet_cache.load(chain.chain_id, account)
-        nkey = (chain.chain_id, account.lower())
-        native_stale = (block is not None
-                        and block < self._last_applied_block.get(nkey, 0))
-        if cached is None:
-            cached = CachedWallet(
-                chain_id=chain.chain_id, address=account.lower(),
-                native_balance_wei=int(native_wei), native_balance_updated=now)
-        elif not native_stale:
-            # Native is block-ordered per account (a stale read can't regress
-            # it); tokens are ordered individually below.
-            cached.native_balance_wei = int(native_wei)
-            cached.native_balance_updated = now
-        if block is not None and not native_stale:
-            self._last_applied_block[nkey] = int(block)
-        existing = {t.contract.lower(): t for t in cached.tokens}
-        emptied: set[str] = set()
-        for contract_lower, raw in balances_raw.items():
-            bkey = (chain.chain_id, account.lower(), contract_lower)
-            if block is not None and block < self._balance_block.get(bkey, 0):
-                continue   # stale read for this token — ignore
-            if block is not None:
-                self._balance_block[bkey] = int(block)
-            tok = existing.get(contract_lower)
-            if tok is not None:
-                if int(raw) <= 0:
-                    emptied.add(contract_lower)   # fully spent → drop the row
-                else:
-                    tok.balance_raw = int(raw)
-                    tok.balance_updated = now
-                continue
-            if int(raw) <= 0:
-                continue
-            entry = self._token_lists.get(chain.chain_id, contract_lower)
-            meta = self._token_metadata.get(chain.chain_id, contract_lower)
-            if meta is not None:
-                symbol, name, decimals = (
-                    meta["symbol"], meta["name"], meta["decimals"])
-            elif entry is not None:
-                symbol, name, decimals = entry.symbol, entry.name, entry.decimals
-            else:
-                continue
-            # Freshly (re-)received → restart its unpriced grace window, so a
-            # token that was hidden after a past window shows again while its
-            # price gets another chance to load.
-            self._unpriced_since.pop((chain.chain_id, contract_lower), None)
-            cached.tokens.append(CachedToken(
-                contract=contract_lower, symbol=symbol, name=name,
-                decimals=decimals, logo_uri=entry.logo_uri if entry else None,
-                balance_raw=int(raw), price_usd=None,
-                balance_updated=now, price_updated=0))
-        if emptied:
-            cached.tokens = [
-                t for t in cached.tokens if t.contract.lower() not in emptied]
-        self._wallet_cache.save(cached)
+        """Write authoritative native + per-token balances into the wallet
+        cache, block-ordered. Thin wrapper over the ledger (kept so existing
+        callers / tests read naturally)."""
+        self._ledger.apply_read(chain, account, native_wei, balances_raw, block)
 
     def _record_nonzero_block(self, chain_id: int, account: str,
                               contract: str, block) -> None:
         """Mark a token as seen NON-ZERO at ``block`` so a later stale read
-        (older block) can't drop it. Used by the receipt path, which knows a
-        received token is non-zero as of the receipt's block without a read."""
-        if block is None:
-            return
-        bkey = (chain_id, account.lower(), contract.lower())
-        self._balance_block[bkey] = max(self._balance_block.get(bkey, 0),
-                                        int(block))
+        can't drop it (ledger-owned; thin wrapper)."""
+        self._ledger.note_nonzero(chain_id, account, contract, block)
 
     def on_native_balance(self, chain, account: str, native_wei) -> None:
         """The on-screen account's native balance, read over the live ws every
@@ -1635,11 +1567,10 @@ class TokensPlugin(Plugin):
         if not pv.get("read_failed"):
             for addr, raw in balances_raw.items():
                 cl = addr.lower()
-                bkey = (chain.chain_id, address.lower(), cl)
-                if block is not None and block < self._balance_block.get(bkey, 0):
+                if self._ledger.is_token_stale(chain.chain_id, address, cl,
+                                               block):
                     continue   # stale read for this token — keep cached value
-                if block is not None:
-                    self._balance_block[bkey] = int(block)
+                self._ledger.stamp_token(chain.chain_id, address, cl, block)
                 if raw == 0 and not self._show_all:
                     merged.pop(cl, None)      # authoritative zero → drop
                     continue

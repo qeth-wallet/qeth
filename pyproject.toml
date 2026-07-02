@@ -125,6 +125,7 @@ files = [
     "qeth/chains.py",
     "qeth/store.py",
     "qeth/fsatomic.py",
+    "qeth/balance_ledger.py",
     "qeth/tokens.py",
     "qeth/tokenlists.py",
     "qeth/token_metadata.py",

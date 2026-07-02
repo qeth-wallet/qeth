@@ -915,6 +915,10 @@ class TransactionsPlugin(Plugin):
     # re-reads a name's records the moment its record/subdomain write lands,
     # rather than guessing with a timer.
     tx_confirmed = Signal(object, str, object)
+    # (chain, hash) — a pending tx reached its OTHER terminal state: its nonce
+    # was consumed elsewhere so it will never confirm. Lets a one-shot
+    # confirm-listener stop waiting instead of leaking forever (5f).
+    tx_dropped = Signal(object, str)
 
     # How many cached rows to materialise into the table on first
     # open, and how many more to reveal on each scroll-to-bottom
@@ -1571,6 +1575,7 @@ class TransactionsPlugin(Plugin):
                 )
                 if self._panel is not None and self._rendered_for == key:
                     self._panel.update_tx_by_hash(txs[i])
+                self.tx_dropped.emit(chain, tx_hash)   # terminal (5f)
                 return
 
     # --- persistence shim ---------------------------------------------------
@@ -3612,6 +3617,13 @@ class TransactionDetailsDialog(Dialog):
                  tx_cache: TransactionCache | None = None,
                  parent=None):
         super().__init__(parent)
+        # Free ourselves on dismissal (5f). This dialog is show()n non-modally
+        # and connects to the app-lifetime IconCache.icon_ready; parented to the
+        # panel, it would otherwise live (and keep receiving icon_ready) until
+        # the app closes — one zombie per tx-details open. finished fires on
+        # accept / reject / WM-close (Dialog.closeEvent → QDialog.reject), so
+        # deleteLater runs on every real close.
+        self.finished.connect(self.deleteLater)
         self.tx = tx
         self.chain = chain
         self._abi_source = abi_source
@@ -4405,6 +4417,12 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
                  resize_to: tuple[int, int] = (720, 640),
                  parent=None):
         super().__init__(parent)
+        # Free ourselves on dismissal (5f) — same rationale as
+        # TransactionDetailsDialog: shown non-modally, wired to the app-lifetime
+        # IconCache.icon_ready, parented to MainWindow. finished never fires
+        # mid-sign (Dialog.closeEvent ignores the close while _signing), so this
+        # can't delete the dialog out from under an in-flight broadcast.
+        self.finished.connect(self.deleteLater)
         # --- common state -------------------------------------------------
         # Address book = (address, label) of the user's OWN wallets only —
         # the recipient autocomplete + own-wallet label. Scoped to wallets

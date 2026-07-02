@@ -913,6 +913,30 @@ class TestTransactionsPlugin:
         QTest.keyClick(dlg, Qt.Key_Escape)
         assert not dlg.isVisible()
 
+    def test_details_dialog_freed_on_dismiss(self, qtbot, tmp_qeth):
+        """5f: the dialog frees itself on dismissal instead of living — and
+        receiving IconCache.icon_ready — until the app closes."""
+        from unittest.mock import MagicMock
+        from qeth.plugins.transactions import TransactionDetailsDialog
+
+        tx = Transaction(
+            chain_id=1, hash="0x" + "bb" * 32, block_number=1,
+            timestamp=1779618611, nonce=1, from_addr=ADDR,
+            to_addr="0x" + "22" * 20, value_wei=0, gas_used=21000,
+            gas_price_wei=10**9, method_id="", input_data="0x", success=True,
+        )
+        dlg = TransactionDetailsDialog(
+            tx, ETH, abi_source=MagicMock(), abi_cache=MagicMock(),
+            start_worker=lambda w: None, token_info=lambda *a: None,
+            icon_cache=MagicMock(), native_price_usd=None,
+        )
+        destroyed = []
+        dlg.destroyed.connect(lambda *_: destroyed.append(True))
+        dlg.show()
+        dlg.reject()                       # dismiss → finished → deleteLater
+        qtbot.waitUntil(lambda: bool(destroyed), timeout=2000)
+        assert destroyed                   # the C++ object was actually freed
+
     def test_tab_reactivation_preserves_table(self, qtbot, tmp_qeth):
         """Switching away to the Tokens tab and back must NOT throw
         away anything on screen. The plugin sees on_activated for the
@@ -1371,6 +1395,22 @@ class TestOnTxDropped:
         assert tx.raw_signed is None       # no point re-broadcasting a dead nonce
         # Disk round-trip preserves the dropped state.
         assert plugin._disk_cache.load(*key)[0].dropped is True
+
+    def test_drop_emits_tx_dropped_signal(self, qtbot, tmp_qeth):
+        """A finalised drop emits tx_dropped so a one-shot confirm-listener can
+        stop waiting instead of leaking forever (5f)."""
+        plugin = TransactionsPlugin()
+        qtbot.addWidget(plugin.widget())
+        plugin.DROP_READING_MIN_SPACING_S = 0
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [self._pending()]
+        plugin._disk_cache.save(*key, plugin._cache[key])
+        h = plugin._cache[key][0].hash
+        emitted = []
+        plugin.tx_dropped.connect(lambda chain, hh: emitted.append(hh))
+        for _ in range(plugin.DROP_CONFIRM_READINGS):
+            plugin._on_tx_dropped(ETH, h)
+        assert emitted == [h]              # fired once, on the terminal drop
 
     def test_contradicting_still_pending_resets_the_count(self, qtbot, tmp_qeth):
         """dropped ×2, STILL PENDING, dropped ×2 — must NOT flip: the

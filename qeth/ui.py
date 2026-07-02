@@ -923,17 +923,25 @@ class MainWindow(QMainWindow):
         """Fire ``callback(receipt)`` once, when the pending tx with this hash
         mines. Subscribes to the transactions plugin's ``tx_confirmed`` and
         self-disconnects on the first match — the watcher already polls the
-        receipt, so we just piggy-back on its confirmation."""
+        receipt, so we just piggy-back on its confirmation. Also disconnects if
+        the tx is DROPPED (its other terminal state): otherwise a tx that never
+        confirms leaves this listener — and its captured callback — connected to
+        the app-lifetime signal forever (5f)."""
         plugin = self.transactions_plugin
         want = tx_hash.lower()
 
-        def _on(chain, h: str, receipt) -> None:
+        def _cleanup() -> None:
+            for sig, slot in ((plugin.tx_confirmed, _on_confirmed),
+                              (plugin.tx_dropped, _on_dropped)):
+                try:
+                    sig.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
+
+        def _on_confirmed(chain, h: str, receipt) -> None:
             if h.lower() != want or chain.chain_id != chain_id:
                 return
-            try:
-                plugin.tx_confirmed.disconnect(_on)
-            except (RuntimeError, TypeError):
-                pass
+            _cleanup()
             try:
                 callback(receipt)
             except Exception:
@@ -941,7 +949,13 @@ class MainWindow(QMainWindow):
                 logging.getLogger("qeth.ui").debug(
                     "request_transaction on_confirmed failed", exc_info=True)
 
-        plugin.tx_confirmed.connect(_on)
+        def _on_dropped(chain, h: str) -> None:
+            if h.lower() != want or chain.chain_id != chain_id:
+                return
+            _cleanup()   # never confirms → stop waiting; the callback isn't run
+
+        plugin.tx_confirmed.connect(_on_confirmed)
+        plugin.tx_dropped.connect(_on_dropped)
 
     def _begin_sign(self, dialog, chain, on_broadcast, on_fail) -> None:
         """Start one sign-and-broadcast attempt. Called every time
@@ -1202,6 +1216,11 @@ class MainWindow(QMainWindow):
 
     def _on_tx_broadcast(self, tx_hash, raw_signed, first_push_ok, dialog,
                           progress, req, chain, on_broadcast) -> None:
+        # Read anything we need off the dialog BEFORE accept() — accept() emits
+        # finished, which now schedules the dialog's deleteLater (5f). It's
+        # deferred (survives this call stack), but capturing first keeps it
+        # robust against any future event-loop turn between here and the use.
+        sim_logs = getattr(dialog, "_logs", None)
         progress.close()
         dialog.accept()
         if not first_push_ok:
@@ -1226,8 +1245,7 @@ class MainWindow(QMainWindow):
             # Transfer logs it will emit — fold them into the pending row's
             # activity so a swap shows its coins immediately (before the
             # receipt, before Blockscout indexes). The confirmed receipt
-            # later re-asserts the same legs.
-            sim_logs = getattr(dialog, "_logs", None)
+            # later re-asserts the same legs. (sim_logs captured above.)
             if sim_logs:
                 self.transactions_plugin.note_transfer_legs(
                     chain.chain_id, tx_hash, sim_logs, req.from_addr,

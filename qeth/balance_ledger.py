@@ -218,13 +218,18 @@ class BalanceLedger:
         cache = self._get_cache()
         cached = cache.load(chain.chain_id, account)
         nkey = (chain.chain_id, account.lower())
+        # A block-less read (the whole aggregate's block leg failed) carries no
+        # ordering, so it's the WEAKEST: it must never overwrite a value we
+        # DID order, and never drop on its zero. It applies only where there's
+        # no floor yet (first read of a fresh wallet/token). Native mirrors it.
         native_stale = (block is not None
                         and block < self.native_block.get(nkey, 0))
+        native_unordered = block is None and nkey in self.native_block
         if cached is None:
             cached = CachedWallet(
                 chain_id=chain.chain_id, address=account.lower(),
                 native_balance_wei=int(native_wei), native_balance_updated=now)
-        elif not native_stale:
+        elif not native_stale and not native_unordered:
             # Native is block-ordered per account (a stale read can't regress
             # it); tokens are ordered individually below.
             cached.native_balance_wei = int(native_wei)
@@ -235,14 +240,20 @@ class BalanceLedger:
         emptied: set[str] = set()
         for contract_lower, raw in balances_raw.items():
             bkey = (chain.chain_id, account.lower(), contract_lower)
-            if block is not None and block < self.balance_block.get(bkey, 0):
+            if block is None:
+                if bkey in self.balance_block:
+                    continue   # ordered elsewhere — a block-less read is too
+                               # weak to override or drop it
+            elif block < self.balance_block.get(bkey, 0):
                 continue   # stale read for this token — ignore
-            if block is not None:
+            else:
                 self.balance_block[bkey] = int(block)
             tok = existing.get(contract_lower)
             if tok is not None:
                 if int(raw) <= 0:
-                    emptied.add(contract_lower)   # fully spent → drop the row
+                    if block is not None:
+                        emptied.add(contract_lower)   # authoritative zero → drop
+                    # else: a block-less zero is too weak to drop — keep it
                 else:
                     tok.balance_raw = int(raw)
                     tok.balance_updated = now

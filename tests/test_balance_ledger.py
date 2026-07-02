@@ -89,11 +89,27 @@ def test_uncached_token_needs_metadata_and_nonzero(tmp_path):
     assert cache2.load(1, ACC) is None or cache2.load(1, ACC).tokens == []
 
 
-def test_block_none_read_never_stale_and_carries_no_order(tmp_path):
+def test_block_none_read_applies_to_unstamped_tokens(tmp_path):
     ledger, cache, _ = _ledger(tmp_path, meta=_meta())
-    ledger.apply_read(CHAIN, ACC, 0, {TOK: 50}, block=None)
+    ledger.apply_read(CHAIN, ACC, 0, {TOK: 50}, block=None)   # no floor → applies
     assert cache.load(1, ACC).tokens[0].balance_raw == 50
     assert not ledger.is_token_stale(1, ACC, TOK, None)
+
+
+def test_block_none_read_cannot_overwrite_an_ordered_value(tmp_path):
+    """A block-less read (whole aggregate's block leg failed) is the weakest —
+    it must not overwrite a token/native we ordered, nor drop on its zero."""
+    ledger, cache, _ = _ledger(tmp_path, meta=_meta())
+    ledger.apply_read(CHAIN, ACC, 5 * 10**18, {TOK: 100}, block=10)  # ordered
+    # block-less read reports a stale value + a spurious zero — both ignored
+    ledger.apply_read(CHAIN, ACC, 1 * 10**18, {TOK: 0}, block=None)
+    w = cache.load(1, ACC)
+    assert w.native_balance_wei == 5 * 10**18       # native not regressed
+    assert w.tokens[0].balance_raw == 100           # token not dropped/regressed
+    # a fresh block-ordered read still wins
+    ledger.apply_read(CHAIN, ACC, 6 * 10**18, {TOK: 200}, block=11)
+    w = cache.load(1, ACC)
+    assert w.native_balance_wei == 6 * 10**18 and w.tokens[0].balance_raw == 200
 
 
 def test_reused_token_resets_unpriced_grace(tmp_path):

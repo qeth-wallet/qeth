@@ -76,6 +76,18 @@ class TokenMetadataCache:
                     "name": str(meta.get("name") or ""),
                     "decimals": int(meta.get("decimals") or 18),
                 }
+            # Merge with the current on-disk file before rewriting (4c). A
+            # SECOND TokenMetadataCache instance — the transactions plugin keeps
+            # its own alongside the tokens plugin's — may have written entries
+            # this instance never loaded; a blind rewrite from our copy alone
+            # would drop them from disk (last-writer-wins on the union, costing
+            # the other's tokens a refetch next session). Metadata is immutable,
+            # so any overlap is identical and re-reading is safe. Fold the disk
+            # entries back into our in-memory copy too, so we stop re-fetching
+            # what the sibling already resolved.
+            on_disk = self._load_chain(chain_id)
+            for addr, meta in on_disk.items():
+                cc.setdefault(addr, meta)
             p = self._path(chain_id)
             p.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(p, json.dumps(cc, indent=2, sort_keys=True))

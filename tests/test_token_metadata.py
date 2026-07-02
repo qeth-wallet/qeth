@@ -43,6 +43,22 @@ def test_persisted_across_instances(tmp_qeth):
     assert c2.get(1, "0xaa") == {"symbol": "A", "name": "A", "decimals": 6}
 
 
+def test_put_many_merges_concurrent_instances(tmp_qeth):
+    # Two TokenMetadataCache instances (the tokens + transactions plugins each
+    # keep one) that both loaded the chain while it was empty must not clobber
+    # each other's writes (4c): each put_many merges the on-disk file first.
+    c1 = TokenMetadataCache()
+    c2 = TokenMetadataCache()
+    c1.get(1, "0xzz")          # force both to load the (empty) chain in memory
+    c2.get(1, "0xzz")          # BEFORE either writes — the divergent-copy setup
+    c1.put_many(1, {"0xAA": {"symbol": "A", "name": "A", "decimals": 6}})
+    c2.put_many(1, {"0xBB": {"symbol": "B", "name": "B", "decimals": 8}})
+    # a fresh instance reads BOTH off disk (c2 didn't drop c1's entry)
+    c3 = TokenMetadataCache()
+    assert c3.get(1, "0xaa") == {"symbol": "A", "name": "A", "decimals": 6}
+    assert c3.get(1, "0xbb") == {"symbol": "B", "name": "B", "decimals": 8}
+
+
 def test_default_decimals_when_missing(tmp_qeth):
     c = TokenMetadataCache()
     # Caller can omit decimals; cache backfills the canonical 18.

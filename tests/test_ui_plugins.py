@@ -2400,6 +2400,31 @@ class TestWalletsTreeExpansion:
         plugin._rebuild_tree()
         assert plugin._tree.topLevelItem(0).isExpanded() is True
 
+    def test_rebuild_restores_selection_not_default(self, qtbot, tmp_qeth):
+        # A rebuild must keep the user's current selection, not jump to the
+        # default account (5c).
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)   # a1 is default
+        assert plugin.select_address(a2)                         # user on a2
+        assert plugin.selected_address == a2
+        plugin._rebuild_tree()                                   # any trigger
+        assert plugin.selected_address == a2                     # not a1
+
+    def test_ens_reverse_updates_label_in_place_without_hijack(
+            self, qtbot, tmp_qeth):
+        # An async ENS reverse-lookup resolving updates the row label WITHOUT a
+        # tree rebuild — so the view stays on whatever account the user is
+        # reading, and the right-slot panels aren't churned (5c).
+        from qeth.plugins.wallets import ACCOUNT_LABEL_ROLE
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)   # a1 is default
+        assert plugin.select_address(a2)                         # user on a2
+        hijacks = []
+        plugin.selected_address_changed.connect(hijacks.append)
+        plugin._on_ens_label_resolved(a2, "alice.eth")           # resolves for a2
+        assert plugin.selected_address == a2                     # no jump to a1
+        assert hijacks == []                                     # no re-broadcast
+        it = plugin._find_item(a2)
+        assert it is not None and it.data(0, ACCOUNT_LABEL_ROLE) == "alice.eth"
+
 
 class TestTokensStartupNonBlocking:
     """Pin the no-wait-for-token-lists startup behaviour: when the

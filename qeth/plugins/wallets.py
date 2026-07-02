@@ -274,14 +274,10 @@ class WalletsPlugin(Plugin):
                 out.append(addr)
         return out
 
-    def select_address(self, address: str) -> bool:
-        """Programmatically focus the tree on the leaf carrying
-        ``address`` (case-insensitive). Returns True if the address
-        was found and selected, False otherwise. Used by MainWindow
-        after a broadcast to make sure the user is looking at the
-        ``from`` account when the pending row appears."""
+    def _find_item(self, address: str) -> QTreeWidgetItem | None:
+        """The tree leaf carrying ``address`` (case-insensitive), or None."""
         if self._tree is None or not address:
-            return False
+            return None
         wanted = address.lower()
 
         def walk(item):
@@ -297,22 +293,48 @@ class WalletsPlugin(Plugin):
         for i in range(self._tree.topLevelItemCount()):
             hit = walk(self._tree.topLevelItem(i))
             if hit is not None:
-                # Already the sole selection? Do nothing. clearSelection()
-                # would broadcast account=None — which clears the
-                # transactions view and its cached activities — then the
-                # re-select forces a full show_transactions + re-fetch of
-                # every row's activity (the "redraws every pic" on send).
-                # A no-op keeps a just-sent pending row a cheap one-row
-                # prepend.
-                sel = self._tree.selectedItems()
-                if (self._tree.currentItem() is hit
-                        and len(sel) == 1 and sel[0] is hit):
-                    return True
-                self._tree.clearSelection()
-                self._tree.setCurrentItem(hit)
-                hit.setSelected(True)
-                return True
-        return False
+                return hit
+        return None
+
+    def _apply_label_in_place(self, address: str, name: str,
+                              verified: bool) -> bool:
+        """Update one account row's label WITHOUT a full _rebuild_tree — used by
+        the async ENS reverse-lookup path (5c). A rebuild there clears the tree,
+        which fires itemSelectionChanged (account=None → account=addr) and so
+        yanks the view off whatever account the user was reading and re-fetches
+        the right-slot panels. Setting the label role repaints just the row.
+        Returns True if the row was found."""
+        it = self._find_item(address)
+        if it is None:
+            return False
+        it.setData(0, ACCOUNT_LABEL_ROLE, name)
+        if verified:
+            it.setToolTip(0, f"{name} — cryptographically verified")
+        return True
+
+    def select_address(self, address: str) -> bool:
+        """Programmatically focus the tree on the leaf carrying
+        ``address`` (case-insensitive). Returns True if the address
+        was found and selected, False otherwise. Used by MainWindow
+        after a broadcast to make sure the user is looking at the
+        ``from`` account when the pending row appears."""
+        hit = self._find_item(address)
+        if hit is None or self._tree is None:
+            return False
+        # Already the sole selection? Do nothing. clearSelection() would
+        # broadcast account=None — which clears the transactions view and its
+        # cached activities — then the re-select forces a full
+        # show_transactions + re-fetch of every row's activity (the "redraws
+        # every pic" on send). A no-op keeps a just-sent pending row a cheap
+        # one-row prepend.
+        sel = self._tree.selectedItems()
+        if (self._tree.currentItem() is hit
+                and len(sel) == 1 and sel[0] is hit):
+            return True
+        self._tree.clearSelection()
+        self._tree.setCurrentItem(hit)
+        hit.setSelected(True)
+        return True
 
     def rebuild_tree(self) -> None:
         """Public re-entry point for MainWindow / host code that
@@ -656,6 +678,11 @@ class WalletsPlugin(Plugin):
     def _rebuild_tree(self) -> None:
         if self._tree is None:
             return
+        # Preserve the user's current selection across the rebuild: an async
+        # trigger (an ENS reverse-lookup, a background rediscover) must not yank
+        # the view to the default account while they're reading another (5c).
+        # Only fall back to the default when there was no single prior selection.
+        prior = self.selected_address
         expanded = self._capture_expansion()
         self._tree.clear()
         ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
@@ -716,8 +743,9 @@ class WalletsPlugin(Plugin):
                 default_item = it
         self._restore_expand(watch_root, "watch", expanded)
 
-        if default_item is not None:
-            self._tree.setCurrentItem(default_item)
+        if not (prior and self.select_address(prior)):
+            if default_item is not None:
+                self._tree.setCurrentItem(default_item)
 
     # --- selection / action handlers ---------------------------------------
 
@@ -1134,7 +1162,12 @@ class WalletsPlugin(Plugin):
             )
             if looks_autogenerated:
                 self._store.set_label(acct["address"], name)
-                self._rebuild_tree()
+                # Update the row in place — a full rebuild here would yank the
+                # user's selection to the default account (5c). Fall back only
+                # if the row isn't built yet.
+                if not self._apply_label_in_place(
+                        addr_lower, name, addr_lower in self._ens_verified):
+                    self._rebuild_tree()
             return
 
     def _add_watch_only(self) -> None:

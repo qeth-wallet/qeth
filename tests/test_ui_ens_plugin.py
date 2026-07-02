@@ -1717,10 +1717,26 @@ class TestResolvedAddressFollowsRecords:
 
     def test_forced_read_clears_address_on_zero(self, qtbot, tmp_qeth):
         # A just-confirmed write (force) IS authoritative — an empty head read
-        # means the addr was set to 0x0, so the name row clears.
+        # means the addr was set to 0x0, so the name row clears. forced now
+        # travels on the ready signal (the worker's catchup=force), so it's
+        # passed explicitly here rather than read from a plugin-wide flag.
         plugin = self._plugin(qtbot)
         plugin._on_records_requested("curvelend.eth", force=True)
-        plugin._on_records_ready("curvelend.eth", EnsRecords(), 100, False, True)
+        plugin._on_records_ready(
+            "curvelend.eth", EnsRecords(), 100, False, True, forced=True)
+        assert self._row_addr(plugin) == ""
+
+    def test_forced_ness_is_per_worker_not_a_shared_flag(self, qtbot, tmp_qeth):
+        # satellite 4: a concurrent NON-forced read for the same name must not
+        # steal the forced read's authority. Each emit carries its own forced.
+        plugin = self._plugin(qtbot)
+        # non-forced read (empty addr) lands first — must NOT clear the row
+        plugin._on_records_ready(
+            "curvelend.eth", EnsRecords(), 100, False, True, forced=False)
+        assert self._row_addr(plugin) == self.OLD
+        # the forced post-write read at a newer block still clears it
+        plugin._on_records_ready(
+            "curvelend.eth", EnsRecords(), 101, False, True, forced=True)
         assert self._row_addr(plugin) == ""
 
     def test_lagging_verified_read_does_not_revert_to_old(self, qtbot, tmp_qeth):

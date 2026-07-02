@@ -310,7 +310,10 @@ class EnsRecordsWorker(QThread):
     twice — ``ok`` False means the read didn't land (a glitch), so the consumer
     must keep what's already shown rather than wipe it."""
 
-    ready = Signal(str, object, object, bool, bool)  # (name, rec, block, verified, ok)
+    # (name, rec, block, verified, ok, forced) — ``forced`` carries THIS
+    # worker's post-write-ness so the landing slot doesn't read it from a
+    # plugin-wide flag a concurrent non-forced worker could clear (satellite 4).
+    ready = Signal(str, object, object, bool, bool, bool)
 
     def __init__(self, chain, name: str, parent=None,
                  *, wait_s: float = VERIFY_WAIT_S, client=None,
@@ -331,10 +334,13 @@ class EnsRecordsWorker(QThread):
         self._catchup = catchup
 
     def run(self) -> None:
+        # _catchup is set iff this worker was spawned for a post-write re-read
+        # (catchup=force), so it doubles as this worker's "forced" flag.
+        forced = self._catchup
         rec, ok, fast_block = read_records(
             self._chain, self._name,
             client=self._client, resolver=self._resolver)
-        self.ready.emit(self._name, rec, fast_block, False, ok)
+        self.ready.emit(self._name, rec, fast_block, False, ok, forced)
         tries = _VERIFY_CATCHUP_TRIES if self._catchup else 1
         for attempt in range(tries):
             vrec, verified, vblock = verified_read_records(
@@ -351,7 +357,7 @@ class EnsRecordsWorker(QThread):
             caught_up = (fast_block is None or vblock is None
                          or vblock >= fast_block)
             if not ok or caught_up or attempt == tries - 1:
-                self.ready.emit(self._name, vrec, vblock, True, True)
+                self.ready.emit(self._name, vrec, vblock, True, True, forced)
                 return
             self.msleep(int(_VERIFY_CATCHUP_DELAY_S * 1000))
 
@@ -1800,12 +1806,12 @@ class EnsPlugin(Plugin):
         # worker) can never regress it, and an equal-block read only upgrades
         # unverified → verified. ``verified`` True means "proven at that block".
         self._rec_cache: dict[str, tuple[EnsRecords, int, bool]] = {}
-        # Names whose records we're re-reading because a write to them just
-        # confirmed. For these the head read is authoritative enough to also
-        # CLEAR the name-row address (a setAddr to 0x0) — outside this set a
-        # records read only sets a present address, never clears one (an absent
-        # on-chain addr can just mean the name resolves offchain via CCIP).
-        self._force_reread: set[str] = set()
+        # (Post-write-ness now travels per-worker on the ready signal's
+        # ``forced`` flag — see EnsRecordsWorker / satellite 4 — so a concurrent
+        # non-forced worker can't clear it out from under a forced one. When a
+        # forced read lands, its head value is authoritative enough to CLEAR the
+        # name-row address, e.g. a setAddr to 0x0; a normal read only sets a
+        # present one, since an absent on-chain addr may just be served offchain.)
         # Fallback worker tracking for a host with no start_worker (tests /
         # minimal hosts): keeps a running QThread referenced so it isn't GC'd
         # mid-run (Qt aborts the process then), self-evicting on finished.
@@ -2107,13 +2113,14 @@ class EnsPlugin(Plugin):
             return
         nl = name.lower()
         if force:
-            # A write to this name just CONFIRMED. Mark it forced (so the
-            # fresh read clears a now-empty address) but KEEP the cached anchor:
-            # the fresh post-write read carries a NEWER block and wins by the
+            # A write to this name just CONFIRMED. KEEP the cached anchor: the
+            # fresh post-write read carries a NEWER block and wins by the
             # reducer, while a still-in-flight pre-write worker's read carries an
             # older block and is dropped. Popping it (as before) left the guards
-            # with no anchor, so that stale worker landed unguarded.
-            self._force_reread.add(nl)
+            # with no anchor, so that stale worker landed unguarded. The
+            # forced-ness travels with the worker (catchup=force → the ready
+            # signal's `forced`), not a plugin-wide flag (satellite 4).
+            pass
         else:
             # Paint cached records instantly (memory → disk), then refresh.
             cached = self._rec_cache.get(nl)
@@ -2139,7 +2146,8 @@ class EnsPlugin(Plugin):
         self._start(worker)
 
     def _on_records_ready(self, name: str, rec: EnsRecords,
-                          block, verified: bool, ok: bool) -> None:
+                          block, verified: bool, ok: bool,
+                          forced: bool = False) -> None:
         # A read that didn't land (transient RPC/sidecar glitch) comes back empty
         # but is NOT authoritative — keep whatever's already shown rather than
         # wipe good records. (This was the "records vanished on a glitch" bug.)
@@ -2177,11 +2185,8 @@ class EnsPlugin(Plugin):
             # also clears a now-empty address; a normal expand only sets a
             # present one (an absent addr may just be served offchain).
             head_addr = rec.addresses.get("60")
-            forced = nl in self._force_reread
             if head_addr or forced:
                 self._panel.update_resolved(name, head_addr)
-        if not verified:
-            self._force_reread.discard(nl)   # head applied — back to normal
 
     # --- add custom -------------------------------------------------------
 

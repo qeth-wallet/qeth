@@ -574,6 +574,12 @@ class EnsPanel(QWidget):
         # churn that could race with the user's expand/collapse).
         self._ownership_sig: dict[str, object] = {}
         self._records_sig: dict[str, object] = {}
+        # Signature of the last populated tree (names + expiry status + resolved
+        # address + structure). An identical discovery landing then skips the
+        # clear+rebuild entirely, so an async re-emit — which fires right after
+        # the user's own write, while they're looking at the name they edited —
+        # can't collapse their expansions or drop their selection (finding 3g).
+        self._populate_sig: object = None
         # Context-menu action icons. The write actions reuse the row icons that
         # already stand for those things (gear = manager, link = address,
         # folder-remote = content, text glyph = text record, folder = subdomain)
@@ -805,6 +811,17 @@ class EnsPanel(QWidget):
     # --- rendering --------------------------------------------------------
 
     def populate(self, roots: list[EnsNode], now_ts: int) -> None:
+        sig = tuple(self._node_sig(r, now_ts) for r in roots)
+        if sig == self._populate_sig and self._items_by_name:
+            return   # identical tree — don't rebuild (would lose fold/selection)
+        # Capture the user's fold + selection so a genuine rebuild restores them
+        # (a rebuilt tree starts collapsed with nothing selected).
+        expanded = {nl for nl, it in self._items_by_name.items()
+                    if it.isExpanded()}
+        cur = self.tree.currentItem()
+        cur_name = cur.data(0, _NAME_ROLE) if cur is not None else None
+        selected = (cur_name.name.lower()
+                    if isinstance(cur_name, EnsName) else None)
         # Bulk-insert with sorting off (else the tree re-sorts on every add),
         # then re-enable — which applies the user's current sort column/order.
         self.tree.setSortingEnabled(False)
@@ -817,6 +834,22 @@ class EnsPanel(QWidget):
         for node in roots:
             self.tree.addTopLevelItem(self._build(node, now_ts, is_sub=False))
         self.tree.setSortingEnabled(True)
+        for nl in expanded:
+            it = self._items_by_name.get(nl)
+            if it is not None:
+                it.setExpanded(True)   # re-fires the lazy records load
+        if selected is not None:
+            it = self._items_by_name.get(selected)
+            if it is not None:
+                self.tree.setCurrentItem(it)
+        self._populate_sig = sig
+
+    @staticmethod
+    def _node_sig(node: EnsNode, now_ts: int) -> tuple:
+        n = node.name
+        return (n.name.lower(), expiry_status(n.expiry_ts, now_ts),
+                (n.resolved_address or "").lower(), n.source, n.is_subdomain,
+                tuple(EnsPanel._node_sig(c, now_ts) for c in node.children))
 
     def _build(self, node: EnsNode, now_ts: int, *, is_sub: bool) -> QTreeWidgetItem:
         n = node.name

@@ -120,6 +120,32 @@ class TestEnsPanel:
         assert sub.text(0) == "blog.vitalik.eth"
         assert sub.data(0, _NAME_ROLE).name == "blog.vitalik.eth"
 
+    def test_populate_skips_identical_and_preserves_fold_selection(self, qtbot):
+        # An identical discovery landing (the common refresh, and the one that
+        # fires right after the user's own write) must not clear+rebuild the
+        # tree — that collapsed expansions and dropped selection (finding 3g).
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        names = [EnsName("a.eth"), EnsName("b.eth")]
+        panel.populate(build_tree(names), NOW)
+        a = panel._items_by_name["a.eth"]
+        a.setExpanded(True)
+        panel.tree.setCurrentItem(a)
+
+        # same tree again → skipped: the SAME item object survives (not rebuilt)
+        panel.populate(build_tree(names), NOW)
+        assert panel._items_by_name["a.eth"] is a
+        assert a.isExpanded()
+        assert panel.tree.currentItem() is a
+
+        # a CHANGED tree (a name added) rebuilds, but restores fold + selection
+        panel.populate(build_tree(names + [EnsName("c.eth")]), NOW)
+        a2 = panel._items_by_name["a.eth"]
+        assert a2 is not a                          # genuinely rebuilt
+        assert a2.isExpanded()                      # fold restored
+        assert panel.tree.currentItem() is a2       # selection restored
+        assert "c.eth" in panel._items_by_name
+
     def test_leaf_gets_lazy_records_placeholder(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

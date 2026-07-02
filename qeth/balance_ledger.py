@@ -72,6 +72,14 @@ class BalanceLedger:
         bkey = (chain_id, account.lower(), token.lower())
         self.balance_block[bkey] = int(block)
 
+    def stamp_native(self, chain_id: int, account: str, block) -> None:
+        """Record ``block`` as the freshest native read applied for the account
+        (for a caller that writes native through its own path, e.g. discovery's
+        cache rebuild, but must still order against later polls)."""
+        if block is None:
+            return
+        self.native_block[(chain_id, account.lower())] = int(block)
+
     def native_stale(self, chain_id: int, account: str, block) -> bool:
         """True if ``block`` is older than the last native read applied for the
         account — a stale ws poll (an LB jumped backwards) that must not

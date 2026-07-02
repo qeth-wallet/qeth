@@ -1480,6 +1480,16 @@ class TokensPlugin(Plugin):
         # flickered" bug: discovery used to rebuild the whole view from its own
         # (possibly stale or failed) read and drop everything else.
         cached_now = self._wallet_cache.load(chain.chain_id, address)
+        # Order discovery's native like every other native write (2c): a stale
+        # read (older block, behind an LB) must not regress it — keep the cached
+        # value; a fresh read stamps the native block so a later poll orders
+        # against it. The prices/risk legs put seconds between the read and here,
+        # exactly the window a confirm's native write lands in.
+        if self._ledger.native_stale(chain.chain_id, address, block):
+            if cached_now is not None:
+                native_wei = cached_now.native_balance_wei
+        else:
+            self._ledger.stamp_native(chain.chain_id, address, block)
         cached_by = {t.contract.lower(): t
                      for t in (cached_now.tokens if cached_now else [])}
         merged: dict[str, TokenBalance] = {

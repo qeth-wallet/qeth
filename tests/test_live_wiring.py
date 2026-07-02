@@ -541,6 +541,48 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
     assert tok not in held()
 
 
+def test_stale_discovery_native_does_not_regress(qtbot, tmp_path):
+    """2c: discovery's native is block-ordered like every other native write —
+    a stale discovery read (older block, behind an LB) must not regress it, and
+    a fresh read applies + stamps the block."""
+    from types import SimpleNamespace
+    from decimal import Decimal
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.prices import Price
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
+                              start_worker=lambda w: None)
+    tp._wallet_cache.save(CachedWallet(chain_id=1, address=acc,
+                                       native_balance_wei=10**18, tokens=[]))
+    tp._displayed_view = (1, acc)
+
+    def native():
+        return tp._wallet_cache.load(1, acc).native_balance_wei
+
+    def discover(native_wei, block):
+        pv = {"chain": eth, "address": acc, "view_key": (1, acc),
+              "native_wei": native_wei, "block": block, "read_failed": False,
+              "balances_raw": {}, "metadata": {}}
+        tp._on_combined_ready(pv, 1, {"": Price(Decimal("2000"), 1, "x")})
+
+    tp._apply_targeted_balances(eth, acc, 5 * 10**18, {}, 100)   # native=5 @100
+    assert native() == 5 * 10**18
+    discover(1 * 10**18, block=99)          # stale → no regress
+    assert native() == 5 * 10**18
+    discover(6 * 10**18, block=101)         # fresh → applies
+    assert native() == 6 * 10**18
+
+
 def test_reconcile_waits_for_rpc_to_reach_the_event_block(qtbot, monkeypatch):
     """A read that comes back at a block BEFORE the event's block (a lagging
     http backend behind the ws that pushed the log/receipt) must NOT be applied

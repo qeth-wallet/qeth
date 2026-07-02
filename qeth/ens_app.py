@@ -592,7 +592,7 @@ def _decode_addr_bytes(raw) -> str | None:
 
 def verify_names(
     chain: Chain, names: list[str], *, wait_s: float = VERIFY_WAIT_S,
-) -> tuple[dict[str, OwnershipCheck], bool]:
+) -> tuple[dict[str, OwnershipCheck], bool, int | None]:
     """Batch on-chain check of controller + registrant + resolved-address for
     ``names`` → ``({name_lower: OwnershipCheck}, verified)``.
 
@@ -617,7 +617,7 @@ def verify_names(
     # prove it (the indexer already gave us a hint), so no sidecar → nothing.
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
     if client is None:
-        return {}, False
+        return {}, False, None
     # A just-synced sidecar can briefly fail an eth_call ("header for hash not
     # found") while the execution RPC catches up. The reads are batched into
     # several aggregate3 calls, so a transient can hit SOME batches and not
@@ -627,37 +627,44 @@ def verify_names(
     # is spent we accept the partial result (those names stay unknown → kept,
     # never a false drop). An empty result (total failure) also retries.
     states: dict[str, OwnershipCheck] = {}
+    block: int | None = None
     for attempt in range(_VERIFY_RETRIES):
         try:
-            states = _read_name_states(client, names)
+            states, block = _read_name_states(client, names)
         except Exception:
             log.debug("ENS verify_names read failed", exc_info=True)
-            states = {}
+            states, block = {}, None
         if states and all(st.owner_known for st in states.values()):
-            return states, verified
+            return states, verified, block
         if attempt < _VERIFY_RETRIES - 1:
             time.sleep(_VERIFY_RETRY_DELAY_S)
-    return states, verified
+    return states, verified, block
 
 
-def read_name_states(chain: Chain, names: list[str]) -> dict[str, OwnershipCheck]:
+def read_name_states(
+    chain: Chain, names: list[str],
+) -> tuple[dict[str, OwnershipCheck], int | None]:
     """Fast, UNVERIFIED ownership read at the execution head (controller +
-    registrant + resolved-address) — fresh, so it reflects a just-confirmed tx
-    at once, but not proof-verified. The first-paint / post-write path for the
-    owner/manager rows, mirroring ``read_records``: ``verify_names`` follows with
-    the Helios-proven read that earns the ✓ (and decides drops). Returns ``{}``
-    on any failure (the verified pass is still the authority)."""
+    registrant + resolved-address) → ``(states, block)`` — fresh, so it reflects
+    a just-confirmed tx at once, but not proof-verified. The first-paint /
+    post-write path for the owner/manager rows, mirroring ``read_records``:
+    ``verify_names`` follows with the Helios-proven read that earns the ✓ (and
+    decides drops). Returns ``({}, None)`` on any failure (the verified pass is
+    still the authority)."""
     from .chain import EthClient
     try:
         return _read_name_states(EthClient(chain), names)
     except Exception:
         log.debug("ENS read_name_states (unverified) failed", exc_info=True)
-        return {}
+        return {}, None
 
 
-def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
+def _read_name_states(
+    client, names: list[str],
+) -> tuple[dict[str, OwnershipCheck], int | None]:
     """The multicall body of ``verify_names``, factored out so it can be tested
-    against a fake client without a live chain."""
+    against a fake client without a live chain. Returns ``(states, block)`` —
+    the height round 1 (the ownership reads) ran at."""
     nodes = {n: namehash(n) for n in names}
     out = {n.lower(): OwnershipCheck() for n in names}
 
@@ -671,6 +678,10 @@ def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
     # just-changed owner/record appears at once instead of lagging ~2 epochs
     # behind finality and surfacing the obsolete value.
     with client.multicall(block="latest") as mc:
+        # Co-read the height the ownership round ran at (same aggregate), so the
+        # caller can order this read against others — a lagging verified proof
+        # of an OLDER block must not overwrite a fresher fast read.
+        block_p = mc.block_number()
         for n in names:
             node = nodes[n]
             owner_p[n] = mc.add(ENS_REGISTRY, _SEL_OWNER + node,
@@ -737,7 +748,9 @@ def _read_name_states(client, names: list[str]) -> dict[str, OwnershipCheck]:
             addr = (coin_p[n].value if coin_p[n].success else None) \
                 or (legacy_p[n].value if legacy_p[n].success else None)
             out[n.lower()].resolved_address = addr
-    return out
+    block = (int(block_p.value)
+             if block_p.success and block_p.value is not None else None)
+    return out, block
 
 
 def _decode_abi_string(raw) -> str | None:

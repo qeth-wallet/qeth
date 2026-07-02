@@ -368,7 +368,7 @@ def test_read_name_states_orchestration():
             return True, "0xReso1ved"
         return False, None        # legacy addr + everything else
 
-    states = ea._read_name_states(
+    states, _block = ea._read_name_states(
         _FakeClient(resp), ["vitalik.eth", "blog.vitalik.eth"])
     vit = states["vitalik.eth"]
     assert vit.controller == "0xC0ntr0ller"
@@ -396,7 +396,7 @@ def test_read_name_states_unwraps_namewrapper():
             return True, ea.ENS_NAME_WRAPPER
         return False, None
 
-    states = ea._read_name_states(_FakeClient(resp), ["curvefi.eth"])
+    states, _block = ea._read_name_states(_FakeClient(resp), ["curvefi.eth"])
     st = states["curvefi.eth"]
     assert st.wrapped is True
     assert st.controller == REAL and st.registrant == REAL
@@ -600,7 +600,7 @@ def test_verified_read_records_retries_transient(monkeypatch):
 def test_verify_names_no_helios_returns_unverified(monkeypatch):
     # No sidecar → the verified-only path (fallback=False) yields nothing.
     monkeypatch.setattr("qeth.verified.verified_chain", lambda *a, **k: None)
-    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+    states, verified, _block = ea.verify_names(object(), ["vitalik.eth"])
     assert states == {} and verified is False
 
 
@@ -619,12 +619,12 @@ def test_verify_names_retries_transient_empty(monkeypatch):
     def fake_read(client, names):
         calls["n"] += 1
         if calls["n"] < 2:                       # read didn't land (owner_known False)
-            return {n.lower(): ea.OwnershipCheck() for n in names}
+            return {n.lower(): ea.OwnershipCheck() for n in names}, 100
         return {n.lower(): ea.OwnershipCheck(controller="0xC", owner_known=True)
-                for n in names}
+                for n in names}, 100
 
     monkeypatch.setattr(ea, "_read_name_states", fake_read)
-    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+    states, verified, _block = ea.verify_names(object(), ["vitalik.eth"])
     assert verified is True
     assert states["vitalik.eth"].controller == "0xC"
     assert calls["n"] == 2                      # retried once, then succeeded
@@ -641,10 +641,10 @@ def test_verify_names_retries_partial_landing(monkeypatch):
         return {
             "a.eth": ea.OwnershipCheck(controller="0xA", owner_known=True),
             "b.eth": ea.OwnershipCheck(controller="0xB", owner_known=landed),
-        }
+        }, 100
 
     monkeypatch.setattr(ea, "_read_name_states", fake_read)
-    states, _ = ea.verify_names(object(), ["a.eth", "b.eth"])
+    states, _v, _block = ea.verify_names(object(), ["a.eth", "b.eth"])
     assert calls["n"] == 2                       # retried until b.eth landed
     assert all(st.owner_known for st in states.values())
 
@@ -654,7 +654,7 @@ def test_verify_names_gives_up_after_retries(monkeypatch):
     _stub_sidecar(monkeypatch)
     monkeypatch.setattr(
         ea, "_read_name_states",
-        lambda client, names: {n.lower(): ea.OwnershipCheck() for n in names})
-    states, verified = ea.verify_names(object(), ["vitalik.eth"])
+        lambda client, names: ({n.lower(): ea.OwnershipCheck() for n in names}, 100))
+    states, verified, _block = ea.verify_names(object(), ["vitalik.eth"])
     assert verified is True
     assert states["vitalik.eth"].controller is None

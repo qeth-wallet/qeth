@@ -485,22 +485,19 @@ class TestEnsPanel:
                    if crv.child(i).text(0) == "manager")
         assert mgr.data(0, _STATUS_ROLE) == "ok"
 
-    def test_states_agree(self):
-        from qeth.plugins.ens import _states_agree
-        a = {"x.eth": OwnershipCheck(controller="0xAA", registrant="0xBB")}
-        b = {"x.eth": OwnershipCheck(controller="0xaa", registrant="0xbb")}
-        c = {"x.eth": OwnershipCheck(controller="0xCC", registrant="0xBB")}
-        assert _states_agree(a, b)                     # case-insensitive
-        assert not _states_agree(a, c)
-
     def test_verify_worker_fast_then_catches_up(self, monkeypatch):
+        # Catchup is BLOCK-ordered now: the verified read is emitted once its
+        # block reaches the fast read's, not once its VALUES agree (which one
+        # externally-changed name could veto for the whole batch — finding 3d).
         import qeth.plugins.ens as ens
         new = {"crv.eth": OwnershipCheck(controller="0x394", registrant="0x394",
                                          owner_known=True)}
         old = {"crv.eth": OwnershipCheck(controller="0x7a", registrant="0x394",
                                          owner_known=True)}
-        seq = [(old, True), (new, True)]
-        monkeypatch.setattr(ens, "read_name_states", lambda c, n: new)
+        # fast read at block 101; verified: first lagging (block 100), then
+        # caught up (block 101, showing the new value).
+        seq = [(old, True, 100), (new, True, 101)]
+        monkeypatch.setattr(ens, "read_name_states", lambda c, n: (new, 101))
         monkeypatch.setattr(ens, "verify_names",
                             lambda c, n, wait_s=0: seq.pop(0))
         monkeypatch.setattr(ens, "_VERIFY_CATCHUP_DELAY_S", 0.0)
@@ -509,20 +506,20 @@ class TestEnsPanel:
         w.ready.connect(lambda a, s, v: emits.append((v, s["crv.eth"].controller)))
         w.run()
         assert emits[0] == (False, "0x394")    # fast, fresh — shown at once
-        assert emits[-1] == (True, "0x394")    # verified, caught up (not 0x7a)
+        assert emits[-1] == (True, "0x394")    # verified, caught up (block 101)
 
     def test_verify_worker_never_emits_stale_proof(self, monkeypatch):
-        # Helios stays behind the whole budget (a just-transferred name): the
-        # worker must NOT emit the stale verified read — it would regress the
-        # fresh fast read back to the previous owner. Only the fast read lands.
+        # Helios's block stays behind the fast read the whole budget (a just-
+        # transferred name): the worker must NOT emit the lagging verified read —
+        # it would regress the fresh fast read. Only the fast read lands.
         import qeth.plugins.ens as ens
         new = {"s.eth": OwnershipCheck(controller="0x425", registrant="0xNEW",
                                        owner_known=True)}
         old = {"s.eth": OwnershipCheck(controller="0x425", registrant="0x425",
                                        owner_known=True)}
-        monkeypatch.setattr(ens, "read_name_states", lambda c, n: new)
+        monkeypatch.setattr(ens, "read_name_states", lambda c, n: (new, 101))
         monkeypatch.setattr(ens, "verify_names",
-                            lambda c, n, wait_s=0: (old, True))   # always stale
+                            lambda c, n, wait_s=0: (old, True, 100))  # block lags
         monkeypatch.setattr(ens, "_VERIFY_CATCHUP_DELAY_S", 0.0)
         monkeypatch.setattr(ens, "_VERIFY_CATCHUP_TRIES", 3)
         w = ens.EnsVerifyWorker(None, "0x425", ["s.eth"], catchup=True)

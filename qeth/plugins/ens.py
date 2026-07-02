@@ -356,20 +356,6 @@ class EnsRecordsWorker(QThread):
             self.msleep(int(_VERIFY_CATCHUP_DELAY_S * 1000))
 
 
-def _states_agree(a: dict[str, OwnershipCheck],
-                  b: dict[str, OwnershipCheck]) -> bool:
-    """True when two ownership reads show the same controller + registrant for
-    every name — i.e. the verified head has caught up to the fast read."""
-    if set(a) != set(b):
-        return False
-    for k in a:
-        if (a[k].controller or "").lower() != (b[k].controller or "").lower():
-            return False
-        if (a[k].registrant or "").lower() != (b[k].registrant or "").lower():
-            return False
-    return True
-
-
 class EnsVerifyWorker(QThread):
     """Check the displayed names' ownership in two phases, like the records
     worker: first a fast UNVERIFIED read at the execution head (fresh — reflects
@@ -397,17 +383,25 @@ class EnsVerifyWorker(QThread):
         self._catchup = catchup
 
     def run(self) -> None:
-        fast = read_name_states(self._chain, self._names)
+        fast, fast_block = read_name_states(self._chain, self._names)
         if fast:
             self.ready.emit(self._address, fast, False)
         tries = _VERIFY_CATCHUP_TRIES if self._catchup else 1
         for attempt in range(tries):
-            states, verified = verify_names(
+            states, verified, vblock = verify_names(
                 self._chain, self._names,
                 wait_s=self._wait_s if attempt == 0 else 0.0)
             if not verified:           # no sidecar / can't prove → stop trying
                 return
-            if not fast or _states_agree(states, fast):
+            # Emit once the verified read reflects the SAME-OR-NEWER chain state
+            # as the fast read (its block ≥ the fast read's), by BLOCK rather than
+            # by value agreement. A block-wait can't be defeated by one name
+            # changing (externally, or served by a lagging failover backend)
+            # between the two reads — the old all-names _states_agree suppressed
+            # the WHOLE verified pass in that case (finding 3d).
+            caught_up = (not fast or fast_block is None or vblock is None
+                         or vblock >= fast_block)
+            if caught_up:
                 self.ready.emit(self._address, states, True)
                 return
             if attempt < tries - 1:

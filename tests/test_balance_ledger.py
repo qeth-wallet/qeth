@@ -29,7 +29,9 @@ def _ledger(tmp_path, *, meta=None):
     # .logo_uri); token_metadata.get → {symbol,name,decimals}. Only the
     # metadata path is used when both are present.
     md = {} if meta is None else {TOK.lower(): meta}
-    ledger = BalanceLedger(lambda: cache, _Lists(), _Lists(md), unpriced)
+    lists, metadata = _Lists(), _Lists(md)
+    ledger = BalanceLedger(lambda: cache, lambda: lists, lambda: metadata,
+                           unpriced)
     return ledger, cache, unpriced
 
 
@@ -138,11 +140,30 @@ def test_apply_floor_blocks_a_later_stale_zero_drop(tmp_path):
     assert cache.load(1, ACC).tokens[0].balance_raw == 7
 
 
+def test_getters_track_swapped_token_sources(tmp_path):
+    """Metadata lookups go through getters, so a caller that swaps its
+    token_lists / token_metadata after construction is seen — the plugin's
+    tests reassign _token_lists, and a stale ref meant apply_floor couldn't
+    resolve metadata and silently dropped a just-received recognised token."""
+    cache = WalletCache(cache_dir=tmp_path)
+    src = {"lists": _Lists(), "meta": _Lists()}     # initially know nothing
+    ledger = BalanceLedger(lambda: cache, lambda: src["lists"],
+                           lambda: src["meta"], {})
+    ledger.apply_floor(CHAIN, ACC, TOK, 10, 5)      # unknown token → skipped
+    w = cache.load(1, ACC)
+    assert w is None or w.tokens == []
+    src["meta"] = _Lists({TOK.lower(): _meta()})    # swap in a knowing source
+    ledger.apply_floor(CHAIN, ACC, TOK, 11, 5)      # now resolvable → added
+    assert cache.load(1, ACC).tokens[0].balance_raw == 5
+
+
 def test_getter_tracks_a_swapped_cache(tmp_path):
     """The ledger reads the cache through the getter, so a caller that swaps
     its WalletCache instance is seen (the plugin/tests do this)."""
     box = {"cache": WalletCache(cache_dir=tmp_path)}
-    ledger = BalanceLedger(lambda: box["cache"], _Lists(), _Lists({TOK.lower(): _meta()}), {})
+    lists, metadata = _Lists(), _Lists({TOK.lower(): _meta()})
+    ledger = BalanceLedger(
+        lambda: box["cache"], lambda: lists, lambda: metadata, {})
     box["cache"] = WalletCache(cache_dir=tmp_path / "swapped")
     ledger.apply_read(CHAIN, ACC, 9, {TOK: 3}, block=1)
     assert box["cache"].load(1, ACC).native_balance_wei == 9

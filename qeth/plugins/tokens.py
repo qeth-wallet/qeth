@@ -350,8 +350,8 @@ class TokensPlugin(Plugin):
         # the wallet cache, token sources and the unpriced-grace map so a
         # (re-)received token restarts its grace window on add.
         self._ledger = BalanceLedger(
-            lambda: self._wallet_cache, self._token_lists,
-            self._token_metadata, self._unpriced_since)
+            lambda: self._wallet_cache, lambda: self._token_lists,
+            lambda: self._token_metadata, self._unpriced_since)
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()

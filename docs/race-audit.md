@@ -34,6 +34,14 @@ Done and committed:
 - **5e** — helios `_stop_all` snapshots under the lock; `ledger_hid.submit`
   enqueues under the lock; `_ensure_heavy_imports` / `_ensure_async_imports`
   publish their guard symbol last.
+- **P2 BalanceLedger (core)** — `qeth/balance_ledger.py` is now the single
+  owner of the freshness stamps + ordered cache mutation (was two dicts +
+  duplicated logic). Every balance write funnels through it: `apply_read`
+  (absolute, block-ordered), `apply_native` (ordered ws-poll native, **2d**),
+  `apply_floor` (idempotent receipt credit — **finding 5**), and discovery's
+  native is ordered too (**2c**). `note_nonzero` / `is_token_stale` /
+  `stamp_token` / `stamp_native` are the shared primitives. Unit-covered in
+  `tests/test_balance_ledger.py`.
 
 Fixes surfaced while verifying (not in the original audit):
 - **aiohttp pycares segfault** — `--system-site-packages` gives aiohttp the
@@ -48,9 +56,21 @@ Fixes surfaced while verifying (not in the original audit):
   `self.sender()` identity/epoch.
 
 Deferred / not yet done:
-- **P2 BalanceLedger (steps 1–4)** — the big consolidation; 2c/2d/finding-5
-  remain until then (2a/2b already de-risk the worst token races). Best done
-  as a dedicated, reviewed effort.
+- **P2 remainder** — with the ledger + ordered writes done, what's left is
+  lower-value/higher-churn or genuinely rare:
+  - *cache-invariant merge (step 2)* — discovery already MERGES for display,
+    but `_save_wallet_cache` still rebuilds the cache from the visible set,
+    which drops user-hidden tokens from disk (contra `_filter_hidden_from_cache`).
+    Route discovery's persist through `apply_read` (merge-only) to close it.
+  - *reorg escape (step 3)* — monotonic floors freeze state if one is stamped
+    too high or a reorg rewinds the chain. Age out floors older than ~2 min, or
+    reset a chain's floors on ws `link_state` reconnect. Rare; one place now
+    (the ledger) instead of three maps.
+  - *satellites* — `_unpriced_since` account keying (LOW display glitch);
+    a `block=None` read should be weakest (apply only to unstamped tokens,
+    never drop-on-zero) — now rare post-co-read; `_carry_forward_absent`
+    shouldn't stamp; `_reconcile_up_to_block` singleShot chains want a
+    shutdown/generation guard (exit-only QThread-abort risk).
 - **P3 records block-stamp (steps 2–5)** — 3b/3c/3e remain.
 - **4a single-instance lock** — UX call (forbid vs focus-raise) for the user.
 - **P5** — being picked off individually.

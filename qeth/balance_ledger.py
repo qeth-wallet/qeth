@@ -19,8 +19,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from .wallet_cache import CachedToken, CachedWallet, WalletCache
+
+if TYPE_CHECKING:
+    from .token_metadata import TokenMetadataCache
+    from .tokenlists import TokenLists
 
 
 class BalanceLedger:
@@ -31,14 +36,16 @@ class BalanceLedger:
     filter that reads it)."""
 
     def __init__(self, cache_getter: Callable[[], WalletCache],
-                 token_lists, token_metadata,
+                 token_lists_getter: Callable[[], TokenLists],
+                 token_metadata_getter: Callable[[], TokenMetadataCache],
                  unpriced_since: dict[tuple[int, str], float]) -> None:
-        # A getter, not the cache itself: the plugin (and its tests) may swap
-        # its WalletCache instance after construction, and the ledger must see
-        # the current one.
+        # Getters, not the objects: the plugin (and its tests) may swap its
+        # WalletCache / token-list / metadata instances after construction, and
+        # the ledger must see the current ones. (``unpriced_since`` is mutated
+        # in place, never reassigned, so it's shared directly.)
         self._get_cache = cache_getter
-        self._token_lists = token_lists
-        self._token_metadata = token_metadata
+        self._get_lists = token_lists_getter
+        self._get_metadata = token_metadata_getter
         self._unpriced_since = unpriced_since
         # (chain_id, account_lower, token_lower) -> block of the last
         # AUTHORITATIVE balance recorded for that token. A read/discovery that
@@ -163,8 +170,8 @@ class BalanceLedger:
             # metadata cache, fall back to the curated list entry (both carry
             # them); a genuinely unknown token is skipped (the next discovery
             # picks it up with proper metadata).
-            entry = self._token_lists.get(chain.chain_id, contract_lower)
-            meta = self._token_metadata.get(chain.chain_id, contract_lower)
+            entry = self._get_lists().get(chain.chain_id, contract_lower)
+            meta = self._get_metadata().get(chain.chain_id, contract_lower)
             if meta is not None:
                 symbol, name, decimals = (
                     meta["symbol"], meta["name"], meta["decimals"])
@@ -228,8 +235,8 @@ class BalanceLedger:
                 continue
             if int(raw) <= 0:
                 continue
-            entry = self._token_lists.get(chain.chain_id, contract_lower)
-            meta = self._token_metadata.get(chain.chain_id, contract_lower)
+            entry = self._get_lists().get(chain.chain_id, contract_lower)
+            meta = self._get_metadata().get(chain.chain_id, contract_lower)
             if meta is not None:
                 symbol, name, decimals = (
                     meta["symbol"], meta["name"], meta["decimals"])

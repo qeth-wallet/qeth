@@ -133,15 +133,25 @@ Deferred / not yet done:
   `plugins/transactions.py`) are each a single GIL-atomic `set.discard` /
   `list.remove` — safe today. The hazard is only latent (adding iteration/
   logging to one would create a race); no code change, noted here.
-- **5f leaks (not races) — LOW, real.** tx-details / composer dialogs connect to
-  the shared `IconCache.icon_ready` and are never destroyed (no
-  `WA_DeleteOnClose`); `_call_on_confirm` listeners for dropped txs aren't
-  disconnected. App-lifetime accumulation; worth a `WA_DeleteOnClose` pass but
-  orthogonal to the race audit.
-- **P2/P3 satellites (LOW)** — `_unpriced_since` account keying;
-  `_carry_forward_absent` shouldn't stamp; `_reconcile_up_to_block` shutdown
-  guard; `_force_reread` per-worker; verify-worker fast-read-failed emit. Each
-  is a rare display glitch or an exit-only edge; see the P2/P3 sections.
+- **5f leaks — DONE.** tx-details + composer dialogs now `finished →
+  deleteLater` (freed on dismissal, never mid-sign); `_call_on_confirm`
+  disconnects on a new public `tx_dropped` signal, not just `tx_confirmed`.
+- **P2/P3 satellites 2–5 — DONE.** carry-forward no longer stamps (2);
+  reconcile retry chain guards on `_shutting_down`/aboutToQuit (3); records
+  forced-ness travels per-worker on the `ready` signal (4); the verify worker
+  stays silent on a failed fast read during catchup (5).
+- **Satellite 1 (`_unpriced_since` account keying) — REASSESSED, recommend
+  NOT changing.** The stated bug (one account's expired grace hiding another's
+  *just-received* token) is already mitigated: the P2 ledger pops the grace key
+  when a token is (re-)received, so a fresh receive restarts its window. The
+  residual is a per-token price-grace shared across accounts, which is
+  defensible — the price is per-token, so "we tried for 150 s and it's still
+  unpriceable, hide it" is arguably correct globally, and per-account keying
+  would re-show an unpriced dust token on every account switch (a fresh window
+  per first view). Keying by account also means threading the account through
+  the panel's core render API (`set_prices`/`render_full`/`show_cached`) —
+  medium churn + regression risk on the user-facing token filter — for a
+  lateral policy change. Left as-is with this rationale.
 
 Post-fix re-review notes (adversarial pass over the branch):
 - **min-block trade — REVISED, the min was wrong too.** The "self-healing"

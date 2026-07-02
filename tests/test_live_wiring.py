@@ -627,6 +627,10 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
         pv = {"chain": eth, "address": acc, "view_key": (1, acc),
               "native_wei": 10**18, "block": block, "read_failed": read_failed,
               "balances_raw": balances,
+              # A real discovery co-reads each token's block (head_balances),
+              # so freshly-READ tokens carry one; only carried-forward values
+              # are absent from `blocks` (satellite 2).
+              "blocks": {c.lower(): block for c in balances},
               "metadata": {tok: ("CUS", "Custom", 18)}}
         tp._on_combined_ready(pv, 1, {"": Price(Decimal("2000"), 1, "x")})
 
@@ -925,6 +929,8 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
     pv = {"chain": eth, "address": acc, "view_key": (1, acc),
           "native_wei": 10**18, "block": 99,
           "balances_raw": {wbtc: 100000, usdc: 50 * 10**6},
+          # both freshly read at the stale block 99 (in `blocks`, so ordered)
+          "blocks": {wbtc: 99, usdc: 99},
           "metadata": {wbtc: ("WBTC", "W", 8), usdc: ("USDC", "U", 6)}}
     prices = {wbtc: Price(Decimal("60000"), 1, "x"),
               usdc: Price(Decimal("1"), 1, "x"),
@@ -934,6 +940,53 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
     assert wbtc not in visible()                          # not resurrected on panel
     reloaded = tp._wallet_cache.load(1, acc)
     assert wbtc not in {t.contract.lower() for t in reloaded.tokens}   # nor cache
+
+
+def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_path):
+    """satellite 2: a token carried forward from cache (absent from a read →
+    absent from `blocks`) is applied but NOT stamped, so a later CORRECT read at
+    a LOWER block isn't discarded against a floor the carry never earned."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokenListPanel, TokensPlugin
+    from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+    from qeth.icons import IconCache
+    from qeth.prices import Price
+    from qeth.store import Store
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    tok = "0x" + "cd" * 20
+    store = Store.load()
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp = TokensPlugin(store)
+    tp._panel = panel
+    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
+    tp._wallet_cache.save(CachedWallet(
+        chain_id=1, address=acc, native_balance_wei=10**18, tokens=[
+            CachedToken(contract=tok, symbol="X", name="X", decimals=18,
+                        balance_raw=5 * 10**18, price_usd="1", price_updated=1)]))
+    panel.show_cached(eth, tp._wallet_cache.load(1, acc))
+    tp._displayed_view = (1, acc)
+
+    # A discovery at block 500 where `tok` was NOT freshly read — it's carried
+    # forward into balances_raw but absent from `blocks`.
+    pv = {"chain": eth, "address": acc, "view_key": (1, acc),
+          "native_wei": 10**18, "block": 500, "read_failed": False,
+          "balances_raw": {tok: 5 * 10**18}, "blocks": {},
+          "metadata": {tok: ("X", "X", 18)}}
+    tp._on_combined_ready(pv, 1, {"": Price(Decimal("2000"), 1, "x"),
+                                  tok: Price(Decimal("1"), 1, "x")})
+    # not stamped at 500 (no floor recorded for it)
+    assert (1, acc.lower(), tok.lower()) not in tp._ledger.balance_block
+    # so a real read at a LOWER block still updates it (would be rejected if the
+    # carry had stamped 500)
+    tp._apply_targeted_balances(eth, acc, 10**18, {tok: 9 * 10**18}, 300,
+                                {tok: 300})
+    held = {t.contract.lower(): t.balance_raw
+            for t in tp._wallet_cache.load(1, acc).tokens}
+    assert held.get(tok) == 9 * 10**18
 
 
 def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):

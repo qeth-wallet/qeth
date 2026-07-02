@@ -1524,8 +1524,12 @@ class TokensPlugin(Plugin):
                 # Order by the height THIS token's chunk ran at, not the batch
                 # min — a min dragged down by one lagging chunk otherwise
                 # rejects this token's fresh read forever (the stuck-balance
-                # bug). Falls back to `block` for a carried-forward value.
-                tblock = blocks.get(cl, block)
+                # bug). A token that was NOT freshly read — carried forward from
+                # cache by _carry_forward_absent — is absent from `blocks`, so
+                # tblock is None: it's applied (its cached value) but NOT stamped
+                # (satellite 2), so a later CORRECT read at a lower block isn't
+                # discarded as stale against a floor it never actually earned.
+                tblock = blocks.get(cl)
                 if self._ledger.is_token_stale(chain.chain_id, address, cl,
                                                tblock):
                     continue   # stale read for this token — keep cached value

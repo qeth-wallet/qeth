@@ -1806,6 +1806,10 @@ class EnsPlugin(Plugin):
         # records read only sets a present address, never clears one (an absent
         # on-chain addr can just mean the name resolves offchain via CCIP).
         self._force_reread: set[str] = set()
+        # Fallback worker tracking for a host with no start_worker (tests /
+        # minimal hosts): keeps a running QThread referenced so it isn't GC'd
+        # mid-run (Qt aborts the process then), self-evicting on finished.
+        self._workers: set[QThread] = set()
         # Per-name resolver (from the ownership pass) — lets a record read skip
         # its resolver-lookup round-trip. Refreshed every load (self-heals a
         # re-pointed resolver).
@@ -2683,5 +2687,11 @@ class EnsPlugin(Plugin):
         host = self.host
         if host is not None and hasattr(host, "start_worker"):
             host.start_worker(worker)
-        else:
-            worker.start()
+            return
+        # No worker pump (a minimal/test host): keep a ref so the running
+        # QThread isn't garbage-collected mid-run — Qt's QThread destructor
+        # aborts the whole process if the thread is still running. Self-evict
+        # on finished (the convention MainWindow.start_worker follows).
+        self._workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        worker.start()

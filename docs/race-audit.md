@@ -30,6 +30,19 @@ Done and committed:
 - **4b** — `Store.save` copies `accounts` under the lock + seq-ordered writes.
 - **3a/3g** — ENS per-generation `_epoch` drops stale discovery/verify
   landings.
+- **P3 ENS block-stamp** — records and ownership reads now co-read their
+  height and order freshness by block, replacing the verified-ratchet /
+  lagging-proof / value-agreement guards with one reducer each. Closes **3b**
+  (forced re-read keeps its cache anchor — the stale pre-write worker is
+  block-ordered out, not left unguarded), **3c** (the value-agreement worker
+  escape is gone), **3e** (a changed record's fast read at a newer block
+  replaces even a cached verified value — so a Helios-less session updates),
+  **3d** (ownership catchup is a block-wait, immune to one name's value
+  vetoing the whole verified pass), **3g-b** (`populate()` skips an identical
+  tree and restores fold + selection), and **3f** falls out of the epoch (the
+  catchup flag is set with the epoch, so only the latest refresh's discovery —
+  carrying the current flag — survives). Records cache schema gains a block
+  (default 0). Also **3h**: the `_start` fallback tracks its QThread.
 - **5d** — stale gas estimates dropped by emitting-worker identity.
 - **5e** — helios `_stop_all` snapshots under the lock; `ledger_hid.submit`
   enqueues under the lock; `_ensure_heavy_imports` / `_ensure_async_imports`
@@ -71,7 +84,14 @@ Deferred / not yet done:
   - `_reconcile_up_to_block` singleShot chains — an exit-only QThread-abort risk
     that mostly can't fire (the event loop is gone by the time the plugin is
     destroyed); would need a plugin shutdown hook.
-- **P3 records block-stamp (steps 2–5)** — 3b/3c/3e remain.
+- **P3 remaining 3h (LOW)** — `_force_reread` is a plugin-wide flag a
+  concurrent non-forced records worker can clear before the forced worker's
+  fast pass (so a setAddr-to-zero might not clear the row until the next
+  refresh); carrying forced-ness per-worker is clean but breaks the direct-call
+  tests (needs `sender()`), so deferred. And a verify worker whose FAST read
+  failed still emits the verified read unconditioned (block-wait's `not fast`
+  path) — could drop a just-acquired name on a lagging proof; the safer policy
+  (emit vs keep-unverified) is ambiguous.
 - **4a single-instance lock** — UX call (forbid vs focus-raise) for the user.
 - **P5** — being picked off individually.
 

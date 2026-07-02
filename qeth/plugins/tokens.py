@@ -352,6 +352,12 @@ class TokensPlugin(Plugin):
         self._ledger = BalanceLedger(
             lambda: self._wallet_cache, lambda: self._token_lists,
             lambda: self._token_metadata, self._unpriced_since)
+        # Set on app.aboutToQuit (wired in attach). The reconcile retry chain is
+        # a QTimer.singleShot loop (up to 20 × 700 ms); a retry firing in the
+        # teardown window would spawn a BalanceWorker whose ref then dies while
+        # it runs — and Qt's QThread destructor aborts the process. The guard
+        # stops spawning once we're quitting (satellite 3).
+        self._shutting_down = False
         # Chains with a live ws connection (LiveWatcher link_state, relayed) —
         # drives the sweep-interval throttle.
         self._ws_live_chains: set[int] = set()
@@ -501,6 +507,12 @@ class TokensPlugin(Plugin):
 
     def attach(self, host) -> None:
         super().attach(host)
+        # Stop spawning reconcile workers once the app starts quitting (see
+        # _shutting_down / satellite 3). aboutToQuit fires before app.exec()
+        # returns, while the event loop can still deliver a pending retry.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._on_about_to_quit)
         # 60-second background refresh against whatever view is on screen.
         # _on_refresh_tick self-dedupes via _discovery_in_flight, so an
         # unfinished run blocks the next tick rather than stacking.
@@ -699,6 +711,10 @@ class TokensPlugin(Plugin):
             self._reconcile_up_to_block(
                 chain, account, sorted(contracts), min_block)
 
+    def _on_about_to_quit(self) -> None:
+        """App is quitting — stop spawning reconcile workers (satellite 3)."""
+        self._shutting_down = True
+
     def _reconcile_up_to_block(self, chain, account: str, tokens,
                                min_block, attempts: int = 20) -> None:
         """Re-read ``tokens`` at latest and apply — but only once the RPC's head
@@ -709,7 +725,7 @@ class TokensPlugin(Plugin):
         stall). Correctness against out-of-order reads still comes from per-token
         block-ordering; this just stops the eager read from settling on a stale
         value and leaving the update to the slow sweep."""
-        if self.host is None or not tokens:
+        if self.host is None or not tokens or self._shutting_down:
             return
         toks = list(tokens)
         bw = BalanceWorker(chain, account, toks)
@@ -726,7 +742,8 @@ class TokensPlugin(Plugin):
         # `block` is the per-batch MIN (conservative) — wait on it so every
         # token's chunk has reached the receipt block before we apply.
         if (min_block is not None and block is not None
-                and int(block) < int(min_block) and attempts > 1):
+                and int(block) < int(min_block) and attempts > 1
+                and not self._shutting_down):
             QTimer.singleShot(
                 700, lambda: self._reconcile_up_to_block(
                     chain, account, tokens, min_block, attempts - 1))

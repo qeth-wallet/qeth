@@ -989,6 +989,29 @@ def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_path):
     assert held.get(tok) == 9 * 10**18
 
 
+def test_reconcile_does_not_spawn_a_worker_while_shutting_down(qtbot):
+    """satellite 3: once the app is quitting, the reconcile retry chain must not
+    spawn a BalanceWorker — a QThread whose ref dies mid-run aborts the process
+    on exit."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    acc = "0xabc0000000000000000000000000000000000001"
+    tok = "0x" + "cd" * 20
+    tp = TokensPlugin(Mock())
+    started: list = []
+    tp.host = SimpleNamespace(start_worker=lambda w: started.append(w))
+
+    tp._on_about_to_quit()
+    assert tp._shutting_down is True
+    tp._reconcile_up_to_block(eth, acc, [tok], 100, attempts=20)
+    assert started == []                 # no worker spawned during teardown
+
+    tp._shutting_down = False            # sanity: it DOES spawn when running
+    tp._reconcile_up_to_block(eth, acc, [tok], 100, attempts=20)
+    assert len(started) == 1
+
+
 def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):
     """Persist writes ABSOLUTE native + per-token balances (unlike the receipt
     path's delta): a held token is overwritten in place; an unknown new token

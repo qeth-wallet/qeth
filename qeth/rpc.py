@@ -159,6 +159,18 @@ class RpcServer:
         # origin's sockets, while a UI-driven one goes only to
         # sockets whose origin doesn't carry an override.
         self._ws_origin: dict[web.WebSocketResponse, str | None] = {}
+        # In-flight ws request handlers — one task per message, dispatched
+        # concurrently (5a) so a long-running handler (an unbounded signing
+        # prompt) can't head-of-line-block other requests on the same socket
+        # (Falkon's 4 s eth_chainId poll, a pipelined call). Tracked so they
+        # aren't GC'd mid-flight; NOT cancelled on disconnect — an open signing
+        # prompt should still let the user finish (its reply just no-ops on the
+        # dead socket).
+        self._ws_tasks: set[asyncio.Task] = set()
+        # Per-ws send serialization: concurrent send_str on one socket
+        # interleaves frames, and the concurrent handlers now share the socket
+        # with the async event push. Both go through _ws_send under this lock.
+        self._ws_send_locks: dict[web.WebSocketResponse, asyncio.Lock] = {}
         # Per-upstream-host fail-fast cool-down. See _proxy below.
         self._host_last_fail: dict[str, float] = {}
         # In-flight wallet_addEthereumChain approvals, keyed by chain id.
@@ -242,6 +254,12 @@ class RpcServer:
         self._ws_clients.clear()
         self._ws_subscriptions.clear()
         self._ws_origin.clear()
+        # Cancel any in-flight request handlers (e.g. an open signing prompt) —
+        # the app is going away, so abandon them rather than wait.
+        for task in list(self._ws_tasks):
+            task.cancel()
+        self._ws_tasks.clear()
+        self._ws_send_locks.clear()
         if client:
             await client.close()
         if runner:
@@ -338,33 +356,64 @@ class RpcServer:
         await ws.prepare(request)
         self._ws_clients.add(ws)
         self._ws_origin[ws] = origin
+
+        async def handle_and_reply(req: Any) -> None:
+            # _handle_one never raises (it maps every error to a JSON-RPC error
+            # object), so a whole batch/single completes to a serialisable resp.
+            if isinstance(req, list):
+                resp: Any = [await self._handle_one(r, origin, ws=ws)
+                             for r in req]
+            else:
+                resp = await self._handle_one(req, origin, ws=ws)
+            await self._ws_send(ws, json.dumps(resp))
+
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     try:
                         req = json.loads(msg.data)
                     except Exception:
-                        await ws.send_str(json.dumps(
+                        await self._ws_send(ws, json.dumps(
                             {"jsonrpc": "2.0", "id": None,
                              "error": {"code": -32700, "message": "Parse error"}}
                         ))
                         continue
-                    resp: Any
-                    if isinstance(req, list):
-                        resp = [
-                            await self._handle_one(r, origin, ws=ws)
-                            for r in req
-                        ]
-                    else:
-                        resp = await self._handle_one(req, origin, ws=ws)
-                    await ws.send_str(json.dumps(resp))
+                    # Dispatch each message as its own task so a slow handler
+                    # doesn't block the read loop (5a). Responses carry their
+                    # JSON-RPC id, so out-of-order replies are correct.
+                    task = asyncio.ensure_future(handle_and_reply(req))
+                    self._ws_tasks.add(task)
+                    task.add_done_callback(self._on_ws_task_done)
                 elif msg.type == WSMsgType.ERROR:
                     break
         finally:
             self._ws_clients.discard(ws)
             self._ws_subscriptions.pop(ws, None)
             self._ws_origin.pop(ws, None)
+            self._ws_send_locks.pop(ws, None)
         return ws
+
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        self._ws_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                log.warning("ws request handler crashed: %s", exc)
+
+    async def _ws_send(self, ws: web.WebSocketResponse, text: str) -> bool:
+        """Serialized send on one ws — concurrent send_str interleaves frames,
+        and the per-message handlers (5a) now share the socket with the async
+        event push. Returns False if the send failed (socket gone)."""
+        lock = self._ws_send_locks.get(ws)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._ws_send_locks[ws] = lock
+        try:
+            async with lock:
+                await ws.send_str(text)
+            return True
+        except Exception:
+            return False
 
     # --- event push (Qt-thread → asyncio loop) ----------------------------
 
@@ -494,12 +543,8 @@ class RpcServer:
                 "method": "eth_subscription",
                 "params": {"subscription": sub_id, "result": result},
             }
-            try:
-                await ws.send_str(json.dumps(payload))
-            except Exception as e:
-                log.warning("ws subscription push failed (%s): %s",
-                             sub_type, e)
-                dead.append(ws)
+            if not await self._ws_send(ws, json.dumps(payload)):
+                dead.append(ws)   # send failed → socket gone, prune it
         for ws in dead:
             self._ws_subscriptions.pop(ws, None)
             self._ws_clients.discard(ws)

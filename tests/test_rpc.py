@@ -103,3 +103,64 @@ def test_shutdown_closes_ws_clients_so_cleanup_does_not_block():
     assert server._ws_clients == set()
     assert server._ws_subscriptions == {}
     assert server._ws_origin == {}
+
+
+def test_ws_slow_request_does_not_head_of_line_block(monkeypatch):
+    """A slow ws handler (an unbounded signing prompt) must not stall other
+    requests on the same socket: each message is dispatched as its own task, so
+    a later FAST request replies while the slow one is still pending (5a). With
+    the old serial loop the read loop blocks on the slow handler and
+    _ws_handler never returns — wait_for turns that revert into a clean fail."""
+    import json
+    from types import SimpleNamespace
+    from aiohttp import WSMsgType
+
+    server = RpcServer(MagicMock(), port=0)
+    sent: list = []
+
+    async def scenario():
+        slow_release = asyncio.Event()
+
+        async def fake_handle_one(req, origin=None, ws=None):
+            if req.get("id") == "slow":
+                await slow_release.wait()      # blocks until we let it go
+                return {"jsonrpc": "2.0", "id": "slow", "result": "S"}
+            return {"jsonrpc": "2.0", "id": req.get("id"), "result": "F"}
+        monkeypatch.setattr(server, "_handle_one", fake_handle_one)
+
+        messages = [
+            SimpleNamespace(type=WSMsgType.TEXT, data=json.dumps(
+                {"jsonrpc": "2.0", "id": "slow", "method": "m"})),
+            SimpleNamespace(type=WSMsgType.TEXT, data=json.dumps(
+                {"jsonrpc": "2.0", "id": "fast", "method": "m"})),
+        ]
+
+        class FakeWS:
+            closed = False
+
+            async def prepare(self, request):
+                pass
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if messages:
+                    return messages.pop(0)
+                raise StopAsyncIteration
+
+            async def send_str(self, s):
+                sent.append(json.loads(s))
+
+        monkeypatch.setattr("qeth.rpc.web.WebSocketResponse", FakeWS)
+        req = make_mocked_request("GET", "/", headers={})
+        await asyncio.wait_for(server._ws_handler(req), timeout=5)
+        for _ in range(10):               # let the dispatched fast task run
+            await asyncio.sleep(0)
+        ids = [s.get("id") for s in sent]
+        assert "fast" in ids and "slow" not in ids   # fast replied while slow blocked
+        slow_release.set()
+        await asyncio.gather(*server._ws_tasks)       # let the slow one finish
+        assert "slow" in [s.get("id") for s in sent]
+
+    asyncio.run(scenario())

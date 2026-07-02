@@ -637,6 +637,14 @@ class Multicall:
                 continue
             chunk_block: int | None = None
             if self.track_blocks:
+                if not decoded:
+                    # A well-formed-but-empty result array (never seen from a
+                    # real Multicall3, which returns len(calls) entries) —
+                    # treat the chunk as failed rather than IndexError below.
+                    for _, _, pending in batch:
+                        pending.success = False
+                    self._chunk_blocks.append(None)
+                    continue
                 blk_success, blk_ret = decoded[0]
                 chunk_block = _decode_uint256(blk_ret) if blk_success else None
                 self._chunk_blocks.append(chunk_block)

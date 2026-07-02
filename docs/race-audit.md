@@ -55,6 +55,30 @@ Deferred / not yet done:
 - **4a single-instance lock** — UX call (forbid vs focus-raise) for the user.
 - **P5** — being picked off individually.
 
+Post-fix re-review notes (adversarial pass over the branch):
+- **min-block trade, verified**: the conservative min stamp means (i) a
+  value can be transiently regressed by a read in the [min, actual) window
+  and (ii) a true zero read alongside a badly lagging chunk can be skipped
+  until a later sweep (missed, not false, drop) — both self-healing, and
+  strictly safer than the pre-change over-stamping (which persistently
+  resurrected sent tokens). Accepted by design.
+- **native fallback mis-stamp** (BalanceWorker, rare chunk-failure path):
+  the fallback `get_balance` isn't co-read with the surviving chunks' block,
+  so the native stamp can be skewed — transient, self-healing, narrower than
+  the pre-change every-refresh exposure. Comment fixed to say so.
+- **remaining closure-connections to worker signals** (same class as the
+  fixed 5d/3a lambdas, pre-existing): `_make_identity_row`'s nested `_apply`
+  (plugins/transactions.py) and the BalanceWorker lambdas in
+  plugins/tokens.py (~:584, :715, :1334) — receivers are the app-lifetime
+  plugin or MainWindow-parented dialogs, so exposure is app-shutdown only.
+  Sweep alongside 5g.
+- **non-multicall custom chains**: the tokenless refresh now emits
+  block=None (was a real `get_block_number`), so native ordering is
+  inactive there — single-RPC chains, no LB skew, LOW; folds into the
+  open block=None-weakest-read satellite.
+- **410c12b commit message**: its "tidies Dialog.closeEvent" line describes
+  a no-op (the tweak cancelled itself out pre-commit); code is correct.
+
 ## The unifying diagnosis
 
 Every guard the recent series added approximates one invariant:

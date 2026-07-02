@@ -269,6 +269,10 @@ class EnsNamesWorker(QThread):
 
     ready = Signal(str, object)        # (address, list[EnsName])
 
+    # Generation the worker was spawned in (set by EnsPlugin._on_refresh);
+    # the landing slot drops a result from a superseded generation.
+    _epoch: int = 0
+
     def __init__(self, address: str, custom_names: list[str], parent=None):
         super().__init__(parent)
         self._address = address
@@ -371,6 +375,10 @@ class EnsVerifyWorker(QThread):
     can't overwrite the change the user just made."""
 
     ready = Signal(str, object, bool)        # (address, states, verified)
+
+    # Generation the worker was spawned in (set by EnsPlugin._verify); the
+    # landing slot drops a result from a superseded generation.
+    _epoch: int = 0
 
     def __init__(self, chain, address: str, names: list[str], parent=None,
                  *, wait_s: float = VERIFY_WAIT_S, catchup: bool = False):
@@ -1894,7 +1902,7 @@ class EnsPlugin(Plugin):
         # lambda): a lambda isn't receiver-tracked, so a worker outliving a torn-
         # down plugin would fire into the deleted object (segfault). The slot
         # reads the generation off the emitting worker (self.sender()).
-        worker._epoch = self._epoch     # type: ignore[attr-defined]
+        worker._epoch = self._epoch
         worker.ready.connect(self._on_names_ready)
         self._start(worker)
 
@@ -1966,7 +1974,7 @@ class EnsPlugin(Plugin):
         self._verify_catchup = False        # consume the one-shot flag
         # Bound method + worker tag, not a lambda (receiver-tracked → no fire
         # into a torn-down plugin; see _on_refresh).
-        worker._epoch = self._epoch     # type: ignore[attr-defined]
+        worker._epoch = self._epoch
         worker.ready.connect(self._on_verified)
         self._start(worker)
 

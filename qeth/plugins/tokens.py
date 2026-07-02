@@ -225,10 +225,14 @@ class BalanceWorker(QThread):
             block, native, balances = client.head_balances(
                 self.contracts, self.address)
             if native is None:
-                # getEthBalance didn't come back (aggregate chunk-0 failure) —
-                # fall back to a plain read so we still emit a native value.
-                # No block consistency lost: a failed aggregate carries no
-                # block for the consumer to order against anyway.
+                # getEthBalance didn't come back (its chunk failed) — fall
+                # back to a plain read so we still emit a native value. This
+                # read is NOT co-read with `block` (later chunks may have
+                # succeeded and set it), so the consumer's native stamp can be
+                # off by the skew between the two — transient and self-healing
+                # (the next ordered read supersedes it), and confined to this
+                # rare failure path; pre-change EVERY refresh read native
+                # separately.
                 native = client.get_balance(self.address, "latest")
             self.refreshed.emit(self.chain.chain_id, native, balances, block)
         except Exception as e:

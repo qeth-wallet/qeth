@@ -181,17 +181,28 @@ class RpcServer:
         call from any thread (won't join itself)."""
         loop = self._loop
         thread = self._thread
-        if loop and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+        if loop is not None:
+            # Run the graceful async shutdown only while the loop is actually
+            # running (run_until_complete or run_forever). In the brief startup
+            # window BETWEEN those two it isn't — _run's finally does the
+            # shutdown then instead.
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+                try:
+                    future.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    log.warning("timed out waiting for qeth JSON-RPC shutdown")
+                except Exception:
+                    log.exception("qeth JSON-RPC shutdown failed")
+            # Stop the loop UNCONDITIONALLY — not gated on is_running(). Via the
+            # self-pipe it also fires the moment a not-yet-running loop enters
+            # run_forever; a stop() landing in that startup window used to be
+            # dropped, leaving run_forever to block the thread forever (join
+            # times out, the port stays bound).
             try:
-                future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                log.warning("timed out waiting for qeth JSON-RPC shutdown")
-            except Exception:
-                log.exception("qeth JSON-RPC shutdown failed")
-            finally:
-                if loop.is_running():
-                    loop.call_soon_threadsafe(loop.stop)
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass   # loop already closed
         if (thread is not None and thread.is_alive()
                 and thread is not threading.current_thread()):
             thread.join(timeout=timeout)
@@ -827,9 +838,13 @@ class RpcServer:
         urls = [chain.rpc_url] if broadcast else [chain.rpc_url, *chain.fallback_rpcs]
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         assert self._client is not None  # set in _serve() before any request is handled
-        now = asyncio.get_event_loop().time()
         last_err: Exception | None = None
         for url in urls:
+            # Per iteration, not once before the loop: a 15 s timeout on an
+            # earlier url would otherwise backdate this one's cooldown check
+            # AND its fail stamp — a just-failed fallback would be stamped
+            # already-outside _FAIL_FAST_S, defeating the fast-fail entirely.
+            now = asyncio.get_event_loop().time()
             last_fail = self._host_last_fail.get(url)
             if (not broadcast and last_fail is not None
                     and (now - last_fail) < self._FAIL_FAST_S):

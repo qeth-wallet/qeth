@@ -111,6 +111,20 @@ Post-fix re-review notes (adversarial pass over the branch):
   value carries its own lagging block and is correctly rejected — closing 2a
   *and* the stuck case. The min survives only for native ordering (protected by
   the ws poll's own-block read) and the reconcile catch-up wait.
+- **Arbitrum number-space poison — the ACTUAL stuck-balance root cause.** The
+  per-token fix above didn't cure the user's report; live diagnosis showed why:
+  on Arbitrum, `block.number` in the EVM (= `Multicall3.getBlockNumber()`) is
+  the **L1** block (~25.4M) while receipts/logs/`eth_blockNumber` are **L2**
+  (~479.6M). Receipt credits stamped floors at L2; every multicall read carried
+  L1 — so one confirm froze that token until restart (floors are in-memory),
+  and the next confirm re-poisoned it. Also silently broke the reconcile wait
+  (L1 min never reaches the L2 target → full retry budget burned every time).
+  Fixed in `Multicall._flush`: a second injected probe per chunk —
+  `ArbSys(0x64).arbBlockNumber()` (L2 on Arbitrum; empty-success on codeless
+  0x64 elsewhere → length-guarded decode → `None` → `getBlockNumber` fallback;
+  probed live on all seven configured chains, no chain list). Lesson recorded:
+  a block used for ordering must come from the same number space as the
+  receipts/logs it's compared against.
 - **native fallback mis-stamp** (BalanceWorker, rare chunk-failure path):
   the fallback `get_balance` isn't co-read with the surviving chunks' block,
   so the native stamp can be skewed — transient, self-healing, narrower than

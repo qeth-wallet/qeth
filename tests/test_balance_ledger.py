@@ -140,6 +140,17 @@ def test_apply_floor_blocks_a_later_stale_zero_drop(tmp_path):
     assert cache.load(1, ACC).tokens[0].balance_raw == 7
 
 
+def test_reset_chain_clears_only_that_chains_floors(tmp_path):
+    ledger, _, _ = _ledger(tmp_path, meta=_meta())
+    ledger.stamp_token(1, ACC, TOK, 10)
+    ledger.stamp_native(1, ACC, 10)
+    ledger.stamp_token(137, ACC, TOK, 50)
+    ledger.reset_chain(1)
+    assert not ledger.is_token_stale(1, ACC, TOK, 1)   # chain-1 token floor gone
+    assert not ledger.native_stale(1, ACC, 1)          # chain-1 native floor gone
+    assert ledger.is_token_stale(137, ACC, TOK, 1)     # other chain untouched
+
+
 def test_getters_track_swapped_token_sources(tmp_path):
     """Metadata lookups go through getters, so a caller that swaps its
     token_lists / token_metadata after construction is seen — the plugin's

@@ -979,6 +979,13 @@ class TokensPlugin(Plugin):
         the ws polls native ~once a minute, so the HTTP sweep slows to a deep
         backstop (and snaps back to the fast floor if ws drops)."""
         if connected:
+            if chain.chain_id not in self._ws_live_chains:
+                # A (re)connect: while the ws was down we were blind to new
+                # heads / logs and a reorg may have rewound the chain. Clear
+                # this chain's freshness floors so the fresh reads that follow
+                # re-establish truth instead of being ordered out by a stamp
+                # from before the gap.
+                self._ledger.reset_chain(chain.chain_id)
             self._ws_live_chains.add(chain.chain_id)
         else:
             self._ws_live_chains.discard(chain.chain_id)

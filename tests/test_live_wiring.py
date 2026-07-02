@@ -481,6 +481,22 @@ def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tm
     assert not tp._wallet_cache.load(1, acc).tokens
 
 
+def test_ws_reconnect_clears_freshness_floors(qtbot):
+    """A ws (re)connect clears the chain's ledger floors: while the socket was
+    down we were blind and a reorg may have rewound the chain, so a stamp from
+    before the gap must not order out the fresh reads that follow."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    ch = SimpleNamespace(chain_id=1)
+    tp.on_ws_link_state(ch, True)                       # initial connect
+    tp._ledger.stamp_token(1, "0xabc", "0xtok", 100)
+    assert tp._ledger.is_token_stale(1, "0xabc", "0xtok", 50)   # 50 < 100
+    tp.on_ws_link_state(ch, False)                      # ws drops
+    tp.on_ws_link_state(ch, True)                       # reconnect → cleared
+    assert not tp._ledger.is_token_stale(1, "0xabc", "0xtok", 50)
+
+
 def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_path):
     """A held token the user HID must stay in the disk cache after a discovery
     (so unhiding brings it back) even though the display filters it — discovery's

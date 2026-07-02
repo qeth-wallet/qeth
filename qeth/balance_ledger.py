@@ -59,6 +59,20 @@ class BalanceLedger:
         # it); tokens are ordered individually above.
         self.native_block: dict[tuple[int, str], int] = {}
 
+    def reset_chain(self, chain_id: int) -> None:
+        """Drop every freshness floor for ``chain_id``. Called on a ws
+        (re)connect: while the socket was down we were blind to new heads /
+        logs, and a reorg may have rewound the chain below a stamp. Clearing
+        the floors lets the fresh reads that follow re-establish truth, rather
+        than being ordered out by a stamp from before the gap. Monotonic floors
+        otherwise can't over-stamp (min-block reads never exceed the true head),
+        so a live reorg self-heals once the head re-passes — this only covers
+        the blind-gap case."""
+        self.balance_block = {k: v for k, v in self.balance_block.items()
+                              if k[0] != chain_id}
+        self.native_block = {k: v for k, v in self.native_block.items()
+                             if k[0] != chain_id}
+
     # --- per-token ordering primitives (shared by the discovery merge) ------
 
     def is_token_stale(self, chain_id: int, account: str, token: str,

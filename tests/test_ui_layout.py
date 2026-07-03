@@ -55,10 +55,17 @@ def test_accounts_tree_has_copy_and_delete_shortcuts(mainwindow):
 
 
 def test_wallet_tree_group_roots_have_icons(mainwindow):
-    """The Ledger / Hot wallet / Watch-only group roots carry the same
-    icons as their add-account menu actions (always present — the roots
-    render even with zero accounts in the group)."""
+    """A populated Ledger / Hot wallet / Watch-only root carries the same icon
+    as its add-account menu action. (Empty roots are now hidden — see
+    TestWalletsTreeHidesEmptyRoots — so populate one of each first.)"""
     wp = mainwindow.wallets_plugin
+    wp._store.accounts = [
+        {"address": "0x" + "11" * 20, "source": "ledger",
+         "scheme": "Ledger Live", "label": ""},
+        {"address": "0x" + "22" * 20, "source": "hot", "label": ""},
+        {"address": "0x" + "33" * 20, "source": "watch_only", "label": ""},
+    ]
+    wp._rebuild_tree()
     tree = wp._tree
     roots = {tree.topLevelItem(i).text(0).split(" (")[0]: tree.topLevelItem(i)
              for i in range(tree.topLevelItemCount())}

@@ -685,63 +685,71 @@ class WalletsPlugin(Plugin):
         prior = self.selected_address
         expanded = self._capture_expansion()
         self._tree.clear()
-        ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
-        ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
-        # Reuse the add-account menu icons so the tree groups and the
-        # picker stay visually consistent (hardware device / key / eye).
-        ledger_root.setIcon(0, self.act_add_ledger.icon())
-        # Group containers: not draggable, not drop targets (we only
-        # allow re-ordering inside scheme subgroups).
-        ledger_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self._tree.addTopLevelItem(ledger_root)
-        groups: dict[str, QTreeWidgetItem] = {}
+        # Each source's root row is shown only when it HAS accounts — an empty
+        # "Watch only (0)" / "Hot wallet (0)" root is just noise (the Add button
+        # below the tree is the discovery affordance, not these roots). With no
+        # accounts at all the tree is simply empty.
         default_item: QTreeWidgetItem | None = None
-        for a in ledger_accts:
-            scheme = a.get("scheme", "Custom")
-            grp = groups.get(scheme)
-            if grp is None:
-                grp = QTreeWidgetItem([scheme])
-                # Scheme group: drop-enabled so children can be
-                # reordered between siblings via the parent, but not
-                # draggable itself.
-                grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-                ledger_root.addChild(grp)
-                groups[scheme] = grp
-            it, is_default = self._make_account_item(a)
-            grp.addChild(it)
-            if is_default:
-                default_item = it
-        self._restore_expand(ledger_root, "ledger", expanded)
-        for scheme, g in groups.items():
-            self._restore_expand(g, f"ledger/{scheme}", expanded)
+
+        ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
+        if ledger_accts:
+            ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
+            # Reuse the add-account menu icons so the tree groups and the
+            # picker stay visually consistent (hardware device / key / eye).
+            ledger_root.setIcon(0, self.act_add_ledger.icon())
+            # Group containers: not draggable, not drop targets (we only
+            # allow re-ordering inside scheme subgroups).
+            ledger_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._tree.addTopLevelItem(ledger_root)
+            groups: dict[str, QTreeWidgetItem] = {}
+            for a in ledger_accts:
+                scheme = a.get("scheme", "Custom")
+                grp = groups.get(scheme)
+                if grp is None:
+                    grp = QTreeWidgetItem([scheme])
+                    # Scheme group: drop-enabled so children can be
+                    # reordered between siblings via the parent, but not
+                    # draggable itself.
+                    grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+                    ledger_root.addChild(grp)
+                    groups[scheme] = grp
+                it, is_default = self._make_account_item(a)
+                grp.addChild(it)
+                if is_default:
+                    default_item = it
+            self._restore_expand(ledger_root, "ledger", expanded)
+            for scheme, g in groups.items():
+                self._restore_expand(g, f"ledger/{scheme}", expanded)
 
         hot_accts = [a for a in self._store.accounts
                       if a.get("source") == "hot"]
-        hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
-        hot_root.setIcon(0, self.act_add_hot.icon())
-        hot_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-        self._tree.addTopLevelItem(hot_root)
-        for a in hot_accts:
-            it, is_default = self._make_account_item(a)
-            hot_root.addChild(it)
-            if is_default:
-                default_item = it
-        self._restore_expand(hot_root, "hot", expanded)
+        if hot_accts:
+            hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
+            hot_root.setIcon(0, self.act_add_hot.icon())
+            hot_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+            self._tree.addTopLevelItem(hot_root)
+            for a in hot_accts:
+                it, is_default = self._make_account_item(a)
+                hot_root.addChild(it)
+                if is_default:
+                    default_item = it
+            self._restore_expand(hot_root, "hot", expanded)
 
         watch_accts = [a for a in self._store.accounts
                         if a.get("source") == "watch_only"]
-        watch_root = QTreeWidgetItem([f"Watch only ({len(watch_accts)})"])
-        watch_root.setIcon(0, self.act_add_watch.icon())
-        # Top-level group: not draggable, not a drop target — same
-        # treatment as the Ledger root.
-        watch_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-        self._tree.addTopLevelItem(watch_root)
-        for a in watch_accts:
-            it, is_default = self._make_account_item(a)
-            watch_root.addChild(it)
-            if is_default:
-                default_item = it
-        self._restore_expand(watch_root, "watch", expanded)
+        if watch_accts:
+            watch_root = QTreeWidgetItem([f"Watch only ({len(watch_accts)})"])
+            watch_root.setIcon(0, self.act_add_watch.icon())
+            # Top-level group: not draggable, not a drop target — same
+            # treatment as the Ledger root.
+            watch_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+            self._tree.addTopLevelItem(watch_root)
+            for a in watch_accts:
+                it, is_default = self._make_account_item(a)
+                watch_root.addChild(it)
+                if is_default:
+                    default_item = it
+            self._restore_expand(watch_root, "watch", expanded)
 
         if not (prior and self.select_address(prior)):
             if default_item is not None:

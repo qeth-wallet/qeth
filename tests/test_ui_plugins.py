@@ -2466,6 +2466,49 @@ class TestWalletsTreeExpansion:
         assert it is not None and it.data(0, ACCOUNT_LABEL_ROLE) == "alice.eth"
 
 
+class TestWalletsTreeHidesEmptyRoots:
+    """A source's root row (Ledger / Hot wallet / Watch only) shows only when
+    it has accounts — an empty '(0)' root is noise. With no accounts the tree
+    is empty; the Add button (not a root) is the discovery affordance."""
+
+    def _roots(self, plugin):
+        tree = plugin._tree
+        return [tree.topLevelItem(i).text(0)
+                for i in range(tree.topLevelItemCount())]
+
+    def _plugin(self, qtbot, accounts):
+        from qeth.store import Store
+        from qeth.plugins.wallets import WalletsPlugin
+        store = Store.load()
+        store.accounts = accounts
+        plugin = WalletsPlugin(store)
+        qtbot.addWidget(plugin.widget())
+        plugin._rebuild_tree()
+        return plugin
+
+    def test_empty_store_gives_empty_tree(self, qtbot, tmp_qeth):
+        assert self._plugin(qtbot, [])._tree.topLevelItemCount() == 0
+
+    def test_only_the_populated_root_shows(self, qtbot, tmp_qeth):
+        # Only a hot wallet → no empty "Ledger (0)" / "Watch only (0)" roots.
+        plugin = self._plugin(qtbot, [
+            {"address": "0x" + "11" * 20, "source": "hot", "label": ""},
+        ])
+        roots = self._roots(plugin)
+        assert len(roots) == 1 and roots[0].startswith("Hot wallet")
+
+    def test_all_three_show_when_all_populated(self, qtbot, tmp_qeth):
+        plugin = self._plugin(qtbot, [
+            {"address": "0x" + "11" * 20, "source": "ledger",
+             "scheme": "Ledger Live", "label": ""},
+            {"address": "0x" + "22" * 20, "source": "hot", "label": ""},
+            {"address": "0x" + "33" * 20, "source": "watch_only", "label": ""},
+        ])
+        roots = self._roots(plugin)
+        assert [r.split(" (")[0] for r in roots] == [
+            "Ledger", "Hot wallet", "Watch only"]
+
+
 class TestTokensStartupNonBlocking:
     """Pin the no-wait-for-token-lists startup behaviour: when the
     wallet cache holds tokens for the selected view, the panel must

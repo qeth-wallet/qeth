@@ -970,39 +970,14 @@ class MainWindow(QMainWindow):
             warn(dialog, "Cannot sign", str(e))
             return
 
-        # Pick the right Signer based on the stored account record.
-        # Hot wallets need a passphrase prompt up-front (on the
-        # main thread) so the worker has the decrypted key by the
-        # time it calls signer.sign().
-        addr_lower = finalised.from_addr.lower()
-        acct = next(
-            (a for a in self.store.accounts
-             if a["address"].lower() == addr_lower),
-            None,
-        )
-        source = acct.get("source") if acct else None
-        signer: Signer
-        if source == "ledger":
-            from .ledger import LedgerSigner
-            signer = LedgerSigner(self.store)
-            progress_text = "Confirm the transaction on your Ledger device…"
-        elif source == "hot":
-            passphrase, ok = prompt_text(
-                dialog, "Hot wallet",
-                f"Passphrase for {finalised.from_addr}:",
-                password=True,
-            )
-            if not ok:
-                return
-            from .hot_wallet import HotWalletSigner
-            signer = HotWalletSigner(self.store, passphrase)
-            # Scrypt-derived key decrypt typically takes ~1 second.
-            progress_text = "Decrypting keystore and signing…"
-        else:
-            warn(
-                dialog, "Cannot sign",
-                f"No known signer for {finalised.from_addr}",
-            )
+        # Pick the right Signer from the account's source via the registry.
+        # Hot wallets prompt for a passphrase up-front (main thread) inside
+        # _pick_signer_for, so the worker has the decrypted key by the time it
+        # calls signer.sign(). (None, None) means no signer or the user
+        # cancelled the unlock — _pick_signer_for already warned if needed.
+        signer, progress_text = self._pick_signer_for(
+            dialog, finalised.from_addr)
+        if signer is None:
             return
         if not signer.can_sign(finalised.from_addr):
             warn(
@@ -1037,14 +1012,16 @@ class MainWindow(QMainWindow):
         )
         self.start_worker(worker)
 
-    def _pick_signer_for(self, dialog, address: str):
-        """Pick a Signer instance based on the account's source.
-        For hot wallets, prompts for the passphrase on the main
-        thread BEFORE returning (so the worker's slow scrypt
-        decrypt can run off-thread). Returns
-        ``(signer, progress_text)`` or ``(None, None)`` if the
-        user cancelled the passphrase prompt / no signer exists.
-        Shows its own QMessageBox for the "no signer" case."""
+    def _pick_signer_for(
+        self, dialog, address: str,
+    ) -> tuple[Signer | None, str | None]:
+        """Pick a Signer for the account's ``source`` via the signer REGISTRY
+        (``qeth.signers``). For a source that needs an unlock secret (hot
+        wallet) prompts for it on the main thread BEFORE returning — so the
+        worker's slow scrypt decrypt runs off-thread. Returns
+        ``(signer, progress_text)``, or ``(None, None)`` if the user cancelled
+        the prompt or the source has no signer (shows the "no signer" warning
+        in that case)."""
         addr_lower = address.lower()
         acct = next(
             (a for a in self.store.accounts
@@ -1052,30 +1029,20 @@ class MainWindow(QMainWindow):
             None,
         )
         source = acct.get("source") if acct else None
-        if source == "ledger":
-            from .ledger import LedgerSigner
-            return (
-                LedgerSigner(self.store),
-                "Confirm on your Ledger device…",
-            )
-        if source == "hot":
-            passphrase, ok = prompt_text(
-                dialog, "Hot wallet",
-                f"Passphrase for {address}:",
-                password=True,
+        from .signers import signer_for_source
+        plugin = signer_for_source(source)
+        if plugin is None or not plugin.can_sign():
+            warn(dialog, "Cannot sign", f"No known signer for {address}")
+            return None, None
+        secret = None
+        prompt = plugin.secret_prompt(address)
+        if prompt is not None:
+            secret, ok = prompt_text(
+                dialog, plugin.display_name, prompt, password=True,
             )
             if not ok:
                 return None, None
-            from .hot_wallet import HotWalletSigner
-            return (
-                HotWalletSigner(self.store, passphrase),
-                "Decrypting keystore and signing…",
-            )
-        warn(
-            dialog, "Cannot sign",
-            f"No known signer for {address}",
-        )
-        return None, None
+        return plugin.make_signer(self.store, secret), plugin.progress_text
 
     def _launch_message_sign(self, req, fut) -> None:
         """Dapp-initiated personal_sign / eth_signTypedData_v4 flow.

@@ -41,7 +41,7 @@ _STICKY_PAD_V = 1
 _STICKY_GAP = 8
 _STICKY_MARGIN = 4
 from .alerts import warn
-from .dialog import prompt_text
+from .signer_interaction import DialogInteraction
 from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
 
 
@@ -971,12 +971,15 @@ class MainWindow(QMainWindow):
             return
 
         # Pick the right Signer from the account's source via the registry.
-        # Hot wallets prompt for a passphrase up-front (main thread) inside
-        # _pick_signer_for, so the worker has the decrypted key by the time it
-        # calls signer.sign(). (None, None) means no signer or the user
+        # The interaction host owns the "signing…" spinner and any unlock
+        # prompt (a hot wallet asks for its passphrase up-front on the main
+        # thread, so the worker has the decrypted key by the time it calls
+        # signer.sign()); it also marshals a worker-side backend's UI (step 3's
+        # QR) onto the main loop. (None, None) means no signer or the user
         # cancelled the unlock — _pick_signer_for already warned if needed.
+        interaction = DialogInteraction(dialog, title="Signing Transaction")
         signer, progress_text = self._pick_signer_for(
-            dialog, finalised.from_addr)
+            dialog, finalised.from_addr, interaction)
         if signer is None:
             return
         if not signer.can_sign(finalised.from_addr):
@@ -987,38 +990,30 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        from PySide6.QtWidgets import QProgressDialog
-        progress = QProgressDialog(
-            labelText=progress_text,
-            minimum=0, maximum=0,     # indeterminate spinner
-            parent=dialog,            # parent on the sign dialog so the
-                                      # progress sits on top of it.
-        )
-        progress.setCancelButton(None)   # no cancel button
-        progress.setWindowTitle("Signing Transaction")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
+        interaction.progress(progress_text)
 
-        worker = SignAndBroadcastWorker(signer, finalised, chain)
+        worker = SignAndBroadcastWorker(signer, req=finalised, chain=chain)
         worker.broadcast.connect(
-            lambda h, raw, ok, d=dialog, p=progress, r=finalised, c=chain,
+            lambda h, raw, ok, d=dialog, it=interaction, r=finalised, c=chain,
                    ob=on_broadcast:
-                self._on_tx_broadcast(h, raw, ok, d, p, r, c, ob)
+                self._on_tx_broadcast(
+                    h, raw, ok, dialog=d, interaction=it, req=r, chain=c,
+                    on_broadcast=ob)
         )
         worker.failed.connect(
-            lambda msg, d=dialog, p=progress, of=on_fail:
-                self._on_tx_sign_failed(msg, d, p, of)
+            lambda msg, d=dialog, it=interaction, of=on_fail:
+                self._on_tx_sign_failed(
+                    msg, dialog=d, interaction=it, on_fail=of)
         )
         self.start_worker(worker)
 
     def _pick_signer_for(
-        self, dialog, address: str,
-    ) -> tuple[Signer | None, str | None]:
+        self, dialog, address: str, interaction,
+    ) -> tuple[Signer | None, str]:
         """Pick a Signer for the account's ``source`` via the signer REGISTRY
-        (``qeth.signers``). For a source that needs an unlock secret (hot
-        wallet) prompts for it on the main thread BEFORE returning — so the
-        worker's slow scrypt decrypt runs off-thread. Returns
+        (``qeth.signers``). The plugin drives ``interaction`` for any up-front
+        unlock (a hot wallet prompts for its passphrase on the main thread, so
+        the worker's slow scrypt decrypt runs off-thread). Returns
         ``(signer, progress_text)``, or ``(None, None)`` if the user cancelled
         the prompt or the source has no signer (shows the "no signer" warning
         in that case)."""
@@ -1031,18 +1026,13 @@ class MainWindow(QMainWindow):
         source = acct.get("source") if acct else None
         from .signers import signer_for_source
         plugin = signer_for_source(source)
-        if plugin is None or not plugin.can_sign():
+        if plugin is None or not plugin.can_sign() or acct is None:
             warn(dialog, "Cannot sign", f"No known signer for {address}")
-            return None, None
-        secret = None
-        prompt = plugin.secret_prompt(address)
-        if prompt is not None:
-            secret, ok = prompt_text(
-                dialog, plugin.display_name, prompt, password=True,
-            )
-            if not ok:
-                return None, None
-        return plugin.make_signer(self.store, secret), plugin.progress_text
+            return None, ""
+        signer = plugin.make_signer(self.store, account=acct, ui=interaction)
+        if signer is None:
+            return None, ""   # user cancelled the unlock prompt
+        return signer, plugin.progress_text
 
     def _launch_message_sign(self, req, fut) -> None:
         """Dapp-initiated personal_sign / eth_signTypedData_v4 flow.
@@ -1075,9 +1065,9 @@ class MainWindow(QMainWindow):
         off the main thread. Errors keep the dialog open so the
         user can retry."""
         from .signing import SignMessageWorker
-        from PySide6.QtWidgets import QProgressDialog
+        interaction = DialogInteraction(dialog, title="Signing Message")
         signer, progress_text = self._pick_signer_for(
-            dialog, req.from_addr,
+            dialog, req.from_addr, interaction,
         )
         if signer is None:
             return
@@ -1089,33 +1079,28 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        progress = QProgressDialog(
-            labelText=progress_text, minimum=0, maximum=0, parent=dialog,
-        )
-        progress.setCancelButton(None)   # no cancel button
-        progress.setWindowTitle("Signing Message")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
+        interaction.progress(progress_text)
 
-        worker = SignMessageWorker(signer, req)
+        worker = SignMessageWorker(signer, req=req)
         worker.signed.connect(
-            lambda sig, d=dialog, p=progress, ok=on_signed:
-                self._on_message_signed(sig, d, p, ok)
+            lambda sig, d=dialog, it=interaction, ok=on_signed:
+                self._on_message_signed(
+                    sig, dialog=d, interaction=it, on_signed=ok)
         )
         worker.failed.connect(
-            lambda msg, d=dialog, p=progress, of=on_fail:
-                self._on_message_sign_failed(msg, d, p, of)
+            lambda msg, d=dialog, it=interaction, of=on_fail:
+                self._on_message_sign_failed(
+                    msg, dialog=d, interaction=it, on_fail=of)
         )
         self.start_worker(worker)
 
-    def _on_message_signed(self, sig_hex, dialog, progress, on_signed):
-        progress.close()
+    def _on_message_signed(self, sig_hex, dialog, interaction, on_signed):
+        interaction.close()
         dialog.accept()
         on_signed(sig_hex)
 
-    def _on_message_sign_failed(self, msg, dialog, progress, on_fail):
-        progress.close()
+    def _on_message_sign_failed(self, msg, dialog, interaction, on_fail):
+        interaction.close()
         dialog.set_signing_in_progress(False)
         warn(dialog, "Signing failed", msg)
         on_fail(msg)
@@ -1141,8 +1126,9 @@ class MainWindow(QMainWindow):
         themselves. Picks signer, prompts for passphrase if hot,
         runs SignMessageWorker, then shows the resulting
         signature."""
-        from PySide6.QtWidgets import QProgressDialog
-        signer, progress_text = self._pick_signer_for(self, req.from_addr)
+        interaction = DialogInteraction(self, title="Signing Message")
+        signer, progress_text = self._pick_signer_for(
+            self, req.from_addr, interaction)
         if signer is None:
             return
         if not signer.can_sign(req.from_addr):
@@ -1152,43 +1138,38 @@ class MainWindow(QMainWindow):
             )
             return
 
-        progress = QProgressDialog(
-            labelText=progress_text, minimum=0, maximum=0, parent=self,
-        )
-        progress.setCancelButton(None)   # no cancel button
-        progress.setWindowTitle("Signing Message")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
+        interaction.progress(progress_text)
 
         from .signing import SignMessageWorker
-        worker = SignMessageWorker(signer, req)
+        worker = SignMessageWorker(signer, req=req)
         worker.signed.connect(
-            lambda sig, p=progress: self._on_local_message_signed(sig, p)
+            lambda sig, it=interaction:
+                self._on_local_message_signed(sig, interaction=it)
         )
         worker.failed.connect(
-            lambda msg, p=progress: self._on_local_message_sign_failed(msg, p)
+            lambda msg, it=interaction:
+                self._on_local_message_sign_failed(msg, interaction=it)
         )
         self.start_worker(worker)
 
-    def _on_local_message_signed(self, signature_hex, progress) -> None:
+    def _on_local_message_signed(self, signature_hex, interaction) -> None:
         from .plugins.sign_message import SignatureResultDialog
-        progress.close()
+        interaction.close()
         dlg = SignatureResultDialog(signature_hex, parent=self)
         dlg.show()
 
-    def _on_local_message_sign_failed(self, msg, progress) -> None:
-        progress.close()
+    def _on_local_message_sign_failed(self, msg, interaction) -> None:
+        interaction.close()
         warn(self, "Signing failed", msg)
 
     def _on_tx_broadcast(self, tx_hash, raw_signed, first_push_ok, dialog,
-                          progress, req, chain, on_broadcast) -> None:
+                          interaction, req, chain, on_broadcast) -> None:
         # Read anything we need off the dialog BEFORE accept() — accept() emits
         # finished, which now schedules the dialog's deleteLater (5f). It's
         # deferred (survives this call stack), but capturing first keeps it
         # robust against any future event-loop turn between here and the use.
         sim_logs = getattr(dialog, "_logs", None)
-        progress.close()
+        interaction.close()
         dialog.accept()
         if not first_push_ok:
             # The first push never reached the node (transport failure) —
@@ -1234,14 +1215,14 @@ class MainWindow(QMainWindow):
         self.right_slot.set_active(self.transactions_plugin)
         on_broadcast(tx_hash)
 
-    def _on_tx_sign_failed(self, msg: str, dialog, progress,
+    def _on_tx_sign_failed(self, msg: str, dialog, interaction,
                             on_fail) -> None:
         """Signing failed (Ledger unavailable, user cancelled on
         device, broadcast rejected, …). Don't close the sign
         dialog — show the message on top of it and re-enable
         Confirm so the user can fix the device and retry without
         losing the dialog state."""
-        progress.close()
+        interaction.close()
         dialog.set_signing_in_progress(False)
         # "Signing failed" is signer-neutral — Ledger AND hot
         # wallets flow through this handler, and broadcast failures

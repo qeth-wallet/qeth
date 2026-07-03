@@ -4,13 +4,14 @@ warns 'no signer') rather than an ``else`` branch."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import SignerPlugin
 
 if TYPE_CHECKING:
     from ..signing import Signer
     from ..store import Store
+    from .interaction import SignerInteraction
 
 
 class WatchOnlySignerPlugin(SignerPlugin):
@@ -20,6 +21,10 @@ class WatchOnlySignerPlugin(SignerPlugin):
     def can_sign(self) -> bool:
         return False
 
-    def make_signer(self, store: Store, secret: str | None = None) -> Signer:
+    def make_signer(
+        self, store: Store, account: dict[str, Any], ui: SignerInteraction,
+    ) -> Signer:
+        # Never reached — the dispatch checks can_sign() first — but the ABC
+        # requires it, and raising keeps the "can't sign" invariant explicit.
         from ..signing import SignerError
         raise SignerError("watch-only accounts cannot sign")

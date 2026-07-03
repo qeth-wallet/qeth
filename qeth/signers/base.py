@@ -11,23 +11,24 @@ declarative prompt the caller renders, and ``make_signer`` takes the result.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..signing import Signer
     from ..store import Store
+    from .interaction import SignerInteraction
 
 
 class SignerPlugin(ABC):
     """The metadata + factory for one account ``source``. Instances are
     stateless singletons in the ``REGISTRY`` (no per-account state — the
-    account and store are passed in), so a new backend is a subclass + a
-    registry entry, not edits to the dispatch."""
+    account, store and interaction host are passed in), so a new backend is a
+    subclass + a registry entry, not edits to the dispatch."""
 
     source_id: str
     display_name: str
     # Spinner label shown while the signature is produced. Source-specific
-    # (device confirm vs. keystore decrypt); step 2 folds it into the
+    # (device confirm vs. keystore decrypt); the caller shows it via the
     # interaction host's ``progress``.
     progress_text: str = ""
 
@@ -37,14 +38,12 @@ class SignerPlugin(ABC):
         Signer."""
         return True
 
-    def secret_prompt(self, address: str) -> str | None:
-        """A label to prompt for an unlock secret BEFORE signing — collected on
-        the main thread so the worker has it when ``sign()`` runs — or ``None``
-        when the backend needs none. Hot wallets return the passphrase prompt;
-        Ledger / watch-only return ``None``."""
-        return None
-
     @abstractmethod
-    def make_signer(self, store: Store, secret: str | None) -> Signer:
-        """Build the ``Signer`` for this source. ``secret`` is the
-        ``secret_prompt`` result (``None`` when it returned ``None``)."""
+    def make_signer(
+        self, store: Store, account: dict[str, Any], ui: SignerInteraction,
+    ) -> Signer | None:
+        """Build the ``Signer`` for ``account``, driving ``ui`` for any up-front
+        interaction — a hot wallet prompts for its passphrase via
+        ``ui.request_secret``. Returns ``None`` if the user cancelled that
+        prompt. ``ui`` is also what a worker-side backend (step 3's QR signer)
+        holds to drive its exchange from ``sign()``."""

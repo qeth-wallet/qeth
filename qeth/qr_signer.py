@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import rlp
 
-from .qr import eth
+from .qr import eth, multipart
 from .signing import (
     MessageSigningRequest,
     Signer,
@@ -94,7 +94,7 @@ class QRSigner(Signer):
             raise SignerError(
                 "QR signing currently supports EIP-1559 chains only")
         unsigned = unsigned_eip1559(req, chain.chain_id)
-        request_parts, request_id = eth.encode_eth_sign_request(
+        ur_type, payload, request_id = eth.encode_eth_sign_request(
             sign_data=unsigned,
             data_type=eth.DataType.TYPED_TRANSACTION,
             chain_id=chain.chain_id,
@@ -103,7 +103,7 @@ class QRSigner(Signer):
             address=_addr_bytes(req.from_addr) or None,
             origin=req.origin,
         )
-        response = self._ui.exchange_qr(request_parts)
+        response = self._ui.exchange_qr(multipart.frame_source(ur_type, payload))
         if response is None:
             raise SignerError("QR signing cancelled")
         sig = eth.parse_eth_signature(response)

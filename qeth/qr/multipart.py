@@ -17,15 +17,19 @@ crc32(message), fragment] )>``.
 
 from __future__ import annotations
 
+import itertools
 import math
 import zlib
+from collections.abc import Callable
 
 from cbor2 import dumps, loads
 
 from . import bytewords, fountain, ur
 
-# Total animated parts = this × seqLen (the pure fragments plus an equal number
-# of rateless fountain parts, for loss-tolerant, tail-free reconstruction).
+# encode_parts (a FINITE list, for tests/round-trips) emits this × seqLen parts.
+# The live signing flow uses frame_source instead — an UNBOUNDED stream of fresh
+# fountain parts, which is what actually lets the device converge without
+# stalling+resetting near completion.
 FOUNTAIN_RATIO = 2
 
 # A payload up to this size is a single static QR — a normal tx stays one clean
@@ -48,28 +52,51 @@ def _fragments(message: bytes, seq_len: int, frag_len: int) -> list[bytes]:
     return [padded[i * frag_len:(i + 1) * frag_len] for i in range(seq_len)]
 
 
+def _plan(message: bytes, fragment_len: int) -> tuple[int, list[bytes], int]:
+    seq_len = math.ceil(len(message) / fragment_len)
+    frags = _fragments(message, seq_len, math.ceil(len(message) / seq_len))
+    return seq_len, frags, _crc32(message)
+
+
+def _part(ur_type: str, seq_num: int, seq_len: int, message_len: int,
+          checksum: int, frags: list[bytes]) -> str:
+    """One ``ur:…`` part. seqNum 1..seqLen is a pure fragment; beyond that a
+    rateless fountain mix (fountain.choose_fragments picks the same set the
+    device will)."""
+    data = fountain.mix(frags, fountain.choose_fragments(seq_num, seq_len, checksum))
+    cbor = dumps([seq_num, seq_len, message_len, checksum, data], canonical=True)
+    return f"ur:{ur_type}/{seq_num}-{seq_len}/{bytewords.encode(cbor)}"
+
+
+def frame_source(
+    ur_type: str, message: bytes, *,
+    single_part_max: int = SINGLE_PART_MAX, fragment_len: int = FRAGMENT_LEN,
+) -> Callable[[], str]:
+    """Return ``next_frame() -> ur_string`` for the exchange dialog to show one
+    QR per animation tick. Small payload → a constant single part; large payload
+    → an UNBOUNDED stream of ever-fresh parts (pure fragments 1..seqLen first,
+    then rateless fountain parts forever), so the device keeps getting new
+    equations and converges without stalling."""
+    if len(message) <= single_part_max:
+        part = ur.encode(ur_type, message)
+        return lambda: part
+    seq_len, frags, checksum = _plan(message, fragment_len)
+    counter = itertools.count(1)
+    return lambda: _part(
+        ur_type, next(counter), seq_len, len(message), checksum, frags)
+
+
 def encode_parts(
     ur_type: str, message: bytes, *,
     single_part_max: int = SINGLE_PART_MAX, fragment_len: int = FRAGMENT_LEN,
 ) -> list[str]:
-    """A payload → the list of ``ur:…`` part strings for a QR: one plain part
-    when it fits ``single_part_max``, else fragmented into ``fragment_len``-byte
-    animated parts."""
+    """A FINITE list of parts (single, else FOUNTAIN_RATIO×seqLen). Used by tests
+    and decode_parts round-trips; the live flow uses :func:`frame_source`."""
     if len(message) <= single_part_max:
         return [ur.encode(ur_type, message)]
-    seq_len = math.ceil(len(message) / fragment_len)
-    frag_len = math.ceil(len(message) / seq_len)
-    checksum = _crc32(message)
-    frags = _fragments(message, seq_len, frag_len)
-    parts = []
-    for seq_num in range(1, FOUNTAIN_RATIO * seq_len + 1):
-        indexes = fountain.choose_fragments(seq_num, seq_len, checksum)
-        data = fountain.mix(frags, indexes)   # a single index → that fragment
-        part = dumps(
-            [seq_num, seq_len, len(message), checksum, data], canonical=True)
-        parts.append(
-            f"ur:{ur_type}/{seq_num}-{seq_len}/{bytewords.encode(part)}")
-    return parts
+    seq_len, frags, checksum = _plan(message, fragment_len)
+    return [_part(ur_type, n, seq_len, len(message), checksum, frags)
+            for n in range(1, FOUNTAIN_RATIO * seq_len + 1)]
 
 
 def _split_part(ur_string: str) -> tuple[str, int | None, int | None, bytes]:

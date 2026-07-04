@@ -47,14 +47,23 @@ class _FakeDevice:
         self.tamper = tamper_request_id
         self.seen_request = None
 
-    def exchange_qr(self, request_parts):
-        self.seen_request = request_parts
+    def exchange_qr(self, next_frame):
         if self.cancel:
             return None
-        # Reassemble the (possibly multi-part / animated) request, like a real
-        # device's BC-UR decoder.
+        # Pull frames until we can reassemble, like a real device's BC-UR
+        # decoder (the pure parts arrive first, so this converges quickly).
         from qeth.qr.multipart import decode_parts
-        _, payload = decode_parts(request_parts)
+        parts = []
+        payload = None
+        for _ in range(500):
+            parts.append(next_frame())
+            try:
+                _, payload = decode_parts(parts)
+                break
+            except ValueError:
+                continue
+        assert payload is not None, "device never reassembled the request"
+        self.seen_request = parts
         body = cbor2.loads(payload)
         sign_data = body[2]
         request_id = body[1].bytes if not self.tamper else b"\x00" * 16

@@ -49,10 +49,10 @@ class _FakeScanner(QObject):
         self.stopped += 1
 
 
-def _dialog(qtbot, scanner, parts=None):
+def _dialog(qtbot, scanner, next_frame=None):
     from qeth.qr_exchange_dialog import QRExchangeDialog
-    dlg = QRExchangeDialog(
-        parts or ["ur:eth-sign-request/aeadcylabntfgm"], scanner=scanner)
+    nf = next_frame or (lambda: "ur:eth-sign-request/aeadcylabntfgm")
+    dlg = QRExchangeDialog(nf, scanner=scanner)
     qtbot.addWidget(dlg)
     return dlg
 
@@ -71,19 +71,21 @@ def test_dialog_accepts_the_first_scanned_ur(qtbot):
     assert scanner.stopped == 1                     # camera stopped on close
 
 
-def test_dialog_animates_multiple_parts(qtbot):
-    scanner = _FakeScanner()
-    parts = [f"ur:eth-sign-request/{i}-3/aeadcylabntfgm" for i in (1, 2, 3)]
-    dlg = _dialog(qtbot, scanner, parts=parts)
-    assert len(dlg._frames) == 3
-    assert dlg._anim is not None and dlg._anim.isActive()   # cycling
-    dlg._advance_frame()
-    assert dlg._frame_idx == 1
+def test_dialog_animates_by_pulling_fresh_frames(qtbot):
+    seq = iter(f"ur:eth-sign-request/{i}-3/aeadcylabntfgm" for i in range(1, 5))
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=lambda: next(seq))
+    assert dlg._shown == "ur:eth-sign-request/1-3/aeadcylabntfgm"   # first frame
+    dlg._render_frame()
+    assert dlg._shown == "ur:eth-sign-request/2-3/aeadcylabntfgm"   # fresh part
+    assert dlg._anim is not None and dlg._anim.isActive()
 
 
-def test_dialog_single_part_does_not_animate(qtbot):
-    dlg = _dialog(qtbot, _FakeScanner())
-    assert len(dlg._frames) == 1 and dlg._anim is None
+def test_dialog_single_part_renders_once(qtbot):
+    dlg = _dialog(qtbot, _FakeScanner(),
+                  next_frame=lambda: "ur:eth-sign-request/const")
+    dlg._render_frame()
+    dlg._render_frame()                       # constant → no re-render
+    assert dlg._shown == "ur:eth-sign-request/const"
 
 
 def test_dialog_ignores_non_ur_barcodes(qtbot):
@@ -127,7 +129,7 @@ def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
     parent = QWidget()
     qtbot.addWidget(parent)
     host = DialogInteraction(parent, title="Signing")
-    assert host.exchange_qr(["ur:eth-sign-request/aeadcylabntfgm"]) == resp
+    assert host.exchange_qr(lambda: "ur:eth-sign-request/aeadcylabntfgm") == resp
 
 
 def test_ur_to_pixmap_is_non_null(qtbot):

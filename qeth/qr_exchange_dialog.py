@@ -11,6 +11,7 @@ hardware.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from typing import Any
 
 import segno
@@ -47,37 +48,35 @@ class QRExchangeDialog(Dialog):
     FRAME_MS = 200
 
     def __init__(
-        self, request_parts: list[str], *, scanner: Any = None,
+        self, next_frame: Callable[[], str], *, scanner: Any = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Scan with your air-gapped wallet")
         self._scanned: str | None = None
         self._scanner = scanner if scanner is not None else _default_scanner()
-        # Pre-render each part's QR once; cycle them if there's more than one
-        # (a large tx animates across several fragments).
-        self._frames = [ur_to_pixmap(p) for p in request_parts]
-        self._frame_idx = 0
+        # Pull a fresh UR each animation tick. A small tx returns the same string
+        # (one static QR); a large tx returns an unbounded stream of fresh
+        # fountain parts, so the device keeps getting new frames and converges.
+        self._next_frame = next_frame
+        self._shown: str | None = None
 
         root = QVBoxLayout(self)
 
         show = QVBoxLayout()
         show.setSpacing(item_spacing(self))
-        label = ("1. Show this to your wallet's camera:" if len(self._frames) == 1
-                 else f"1. Show this ANIMATED QR ({len(self._frames)} frames) "
-                      "to your wallet's camera:")
-        show.addWidget(QLabel(label))
+        show.addWidget(QLabel(
+            "1. Show this to your wallet's camera "
+            "(it animates for a large transaction):"))
         self._qr_label = QLabel()
         self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._qr_label.setPixmap(self._frames[0])
         show.addWidget(self._qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addLayout(show)
 
-        self._anim: QTimer | None = None
-        if len(self._frames) > 1:
-            self._anim = QTimer(self)
-            self._anim.timeout.connect(self._advance_frame)
-            self._anim.start(self.FRAME_MS)
+        self._render_frame()   # first frame
+        self._anim: QTimer | None = QTimer(self)
+        self._anim.timeout.connect(self._render_frame)
+        self._anim.start(self.FRAME_MS)
 
         scan = QVBoxLayout()
         scan.setSpacing(item_spacing(self))
@@ -121,9 +120,11 @@ class QRExchangeDialog(Dialog):
 
     # --- request animation -------------------------------------------------
 
-    def _advance_frame(self) -> None:
-        self._frame_idx = (self._frame_idx + 1) % len(self._frames)
-        self._qr_label.setPixmap(self._frames[self._frame_idx])
+    def _render_frame(self) -> None:
+        ur_string = self._next_frame()
+        if ur_string != self._shown:      # a constant single part renders once
+            self._shown = ur_string
+            self._qr_label.setPixmap(ur_to_pixmap(ur_string))
 
     # --- scanner signals ---------------------------------------------------
 

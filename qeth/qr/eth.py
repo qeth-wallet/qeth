@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from cbor2 import CBORTag, dumps, loads
 
-from . import multipart, ur
+from . import ur
 
 
 def _uuid_bytes(value: object) -> bytes:
@@ -76,10 +76,10 @@ def encode_eth_sign_request(
     address: bytes | None = None,
     origin: str | None = None,
     request_id: bytes | None = None,
-) -> tuple[list[str], bytes]:
-    """Build an ``eth-sign-request`` and return ``(ur_parts, request_id)`` — the
-    list of ``ur:…`` strings for the (possibly animated) QR. A big tx (a swap's
-    calldata) spans several parts; a small one is a single part.
+) -> tuple[str, bytes, bytes]:
+    """Build an ``eth-sign-request`` and return ``(ur_type, cbor_payload,
+    request_id)``. The caller turns the payload into QR frames via
+    ``multipart.frame_source``.
 
     ``sign_data`` is the opaque payload the device signs (an unsigned tx RLP /
     typed-tx serialization / message). ``request_id`` correlates the response;
@@ -96,8 +96,7 @@ def encode_eth_sign_request(
         body[_ADDRESS] = address
     if origin is not None:
         body[_ORIGIN] = origin
-    parts = multipart.encode_parts("eth-sign-request", dumps(body, canonical=True))
-    return parts, rid
+    return "eth-sign-request", dumps(body, canonical=True), rid
 
 
 @dataclass(frozen=True)

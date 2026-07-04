@@ -11,6 +11,7 @@ signing WORKER thread onto the main loop, so a signer can drive UI from
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 
@@ -25,10 +26,10 @@ class SignerInteraction(Protocol):
         string, or ``None`` if the user cancelled."""
         ...
 
-    def exchange_qr(self, request_parts: list[str]) -> str | None:
-        """Show ``request_parts`` (one or more ``ur:…`` strings — a single QR, or
-        an animated one cycling the fragments of a large request) and, at the
-        same time, run the camera to read the device's response QR; returns the
-        scanned ``ur:…`` string, or ``None`` if cancelled. Protocol-agnostic —
-        the signer owns the UR encode/decode."""
+    def exchange_qr(self, next_frame: Callable[[], str]) -> str | None:
+        """Show a QR, updating it each animation tick with ``next_frame()`` (a
+        constant single QR, or an unbounded stream of fresh fountain parts for a
+        large request), while running the camera to read the device's response
+        QR; returns the scanned ``ur:…`` string, or ``None`` if cancelled.
+        Protocol-agnostic — the signer owns the UR encode/decode."""
         ...

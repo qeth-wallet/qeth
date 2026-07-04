@@ -62,8 +62,8 @@ class DialogInteraction(QObject):
     def request_secret(self, prompt: str, *, title: str = "") -> str | None:
         return self._on_main(lambda: self._prompt(prompt, title))
 
-    def exchange_qr(self, request_parts: list[str]) -> str | None:
-        return self._on_main(lambda: self._run_exchange(request_parts))
+    def exchange_qr(self, next_frame: Callable[[], str]) -> str | None:
+        return self._on_main(lambda: self._run_exchange(next_frame))
 
     def close(self) -> None:
         """Dismiss the spinner (on signing success/failure)."""
@@ -95,11 +95,11 @@ class DialogInteraction(QObject):
             self._progress.close()
             self._progress = None
 
-    def _run_exchange(self, request_parts: list[str]) -> str | None:
+    def _run_exchange(self, next_frame: Callable[[], str]) -> str | None:
         """Main-thread: open the modal QR exchange window and return the scanned
         ``ur:…`` (or ``None`` on cancel). ``exec()`` spins a nested loop while
         the signing worker blocks on the marshaling Future."""
         from .qr_exchange_dialog import QRExchangeDialog
-        dialog = QRExchangeDialog(request_parts, parent=self._parent)
+        dialog = QRExchangeDialog(next_frame, parent=self._parent)
         dialog.exec()
         return dialog.scanned_ur()

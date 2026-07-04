@@ -95,5 +95,5 @@ def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
     monkeypatch.setattr(ex, "QRExchangeDialog", _StubDialog)
 
     host, _p = _host(qtbot)
-    got = host.exchange_qr(["ur:eth-sign-request/aeadcylabntfgm"])
+    got = host.exchange_qr(lambda: "ur:eth-sign-request/aeadcylabntfgm")
     assert got == "ur:eth-signature/aeadcylabntfgm"

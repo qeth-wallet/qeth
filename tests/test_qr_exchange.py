@@ -64,8 +64,10 @@ def test_dialog_accepts_the_first_scanned_ur(qtbot):
     assert scanner.started == 1                    # camera started on show
     resp = _signature_ur()
     scanner.decoded.emit(resp)
-    assert dlg.scanned_ur() == resp
-    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.scanned_ur() == resp                 # captured synchronously
+    # …but the close is DEFERRED (out of the frame callback) — pump the loop.
+    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted,
+                    timeout=2000)
     assert scanner.stopped == 1                     # camera stopped on close
 
 
@@ -130,7 +132,8 @@ def test_scan_dialog_accepts_first_ur_and_runs_camera(qtbot):
     assert scanner.started == 1
     scanner.decoded.emit("ur:crypto-hdkey/aeadcylabntfgm")
     assert dlg.scanned_ur() == "ur:crypto-hdkey/aeadcylabntfgm"
-    assert dlg.result() == QDialog.DialogCode.Accepted
+    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted,
+                    timeout=2000)
     assert scanner.stopped == 1
 
 

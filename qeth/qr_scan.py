@@ -61,6 +61,12 @@ class CameraScanner(QObject):
         self._camera.start()
 
     def stop(self) -> None:
+        # Detach the frame callback FIRST so no frame arrives mid-teardown, then
+        # stop the camera. Idempotent (stop may be called more than once).
+        try:
+            self._sink.videoFrameChanged.disconnect(self._on_frame)
+        except (RuntimeError, TypeError):
+            pass
         self._camera.stop()
 
     def _on_frame(self, video_frame: Any) -> None:

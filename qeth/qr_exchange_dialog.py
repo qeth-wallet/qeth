@@ -14,11 +14,12 @@ import io
 from typing import Any
 
 import segno
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QDialogButtonBox,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -67,7 +68,9 @@ class QRExchangeDialog(Dialog):
             "2. Point your camera at the wallet's signature QR:"))
         self._preview = QLabel("Starting camera…")
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setMinimumHeight(240)
+        self._preview.setMinimumSize(560, 420)      # a usably-large camera view
+        self._preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         scan.addWidget(self._preview)
         root.addLayout(scan)
 
@@ -101,19 +104,19 @@ class QRExchangeDialog(Dialog):
 
     def _on_decoded(self, text: str) -> None:
         candidate = text.strip()
-        # Only a UR accepts — ignore any other barcode in view. The signer
-        # validates the specific type (eth-signature).
-        if candidate.lower().startswith("ur:"):
+        # Only a UR accepts — ignore any other barcode in view (the signer
+        # validates the specific type). Accept once, and DEFER the close: this
+        # runs inside the camera's frame-delivery callback, so closing here
+        # would tear the QCamera down mid-frame and crash the FFmpeg backend.
+        if self._scanned is None and candidate.lower().startswith("ur:"):
             self._scanned = candidate
-            self.accept()
+            QTimer.singleShot(0, self.accept)
 
     def _on_frame(self, image: Any) -> None:
-        pixmap = QPixmap.fromImage(image).scaled(
+        self._preview.setPixmap(QPixmap.fromImage(image).scaled(
             self._preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview.setPixmap(pixmap)
+            Qt.TransformationMode.SmoothTransformation))
 
 
 class QRScanDialog(Dialog):
@@ -136,7 +139,9 @@ class QRScanDialog(Dialog):
         body.addWidget(QLabel(prompt))
         self._preview = QLabel("Starting camera…")
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setMinimumHeight(240)
+        self._preview.setMinimumSize(560, 420)      # a usably-large camera view
+        self._preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body.addWidget(self._preview)
         root.addLayout(body)
 
@@ -165,9 +170,11 @@ class QRScanDialog(Dialog):
 
     def _on_decoded(self, text: str) -> None:
         candidate = text.strip()
-        if candidate.lower().startswith("ur:"):
+        # Accept once, and defer the close out of the frame-delivery callback
+        # (closing here crashes the FFmpeg camera backend — see QRExchangeDialog).
+        if self._scanned is None and candidate.lower().startswith("ur:"):
             self._scanned = candidate
-            self.accept()
+            QTimer.singleShot(0, self.accept)
 
     def _on_frame(self, image: Any) -> None:
         self._preview.setPixmap(QPixmap.fromImage(image).scaled(

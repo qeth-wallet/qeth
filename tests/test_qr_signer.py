@@ -38,6 +38,23 @@ def _account():
             "xfp": 0x12345678, "source": "qr"}
 
 
+def _hash_for(data_type, sign_data):
+    """The hash a device signs for an eth-sign-request of ``data_type``: a tx
+    (1/4) signs its raw serialization; a personal message (3) its EIP-191 hash;
+    typed data (2) its EIP-712 hash. The latter two share the 0x19-prefixed
+    keccak of (version‖header‖body) of eth-account's SignableMessage."""
+    if data_type == 3:
+        from eth_account.messages import encode_defunct
+        m = encode_defunct(primitive=sign_data)
+    elif data_type == 2:
+        import json
+        from eth_account.messages import encode_typed_data
+        m = encode_typed_data(full_message=json.loads(sign_data))
+    else:
+        return keccak(sign_data)
+    return keccak(b"\x19" + m.version + m.header + m.body)
+
+
 class _FakeDevice:
     """Plays the air-gapped wallet: reads our request QR, signs, shows the
     signature QR. ``tamper_request_id`` simulates scanning the wrong response."""
@@ -65,9 +82,10 @@ class _FakeDevice:
         assert payload is not None, "device never reassembled the request"
         self.seen_request = parts
         body = cbor2.loads(payload)
-        sign_data = body[2]
         request_id = body[1].bytes if not self.tamper else b"\x00" * 16
-        sig = _PK.sign_msg_hash(keccak(sign_data))       # v is 0/1
+        # Sign the hash the data-type calls for — a tx signs its raw
+        # serialization, a message/typed-data its EIP-191/EIP-712 hash.
+        sig = _PK.sign_msg_hash(_hash_for(body[3], body[2]))   # v is 0/1
         sig_bytes = (sig.r.to_bytes(32, "big") + sig.s.to_bytes(32, "big")
                      + bytes([sig.v]))
         resp = {1: cbor2.CBORTag(37, request_id), 2: sig_bytes}
@@ -116,6 +134,48 @@ def test_sign_large_calldata_animates_and_still_recovers():
     assert len(device.seen_request) > 1        # animated, multiple parts
     assert all(p.startswith("ur:eth-sign-request/") for p in device.seen_request)
     assert Account.recover_transaction("0x" + raw.hex()) == ADDRESS
+
+
+def test_sign_message_recovers_the_signer():
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+    from qeth.signing import MessageSigningRequest
+    device = _FakeDevice()
+    signer = QRSigner(_account(), device)
+    sig = signer.sign_message(MessageSigningRequest(from_addr=ADDRESS, raw=b"hello qeth"))
+    assert len(sig) == 65 and sig[64] in (27, 28)   # personal_sign v convention
+    assert Account.recover_message(
+        encode_defunct(primitive=b"hello qeth"), signature=sig) == ADDRESS
+    # the request declared a personal message and carried the raw bytes
+    from qeth.qr.multipart import decode_parts
+    body = cbor2.loads(decode_parts(device.seen_request)[1])
+    assert body[3] == 3 and body[2] == b"hello qeth"
+
+
+def test_sign_typed_data_recovers_the_signer():
+    from eth_account import Account
+    from eth_account.messages import encode_typed_data
+    from qeth.signing import TypedDataSigningRequest
+    typed = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "chainId", "type": "uint256"}],
+            "Msg": [{"name": "text", "type": "string"}],
+        },
+        "domain": {"name": "qeth", "chainId": 1},
+        "primaryType": "Msg",
+        "message": {"text": "hi"},
+    }
+    device = _FakeDevice()
+    signer = QRSigner(_account(), device)
+    sig = signer.sign_typed_data(
+        TypedDataSigningRequest(from_addr=ADDRESS, typed_data=typed))
+    assert Account.recover_message(
+        encode_typed_data(full_message=typed), signature=sig) == ADDRESS
+    from qeth.qr.multipart import decode_parts
+    body = cbor2.loads(decode_parts(device.seen_request)[1])
+    assert body[3] == 2                              # typed data
 
 
 def test_cancel_raises():

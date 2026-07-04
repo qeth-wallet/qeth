@@ -4,8 +4,10 @@ tx, hands the ``ur:eth-sign-request`` to ``ui.exchange_qr`` (which shows it as a
 QR and reads the device's ``ur:eth-signature`` back — marshaled to the main
 thread by ``DialogInteraction``), then assembles the signed raw tx.
 
-Step 3b of docs/signers-qr.md. First slice: EIP-1559 (typed) transactions;
-message / typed-data / legacy-tx signing land in follow-ups.
+Step 3b of docs/signers-qr.md. Signs EIP-1559 (typed) transactions, personal
+messages (EIP-191), and EIP-712 typed data — all over the same eth-sign-request
+exchange, differing only in the data-type + sign-data. Legacy (pre-2718) tx
+signing lands in a follow-up.
 """
 
 from __future__ import annotations
@@ -46,6 +48,27 @@ def _data_bytes(data: str | None) -> bytes:
     if not data or data == "0x":
         return b""
     return bytes.fromhex(data[2:] if data.startswith("0x") else data)
+
+
+def _recovery_v_27_28(signature: bytes) -> bytes:
+    """Normalise a 65-byte signature's v to 27/28 — the personal_sign / EIP-712
+    convention (eth-account emits it that way, and that's what verifiers/dapps
+    expect). Some devices return the 0/1 recovery id; bump it so a QR-signed
+    message verifies identically to a locally-signed one."""
+    if len(signature) == 65 and signature[64] < 27:
+        return signature[:64] + bytes([signature[64] + 27])
+    return signature
+
+
+def _typed_data_chain_id(typed_data: dict) -> int:
+    """The EIP-712 domain's chainId as an int, default 1 — accepts int, decimal
+    string, or 0x-hex, as dapps send it variously. The device hashes per this
+    (from the JSON it parses); we mirror it in the request for consistency."""
+    domain = typed_data.get("domain") if isinstance(typed_data, dict) else None
+    cid = (domain or {}).get("chainId", 1)
+    if isinstance(cid, str):
+        return int(cid, 16) if cid.lower().startswith("0x") else int(cid)
+    return int(cid)
 
 
 def unsigned_eip1559(req: SigningRequest, chain_id: int) -> bytes:
@@ -94,14 +117,31 @@ class QRSigner(Signer):
             raise SignerError(
                 "QR signing currently supports EIP-1559 chains only")
         unsigned = unsigned_eip1559(req, chain.chain_id)
-        ur_type, payload, request_id = eth.encode_eth_sign_request(
+        signature = self._request_signature(
             sign_data=unsigned,
             data_type=eth.DataType.TYPED_TRANSACTION,
             chain_id=chain.chain_id,
+            from_addr=req.from_addr,
+            origin=req.origin,
+        )
+        return self._assemble_eip1559(req, chain.chain_id, signature)
+
+    def _request_signature(
+        self, *, sign_data: bytes, data_type: int, chain_id: int,
+        from_addr: str | None, origin: str | None,
+    ) -> bytes:
+        """Show the eth-sign-request QR (animated for a big payload), read the
+        device's eth-signature back, and return its 65-byte ``r‖s‖v``. Shared by
+        tx / message / typed-data signing — they differ only in ``sign_data`` and
+        ``data_type``."""
+        ur_type, payload, request_id = eth.encode_eth_sign_request(
+            sign_data=sign_data,
+            data_type=data_type,
+            chain_id=chain_id,
             path=self._account["path"],
             source_fingerprint=self._source_fingerprint(),
-            address=_addr_bytes(req.from_addr) or None,
-            origin=req.origin,
+            address=_addr_bytes(from_addr) or None,
+            origin=origin,
         )
         response = self._ui.exchange_qr(multipart.frame_source(ur_type, payload))
         if response is None:
@@ -110,7 +150,7 @@ class QRSigner(Signer):
         if sig.request_id and sig.request_id != request_id:
             raise SignerError(
                 "scanned a signature for a different request — try again")
-        return self._assemble_eip1559(req, chain.chain_id, sig.signature)
+        return sig.signature
 
     @staticmethod
     def _assemble_eip1559(
@@ -142,7 +182,29 @@ class QRSigner(Signer):
         }).encode()
 
     def sign_message(self, req: MessageSigningRequest) -> bytes:
-        raise SignerError("QR message signing lands in a follow-up")
+        """personal_sign — the device applies the EIP-191 prefix and hashes the
+        raw message itself, so we hand it the bytes and return the 65-byte
+        signature. Chain-agnostic; the request carries chain 1 as context."""
+        signature = self._request_signature(
+            sign_data=req.raw,
+            data_type=eth.DataType.PERSONAL_MESSAGE,
+            chain_id=1,
+            from_addr=req.from_addr,
+            origin=req.origin,
+        )
+        return _recovery_v_27_28(signature)
 
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
-        raise SignerError("QR typed-data signing lands in a follow-up")
+        """EIP-712 — the device parses the typed-data JSON and builds the hash
+        per its domain (incl. chainId). We serialize the full v4 object as the
+        sign-data."""
+        import json
+        payload = json.dumps(req.typed_data, separators=(",", ":")).encode()
+        signature = self._request_signature(
+            sign_data=payload,
+            data_type=eth.DataType.TYPED_DATA,
+            chain_id=_typed_data_chain_id(req.typed_data),
+            from_addr=req.from_addr,
+            origin=req.origin,
+        )
+        return _recovery_v_27_28(signature)

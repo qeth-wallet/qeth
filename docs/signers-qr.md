@@ -26,7 +26,7 @@ plan; the code is the source of truth once written.
   reassemble. We *encode* our request and *decode* their response.
 - **EIP-4527** registry (Keystone's `eth-*` UR types):
   - `eth-sign-request` (qeth → device): `{request-id (uuid), sign-data (bytes),
-    data-type (1 legacy-tx | 2 typed-tx | 3 personal-message | 4 typed-data),
+    data-type (1 legacy-tx | 2 typed-data | 3 personal-message | 4 typed-tx),
     chain-id, derivation-path (crypto-keypath incl. **source-fingerprint**),
     address, origin}`.
   - `eth-signature` (device → qeth): `{request-id, signature (r‖s‖v)}`.

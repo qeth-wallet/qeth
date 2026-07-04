@@ -225,6 +225,19 @@ class TestEffectiveOrigin:
     def test_matching_origins_are_stable(self):
         assert self._eff("https://x.org", "https://x.org") == "https://x.org"
 
+    def test_hostless_web_transport_does_not_override_frame_origin(self):
+        """A host-less transport Origin ("https://", no host — a browser/
+        extension quirk seen on macOS) is NOT a real page, so the full dapp URL
+        Frame reports wins instead of the dialog degrading to a bare "https://"."""
+        assert self._eff("https://", "https://www.curve.finance") \
+            == "https://www.curve.finance"
+
+    def test_hostless_frame_origin_yields_to_real_transport(self):
+        # The reverse: a real transport page (with a host) is shown rather than
+        # a degenerate __frameOrigin.
+        assert self._eff("https://app.uniswap.org", "https://") \
+            == "https://app.uniswap.org"
+
 
 def test_signing_request_setup_failure_rejects_future(qtbot):
     """If building/showing the sign dialog raises, the bridge future must be

@@ -72,12 +72,19 @@ def _effective_origin(http_origin: str | None,
     dialog — so the unforgeable transport origin wins. Frame's transport origin
     is an extension scheme (or absent), and qeth's own Falkon connector sets the
     real dapp Origin as the transport header without ``__frameOrigin`` at all,
-    so neither legitimate path is affected."""
+    so neither legitimate path is affected.
+
+    A "real site" transport origin needs a **host**, not just an http(s) scheme:
+    some browser/extension setups (seen on macOS) send a host-less ``https://``
+    as the transport Origin, and that must NOT override the full dapp URL Frame
+    reports — otherwise the dialog's "Requested by" degrades to a bare
+    ``https://``. A host-less origin isn't a page that can spoof another."""
     if not frame_origin:
         return http_origin
     if http_origin and http_origin != frame_origin:
-        if urlparse(http_origin).scheme in ("http", "https"):
-            return http_origin     # a real site can't claim to be another
+        parsed = urlparse(http_origin)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return http_origin     # a real site (scheme + host) can't claim to be another
     return frame_origin
 
 

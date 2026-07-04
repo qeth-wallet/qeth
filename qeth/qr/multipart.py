@@ -36,11 +36,12 @@ FOUNTAIN_RATIO = 2
 # code (no animation, no coupon-collector tail). Sized to hold a simple send.
 SINGLE_PART_MAX = 150
 # When a payload IS too big (a swap's calldata), fragment it into pieces this
-# small: each part's QR is then a low, reliably-scanned version, so the device's
-# camera misses fewer frames — which is what shortens the animation's tail. (The
-# tail can't be fully removed without the rateless fountain parts; see the
-# module docstring.)
-FRAGMENT_LEN = 90
+# size. At 150 each part's QR is ~version 10 (57×57) — the low end of what
+# Keystone/Sparrow use, dense enough to keep the frame count (and animation)
+# short, still comfortably camera-readable. The rateless fountain parts absorb
+# the occasional missed dense frame, so density here is cheap. Drop it (→ lower
+# QR version, more frames) only if a device's camera can't lock on reliably.
+FRAGMENT_LEN = 150
 
 
 def _crc32(data: bytes) -> int:

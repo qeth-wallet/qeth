@@ -28,10 +28,11 @@ from PySide6.QtWidgets import (
 from .dialog import Dialog, item_spacing
 
 
-def ur_to_pixmap(ur_string: str, *, scale: int = 6) -> QPixmap:
+def ur_to_pixmap(ur_string: str, *, scale: int = 8) -> QPixmap:
     """Render a UR string as a QR ``QPixmap``. UR is uppercased so the QR uses
     the compact alphanumeric mode (``ur:``/``/``/``-`` and digits are all in
-    that charset)."""
+    that charset). ``scale`` is px-per-module — bigger is physically larger on
+    screen, easier for the device camera to lock onto (independent of density)."""
     buf = io.BytesIO()
     segno.make(ur_string.upper(), error="l").save(buf, kind="png", scale=scale)
     pixmap = QPixmap()

@@ -127,7 +127,13 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   rhythm: caption↔pane is `item_spacing` (within a paragraph), the between-column
   gap is `group_spacing` (two distinct groups). The QR is rendered large by
   `ur_to_pixmap` then scaled to the pane with **nearest-neighbour** (hard module
-  edges, best for the device's scan, vs. grey-fringed smooth scaling).
+  edges, best for the device's scan, vs. grey-fringed smooth scaling); the camera
+  frame is scaled *expanding* + centre-cropped to fill the square (the decoder
+  still runs on the full frame, so no scan area is lost). Each pane sits in the
+  theme's native sunken **"view" frame** via `_view_framed` (a `QScrollArea`
+  wrap — the same trick the ENS renewal calendar uses, since a plain `QFrame`
+  border is suppressed by Kvantum). The account-import scanner
+  (`QRScanDialog`) reuses the same square, view-framed camera pane.
 - Implement `DialogInteraction.exchange_qr` to open it (already marshaled from
   the worker by step 2). Add the `progress_text==""` skip in `ui.py`.
 - Camera + decoder are injectable so the **frame-cycling and decode-callback

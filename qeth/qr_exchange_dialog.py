@@ -42,6 +42,19 @@ def ur_to_pixmap(ur_string: str, *, scale: int = 8) -> QPixmap:
     return pixmap
 
 
+def _fill_square(pixmap: QPixmap, size: Any) -> QPixmap:
+    """Scale a camera frame to *fill* the (square) ``size`` and centre-crop the
+    overflow, so the preview shows edge-to-edge video instead of a letterboxed
+    4:3 image with bars. The QR decoder works on the full frame (qr_scan.py), so
+    cropping the preview doesn't shrink the scanned area — it's purely visual."""
+    scaled = pixmap.scaled(
+        size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation)
+    x = (scaled.width() - size.width()) // 2
+    y = (scaled.height() - size.height()) // 2
+    return scaled.copy(x, y, size.width(), size.height())
+
+
 class QRExchangeDialog(Dialog):
     """Modal exchange: our request QR (left) and the live camera (right), side by
     side to suit a wide desktop screen. The first scanned ``ur:…`` accepts and is
@@ -158,10 +171,8 @@ class QRExchangeDialog(Dialog):
             QTimer.singleShot(0, self.accept)
 
     def _on_frame(self, image: Any) -> None:
-        self._preview.setPixmap(QPixmap.fromImage(image).scaled(
-            self._preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation))
+        self._preview.setPixmap(_fill_square(
+            QPixmap.fromImage(image), self._preview.size()))
 
 
 class QRScanDialog(Dialog):

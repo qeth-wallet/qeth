@@ -25,9 +25,10 @@ class SignerInteraction(Protocol):
         string, or ``None`` if the user cancelled."""
         ...
 
-    def exchange_qr(self, request_ur: str) -> str | None:
-        """Show ``request_ur`` (a ``ur:…`` string) as a QR and, at the same
-        time, run the camera to read the device's response QR; returns the
+    def exchange_qr(self, request_parts: list[str]) -> str | None:
+        """Show ``request_parts`` (one or more ``ur:…`` strings — a single QR, or
+        an animated one cycling the fragments of a large request) and, at the
+        same time, run the camera to read the device's response QR; returns the
         scanned ``ur:…`` string, or ``None`` if cancelled. Protocol-agnostic —
-        the signer owns the UR encode/decode. Implemented in step 3c."""
+        the signer owns the UR encode/decode."""
         ...

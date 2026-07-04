@@ -9,13 +9,14 @@ import pytest
 from cbor2 import CBORTag, dumps, loads
 
 from qeth.qr import eth, ur
+from qeth.qr.multipart import decode_parts
 
 RID = bytes.fromhex("00112233445566778899aabbccddeeff")
 ADDR = bytes.fromhex("11" * 20)
 
 
 def test_eth_sign_request_wire_structure():
-    ur_string, rid = eth.encode_eth_sign_request(
+    parts, rid = eth.encode_eth_sign_request(
         sign_data=b"\xde\xad\xbe\xef",
         data_type=eth.DataType.TYPED_TRANSACTION,
         chain_id=1,
@@ -26,7 +27,7 @@ def test_eth_sign_request_wire_structure():
         request_id=RID,
     )
     assert rid == RID
-    ur_type, payload = ur.decode(ur_string)
+    ur_type, payload = decode_parts(parts)
     assert ur_type == "eth-sign-request"
     body = loads(payload)
     # request-id: cbor2 decodes UUID tag 37 into a uuid.UUID — its existence
@@ -45,11 +46,11 @@ def test_eth_sign_request_wire_structure():
 
 
 def test_optional_fields_are_omitted():
-    ur_string, _ = eth.encode_eth_sign_request(
+    parts, _ = eth.encode_eth_sign_request(
         sign_data=b"\x01", data_type=eth.DataType.PERSONAL_MESSAGE,
         chain_id=1, path="m/44'/60'/0'/0/0", source_fingerprint=1,
         request_id=RID)
-    body = loads(ur.decode(ur_string)[1])
+    body = loads(decode_parts(parts)[1])
     assert 6 not in body and 7 not in body         # no address / origin
 
 
@@ -76,8 +77,8 @@ def test_parse_eth_signature_rejects_wrong_ur_type():
 
 
 def test_request_id_defaults_to_a_fresh_uuid():
-    ur_string, rid = eth.encode_eth_sign_request(
+    parts, rid = eth.encode_eth_sign_request(
         sign_data=b"\x00", data_type=eth.DataType.TRANSACTION, chain_id=1,
         path="m/44'/60'/0'/0/0", source_fingerprint=1)
     assert len(rid) == 16
-    assert loads(ur.decode(ur_string)[1])[1].bytes == rid   # echoed into the body
+    assert loads(decode_parts(parts)[1])[1].bytes == rid   # echoed into the body

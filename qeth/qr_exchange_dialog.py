@@ -42,25 +42,42 @@ class QRExchangeDialog(Dialog):
     """Modal exchange: our request QR (top) + the live camera (bottom). The
     first scanned ``ur:…`` accepts and is returned by :meth:`scanned_ur`."""
 
+    # Animated-QR frame cadence (ms). Slow enough for a device camera to lock
+    # onto each fragment, fast enough to cycle a few-part request quickly.
+    FRAME_MS = 200
+
     def __init__(
-        self, request_ur: str, *, scanner: Any = None, parent: QWidget | None = None,
+        self, request_parts: list[str], *, scanner: Any = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Scan with your air-gapped wallet")
         self._scanned: str | None = None
         self._scanner = scanner if scanner is not None else _default_scanner()
+        # Pre-render each part's QR once; cycle them if there's more than one
+        # (a large tx animates across several fragments).
+        self._frames = [ur_to_pixmap(p) for p in request_parts]
+        self._frame_idx = 0
 
         root = QVBoxLayout(self)
 
         show = QVBoxLayout()
         show.setSpacing(item_spacing(self))
-        show.addWidget(QLabel(
-            "1. Show this to your wallet's camera:"))
+        label = ("1. Show this to your wallet's camera:" if len(self._frames) == 1
+                 else f"1. Show this ANIMATED QR ({len(self._frames)} frames) "
+                      "to your wallet's camera:")
+        show.addWidget(QLabel(label))
         self._qr_label = QLabel()
         self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._qr_label.setPixmap(ur_to_pixmap(request_ur))
+        self._qr_label.setPixmap(self._frames[0])
         show.addWidget(self._qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addLayout(show)
+
+        self._anim: QTimer | None = None
+        if len(self._frames) > 1:
+            self._anim = QTimer(self)
+            self._anim.timeout.connect(self._advance_frame)
+            self._anim.start(self.FRAME_MS)
 
         scan = QVBoxLayout()
         scan.setSpacing(item_spacing(self))
@@ -96,9 +113,17 @@ class QRExchangeDialog(Dialog):
             self._preview.setText("No camera available")
 
     def done(self, result: int) -> None:  # noqa: N802 — Qt override
+        if self._anim is not None:
+            self._anim.stop()
         if self._scanner is not None:
             self._scanner.stop()
         super().done(result)
+
+    # --- request animation -------------------------------------------------
+
+    def _advance_frame(self) -> None:
+        self._frame_idx = (self._frame_idx + 1) % len(self._frames)
+        self._qr_label.setPixmap(self._frames[self._frame_idx])
 
     # --- scanner signals ---------------------------------------------------
 

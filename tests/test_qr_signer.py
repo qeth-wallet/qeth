@@ -47,11 +47,14 @@ class _FakeDevice:
         self.tamper = tamper_request_id
         self.seen_request = None
 
-    def exchange_qr(self, request_ur):
-        self.seen_request = request_ur
+    def exchange_qr(self, request_parts):
+        self.seen_request = request_parts
         if self.cancel:
             return None
-        _, payload = urmod.decode(request_ur)
+        # Reassemble the (possibly multi-part / animated) request, like a real
+        # device's BC-UR decoder.
+        from qeth.qr.multipart import decode_parts
+        _, payload = decode_parts(request_parts)
         body = cbor2.loads(payload)
         sign_data = body[2]
         request_id = body[1].bytes if not self.tamper else b"\x00" * 16
@@ -82,14 +85,27 @@ def test_sign_roundtrip_recovers_the_signer():
     raw_hex = "0x" + raw.hex()
     # The assembled raw tx must recover to the key that signed the sign-data.
     assert Account.recover_transaction(raw_hex) == ADDRESS
-    # …and the request we showed was a proper eth-sign-request UR.
-    assert device.seen_request.startswith("ur:eth-sign-request/")
+    # …and a small tx is shown as a single eth-sign-request part.
+    assert len(device.seen_request) == 1
+    assert device.seen_request[0].startswith("ur:eth-sign-request/")
 
 
 def test_sign_roundtrip_with_data_and_contract_creation():
     device = _FakeDevice()
     signer = QRSigner(_account(), device)
     raw = signer.sign(_req(to_addr=None, value_wei=0, data="0xabcdef"), CHAIN)
+    assert Account.recover_transaction("0x" + raw.hex()) == ADDRESS
+
+
+def test_sign_large_calldata_animates_and_still_recovers():
+    """The Curve-swap case: a big calldata tx must span several animated QR
+    parts (not one giant QR that hangs the device) and still assemble."""
+    device = _FakeDevice()
+    signer = QRSigner(_account(), device)
+    big_calldata = "0x" + "ab" * 400          # ~400 bytes → several UR parts
+    raw = signer.sign(_req(data=big_calldata), CHAIN)
+    assert len(device.seen_request) > 1        # animated, multiple parts
+    assert all(p.startswith("ur:eth-sign-request/") for p in device.seen_request)
     assert Account.recover_transaction("0x" + raw.hex()) == ADDRESS
 
 

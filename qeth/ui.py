@@ -14,8 +14,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QLabel, QMainWindow, QSplitter, QStatusBar,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QWidget,
+    QStyle, QStyledItemDelegate, QStyleOption, QStyleOptionViewItem,
+    QTableWidget, QTreeView, QWidget,
 )
 
 from .icons import ChainIconCache, smooth_icon
@@ -1561,6 +1561,29 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             return option.rect.adjusted(-option.rect.left(), 0, 0, 0)
         return option.rect
 
+    def _redraw_disclosure(self, painter, option, index):
+        """Redraw the tree's +/- disclosure control ON TOP of a selected group
+        row's fill. The fill extends over the indent column (to close a Kvantum
+        gap), so it covers the disclosure the style drew *before* the delegate —
+        this puts it back, visible and within the selection highlight. No-op for
+        leaf rows / the flat tables (no children → no disclosure)."""
+        view = self.parent()
+        model = index.model()
+        if (not isinstance(view, QTreeView) or model is None
+                or model.rowCount(index) <= 0):     # leaf row / flat table
+            return
+        indent = view.indentation()
+        opt = QStyleOption()
+        opt.rect = QRect(option.rect.left() - indent, option.rect.top(),
+                         indent, option.rect.height())
+        opt.palette = option.palette
+        opt.state = (QStyle.StateFlag.State_Item | QStyle.StateFlag.State_Children
+                     | QStyle.StateFlag.State_Enabled)
+        if view.isExpanded(index):
+            opt.state |= QStyle.StateFlag.State_Open
+        view.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorBranch, opt, painter, view)
+
     def paint(self, painter, option, index):
         view = self.parent()
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -1611,6 +1634,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             opt.palette.setColor(QPalette.ColorRole.AlternateBase, highlight)
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
+            self._redraw_disclosure(painter, option, index)
             return
 
         if is_selected and not is_focused:
@@ -1643,6 +1667,7 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             opt.palette.setColor(QPalette.ColorRole.AlternateBase, muted)
             super().paint(painter, opt, index)
             self._draw_sticky_pill(painter, pill, label, option.font)
+            self._redraw_disclosure(painter, option, index)
             return
 
         # Not selected: default paint, but never the per-cell focus

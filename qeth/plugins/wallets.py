@@ -931,7 +931,8 @@ class WalletsPlugin(Plugin):
                 if grp is None:
                     grp = QTreeWidgetItem([key])
                     grp.setFlags(
-                        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+                        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsDropEnabled)
                     root.addChild(grp)
                     groups[key] = grp
                 it, is_default = self._make_account_item(a)

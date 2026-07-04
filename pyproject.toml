@@ -28,6 +28,7 @@ dependencies = [
     # discipline that the `frame`/cryptography split enforced; deptry checks it.
     "eth-abi>=5.0",
     "eth-account>=0.11",
+    "eth-keys>=0.5",     # secp256k1 point math for BIP32 CKDpub (qeth/qr/derive)
     "eth-typing>=4",
     "eth-utils>=4",
     "hexbytes>=1",
@@ -194,6 +195,8 @@ files = [
     "qeth/qr/bytewords.py",
     "qeth/qr/ur.py",
     "qeth/qr/eth.py",
+    "qeth/qr/derive.py",
+    "qeth/qr/account.py",
     "qeth/alerts.py",
     "qeth/dialog.py",
     "qeth/branding.py",

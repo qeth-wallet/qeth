@@ -77,8 +77,23 @@ def test_call_from_worker_thread_marshals_to_main(qtbot, monkeypatch):
     assert fake_prompt.on_main is True            # UI ran on the main thread
 
 
-def test_exchange_qr_not_implemented_until_step3(qtbot):
-    import pytest
+def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
+    """exchange_qr opens the modal QR exchange window and returns its scanned
+    UR. Patch the dialog to a stub so no real window/camera/exec() is needed
+    (a real exec() here would block forever)."""
+    import qeth.qr_exchange_dialog as ex
+
+    class _StubDialog:
+        def __init__(self, request_ur, *, parent=None):
+            self.request_ur = request_ur
+
+        def exec(self):
+            return 1
+
+        def scanned_ur(self):
+            return "ur:eth-signature/aeadcylabntfgm"
+    monkeypatch.setattr(ex, "QRExchangeDialog", _StubDialog)
+
     host, _p = _host(qtbot)
-    with pytest.raises(NotImplementedError):
-        host.exchange_qr("ur:eth-sign-request/aeadcylabntfgm")
+    got = host.exchange_qr("ur:eth-sign-request/aeadcylabntfgm")
+    assert got == "ur:eth-signature/aeadcylabntfgm"

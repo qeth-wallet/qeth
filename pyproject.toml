@@ -56,11 +56,12 @@ simulate = ["py-evm>=0.10"]
 frame = ["cryptography>=42"]
 # Air-gapped QR signer (Keystone / Keycard Shell — BC-UR + EIP-4527). The
 # headless codec (qeth/qr/: bytewords + single-part UR + the eth-sign-request /
-# eth-signature registry) needs only CBOR here; the camera + QR-decode stack
-# (zxing-cpp, system QtMultimedia) is pulled in with the exchange dialog later.
-# See docs/signers-qr.md. Install with:
+# eth-signature registry) uses CBOR; the exchange dialog decodes the response QR
+# with zxing-cpp. The camera itself is system QtMultimedia (ships with PySide6 —
+# not a PyPI dep; a distro package for system installs, bundled in the PyPI
+# PySide6 the flatpak/appimage use). See docs/signers-qr.md. Install with:
 #   uv pip install -e '.[qr]'
-qr = ["cbor2>=5.4"]
+qr = ["cbor2>=5.4", "zxing-cpp>=2", "Pillow>=10"]
 
 [dependency-groups]
 dev = [
@@ -75,8 +76,10 @@ dev = [
     # The frame extra, mirrored so the Frame-import decrypt tests run
     # against the real cryptography rather than relying on system packages.
     "cryptography>=42",
-    # The qr extra, mirrored so the BC-UR / EIP-4527 codec tests run.
+    # The qr extra, mirrored so the BC-UR / EIP-4527 codec + QR-decode tests run.
     "cbor2>=5.4",
+    "zxing-cpp>=2",
+    "Pillow>=10",
 ]
 
 [tool.uv]
@@ -185,6 +188,8 @@ files = [
     "qeth/signers/qr.py",
     "qeth/signer_interaction.py",
     "qeth/qr_signer.py",
+    "qeth/qr_scan.py",
+    "qeth/qr_exchange_dialog.py",
     "qeth/qr/__init__.py",
     "qeth/qr/bytewords.py",
     "qeth/qr/ur.py",
@@ -220,6 +225,11 @@ module = [
     "hexbytes.*",
     "rlp.*",
     "eth_account.*",
+    "zxingcpp",
+    # System QtMultimedia (ships with PySide6, not pip-installable here) — the
+    # camera in the QR exchange dialog. Lazily imported; absent on this dev host.
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
 ]
 ignore_missing_imports = true
 
@@ -267,6 +277,9 @@ known_first_party = ["qeth_connector"]
 [tool.deptry.package_module_name_map]
 py-evm = ["eth"]
 web3 = ["web3", "ens"]
+# zxing-cpp's import name drops the hyphen; Pillow imports as PIL.
+zxing-cpp = ["zxingcpp"]
+Pillow = ["PIL"]
 
 [tool.deptry.per_rule_ignores]
 # DEP001 = imported but undeclared; DEP002 = declared but unused.

@@ -63,8 +63,7 @@ class DialogInteraction(QObject):
         return self._on_main(lambda: self._prompt(prompt, title))
 
     def exchange_qr(self, request_ur: str) -> str | None:
-        raise NotImplementedError(
-            "QR exchange dialog lands in step 3c (docs/signers-qr.md)")
+        return self._on_main(lambda: self._run_exchange(request_ur))
 
     def close(self) -> None:
         """Dismiss the spinner (on signing success/failure)."""
@@ -95,3 +94,12 @@ class DialogInteraction(QObject):
         if self._progress is not None:
             self._progress.close()
             self._progress = None
+
+    def _run_exchange(self, request_ur: str) -> str | None:
+        """Main-thread: open the modal QR exchange window and return the scanned
+        ``ur:…`` (or ``None`` on cancel). ``exec()`` spins a nested loop while
+        the signing worker blocks on the marshaling Future."""
+        from .qr_exchange_dialog import QRExchangeDialog
+        dialog = QRExchangeDialog(request_ur, parent=self._parent)
+        dialog.exec()
+        return dialog.scanned_ur()

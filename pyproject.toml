@@ -194,6 +194,7 @@ files = [
     "qeth/qr/__init__.py",
     "qeth/qr/bytewords.py",
     "qeth/qr/ur.py",
+    "qeth/qr/fountain.py",
     "qeth/qr/multipart.py",
     "qeth/qr/eth.py",
     "qeth/qr/derive.py",

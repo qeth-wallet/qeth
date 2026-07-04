@@ -2,14 +2,13 @@
 
 A large payload (a swap's calldata makes a single QR far too dense for the
 device to read) is split into a sequence of small QR "parts" shown as an
-animated QR. We emit the **fixed-rate** parts (``seqNum`` 1..``seqLen``): each
-carries one pure fragment, and every BC-UR decoder reconstructs the message once
-it has seen all ``seqLen`` of them — no randomness involved. The **rateless**
-fountain parts (``seqNum > seqLen``, a Xoshiro-mixed XOR of fragments) are only a
-loss-tolerance optimisation for lossy channels; a screen→camera exchange cycles,
-so it doesn't need them (and hand-rolling the RNG bit-exactly is where the risk
-is). A payload that fits one fragment is emitted as the plain single-part UR,
-byte-identical to what already works.
+animated QR. We emit both the **fixed-rate** parts (``seqNum`` 1..``seqLen``,
+each one pure fragment) AND ``seqLen`` **rateless** fountain parts
+(``seqNum > seqLen``, a Xoshiro-mixed XOR of fragments — see :mod:`qeth.qr.fountain`).
+The rateless parts are what remove the coupon-collector tail: the receiver
+reconstructs from ANY ~seqLen parts, so a missed frame never forces a wait for
+one specific fragment. A payload that fits one fragment stays a plain
+single-part UR, byte-identical to what already works.
 
 Part wire format (pinned to the spec vector in tests):
 ``ur:<type>/<seqNum>-<seqLen>/<bytewords( CBOR [seqNum, seqLen, messageLen,
@@ -23,7 +22,11 @@ import zlib
 
 from cbor2 import dumps, loads
 
-from . import bytewords, ur
+from . import bytewords, fountain, ur
+
+# Total animated parts = this × seqLen (the pure fragments plus an equal number
+# of rateless fountain parts, for loss-tolerant, tail-free reconstruction).
+FOUNTAIN_RATIO = 2
 
 # A payload up to this size is a single static QR — a normal tx stays one clean
 # code (no animation, no coupon-collector tail). Sized to hold a simple send.
@@ -57,12 +60,15 @@ def encode_parts(
     seq_len = math.ceil(len(message) / fragment_len)
     frag_len = math.ceil(len(message) / seq_len)
     checksum = _crc32(message)
+    frags = _fragments(message, seq_len, frag_len)
     parts = []
-    for i, fragment in enumerate(_fragments(message, seq_len, frag_len)):
+    for seq_num in range(1, FOUNTAIN_RATIO * seq_len + 1):
+        indexes = fountain.choose_fragments(seq_num, seq_len, checksum)
+        data = fountain.mix(frags, indexes)   # a single index → that fragment
         part = dumps(
-            [i + 1, seq_len, len(message), checksum, fragment], canonical=True)
+            [seq_num, seq_len, len(message), checksum, data], canonical=True)
         parts.append(
-            f"ur:{ur_type}/{i + 1}-{seq_len}/{bytewords.encode(part)}")
+            f"ur:{ur_type}/{seq_num}-{seq_len}/{bytewords.encode(part)}")
     return parts
 
 

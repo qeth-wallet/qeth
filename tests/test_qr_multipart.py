@@ -19,9 +19,11 @@ def test_part_cbor_matches_the_spec_vector():
 
 
 def test_fragmentation_sizing_matches_the_spec():
-    # 256 bytes @ maxFragmentLen 30 → 9 fragments (the spec vector's seqLen).
+    # 256 bytes @ fragment_len 30 → seqLen 9 (the spec vector's seqLen); with
+    # the rateless fountain parts the stream is 2×seqLen = 18.
     parts = encode_parts("t", bytes(256), single_part_max=0, fragment_len=30)
-    assert len(parts) == 9
+    assert len(parts) == 18
+    assert all(_split_part(p)[2] == 9 for p in parts)   # seqLen 9 in every part
 
 
 def test_small_payload_is_a_single_plain_part():
@@ -31,12 +33,14 @@ def test_small_payload_is_a_single_plain_part():
     assert parts[0].count("/") == 1               # no seqNum-seqLen segment
 
 
-def test_large_payload_animates_and_roundtrips():
+def test_large_payload_animates_with_pure_plus_rateless():
     msg = bytes((i * 7 + 3) % 256 for i in range(400))
     parts = encode_parts("eth-sign-request", msg, single_part_max=0, fragment_len=150)
-    assert len(parts) == math.ceil(400 / 150) == 3
-    for i, p in enumerate(parts):
-        assert p.startswith(f"ur:eth-sign-request/{i + 1}-3/")   # 1-3, 2-3, 3-3
+    seq_len = math.ceil(400 / 150)                 # 3
+    assert len(parts) == 2 * seq_len               # 3 pure + 3 rateless
+    assert [_split_part(p)[1] for p in parts] == list(range(1, 2 * seq_len + 1))
+    assert all(_split_part(p)[2] == seq_len for p in parts)
+    # the pure parts (rateless are skipped by decode_parts) reconstruct the msg
     ur_type, out = decode_parts(parts)
     assert ur_type == "eth-sign-request" and out == msg
 

@@ -1466,10 +1466,11 @@ class WalletsPlugin(Plugin):
 
     def _sign_selected(self) -> None:
         """Sign button → open the compose/sign flow for the selected
-        account (forwarded to the host)."""
-        addr = self.selected_address
-        if addr:
-            self._on_sign_message(addr)
+        account (forwarded to the host). Passes the row's path so a repeat
+        address signs via the branch the user selected (Ledger vs QR)."""
+        key = self._selected_key()
+        if key is not None:
+            self._on_sign_message(key[0], key[1])
 
     def _show_qr_info(self) -> None:
         """QR button → modal popup with the receive QR plus the
@@ -1540,14 +1541,14 @@ class WalletsPlugin(Plugin):
         # Re-run selection to refresh the details-panel button state.
         self._on_tree_selection()
 
-    def _on_sign_message(self, address: str) -> None:
+    def _on_sign_message(self, address: str, path: str | None = None) -> None:
         """Forward to host. ``MainWindow.open_sign_message_dialog``
         runs the compose + review + signing flow."""
         if self.host is None:
             return
         opener = getattr(self.host, "open_sign_message_dialog", None)
         if callable(opener):
-            opener(address)
+            opener(address, path)
 
 
 # --- AccountInfoDialog + AddLedgerDialog (moved from qeth.ui) --------------

@@ -1104,7 +1104,7 @@ class MainWindow(QMainWindow):
         warn(dialog, "Signing failed", msg)
         on_fail(msg)
 
-    def open_sign_message_dialog(self, address: str) -> None:
+    def open_sign_message_dialog(self, address: str, path: str | None = None) -> None:
         """User-initiated 'sign anything you paste' flow. Triggered
         from the details panel button. Opens
         ``ComposeMessageDialog`` to collect the payload; the
@@ -1112,14 +1112,16 @@ class MainWindow(QMainWindow):
         text, no separate confirmation step needed. After signing,
         ``SignatureResultDialog`` shows the 0x-hex with a copy-
         to-clipboard button (no dapp to receive it
-        automatically)."""
+        automatically). ``path`` routes a repeat address to the
+        selected branch's signer."""
         from .plugins.sign_message import ComposeMessageDialog
 
         compose = ComposeMessageDialog(address, parent=self)
-        compose.request_built.connect(self._sign_local_message)
+        compose.request_built.connect(
+            lambda req, p=path: self._sign_local_message(req, p))
         compose.show()
 
-    def _sign_local_message(self, req) -> None:
+    def _sign_local_message(self, req, path: str | None = None) -> None:
         """Sign a locally-composed message (from
         ComposeMessageDialog). No review step — the user typed it
         themselves. Picks signer, prompts for passphrase if hot,
@@ -1127,7 +1129,7 @@ class MainWindow(QMainWindow):
         signature."""
         interaction = DialogInteraction(self, title="Signing Message")
         signer, progress_text = self._pick_signer_for(
-            self, req.from_addr, interaction)
+            self, req.from_addr, interaction, path)
         if signer is None:
             return
         if not signer.can_sign(req.from_addr):

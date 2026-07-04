@@ -411,27 +411,29 @@ def test_handle_log_decodes_transfer_seen_both_directions(qapp):
     w = _watcher()
     seen: list = []
     w.transfer_seen.connect(
-        lambda c, a, tok, cp, out, val: seen.append((tok, cp, out, val)))
+        lambda c, a, tok, cp, out, val, th, li:
+        seen.append((tok, cp, out, val, th, li)))
     chain = _chain(100)
     acct = "0x" + "ac" * 20
     other = "0x" + "11" * 20
     w3 = _FakeWsW3()
 
-    # other -> acct : incoming, counterparty is the sender
+    # other -> acct : incoming, counterparty is the sender. logIndex as raw hex
+    # (some providers) — carried through for the notification dedup key.
     _run(w._handle_log(chain, acct, {
         "address": "0xTok",
         "topics": [TRANSFER_TOPIC0, _padded(other), _padded(acct)],
-        "data": hex(1000),
+        "data": hex(1000), "transactionHash": "0xdead", "logIndex": "0x2",
     }, w3))
-    # acct -> other : outgoing, counterparty is the recipient
+    # acct -> other : outgoing, counterparty is the recipient. logIndex as int.
     _run(w._handle_log(chain, acct, {
         "address": "0xTok",
         "topics": [TRANSFER_TOPIC0, _padded(acct), _padded(other)],
-        "data": hex(42),
+        "data": hex(42), "transactionHash": "0xbeef", "logIndex": 5,
     }, w3))
     assert seen == [
-        ("0xTok", other, False, 1000),
-        ("0xTok", other, True, 42),
+        ("0xTok", other, False, 1000, "0xdead", 2),
+        ("0xTok", other, True, 42, "0xbeef", 5),
     ]
 
 

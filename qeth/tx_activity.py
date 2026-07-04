@@ -102,6 +102,57 @@ def transfer_legs_from_logs(
     return out, inn
 
 
+@dataclass(frozen=True)
+class TransferRow:
+    """One ERC-20 Transfer touching the viewer — the notification path's view of
+    a receipt/ws log (counterparty + value + where it sits, for dedup)."""
+    token: str            # lowercased ERC-20 address
+    counterparty: str     # lowercased other party
+    outgoing: bool
+    value: int
+    tx_hash: str          # lowercased 0x hash of the parent tx
+    log_index: int | None
+
+
+def transfers_touching(logs: object, viewer: str) -> list[TransferRow]:
+    """Every ERC-20 Transfer in ``logs`` that ``viewer`` sent or received, with
+    the counterparty / value / (tx, log-index) — so the notification path can
+    surface an arrival from a confirmed tx's receipt and dedup it against the ws
+    Transfer-log watcher. Same Mapping shape as ``transfer_legs_from_logs``;
+    malformed logs are skipped."""
+    viewer = viewer.lower()
+    rows: list[TransferRow] = []
+    for log in cast(Iterable[Any], logs or []):
+        if not hasattr(log, "get"):
+            continue
+        topics = log.get("topics") or []
+        if len(topics) != 3 or _hexstr(topics[0]).lower() != TRANSFER_TOPIC0:
+            continue
+        raw = log.get("address") or ""
+        token = raw.lower() if isinstance(raw, str) else _hexstr(raw).lower()
+        if not token or token == "0x":
+            continue
+        frm = "0x" + _hexstr(topics[1])[-40:]
+        to = "0x" + _hexstr(topics[2])[-40:]
+        outgoing = frm == viewer
+        if not outgoing and to != viewer:
+            continue
+        try:
+            value = int(_hexstr(log.get("data")), 16)
+        except (ValueError, TypeError):
+            value = 0
+        li = log.get("logIndex")
+        try:
+            log_index = (int(li, 16) if isinstance(li, str)
+                         else int(li) if li is not None else None)
+        except (ValueError, TypeError):
+            log_index = None
+        rows.append(TransferRow(
+            token, to if outgoing else frm, outgoing, value,
+            _hexstr(log.get("transactionHash")).lower(), log_index))
+    return rows
+
+
 _PAGE = 300
 
 

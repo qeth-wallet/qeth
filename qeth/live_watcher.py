@@ -107,11 +107,12 @@ class LiveWatcher(QThread):
     # doesn't have the block yet); the consumer then falls back to an http read.
     balance_dirty = Signal(object, str, str, object, object, object)
     native_balance = Signal(object, str, object, object)  # (chain, acct, wei, block)
-    # (chain, account, token, counterparty, outgoing, raw_value) — a Transfer
-    # touching the account, decoded for a sent/received desktop notification.
-    # The value is the log's own (display only); balance_dirty drives the
-    # authoritative balance re-read.
-    transfer_seen = Signal(object, str, str, str, bool, object)
+    # (chain, account, token, counterparty, outgoing, raw_value, tx_hash,
+    # log_index) — a Transfer touching the account, decoded for a sent/received
+    # desktop notification. The value is the log's own (display only);
+    # balance_dirty drives the authoritative balance re-read. tx_hash+log_index
+    # key the notification dedup against the tx-confirmation receipt scan.
+    transfer_seen = Signal(object, str, str, str, bool, object, str, object)
 
     _POLL_S = 1.0          # supervisor reconcile / stop-poll cadence
     _MAX_BACKOFF_S = 30.0  # reconnect backoff ceiling
@@ -425,8 +426,16 @@ class LiveWatcher(QThread):
             outgoing = frm == account.lower()
             counterparty = to if outgoing else frm
             value = self._int_from_data(get("data"))
+            th = get("transactionHash")
+            tx_hash = th.hex() if hasattr(th, "hex") else (str(th) if th else "")
+            li = get("logIndex")
+            try:
+                log_index = _to_int(li) if li is not None else None
+            except Exception:
+                log_index = None
             self.transfer_seen.emit(
-                chain, account, str(token), counterparty, outgoing, value)
+                chain, account, str(token), counterparty, outgoing, value,
+                tx_hash, log_index)
         except Exception:
             pass
 

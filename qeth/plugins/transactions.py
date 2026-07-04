@@ -75,6 +75,7 @@ from ..activity_cache import ActivityCache
 from ..token_metadata import TokenMetadataCache
 from ..tx_activity import (
     Activity, AssetLeg, fetch_activities, transfer_legs_from_logs,
+    transfers_touching,
 )
 from ..icons import (
     IconCache, bundled_native_icon, notification_icon, smooth_scaled,
@@ -1298,16 +1299,18 @@ class TransactionsPlugin(Plugin):
 
     def _on_transfer_seen(
         self, chain, account: str, token: str, counterparty: str,
-        outgoing: bool, raw_value,
+        outgoing: bool, raw_value, tx_hash: str = "", log_index=None,
     ) -> None:
         """A ws Transfer touching the account, decoded (LiveWatcher). Relay to
         TokensPlugin, which formats the amount with the token's symbol/decimals
-        and raises the sent/received desktop notification."""
+        and raises the sent/received desktop notification. tx_hash+log_index let
+        it dedup against the tx-confirmation receipt scan."""
         tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
         if tokens is not None and hasattr(tokens, "on_transfer_seen"):
             try:
                 tokens.on_transfer_seen(
-                    chain, account, token, counterparty, outgoing, raw_value)
+                    chain, account, token, counterparty, outgoing, raw_value,
+                    tx_hash=tx_hash, log_index=log_index)
             except Exception:
                 log.exception("on_transfer_seen failed")
 
@@ -1507,8 +1510,26 @@ class TransactionsPlugin(Plugin):
                 # index the transfers (or an app restart).
                 logs = receipt.get("logs") if hasattr(receipt, "get") else None
                 self.note_transfer_legs(chain_id, tx_hash, logs, key[1])
+                self._notify_receipt_transfers(chain, key[1], logs)
                 self._maybe_notify_native_sent(chain, txs[i])
                 return
+
+    def _notify_receipt_transfers(self, chain, viewer: str, logs) -> None:
+        """A confirmed tx of ours: feed its receipt's ERC-20 Transfers touching
+        the account into the same notification path the ws watcher uses, so an
+        arrival (e.g. a swap's incoming token) still notifies when the ws
+        Transfer-log subscription missed it. Dedup in ``on_transfer_seen`` keeps
+        it to one notification per arrival — whichever source is faster wins."""
+        tokens = getattr(self.host, "tokens_plugin", None) if self.host else None
+        if tokens is None or not hasattr(tokens, "on_transfer_seen") or not logs:
+            return
+        for row in transfers_touching(logs, viewer):
+            try:
+                tokens.on_transfer_seen(
+                    chain, viewer, row.token, row.counterparty, row.outgoing,
+                    row.value, tx_hash=row.tx_hash, log_index=row.log_index)
+            except Exception:
+                log.exception("receipt transfer notify failed")
 
     def _maybe_notify_native_sent(self, chain, tx) -> None:
         """Desktop-notify a confirmed native (ETH/xDAI/…) send of ours. Token

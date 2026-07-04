@@ -157,3 +157,36 @@ def test_pass0_emits_known_verb_but_not_cold_placeholder(tmp_path, monkeypatch):
     # First (pass-0) batch: the cached verb, and NOT the cold tx.
     assert batches[0][known.hash].verb == "transfer"
     assert cold.hash not in batches[0]
+
+
+def _transfer_full(token, frm, to, value, tx_hash, log_index):
+    """A Transfer log carrying the fields the notification path reads."""
+    log = _transfer(token, frm, to)
+    log["data"] = "0x" + f"{value:064x}"
+    log["transactionHash"] = tx_hash
+    log["logIndex"] = log_index
+    return log
+
+
+def test_transfers_touching_extracts_value_counterparty_and_position():
+    from qeth.tx_activity import transfers_touching
+    logs = [
+        _transfer_full(USDC, OTHER, VIEWER, 2_500_000, "0xDEAD", "0x3"),  # in, hex idx
+        _transfer_full(WBTC, VIEWER, OTHER, 10 ** 8, "0xDEAD", 4),        # out, int idx
+    ]
+    rows = transfers_touching(logs, VIEWER)
+    assert [(r.token, r.counterparty, r.outgoing, r.value, r.tx_hash, r.log_index)
+            for r in rows] == [
+        (USDC, OTHER, False, 2_500_000, "0xdead", 3),
+        (WBTC, OTHER, True, 10 ** 8, "0xdead", 4),
+    ]
+
+
+def test_transfers_touching_skips_untouched_and_malformed():
+    from qeth.tx_activity import transfers_touching
+    third = "0x" + "33" * 20
+    logs = [
+        _transfer_full(USDC, OTHER, third, 1, "0x1", 0),   # between others → skip
+        {"topics": [TRANSFER_TOPIC0], "address": USDC},    # malformed (short topics)
+    ]
+    assert transfers_touching(logs, VIEWER) == []

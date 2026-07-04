@@ -21,6 +21,7 @@ Lifecycle:
 from __future__ import annotations
 
 import logging
+from collections import deque
 from decimal import Decimal
 from collections.abc import Callable
 from typing import Any
@@ -299,9 +300,19 @@ class TokensPlugin(Plugin):
     # staleness independent of the discovery sweep.
     RECONCILE_INTERVAL_MS = 60_000
 
+    _ARRIVAL_CAP = 2048   # bound the dedup memory; arrivals are infrequent
+
     def __init__(self, store):
         super().__init__()
         self._store = store
+        # First-source-wins dedup for arrival notifications. The ws Transfer-log
+        # watcher and our tx-confirmation receipt scan can BOTH surface the same
+        # arrival (either can be the faster — a slow ws sub, or a slow confirm);
+        # whichever reaches on_transfer_seen first notifies, keyed by the
+        # Transfer event's (chain, tx, log index). Bounded FIFO so it can't grow
+        # without limit.
+        self._notified_arrivals: set[tuple[int, str, int | None]] = set()
+        self._arrival_order: deque[tuple[int, str, int | None]] = deque()
         # Sources (constructed once, reused across refreshes).
         # Etherscan v2 is preferred when a key is configured (more
         # reliable + covers chains Blockscout doesn't, e.g. BSC).
@@ -964,10 +975,11 @@ class TokensPlugin(Plugin):
     def on_transfer_seen(
         self, chain, account: str, token: str, counterparty: str,
         outgoing: bool, raw_value,
+        tx_hash: str | None = None, log_index: int | None = None,
     ) -> None:
-        """A ws ERC-20 Transfer touching the on-screen account (LiveWatcher,
-        relayed). Raise a sent/received desktop notification — but skip the
-        scam/spam that dominates these logs:
+        """An ERC-20 Transfer touching the on-screen account. Raise a
+        sent/received desktop notification — but skip the scam/spam that
+        dominates these logs:
 
           - **zero value** moves nothing: a ``transferFrom(me, x, 0)`` still
             emits a Transfer event (often on a stale/zero allowance) but isn't
@@ -975,12 +987,20 @@ class TokensPlugin(Plugin):
           - **unrecognised tokens** are overwhelmingly address-poisoning spam —
             only notify for tokens in the curated lists or that the user added.
 
+        Fed from two sources for the same arrival — the ws Transfer-log watcher
+        (LiveWatcher, relayed) and, for a tx of ours, the confirmation receipt
+        scan — so an arrival still notifies when the ws sub missed it. ``tx_hash``
+        + ``log_index`` key the dedup so only the FIRST source notifies.
+
         (The balance still re-reads for every transfer via on_balance_dirty;
         this only gates the *notification*.)"""
         if int(raw_value) == 0:
             return
         if not self._worth_notifying_token(chain.chain_id, token):
             return
+        key = self._arrival_key(chain.chain_id, tx_hash, log_index)
+        if key is not None and key in self._notified_arrivals:
+            return                    # a faster source already notified this one
         meta = self._token_metadata.get(chain.chain_id, token.lower())
         if meta and meta.get("symbol"):
             symbol = str(meta["symbol"])
@@ -996,6 +1016,24 @@ class TokensPlugin(Plugin):
         # the badge stands alone. We don't block the notification on a fetch.
         base = self._icon_cache.get(chain.chain_id, token.lower())
         self._notify(title, body, notification_icon(base, outgoing))
+        if key is not None:
+            self._record_arrival(key)
+
+    @staticmethod
+    def _arrival_key(
+        chain_id: int, tx_hash: str | None, log_index: int | None,
+    ) -> tuple[int, str, int | None] | None:
+        """Cross-source dedup key for one Transfer event, or None when the
+        source didn't carry a tx hash (then we can't dedup, so notify)."""
+        if not tx_hash:
+            return None
+        return (chain_id, str(tx_hash).lower().removeprefix("0x"), log_index)
+
+    def _record_arrival(self, key: tuple[int, str, int | None]) -> None:
+        self._notified_arrivals.add(key)
+        self._arrival_order.append(key)
+        while len(self._arrival_order) > self._ARRIVAL_CAP:
+            self._notified_arrivals.discard(self._arrival_order.popleft())
 
     def _notify(self, title: str, body: str, icon=None) -> None:
         host = self.host

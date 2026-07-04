@@ -110,9 +110,10 @@ def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
     plugin._on_native_balance(gnosis, "0xabc", 5 * 10**18, 42)
     tokens.on_native_balance.assert_called_once_with(gnosis, "0xabc", 5 * 10**18, 42)
 
-    plugin._on_transfer_seen(gnosis, "0xabc", "0xtok", "0xcp", False, 7)
+    plugin._on_transfer_seen(gnosis, "0xabc", "0xtok", "0xcp", False, 7,
+                             "0xhash", 3)
     tokens.on_transfer_seen.assert_called_once_with(
-        gnosis, "0xabc", "0xtok", "0xcp", False, 7)
+        gnosis, "0xabc", "0xtok", "0xcp", False, 7, tx_hash="0xhash", log_index=3)
 
 
 def _chain_ns(chain_id=1, symbol="ETH", name="Ethereum"):
@@ -171,6 +172,35 @@ def test_on_transfer_seen_filters_scam_and_zero(qtbot, tmp_qeth, monkeypatch):
     # recognised + non-zero → notifies
     tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 5 * 10**18)
     assert tp.host.notify.call_count == 1
+
+
+def test_on_transfer_seen_dedupes_across_sources(qtbot, monkeypatch):
+    """The same arrival can surface twice — the ws Transfer-log watcher and our
+    tx-confirmation receipt scan — keyed by (chain, tx, log index). Only the
+    FIRST notifies; a later duplicate is a no-op regardless of 0x/case. A
+    different log (or no tx hash) still notifies."""
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp.host = Mock()
+    monkeypatch.setattr(tp._token_metadata, "get",
+                        lambda cid, c: {"symbol": "USDC", "decimals": 6})
+    ch = _chain_ns()
+
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 2_000_000,
+                        tx_hash="0xABC", log_index=4)
+    assert tp.host.notify.call_count == 1
+    # same event from the other source, hash differently cased / unprefixed
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 2_000_000,
+                        tx_hash="abc", log_index=4)
+    assert tp.host.notify.call_count == 1          # deduped
+    # a different log in the same tx → a distinct arrival, notifies
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 2_000_000,
+                        tx_hash="0xabc", log_index=5)
+    assert tp.host.notify.call_count == 2
+    # no tx hash → can't dedup, so it always notifies (never silently drops)
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 2_000_000)
+    tp.on_transfer_seen(ch, "0xme", "0xtok", "0xfrom", False, 2_000_000)
+    assert tp.host.notify.call_count == 4
 
 
 def test_on_native_balance_notifies_received_on_increase(qtbot, monkeypatch):

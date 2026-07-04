@@ -156,6 +156,31 @@ class TestCoinsTooltip:
         assert self._tt() == ""
 
 
+def test_confirmation_feeds_incoming_token_to_notifier(qtbot, tmp_qeth):
+    """A confirmed tx of ours feeds its receipt's incoming ERC-20 Transfers into
+    the same on_transfer_seen path the ws watcher uses — so a swap's received
+    token still notifies when the ws Transfer-log sub missed it — carrying
+    tx_hash+log_index so the two sources dedup to one notification."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from qeth.plugins.transactions import TransactionsPlugin
+    from qeth.tx_activity import TRANSFER_TOPIC0
+    plugin = TransactionsPlugin()
+    tokens = Mock()
+    plugin.host = SimpleNamespace(tokens_plugin=tokens)
+    viewer = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+    other = "0x" + "11" * 20
+    usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    log = {"topics": [TRANSFER_TOPIC0, "0x" + "00" * 12 + other[2:],
+                      "0x" + "00" * 12 + viewer[2:]],
+           "data": "0x" + f"{1000:064x}", "address": usdc,
+           "transactionHash": "0xFEED", "logIndex": 2}
+    chain = SimpleNamespace(chain_id=1, symbol="ETH", name="Ethereum")
+    plugin._notify_receipt_transfers(chain, viewer, [log])
+    tokens.on_transfer_seen.assert_called_once_with(
+        chain, viewer, usdc, other, False, 1000, tx_hash="0xfeed", log_index=2)
+
+
 class TestNonListedTokenSymbols:
     """A token outside every curated list still has an on-chain symbol(); the
     coins column must show it, not "?". Resolution order: curated list →

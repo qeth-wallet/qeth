@@ -32,6 +32,20 @@ def test_schemes_produce_distinct_suffixes():
     assert QR_ADDRESS_SCHEMES["Legacy (…/i)"](3) == [3]
 
 
+def test_display_scheme_expands_the_ellipsis_to_the_origin():
+    from qeth.qr.schemes import display_scheme
+    assert display_scheme("BIP44 (…/0/i)", "m/44'/60'/0'") == "BIP44 (m/44'/60'/0'/0/i)"
+    assert display_scheme("Legacy (…/i)", "m/44'/60'/0'") == "Legacy (m/44'/60'/0'/i)"
+    assert display_scheme("Ledger Live", "m/44'/60'/0'") == "Ledger Live"   # no … → as-is
+
+
+def test_scheme_origin_strips_the_suffix():
+    from qeth.qr.schemes import scheme_origin
+    assert scheme_origin("BIP44 (…/0/i)", "m/44'/60'/0'/0/5") == "m/44'/60'/0'"
+    assert scheme_origin("Legacy (…/i)", "m/44'/60'/0'/5") == "m/44'/60'/0'"
+    assert scheme_origin("Custom", "m/44'/60'/0'/5") == "m/44'/60'/0'/5"    # unknown → as-is
+
+
 def test_worker_derives_correct_addresses_and_paths(qtbot):
     from qeth.qr_discover import QRAccountWorker
     found = []

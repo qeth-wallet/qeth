@@ -48,7 +48,12 @@ from ..dialog import (
     Dialog, address_field_min_width, item_spacing, prompt_text,
 )
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
-from ..qr.schemes import QR_ADDRESS_SCHEMES
+from ..qr.schemes import (
+    QR_ADDRESS_SCHEMES,
+    components_to_path,
+    display_scheme,
+    scheme_origin,
+)
 from ..plugin import Plugin
 
 # Item data role carrying an account's user label. Present only on labeled
@@ -59,6 +64,14 @@ ACCOUNT_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 # the user's expand/collapse state across a rebuild (e.g. when switching
 # the default account) instead of force-expanding everything each time.
 EXPAND_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+
+
+def _scheme_label(account: dict) -> str:
+    """An account's derivation scheme as a full-path label — a QR scheme's ``…``
+    expanded to the real origin (``Legacy (m/44'/60'/0'/i)``); Ledger/Custom
+    schemes returned unchanged. Used for tree subgroups and the details panel."""
+    scheme = account.get("scheme", "")
+    return display_scheme(scheme, scheme_origin(scheme, account.get("path", "")))
 
 
 def _palette_aware_error_color(palette) -> str:
@@ -767,12 +780,25 @@ class WalletsPlugin(Plugin):
             qr_root.setIcon(0, self.act_add_qr.icon())
             qr_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
             self._tree.addTopLevelItem(qr_root)
+            # Group by derivation scheme, like Ledger — an air-gapped wallet can
+            # hold several (BIP44, Legacy, …). The subgroup label is the full
+            # path (origin expanded), so distinct paths read as distinct groups.
+            qr_groups: dict[str, QTreeWidgetItem] = {}
             for a in qr_accts:
+                label = _scheme_label(a) or "Custom"
+                grp = qr_groups.get(label)
+                if grp is None:
+                    grp = QTreeWidgetItem([label])
+                    grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+                    qr_root.addChild(grp)
+                    qr_groups[label] = grp
                 it, is_default = self._make_account_item(a)
-                qr_root.addChild(it)
+                grp.addChild(it)
                 if is_default:
                     default_item = it
             self._restore_expand(qr_root, "qr", expanded)
+            for label, g in qr_groups.items():
+                self._restore_expand(g, f"qr/{label}", expanded)
 
         if not (prior and self.select_address(prior)):
             if default_item is not None:
@@ -1038,7 +1064,7 @@ class WalletsPlugin(Plugin):
             account_key, self.host.current_chain(), self._container)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        scheme = dlg.scheme_combo.currentText()
+        scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
         xfp = f"0x{account_key.master_fingerprint():08x}"
         added_addrs: list[str] = []
         for d in dlg.selected_accounts():
@@ -1358,7 +1384,7 @@ class AccountInfoDialog(Dialog):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.path_lbl = QLabel(account.get("path", "—")); self.path_lbl.setFont(mono)
         self.source_lbl = QLabel(account.get("source", "—"))
-        self.scheme_lbl = QLabel(account.get("scheme", "—"))
+        self.scheme_lbl = QLabel(_scheme_label(account) or "—")
         label_text = account.get("label") or ""
         if label_text:
             form.addRow("Label:", QLabel(label_text))
@@ -1603,8 +1629,13 @@ class AddQRWalletDialog(AddLedgerDialog):
         super().__init__(chain, parent)
         self._account_key = account_key
         self.setWindowTitle("Add air-gapped (QR) accounts")
+        # Show each scheme as its FULL path (origin from the scanned account
+        # filled into the … placeholder); keep the scheme key as item data so
+        # storage / derivation still use it (read via currentData()).
+        origin = components_to_path(account_key.origin_path)
         self.scheme_combo.clear()
-        self.scheme_combo.addItems(list(QR_ADDRESS_SCHEMES.keys()))
+        for name in QR_ADDRESS_SCHEMES:
+            self.scheme_combo.addItem(display_scheme(name, origin), name)
         self.scan_btn.setText("&Derive")   # the export QR was already scanned
 
     def _scan(self) -> None:
@@ -1620,7 +1651,7 @@ class AddQRWalletDialog(AddLedgerDialog):
         self.progress.setVisible(True)
         self.scan_btn.setEnabled(False)
         worker = QRAccountWorker(
-            self._account_key, self.scheme_combo.currentText(), n,
+            self._account_key, self.scheme_combo.currentData(), n,
             chain=self._chain)
         worker.discovered.connect(self._on_found)
         worker.finished_ok.connect(self._on_done)

@@ -26,13 +26,17 @@ def _roots(plugin):
             for i in range(tree.topLevelItemCount())]
 
 
-def test_qr_account_shows_air_gapped_root(qtbot, tmp_qeth):
+def test_qr_account_shows_air_gapped_root_with_full_path_subgroup(qtbot, tmp_qeth):
     plugin, _ = _plugin(qtbot, [
         {"address": "0x" + "11" * 20, "source": "qr",
          "path": "m/44'/60'/0'/0/0", "scheme": "BIP44 (…/0/i)",
          "xfp": "0x12345678", "label": ""},
     ])
     assert _roots(plugin) == ["Air-gapped"]
+    # Grouped by scheme, labelled with the FULL derivation path (… expanded).
+    root = plugin._tree.topLevelItem(0)
+    assert [root.child(i).text(0) for i in range(root.childCount())] == [
+        "BIP44 (m/44'/60'/0'/0/i)"]
 
 
 def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
@@ -62,7 +66,7 @@ def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
     class _AddStub:
         def __init__(self, key, chain, parent=None):
             self.scheme_combo = SimpleNamespace(
-                currentText=lambda: "BIP44 (…/0/i)")
+                currentData=lambda: "BIP44 (…/0/i)")   # the key, via item data
 
         def exec(self):
             return QDialog.DialogCode.Accepted

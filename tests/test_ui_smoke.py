@@ -46,3 +46,45 @@ class TestX11BackingStoreHardening:
             env = {}
             _harden_x11_backing_store(env, plat)
             assert "QT_X11_NO_MITSHM" not in env
+
+
+class TestFfmpegHwaccel:
+    """Set an explicit ffmpeg hw-codec list for BOTH decode and encode, so the
+    camera never runs the all-types availability probe that creates a VDPAU
+    context (→ the "libvdpau_va_gl.so" stderr warning on Intel/AMD). Both vars
+    must be set — one unset var still triggers the probe. VA-API is first (so an
+    Intel box selects it and never reaches VDPAU); VDPAU stays LAST in the decode
+    list as a fallback for VDPAU-only machines, but is out of the encode list."""
+
+    _DEC = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
+    _ENC = "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"
+
+    def test_vaapi_first_both_vars_on_linux(self):
+        from qeth.__main__ import _set_ffmpeg_hwaccel
+        env = {}
+        _set_ffmpeg_hwaccel(env, "linux")
+        for var in (self._DEC, self._ENC):
+            types = env[var].split(",")
+            assert types[0] == "vaapi"            # working Intel/AMD path first
+            assert "cuda" in types                # non-Intel path kept available
+
+    def test_vdpau_is_a_last_resort_decode_fallback(self):
+        from qeth.__main__ import _set_ffmpeg_hwaccel
+        env = {}
+        _set_ffmpeg_hwaccel(env, "linux")
+        dec = env[self._DEC].split(",")
+        assert dec[-1] == "vdpau"                 # kept, but only after all else
+        assert "vdpau" not in env[self._ENC]      # no VDPAU encoder exists
+
+    def test_respects_explicit_override(self):
+        from qeth.__main__ import _set_ffmpeg_hwaccel
+        env = {self._DEC: "cuda", self._ENC: "cuda"}
+        _set_ffmpeg_hwaccel(env, "linux")
+        assert env[self._DEC] == "cuda" and env[self._ENC] == "cuda"
+
+    def test_noop_off_linux(self):
+        from qeth.__main__ import _set_ffmpeg_hwaccel
+        for plat in ("darwin", "win32"):
+            env = {}
+            _set_ffmpeg_hwaccel(env, plat)
+            assert self._DEC not in env and self._ENC not in env

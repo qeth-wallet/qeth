@@ -48,6 +48,12 @@ from ..dialog import (
     Dialog, address_field_min_width, item_spacing, prompt_text,
 )
 from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from ..qr.schemes import (
+    QR_ADDRESS_SCHEMES,
+    components_to_path,
+    display_scheme,
+    scheme_origin,
+)
 from ..plugin import Plugin
 
 # Item data role carrying an account's user label. Present only on labeled
@@ -58,6 +64,43 @@ ACCOUNT_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 # the user's expand/collapse state across a rebuild (e.g. when switching
 # the default account) instead of force-expanding everything each time.
 EXPAND_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+# The account's derivation path on its leaf row. With UserRole (the address)
+# it forms the (address, path) pair that uniquely identifies a record — needed
+# because the SAME address can sit in two branches, so address alone can't tell
+# rows apart (used to re-select the right row after a drag, and to reorder).
+ACCOUNT_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
+# The source key ("ledger" / "hot" / "watch_only" / "qr") on a top-level branch
+# root, so a branch drag can be persisted as a source order.
+ROOT_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 4
+
+# Top-level branches in their built-in default order:
+# (source key, root label, add-action attribute, grouped-by-scheme). The user
+# can drag branches to reorder them; the order is stored in the Store.
+_SECTIONS: list[tuple[str, str, str, bool]] = [
+    ("ledger", "Ledger", "act_add_ledger", True),
+    ("hot", "Hot wallet", "act_add_hot", False),
+    ("watch_only", "Watch only", "act_add_watch", False),
+    ("qr", "Air-gapped", "act_add_qr", True),
+]
+
+
+def _ledger_scheme_label(name: str) -> str:
+    """A Ledger scheme name suffixed with its full path template (``i`` = the
+    address index) — ``Legacy (m/44'/60'/0'/i)``. Unknown name → unchanged."""
+    template = PATH_SCHEMES.get(name)
+    return f"{name} (m/{template.format(i='i')})" if template else name
+
+
+def _scheme_label(account: dict) -> str:
+    """An account's derivation scheme as a full-path label, so it's clear which
+    path it uses — ``Legacy (m/44'/60'/0'/i)`` (``i`` = the address index):
+    a QR scheme's ``…`` expanded to the real origin, or a Ledger scheme's clean
+    name suffixed with its path template. Unknown schemes returned unchanged.
+    Used for tree subgroups and the details panel."""
+    scheme = account.get("scheme", "")
+    if scheme in QR_ADDRESS_SCHEMES:
+        return display_scheme(scheme, scheme_origin(scheme, account.get("path", "")))
+    return _ledger_scheme_label(scheme)
 
 
 def _palette_aware_error_color(palette) -> str:
@@ -96,6 +139,9 @@ class _ReorderTree(QTreeWidget):
     the on-disk account list to match."""
 
     reorder_committed = Signal()
+    # Fired after the user drags a top-level BRANCH (group root) to a new
+    # position, so the plugin can persist the new branch order.
+    branches_reordered = Signal()
     # Fired when the user presses Return / Enter while a row is
     # selected. The plugin connects this to "connect to browser"
     # (same as double-clicking the address). Carries the address.
@@ -124,6 +170,14 @@ class _ReorderTree(QTreeWidget):
         source_items = self.selectedItems()
         if not source_items:
             return super().dropEvent(event)
+        # Dragging top-level BRANCH roots → reorder branches among themselves.
+        if all(it.parent() is None for it in source_items):
+            self._drop_branches(event, source_items)
+            return
+        # A mixed root+leaf drag makes no sense — refuse.
+        if any(it.parent() is None for it in source_items):
+            event.ignore()
+            return
         # All selected items must share a parent — otherwise we can't
         # honour "same parent only" cleanly.
         source_parent = source_items[0].parent()
@@ -155,16 +209,21 @@ class _ReorderTree(QTreeWidget):
         # the plugin slots see ``selected_address_changed(addr)`` and
         # repopulate, instead of being left with the mid-drop
         # ``None`` emission that empties the panels.
-        dragged_addrs = [
-            it.data(0, Qt.ItemDataRole.UserRole) for it in source_items
+        # Key on (address, path), not address alone: the same address can sit in
+        # another branch, and re-selecting by address would grab THAT row and
+        # yank the view to the other branch. The (address, path) pair is the
+        # record's unique identity, so we re-select exactly the row we dropped.
+        dragged_keys = [
+            (it.data(0, Qt.ItemDataRole.UserRole), it.data(0, ACCOUNT_PATH_ROLE))
+            for it in source_items
         ]
-        dragged_addrs = [a for a in dragged_addrs if isinstance(a, str)]
+        dragged_keys = [(a, p) for (a, p) in dragged_keys if isinstance(a, str)]
         super().dropEvent(event)
-        if dragged_addrs:
+        if dragged_keys:
             self.clearSelection()
             first = None
-            for addr in dragged_addrs:
-                it = self._find_by_address(addr)
+            for addr, path in dragged_keys:
+                it = self._find_by_key(addr, path)
                 if it is not None:
                     it.setSelected(True)
                     if first is None:
@@ -173,13 +232,50 @@ class _ReorderTree(QTreeWidget):
                 self.setCurrentItem(first)
         self.reorder_committed.emit()
 
-    def _find_by_address(self, addr: str):
-        """Depth-first search for the leaf carrying ``addr`` in
-        UserRole. Used after a drop to relocate items whose pointers
-        were invalidated by Qt's row remove/insert."""
+    def _drop_branches(self, event, source_items) -> None:
+        """Reorder top-level branch roots among themselves. The drop must land AT
+        the top level — above/below another root, or on empty space — never ONTO
+        a root (would nest) or inside a group. Re-selects the moved branch by its
+        source key and emits ``branches_reordered`` to persist the order."""
+        target = self.itemAt(event.position().toPoint())
+        indicator = self.dropIndicatorPosition()
+        if target is not None and target.parent() is not None:
+            event.ignore()          # would drop inside a group, not at top level
+            return
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnItem:
+            event.ignore()          # would nest this branch into the target root
+            return
+        sources = [it.data(0, ROOT_SOURCE_ROLE) for it in source_items]
+        super().dropEvent(event)
+        self.clearSelection()
+        first = None
+        for src in sources:
+            it = self._find_root_by_source(src)
+            if it is not None:
+                it.setSelected(True)
+                if first is None:
+                    first = it
+        if first is not None:
+            self.setCurrentItem(first)
+        self.branches_reordered.emit()
+
+    def _find_root_by_source(self, src):
+        """The top-level branch root carrying ``src`` in ROOT_SOURCE_ROLE."""
+        for i in range(self.topLevelItemCount()):
+            it = self.topLevelItem(i)
+            if it is not None and it.data(0, ROOT_SOURCE_ROLE) == src:
+                return it
+        return None
+
+    def _find_by_key(self, addr: str, path):
+        """Depth-first search for the leaf carrying ``(addr, path)`` — the
+        record's unique key. Used after a drop to relocate an item whose pointer
+        was invalidated by Qt's row remove/insert, without grabbing a same-address
+        row in another branch."""
 
         def walk(item):
-            if item.data(0, Qt.ItemDataRole.UserRole) == addr:
+            if (item.data(0, Qt.ItemDataRole.UserRole) == addr
+                    and (item.data(0, ACCOUNT_PATH_ROLE) or "") == (path or "")):
                 return item
             for i in range(item.childCount()):
                 r = walk(item.child(i))
@@ -274,6 +370,43 @@ class WalletsPlugin(Plugin):
                 out.append(addr)
         return out
 
+    def _selected_key(self) -> tuple[str, str] | None:
+        """(address, path) of the single selected account row, or None for a
+        zero/multi/group selection. Identifies the exact record across a rebuild."""
+        if self._tree is None:
+            return None
+        rows = [it for it in self._tree.selectedItems()
+                if isinstance(it.data(0, Qt.ItemDataRole.UserRole), str)]
+        if len(rows) != 1:
+            return None
+        it = rows[0]
+        return (it.data(0, Qt.ItemDataRole.UserRole),
+                it.data(0, ACCOUNT_PATH_ROLE) or "")
+
+    def _select_key(self, address: str, path: str) -> bool:
+        """Select the exact row for ``(address, path)``. True if found."""
+        if self._tree is None:
+            return False
+
+        def walk(item: QTreeWidgetItem | None) -> QTreeWidgetItem | None:
+            if item is None:
+                return None
+            if (item.data(0, Qt.ItemDataRole.UserRole) == address
+                    and (item.data(0, ACCOUNT_PATH_ROLE) or "") == (path or "")):
+                return item
+            for i in range(item.childCount()):
+                hit = walk(item.child(i))
+                if hit is not None:
+                    return hit
+            return None
+
+        for i in range(self._tree.topLevelItemCount()):
+            hit = walk(self._tree.topLevelItem(i))
+            if hit is not None:
+                self._tree.setCurrentItem(hit)
+                return True
+        return False
+
     def _find_item(self, address: str) -> QTreeWidgetItem | None:
         """The tree leaf carrying ``address`` (case-insensitive), or None."""
         if self._tree is None or not address:
@@ -296,21 +429,43 @@ class WalletsPlugin(Plugin):
                 return hit
         return None
 
+    def _find_items(self, address: str) -> list[QTreeWidgetItem]:
+        """EVERY tree leaf carrying ``address`` (case-insensitive) — a repeat
+        address has one per branch it sits in."""
+        hits: list[QTreeWidgetItem] = []
+        if self._tree is None or not address:
+            return hits
+        wanted = address.lower()
+
+        def walk(item: QTreeWidgetItem | None) -> None:
+            if item is None:
+                return
+            addr = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(addr, str) and addr.lower() == wanted:
+                hits.append(item)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            walk(self._tree.topLevelItem(i))
+        return hits
+
     def _apply_label_in_place(self, address: str, name: str,
                               verified: bool) -> bool:
-        """Update one account row's label WITHOUT a full _rebuild_tree — used by
-        the async ENS reverse-lookup path (5c). A rebuild there clears the tree,
-        which fires itemSelectionChanged (account=None → account=addr) and so
-        yanks the view off whatever account the user was reading and re-fetches
-        the right-slot panels. Setting the label role repaints just the row.
-        Returns True if the row was found."""
-        it = self._find_item(address)
-        if it is None:
-            return False
-        it.setData(0, ACCOUNT_LABEL_ROLE, name)
-        if verified:
-            it.setToolTip(0, f"{name} — cryptographically verified")
-        return True
+        """Update EVERY row carrying ``address`` WITHOUT a full _rebuild_tree —
+        used by the async ENS reverse-lookup path (5c). A rebuild there clears
+        the tree, which fires itemSelectionChanged (account=None → account=addr)
+        and so yanks the view off whatever account the user was reading and
+        re-fetches the right-slot panels. Setting the label role repaints just
+        the rows. Updates all of them so a repeat address (held in two branches)
+        shows the label everywhere. Returns True if any row was found."""
+        found = False
+        for it in self._find_items(address):
+            it.setData(0, ACCOUNT_LABEL_ROLE, name)
+            if verified:
+                it.setToolTip(0, f"{name} — cryptographically verified")
+            found = True
+        return found
 
     def select_address(self, address: str) -> bool:
         """Programmatically focus the tree on the leaf carrying
@@ -389,6 +544,7 @@ class WalletsPlugin(Plugin):
         self._tree.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._tree.itemSelectionChanged.connect(self._on_tree_selection)
         self._tree.reorder_committed.connect(self._on_tree_reordered)
+        self._tree.branches_reordered.connect(self._on_branches_reordered)
         # Double-click an address leaf = "Connect to browser". The
         # button + right-click menu offer the same action; this is
         # just the no-friction path for the user's primary
@@ -466,6 +622,13 @@ class WalletsPlugin(Plugin):
             QStyle.StandardPixmap.SP_FileDialogContentsView,
         ))
         self.act_add_watch.triggered.connect(self._add_watch_only)
+        self.act_add_qr = QAction("&Air-gapped (QR) Wallet…", self)
+        # A QR/scan glyph — theme names vary across icon sets.
+        self.act_add_qr.setIcon(_icon(
+            "view-barcode-qr", "qrcode", "camera-web", "camera-photo",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+        ))
+        self.act_add_qr.triggered.connect(self._add_qr)
         # Import-from-other-wallet actions live below a separator
         # so the primary "add a new account" actions stay grouped
         # at the top. Each external source is its own entry +
@@ -569,6 +732,7 @@ class WalletsPlugin(Plugin):
         add_btn.setToolTip(self.act_add.toolTip())
         self._add_menu = QMenu(add_btn)
         self._add_menu.addAction(self.act_add_ledger)
+        self._add_menu.addAction(self.act_add_qr)
         self._add_menu.addAction(self.act_add_hot)
         self._add_menu.addAction(self.act_add_watch)
         self._add_menu.addSeparator()
@@ -648,20 +812,38 @@ class WalletsPlugin(Plugin):
         item.setData(0, EXPAND_KEY_ROLE, key)
         item.setExpanded(snapshot.get(key, True))
 
+    def _effective_label(self, address: str) -> str:
+        """The label to show for ``address``: any non-empty label among the
+        records holding it. A repeat address (the same address in two branches)
+        thus shows its label on every row, even if only one record carries it —
+        older records were only labelled on the first match. Empty if none."""
+        wanted = address.lower()
+        for a in self._store.accounts:
+            if a["address"].lower() == wanted and (a.get("label") or ""):
+                return str(a["label"])
+        return ""
+
     def _make_account_item(self, a: dict) -> tuple[QTreeWidgetItem, bool]:
         """Build the address-leaf row for one account — shared by the Ledger /
         hot / watch-only sections (previously copy-pasted three times). Returns
         ``(item, is_default)`` so the caller can track the default row; the
         caller adds it under the right parent."""
         addr = a["address"]
+        # Record-aware: mark only the CONNECTED record as default. When the
+        # default's path is unknown (legacy config, never re-connected), fall
+        # back to matching by address so the marker still shows.
+        default = self._store.default_account
+        dpath = self._store.default_account_path
         is_default = (
-            self._store.default_account is not None
-            and addr.lower() == self._store.default_account.lower()
+            default is not None
+            and addr.lower() == default.lower()
+            and (dpath is None or dpath == a.get("path", ""))
         )
         display = f"[{addr}]" if is_default else f" {addr} "
-        label_text = a.get("label") or ""
+        label_text = self._effective_label(addr)
         it = QTreeWidgetItem([display])
         it.setData(0, Qt.ItemDataRole.UserRole, addr)
+        it.setData(0, ACCOUNT_PATH_ROLE, a.get("path", ""))
         if label_text:
             it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             if addr.lower() in self._ens_verified:
@@ -675,85 +857,99 @@ class WalletsPlugin(Plugin):
         )
         return it, is_default
 
+    def _ordered_sections(self) -> list[tuple[str, str, str, bool]]:
+        """The branch specs ``(source, label, add-action attr, grouped-by-scheme)``
+        in the user's saved order (``store.account_source_order``), with any not
+        listed appended in the built-in default order."""
+        by_key = {s[0]: s for s in _SECTIONS}
+        ordered = [by_key[k] for k in self._store.account_source_order
+                   if k in by_key]
+        seen = {s[0] for s in ordered}
+        ordered.extend(s for s in _SECTIONS if s[0] not in seen)
+        return ordered
+
     def _rebuild_tree(self) -> None:
         if self._tree is None:
             return
         # Preserve the user's current selection across the rebuild: an async
         # trigger (an ENS reverse-lookup, a background rediscover) must not yank
         # the view to the default account while they're reading another (5c).
-        # Only fall back to the default when there was no single prior selection.
-        prior = self.selected_address
+        # Key on (address, path) — the record's unique identity — so a repeat
+        # address restores the row the user actually had, not its twin in the
+        # other branch (which made "connect to browser" jump trees). Only fall
+        # back to the default when there was no single prior selection.
+        prior_key = self._selected_key()
         expanded = self._capture_expansion()
         self._tree.clear()
-        # Each source's root row is shown only when it HAS accounts — an empty
-        # "Watch only (0)" / "Hot wallet (0)" root is just noise (the Add button
-        # below the tree is the discovery affordance, not these roots). With no
-        # accounts at all the tree is simply empty.
         default_item: QTreeWidgetItem | None = None
+        for source, label, action_attr, grouped in self._ordered_sections():
+            got = self._build_source_section(
+                source, label, action_attr, grouped, expanded)
+            if got is not None:
+                default_item = got
+        if not (prior_key and self._select_key(*prior_key)):
+            if default_item is not None:
+                self._tree.setCurrentItem(default_item)
 
-        ledger_accts = [a for a in self._store.accounts if a.get("source") == "ledger"]
-        if ledger_accts:
-            ledger_root = QTreeWidgetItem([f"Ledger ({len(ledger_accts)})"])
-            # Reuse the add-account menu icons so the tree groups and the
-            # picker stay visually consistent (hardware device / key / eye).
-            ledger_root.setIcon(0, self.act_add_ledger.icon())
-            # Group containers: not draggable, not drop targets (we only
-            # allow re-ordering inside scheme subgroups).
-            ledger_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self._tree.addTopLevelItem(ledger_root)
+    def _build_source_section(
+        self, source: str, label: str, action_attr: str, grouped: bool,
+        expanded: dict,
+    ) -> QTreeWidgetItem | None:
+        """Build one top-level branch (root + its accounts). Returns the
+        default-account row if it falls in this branch, else None; a source with
+        no accounts builds nothing (an empty "Watch only (0)" root is just
+        noise). The root is draggable so branches can be reordered; a FLAT
+        branch's root is also a drop target for its address leaves, a GROUPED
+        branch's isn't (its scheme subgroups are)."""
+        assert self._tree is not None    # _rebuild_tree guards before calling
+        accts = [a for a in self._store.accounts if a.get("source") == source]
+        if not accts:
+            return None
+        root = QTreeWidgetItem([f"{label} ({len(accts)})"])
+        action = getattr(self, action_attr, None)
+        if action is not None:
+            root.setIcon(0, action.icon())   # same icon as the add menu / picker
+        root.setData(0, ROOT_SOURCE_ROLE, source)
+        # Selectable + draggable so the user can drag the whole branch to
+        # reorder priority. Grouped branches drop into their scheme subgroups;
+        # a flat branch drops leaves straight into the root.
+        flags = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                 | Qt.ItemFlag.ItemIsDragEnabled)
+        if not grouped:
+            flags |= Qt.ItemFlag.ItemIsDropEnabled
+        root.setFlags(flags)
+        self._tree.addTopLevelItem(root)
+
+        default_item: QTreeWidgetItem | None = None
+        if grouped:
+            # Group by derivation scheme — a Ledger / air-gapped wallet can hold
+            # several (BIP44, Legacy, …). The subgroup label is the full path.
             groups: dict[str, QTreeWidgetItem] = {}
-            for a in ledger_accts:
-                scheme = a.get("scheme", "Custom")
-                grp = groups.get(scheme)
+            for a in accts:
+                key = _scheme_label(a) or "Custom"
+                grp = groups.get(key)
                 if grp is None:
-                    grp = QTreeWidgetItem([scheme])
-                    # Scheme group: drop-enabled so children can be
-                    # reordered between siblings via the parent, but not
-                    # draggable itself.
-                    grp.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-                    ledger_root.addChild(grp)
-                    groups[scheme] = grp
+                    grp = QTreeWidgetItem([key])
+                    grp.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsDropEnabled)
+                    root.addChild(grp)
+                    groups[key] = grp
                 it, is_default = self._make_account_item(a)
                 grp.addChild(it)
                 if is_default:
                     default_item = it
-            self._restore_expand(ledger_root, "ledger", expanded)
-            for scheme, g in groups.items():
-                self._restore_expand(g, f"ledger/{scheme}", expanded)
-
-        hot_accts = [a for a in self._store.accounts
-                      if a.get("source") == "hot"]
-        if hot_accts:
-            hot_root = QTreeWidgetItem([f"Hot wallet ({len(hot_accts)})"])
-            hot_root.setIcon(0, self.act_add_hot.icon())
-            hot_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-            self._tree.addTopLevelItem(hot_root)
-            for a in hot_accts:
+            self._restore_expand(root, source, expanded)
+            for key, g in groups.items():
+                self._restore_expand(g, f"{source}/{key}", expanded)
+        else:
+            for a in accts:
                 it, is_default = self._make_account_item(a)
-                hot_root.addChild(it)
+                root.addChild(it)
                 if is_default:
                     default_item = it
-            self._restore_expand(hot_root, "hot", expanded)
-
-        watch_accts = [a for a in self._store.accounts
-                        if a.get("source") == "watch_only"]
-        if watch_accts:
-            watch_root = QTreeWidgetItem([f"Watch only ({len(watch_accts)})"])
-            watch_root.setIcon(0, self.act_add_watch.icon())
-            # Top-level group: not draggable, not a drop target — same
-            # treatment as the Ledger root.
-            watch_root.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-            self._tree.addTopLevelItem(watch_root)
-            for a in watch_accts:
-                it, is_default = self._make_account_item(a)
-                watch_root.addChild(it)
-                if is_default:
-                    default_item = it
-            self._restore_expand(watch_root, "watch", expanded)
-
-        if not (prior and self.select_address(prior)):
-            if default_item is not None:
-                self._tree.setCurrentItem(default_item)
+            self._restore_expand(root, source, expanded)
+        return default_item
 
     # --- selection / action handlers ---------------------------------------
 
@@ -761,7 +957,7 @@ class WalletsPlugin(Plugin):
         """Walk the tree top-to-bottom collecting addresses in their
         current display order, then persist that order via the Store.
         Triggered after _ReorderTree commits an internal move."""
-        ordered: list[str] = []
+        ordered: list[tuple[str, str]] = []
         if self._tree is None:
             return
 
@@ -770,13 +966,26 @@ class WalletsPlugin(Plugin):
                 return
             addr = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(addr, str) and addr:
-                ordered.append(addr)
+                ordered.append((addr, item.data(0, ACCOUNT_PATH_ROLE) or ""))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
         for i in range(self._tree.topLevelItemCount()):
             walk(self._tree.topLevelItem(i))
         self._store.reorder_accounts(ordered)
+
+    def _on_branches_reordered(self) -> None:
+        """The user dragged a branch to a new position — persist the top-level
+        branch order (their source keys, top to bottom)."""
+        if self._tree is None:
+            return
+        order: list[str] = []
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            src = item.data(0, ROOT_SOURCE_ROLE) if item is not None else None
+            if isinstance(src, str) and src:
+                order.append(src)
+        self._store.set_source_order(order)
 
     def _on_tree_double_clicked(self, item, _column: int) -> None:
         """Double-click on an address leaf connects that account to
@@ -786,10 +995,15 @@ class WalletsPlugin(Plugin):
         addr = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(addr, str) or not addr:
             return
-        current = self._store.default_account
-        if current is not None and addr.lower() == current.lower():
+        path = item.data(0, ACCOUNT_PATH_ROLE) or ""
+        # Skip only if THIS exact record is already connected — the same address
+        # held by another signer (Ledger vs QR) is a different connection, so a
+        # double-click there should switch to it.
+        if (self._store.default_account is not None
+                and addr.lower() == self._store.default_account.lower()
+                and (self._store.default_account_path or "") == path):
             return
-        self._set_default(addr)
+        self._set_default(addr, path)
 
     def _on_tree_enter_pressed(self, address: str) -> None:
         """Enter / Return on a focused account leaf: same as
@@ -888,18 +1102,30 @@ class WalletsPlugin(Plugin):
             self.host.status_message(f"Copied {addrs[0]} to clipboard", 3000)
 
     def _remove_selected_account(self) -> None:
-        addrs = self.selected_addresses()
-        if not addrs:
+        if self._tree is None:
             return
-        # Bucket the selection by source so the confirmation
-        # message tells the user what's actually happening — a
-        # Ledger removal is reversible (re-scan the device), a
-        # hot-wallet removal DELETES the on-disk keystore (real
-        # data loss unless backed up), watch-only just forgets an
-        # address.
-        addrs_lower = {a.lower() for a in addrs}
-        sources = {a.get("source") for a in self._store.accounts
-                    if a["address"].lower() in addrs_lower}
+        # Remove the selected RECORDS (address, path), not every record with the
+        # address — so removing the Ledger row of an address held in two
+        # branches leaves the Air-gapped row (and its shared, address-keyed tx /
+        # token cache) intact.
+        by_key = {(a["address"].lower(), a.get("path", "")): a
+                  for a in self._store.accounts}
+        rows: list[tuple[str, str, str | None]] = []
+        for it in self._tree.selectedItems():
+            addr = it.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(addr, str) or not addr:
+                continue
+            path = it.data(0, ACCOUNT_PATH_ROLE) or ""
+            rec = by_key.get((addr.lower(), path))
+            rows.append((addr, path, rec.get("source") if rec else None))
+        if not rows:
+            return
+        addrs = [a for a, _, _ in rows]
+        # Bucket by source so the confirmation message tells the user what's
+        # actually happening — a Ledger removal is reversible (re-scan the
+        # device), a hot-wallet removal DELETES the on-disk keystore (real data
+        # loss unless backed up), watch-only just forgets an address.
+        sources = {s for _, _, s in rows}
         if len(addrs) == 1:
             prompt = "Remove this account from the wallet?"
             detail_head = addrs[0]
@@ -940,19 +1166,22 @@ class WalletsPlugin(Plugin):
             action="&Remove", destructive=True,
         ):
             return
-        # Hot wallets carry an on-disk keystore alongside the
-        # config-level account record; remove both. Ledger / watch-
-        # only accounts have nothing on disk to clean up, only the
-        # config record.
+        # Hot wallets carry an on-disk keystore alongside the config record;
+        # remove both. Ledger / watch-only have nothing on disk, only the record.
         from ..hot_wallet import delete_keystore
-        hot_addrs = {
-            a["address"].lower() for a in self._store.accounts
-            if a.get("source") == "hot" and a["address"].lower() in
-                {x.lower() for x in addrs}
-        }
-        removed = sum(1 for a in addrs if self._store.remove_account(a))
-        for a in addrs:
-            if a.lower() in hot_addrs:
+        removed = 0
+        hot_removed: list[str] = []
+        for address, path, source in rows:
+            if self._store.remove_account(address, path):
+                removed += 1
+                if source == "hot":
+                    hot_removed.append(address)
+        # Delete a hot keystore only once its (unique) hot record is gone — never
+        # when another branch still holds the address as a device/watch account.
+        for a in hot_removed:
+            if not any(x.get("source") == "hot"
+                       and x["address"].lower() == a.lower()
+                       for x in self._store.accounts):
                 try:
                     delete_keystore(a)
                 except Exception:
@@ -969,7 +1198,7 @@ class WalletsPlugin(Plugin):
         dlg = AddLedgerDialog(self.host.current_chain(), self._container)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        scheme = dlg.scheme_combo.currentText()
+        scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
         added_addrs: list[str] = []
         for d in dlg.selected_accounts():
             if self._store.add_account({
@@ -992,6 +1221,47 @@ class WalletsPlugin(Plugin):
             # whenever ENS has one. User-edited labels are never
             # clobbered (the guard is on ``looks_autogenerated``
             # in ``_on_ens_label_resolved``).
+            self._kick_ens_label_lookups(added_addrs)
+
+    def _add_qr(self) -> None:
+        """Import an air-gapped (QR) wallet: scan its account-export QR, derive
+        addresses locally for the chosen scheme, and add the ones the user
+        picks. No key ever leaves the device — signing is a QR exchange."""
+        if self.host is None:
+            return
+        from ..qr.account import parse_account_export
+        from ..qr_exchange_dialog import QRScanDialog
+        scan = QRScanDialog(parent=self._container)
+        if scan.exec() != QDialog.DialogCode.Accepted or not scan.scanned_ur():
+            return
+        try:
+            account_key = parse_account_export(scan.scanned_ur() or "")
+        except ValueError as e:
+            warn(self._container, "Couldn't read that QR",
+                 f"That doesn't look like a wallet account export.\n\n{e}")
+            return
+        dlg = AddQRWalletDialog(
+            account_key, self.host.current_chain(), self._container)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
+        xfp = f"0x{account_key.master_fingerprint():08x}"
+        added_addrs: list[str] = []
+        for d in dlg.selected_accounts():
+            if self._store.add_account({
+                "address": d.address,
+                "path": d.path,
+                "source": "qr",
+                "scheme": scheme,
+                "xfp": xfp,
+                "label": "",
+            }):
+                added_addrs.append(d.address)
+        self._rebuild_tree()
+        self.default_account_changed.emit()
+        if added_addrs and self.host is not None:
+            self.host.status_message(
+                f"Added {len(added_addrs)} account(s)", 3000)
             self._kick_ens_label_lookups(added_addrs)
 
     def _add_hot_wallet(self) -> None:
@@ -1197,23 +1467,30 @@ class WalletsPlugin(Plugin):
 
     def _sign_selected(self) -> None:
         """Sign button → open the compose/sign flow for the selected
-        account (forwarded to the host)."""
-        addr = self.selected_address
-        if addr:
-            self._on_sign_message(addr)
+        account (forwarded to the host). Passes the row's path so a repeat
+        address signs via the branch the user selected (Ledger vs QR)."""
+        key = self._selected_key()
+        if key is not None:
+            self._on_sign_message(key[0], key[1])
 
     def _show_qr_info(self) -> None:
         """QR button → modal popup with the receive QR plus the
         account's address / path / source / scheme."""
-        addr = self.selected_address
-        if not addr:
+        key = self._selected_key()
+        if key is None:
             return
+        addr, path = key
+        # The exact selected record (not first-match by address) so a repeat
+        # address shows the branch the user picked; with its effective label.
         acct = next(
-            (a for a in self._store.accounts if a["address"] == addr), None,
+            (a for a in self._store.accounts
+             if a["address"] == addr and a.get("path", "") == path), None,
         )
         if acct is None:
             return
-        dlg = AccountInfoDialog(acct, parent=self._container)
+        dlg = AccountInfoDialog(
+            {**acct, "label": self._effective_label(addr)},
+            parent=self._container)
         dlg.exec()
 
     def _edit_label(self) -> None:
@@ -1222,10 +1499,10 @@ class WalletsPlugin(Plugin):
         addr = self.selected_address
         if not addr:
             return
-        acct = next(
-            (a for a in self._store.accounts if a["address"] == addr), None,
-        )
-        current = (acct.get("label") if acct else "") or ""
+        # Pre-fill the EFFECTIVE label (what the row actually shows) so editing a
+        # repeat address doesn't start from a blank when only its twin carried
+        # the label. The save (set_label) writes it to every record either way.
+        current = self._effective_label(addr)
         new, ok = prompt_text(
             self._container, "Edit Label", f"Label for {addr}:", current,
         )
@@ -1257,21 +1534,28 @@ class WalletsPlugin(Plugin):
                     f"Updated label for {address}", 2500,
                 )
 
-    def _set_default(self, address: str) -> None:
-        self._store.set_default_account(address)
+    def _set_default(self, address: str, path: str | None = None) -> None:
+        # ``path`` records WHICH record is connected when the same address is
+        # held by two signers, so signing routes to the right one (Ledger vs
+        # QR). Fall back to the selected row's path when not given explicitly.
+        if path is None:
+            key = self._selected_key()
+            if key is not None and key[0] == address:
+                path = key[1]
+        self._store.set_default_account(address, path)
         self._rebuild_tree()
         self.default_account_changed.emit()
         # Re-run selection to refresh the details-panel button state.
         self._on_tree_selection()
 
-    def _on_sign_message(self, address: str) -> None:
+    def _on_sign_message(self, address: str, path: str | None = None) -> None:
         """Forward to host. ``MainWindow.open_sign_message_dialog``
         runs the compose + review + signing flow."""
         if self.host is None:
             return
         opener = getattr(self.host, "open_sign_message_dialog", None)
         if callable(opener):
-            opener(address)
+            opener(address, path)
 
 
 # --- AccountInfoDialog + AddLedgerDialog (moved from qeth.ui) --------------
@@ -1294,7 +1578,7 @@ class AccountInfoDialog(Dialog):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.path_lbl = QLabel(account.get("path", "—")); self.path_lbl.setFont(mono)
         self.source_lbl = QLabel(account.get("source", "—"))
-        self.scheme_lbl = QLabel(account.get("scheme", "—"))
+        self.scheme_lbl = QLabel(_scheme_label(account) or "—")
         label_text = account.get("label") or ""
         if label_text:
             form.addRow("Label:", QLabel(label_text))
@@ -1355,7 +1639,10 @@ class AddLedgerDialog(Dialog):
 
         form = QFormLayout()
         self.scheme_combo = QComboBox()
-        self.scheme_combo.addItems(list(PATH_SCHEMES.keys()))
+        # Show each scheme as its full path (i = index); keep the scheme name as
+        # item data so storage / derivation use it (read via currentData()).
+        for name in PATH_SCHEMES:
+            self.scheme_combo.addItem(_ledger_scheme_label(name), name)
         form.addRow("Derivation scheme:", self.scheme_combo)
         self.count_spin = QSpinBox()
         self.count_spin.setRange(0, 100)
@@ -1439,7 +1726,7 @@ class AddLedgerDialog(Dialog):
         self.progress.setVisible(True)
         self.scan_btn.setEnabled(False)
         worker = LedgerWorker(
-            self.scheme_combo.currentText(), n, chain=self._chain
+            self.scheme_combo.currentData(), n, chain=self._chain
         )
         worker.discovered.connect(self._on_found)
         worker.finished_ok.connect(self._on_done)
@@ -1527,7 +1814,62 @@ class AddLedgerDialog(Dialog):
         error(self, "Ledger error", msg)
 
     def selected_accounts(self) -> list[DiscoveredAccount]:
-        return [it.data(Qt.ItemDataRole.UserRole) for it in self.results.selectedItems()]
+        # Iterate the list in DISPLAY order (top to bottom) rather than
+        # selectedItems(), whose order is unspecified — so accounts get added in
+        # the order the user sees them, not a scrambled one.
+        out = []
+        for i in range(self.results.count()):
+            it = self.results.item(i)
+            if it is not None and it.isSelected():
+                out.append(it.data(Qt.ItemDataRole.UserRole))
+        return out
+
+
+class AddQRWalletDialog(AddLedgerDialog):
+    """Reuses the scan-list / select UI, but discovers addresses by deriving
+    them locally from an imported account xpub (``QRAccountWorker``) instead of
+    talking to a Ledger. Constructed with the already-scanned ``account_key``."""
+
+    def __init__(self, account_key, chain, parent=None):
+        super().__init__(chain, parent)
+        self._account_key = account_key
+        self.setWindowTitle("Add air-gapped (QR) accounts")
+        # Show each scheme as its FULL path (origin from the scanned account
+        # filled into the … placeholder); keep the scheme key as item data so
+        # storage / derivation still use it (read via currentData()).
+        origin = components_to_path(account_key.origin_path)
+        self.scheme_combo.clear()
+        for name in QR_ADDRESS_SCHEMES:
+            self.scheme_combo.addItem(display_scheme(name, origin), name)
+        self.scan_btn.setText("&Scan")
+
+    def _scan(self) -> None:
+        from ..qr_discover import QRAccountWorker
+        self.results.clear()
+        self.add_btn.setEnabled(False)
+        n = self.count_spin.value()
+        if n == 0:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, n)
+            self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.scan_btn.setEnabled(False)
+        worker = QRAccountWorker(
+            self._account_key, self.scheme_combo.currentData(), n,
+            chain=self._chain)
+        worker.discovered.connect(self._on_found)
+        worker.finished_ok.connect(self._on_done)
+        worker.failed.connect(self._on_failed_qr)
+        self._workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_failed_qr(self, msg: str) -> None:
+        self.progress.setVisible(False)
+        self.scan_btn.setEnabled(True)
+        error(self, "Air-gapped account error", msg)
 
 
 class AddWatchOnlyDialog(Dialog):

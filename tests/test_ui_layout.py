@@ -329,3 +329,14 @@ def test_hide_pin_enabled_only_for_erc20_rows(mainwindow):
     table.selectRow(1)
     assert mainwindow.token_panel.btn_hide.isEnabled()
     assert mainwindow.token_panel.btn_pin.isEnabled()
+
+
+def test_account_book_dedupes_repeat_address_with_effective_label(mainwindow):
+    """Send-dialog recipient book: a repeat address (labelled in one branch,
+    empty in another) resolves to ONE entry keeping the label — so the "to"
+    field still finds it by label."""
+    mainwindow.store.accounts = [
+        {"address": "0xAA", "source": "ledger", "path": "p1", "label": "my"},
+        {"address": "0xAA", "source": "qr", "path": "p2", "label": ""},
+    ]
+    assert dict(mainwindow.account_book()) == {"0xAA": "my"}

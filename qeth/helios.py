@@ -178,8 +178,16 @@ class HeliosSidecar:
             except Exception:
                 pass   # server not up yet
             sleep(_POLL_INTERVAL_S)
-        log.warning("helios for chain %d not ready after %.0fs",
-                    self.chain_id, timeout)
+        # timeout == 0 is a deliberate non-blocking probe ("use verified only if
+        # already synced") — e.g. background ENS label lookups on account add.
+        # Not-ready is the expected answer there, so don't cry wolf at WARNING;
+        # a real wait (timeout > 0) that still times out IS worth a warning.
+        if timeout > 0:
+            log.warning("helios for chain %d not ready after %.0fs",
+                        self.chain_id, timeout)
+        else:
+            log.debug("helios for chain %d not ready (non-blocking probe)",
+                      self.chain_id)
         return False
 
     def stop(self) -> None:

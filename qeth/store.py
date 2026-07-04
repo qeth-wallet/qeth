@@ -86,9 +86,18 @@ class Store:
         self._save_seq = 0
         self._last_written_seq = 0
         self.accounts: list[dict] = []  # {address, path, source, scheme, label}
+        # Display order of the top-level account branches (source keys, e.g.
+        # ["qr", "ledger", …]). Empty = the built-in default order. The tree
+        # lets the user drag branches to reorder their priority.
+        self.account_source_order: list[str] = []
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
         self.default_account: str | None = None
+        # The default account's derivation path — its record identity together
+        # with default_account. Disambiguates the signer when the same address
+        # is held by two signers (Ledger + Air-gapped): connecting the QR row
+        # must sign via QR, the Ledger row via Ledger.
+        self.default_account_path: str | None = None
         # User overrides for the token panel: (chain_id, addr_lower) tuples.
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
@@ -130,8 +139,10 @@ class Store:
             except json.JSONDecodeError:
                 return s
             s.accounts = data.get("accounts", [])
+            s.account_source_order = list(data.get("account_source_order", []))
             s.current_chain_id = data.get("current_chain_id", 1)
             s.default_account = data.get("default_account")
+            s.default_account_path = data.get("default_account_path")
             chains_data = data.get("chains")
             if chains_data:
                 s.chains = [_merge_chain(c) for c in chains_data]
@@ -192,9 +203,11 @@ class Store:
                 # iteration" mid-serialize (everything else here is already a
                 # fresh list/dict).
                 "accounts": [dict(a) for a in self.accounts],
+                "account_source_order": list(self.account_source_order),
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
                 "default_account": self.default_account,
+                "default_account_path": self.default_account_path,
                 "hidden_tokens": [
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.hidden_tokens)
@@ -241,15 +254,37 @@ class Store:
         self.save()
         return True
 
-    def remove_account(self, address: str) -> bool:
+    def remove_account(self, address: str, path: str | None = None) -> bool:
+        """Remove account record(s) for ``address``. With ``path``, remove ONLY
+        that record — the same address held by another signer (Ledger vs
+        Air-gapped) stays, and since the tx / token caches are keyed by address
+        they keep working for it. Without ``path``, remove every record with the
+        address (legacy). Repoints the default account if it was removed.
+        Returns True if anything was removed."""
+        addr = address.lower()
         with self._lock:
-            addr = address.lower()
             before = len(self.accounts)
-            self.accounts = [a for a in self.accounts if a["address"].lower() != addr]
+            if path is None:
+                self.accounts = [a for a in self.accounts
+                                 if a["address"].lower() != addr]
+            else:
+                self.accounts = [
+                    a for a in self.accounts
+                    if not (a["address"].lower() == addr
+                            and a.get("path", "") == path)]
             if len(self.accounts) == before:
                 return False
+            still_has_addr = any(a["address"].lower() == addr for a in self.accounts)
             if self.default_account and self.default_account.lower() == addr:
-                self.default_account = self.accounts[0]["address"] if self.accounts else None
+                if still_has_addr:
+                    # The address survives in another branch — keep it as the
+                    # default, but drop a now-stale connected-record path.
+                    if self.default_account_path == path:
+                        self.default_account_path = None
+                else:
+                    self.default_account = (
+                        self.accounts[0]["address"] if self.accounts else None)
+                    self.default_account_path = None
         self.save()
         return True
 
@@ -266,52 +301,81 @@ class Store:
         if persist:
             self.save()
 
-    def reorder_accounts(self, ordered_addresses: list[str]) -> None:
+    def reorder_accounts(self, ordered_keys: list[tuple[str, str]]) -> None:
         """Rewrite ``self.accounts`` so its order matches the given
-        list of addresses (case-insensitive). Addresses not present
-        in the new order keep their existing relative position at
-        the end — so a partial reorder (e.g. only one scheme group)
-        leaves the rest alone. Persists on disk."""
+        ``(address, path)`` keys (address case-insensitive). Keyed on the
+        (address, path) PAIR — the record's unique identity — so the same
+        address held in two places (e.g. Ledger + Air-gapped, or watch-only)
+        reorders independently instead of both records jumping together.
+        Records not referenced keep their existing relative position at the
+        end — so a partial reorder (one scheme group) leaves the rest alone.
+        Persists on disk."""
         with self._lock:
-            wanted = [a.lower() for a in ordered_addresses]
-            by_addr: dict[str, list[dict]] = {}
-            for a in self.accounts:
-                by_addr.setdefault(a["address"].lower(), []).append(a)
+            remaining = list(self.accounts)
             new_list: list[dict] = []
-            seen: set[str] = set()
-            for addr in wanted:
-                if addr in by_addr and addr not in seen:
-                    new_list.extend(by_addr[addr])
-                    seen.add(addr)
-            # Append any unreferenced accounts in their original order.
-            for a in self.accounts:
-                if a["address"].lower() not in seen:
-                    new_list.append(a)
+            for address, path in ordered_keys:
+                al = address.lower()
+                for i, a in enumerate(remaining):
+                    if a["address"].lower() == al and a.get("path", "") == path:
+                        new_list.append(remaining.pop(i))
+                        break
+            new_list.extend(remaining)   # unreferenced, in original order
             self.accounts = new_list
         self.save()
 
+    def set_source_order(self, order: list[str]) -> None:
+        """Persist the display order of the top-level account branches (source
+        keys). The tree passes the roots' current top-to-bottom order after a
+        branch drag."""
+        with self._lock:
+            self.account_source_order = list(order)
+        self.save()
+
     def set_label(self, address: str, label: str) -> bool:
-        """Update the human-readable label on the account whose
-        address matches ``address`` (case-insensitive). Returns
-        True if an account was found and modified, False otherwise.
+        """Update the human-readable label on EVERY account holding
+        ``address`` (case-insensitive) — a label names the address, so all its
+        rows (the same address held via Ledger + Air-gapped, watch-only, …)
+        show it, not just the first. Returns True if any record changed.
         Persists on disk on success."""
         addr = address.lower()
         changed = False
         with self._lock:
             for a in self.accounts:
-                if a["address"].lower() == addr:
-                    if a.get("label") != label:
-                        a["label"] = label
-                        changed = True
-                    break
+                if a["address"].lower() == addr and a.get("label") != label:
+                    a["label"] = label
+                    changed = True
         if changed:
             self.save()
         return changed
 
-    def set_default_account(self, address: str) -> None:
+    def set_default_account(self, address: str, path: str | None = None) -> None:
+        """Set the connected/default account. ``path`` records WHICH record it is
+        when the same address is held by two signers, so signing routes to the
+        right one; ``None`` leaves it ambiguous (first record with the address)."""
         with self._lock:
             self.default_account = address
+            self.default_account_path = path
         self.save()
+
+    def account_for_signing(self, address: str, path: str | None = None) -> dict | None:
+        """The account record to sign for ``address`` — disambiguated when the
+        same address is held by two signers (Ledger + Air-gapped). Prefers an
+        exact ``(address, path)``; else the connected default's remembered
+        record; else the first record with the address."""
+        al = address.lower()
+
+        def match(p: str) -> dict | None:
+            return next((a for a in self.accounts
+                         if a["address"].lower() == al and a.get("path", "") == p),
+                        None)
+
+        if path is not None and (hit := match(path)) is not None:
+            return hit
+        if (self.default_account and al == self.default_account.lower()
+                and self.default_account_path is not None
+                and (hit := match(self.default_account_path)) is not None):
+            return hit
+        return next((a for a in self.accounts if a["address"].lower() == al), None)
 
     def add_chain(self, chain: Chain) -> None:
         with self._lock:

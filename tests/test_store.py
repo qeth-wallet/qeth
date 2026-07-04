@@ -192,6 +192,30 @@ class TestSetLabel:
         s = Store()
         assert s.set_label("0xCC", "nope") is False
 
+    def test_labels_every_record_holding_the_address(self, tmp_qeth):
+        # Same address in two records (Ledger + watch-only) — distinct paths, so
+        # add_account keeps both. The label must land on BOTH, not just the first.
+        s = Store()
+        s.add_account({"address": "0xAA", "path": "m/44'/60'/0'/0/0",
+                       "source": "ledger", "label": ""})
+        s.add_account({"address": "0xAA", "path": "",
+                       "source": "watch_only", "label": ""})
+        assert s.set_label("0xAA", "Main") is True
+        assert [a["label"] for a in s.accounts] == ["Main", "Main"]
+
+
+class TestReorderAccounts:
+    def test_reorders_by_address_and_path_not_address_alone(self, tmp_qeth):
+        # Two records share an address (distinct paths). Reordering must move the
+        # exact record, not drag its same-address twin along.
+        s = Store()
+        s.add_account({"address": "0xAA", "path": "p1", "source": "ledger"})
+        s.add_account({"address": "0xBB", "path": "p2", "source": "hot"})
+        s.add_account({"address": "0xAA", "path": "p3", "source": "watch_only"})
+        s.reorder_accounts([("0xAA", "p3"), ("0xAA", "p1"), ("0xBB", "p2")])
+        assert [(a["address"], a["path"]) for a in s.accounts] == [
+            ("0xAA", "p3"), ("0xAA", "p1"), ("0xBB", "p2")]
+
     def test_noop_update_returns_false_and_does_not_resave(
         self, tmp_qeth, monkeypatch,
     ):

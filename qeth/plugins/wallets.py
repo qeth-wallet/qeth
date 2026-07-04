@@ -64,6 +64,11 @@ ACCOUNT_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 # the user's expand/collapse state across a rebuild (e.g. when switching
 # the default account) instead of force-expanding everything each time.
 EXPAND_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+# The account's derivation path on its leaf row. With UserRole (the address)
+# it forms the (address, path) pair that uniquely identifies a record — needed
+# because the SAME address can sit in two branches, so address alone can't tell
+# rows apart (used to re-select the right row after a drag, and to reorder).
+ACCOUNT_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 
 
 def _ledger_scheme_label(name: str) -> str:
@@ -180,16 +185,21 @@ class _ReorderTree(QTreeWidget):
         # the plugin slots see ``selected_address_changed(addr)`` and
         # repopulate, instead of being left with the mid-drop
         # ``None`` emission that empties the panels.
-        dragged_addrs = [
-            it.data(0, Qt.ItemDataRole.UserRole) for it in source_items
+        # Key on (address, path), not address alone: the same address can sit in
+        # another branch, and re-selecting by address would grab THAT row and
+        # yank the view to the other branch. The (address, path) pair is the
+        # record's unique identity, so we re-select exactly the row we dropped.
+        dragged_keys = [
+            (it.data(0, Qt.ItemDataRole.UserRole), it.data(0, ACCOUNT_PATH_ROLE))
+            for it in source_items
         ]
-        dragged_addrs = [a for a in dragged_addrs if isinstance(a, str)]
+        dragged_keys = [(a, p) for (a, p) in dragged_keys if isinstance(a, str)]
         super().dropEvent(event)
-        if dragged_addrs:
+        if dragged_keys:
             self.clearSelection()
             first = None
-            for addr in dragged_addrs:
-                it = self._find_by_address(addr)
+            for addr, path in dragged_keys:
+                it = self._find_by_key(addr, path)
                 if it is not None:
                     it.setSelected(True)
                     if first is None:
@@ -198,13 +208,15 @@ class _ReorderTree(QTreeWidget):
                 self.setCurrentItem(first)
         self.reorder_committed.emit()
 
-    def _find_by_address(self, addr: str):
-        """Depth-first search for the leaf carrying ``addr`` in
-        UserRole. Used after a drop to relocate items whose pointers
-        were invalidated by Qt's row remove/insert."""
+    def _find_by_key(self, addr: str, path):
+        """Depth-first search for the leaf carrying ``(addr, path)`` — the
+        record's unique key. Used after a drop to relocate an item whose pointer
+        was invalidated by Qt's row remove/insert, without grabbing a same-address
+        row in another branch."""
 
         def walk(item):
-            if item.data(0, Qt.ItemDataRole.UserRole) == addr:
+            if (item.data(0, Qt.ItemDataRole.UserRole) == addr
+                    and (item.data(0, ACCOUNT_PATH_ROLE) or "") == (path or "")):
                 return item
             for i in range(item.childCount()):
                 r = walk(item.child(i))
@@ -321,21 +333,43 @@ class WalletsPlugin(Plugin):
                 return hit
         return None
 
+    def _find_items(self, address: str) -> list[QTreeWidgetItem]:
+        """EVERY tree leaf carrying ``address`` (case-insensitive) — a repeat
+        address has one per branch it sits in."""
+        hits: list[QTreeWidgetItem] = []
+        if self._tree is None or not address:
+            return hits
+        wanted = address.lower()
+
+        def walk(item: QTreeWidgetItem | None) -> None:
+            if item is None:
+                return
+            addr = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(addr, str) and addr.lower() == wanted:
+                hits.append(item)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            walk(self._tree.topLevelItem(i))
+        return hits
+
     def _apply_label_in_place(self, address: str, name: str,
                               verified: bool) -> bool:
-        """Update one account row's label WITHOUT a full _rebuild_tree — used by
-        the async ENS reverse-lookup path (5c). A rebuild there clears the tree,
-        which fires itemSelectionChanged (account=None → account=addr) and so
-        yanks the view off whatever account the user was reading and re-fetches
-        the right-slot panels. Setting the label role repaints just the row.
-        Returns True if the row was found."""
-        it = self._find_item(address)
-        if it is None:
-            return False
-        it.setData(0, ACCOUNT_LABEL_ROLE, name)
-        if verified:
-            it.setToolTip(0, f"{name} — cryptographically verified")
-        return True
+        """Update EVERY row carrying ``address`` WITHOUT a full _rebuild_tree —
+        used by the async ENS reverse-lookup path (5c). A rebuild there clears
+        the tree, which fires itemSelectionChanged (account=None → account=addr)
+        and so yanks the view off whatever account the user was reading and
+        re-fetches the right-slot panels. Setting the label role repaints just
+        the rows. Updates all of them so a repeat address (held in two branches)
+        shows the label everywhere. Returns True if any row was found."""
+        found = False
+        for it in self._find_items(address):
+            it.setData(0, ACCOUNT_LABEL_ROLE, name)
+            if verified:
+                it.setToolTip(0, f"{name} — cryptographically verified")
+            found = True
+        return found
 
     def select_address(self, address: str) -> bool:
         """Programmatically focus the tree on the leaf carrying
@@ -695,6 +729,7 @@ class WalletsPlugin(Plugin):
         label_text = a.get("label") or ""
         it = QTreeWidgetItem([display])
         it.setData(0, Qt.ItemDataRole.UserRole, addr)
+        it.setData(0, ACCOUNT_PATH_ROLE, a.get("path", ""))
         if label_text:
             it.setData(0, ACCOUNT_LABEL_ROLE, label_text)
             if addr.lower() in self._ens_verified:
@@ -821,7 +856,7 @@ class WalletsPlugin(Plugin):
         """Walk the tree top-to-bottom collecting addresses in their
         current display order, then persist that order via the Store.
         Triggered after _ReorderTree commits an internal move."""
-        ordered: list[str] = []
+        ordered: list[tuple[str, str]] = []
         if self._tree is None:
             return
 
@@ -830,7 +865,7 @@ class WalletsPlugin(Plugin):
                 return
             addr = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(addr, str) and addr:
-                ordered.append(addr)
+                ordered.append((addr, item.data(0, ACCOUNT_PATH_ROLE) or ""))
             for i in range(item.childCount()):
                 walk(item.child(i))
 

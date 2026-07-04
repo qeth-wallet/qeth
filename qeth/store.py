@@ -266,44 +266,41 @@ class Store:
         if persist:
             self.save()
 
-    def reorder_accounts(self, ordered_addresses: list[str]) -> None:
+    def reorder_accounts(self, ordered_keys: list[tuple[str, str]]) -> None:
         """Rewrite ``self.accounts`` so its order matches the given
-        list of addresses (case-insensitive). Addresses not present
-        in the new order keep their existing relative position at
-        the end — so a partial reorder (e.g. only one scheme group)
-        leaves the rest alone. Persists on disk."""
+        ``(address, path)`` keys (address case-insensitive). Keyed on the
+        (address, path) PAIR — the record's unique identity — so the same
+        address held in two places (e.g. Ledger + Air-gapped, or watch-only)
+        reorders independently instead of both records jumping together.
+        Records not referenced keep their existing relative position at the
+        end — so a partial reorder (one scheme group) leaves the rest alone.
+        Persists on disk."""
         with self._lock:
-            wanted = [a.lower() for a in ordered_addresses]
-            by_addr: dict[str, list[dict]] = {}
-            for a in self.accounts:
-                by_addr.setdefault(a["address"].lower(), []).append(a)
+            remaining = list(self.accounts)
             new_list: list[dict] = []
-            seen: set[str] = set()
-            for addr in wanted:
-                if addr in by_addr and addr not in seen:
-                    new_list.extend(by_addr[addr])
-                    seen.add(addr)
-            # Append any unreferenced accounts in their original order.
-            for a in self.accounts:
-                if a["address"].lower() not in seen:
-                    new_list.append(a)
+            for address, path in ordered_keys:
+                al = address.lower()
+                for i, a in enumerate(remaining):
+                    if a["address"].lower() == al and a.get("path", "") == path:
+                        new_list.append(remaining.pop(i))
+                        break
+            new_list.extend(remaining)   # unreferenced, in original order
             self.accounts = new_list
         self.save()
 
     def set_label(self, address: str, label: str) -> bool:
-        """Update the human-readable label on the account whose
-        address matches ``address`` (case-insensitive). Returns
-        True if an account was found and modified, False otherwise.
+        """Update the human-readable label on EVERY account holding
+        ``address`` (case-insensitive) — a label names the address, so all its
+        rows (the same address held via Ledger + Air-gapped, watch-only, …)
+        show it, not just the first. Returns True if any record changed.
         Persists on disk on success."""
         addr = address.lower()
         changed = False
         with self._lock:
             for a in self.accounts:
-                if a["address"].lower() == addr:
-                    if a.get("label") != label:
-                        a["label"] = label
-                        changed = True
-                    break
+                if a["address"].lower() == addr and a.get("label") != label:
+                    a["label"] = label
+                    changed = True
         if changed:
             self.save()
         return changed

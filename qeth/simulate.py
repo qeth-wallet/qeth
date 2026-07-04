@@ -332,6 +332,47 @@ _DEFAULT_FORK_LAG = 3
 # this is a genuine block number (no chain reaches 2**40 blocks for millennia).
 _REAL_BLOCK_CEILING = 1 << 40
 
+# How long an unverified preview waits for the load-balanced RPC head to catch
+# up to the wallet's latest confirmed tx before forking. Short — a preview
+# mustn't hang — and only actually spent when the node IS behind (a caught-up
+# node returns on the first poll). Tuned for the common case: a node the LB
+# routed to is mid-importing an already-mined block, seconds behind.
+_HEAD_CATCHUP_CAP_S = 5.0
+_HEAD_POLL_S = 0.25
+
+
+def _await_floor(chain, floor_block, *, deadline, sleep) -> None:
+    """Wait (briefly, bounded) for ``chain``'s head to reach ``floor_block`` —
+    the wallet's latest confirmed tx — before an unverified preview forks at
+    'latest'. Right after a fast back-to-back sign (QR signing is quick enough
+    to fire an approve then its dependent swap seconds apart), the node the load
+    balancer routes to can trail the one that mined the first tx; forking before
+    it makes the follow-up falsely revert on stale state (e.g. a missing
+    allowance). We can't fork a block a lagging node doesn't have, so instead we
+    wait for it to import ours. No-op for the pending-tx sentinel, an unknown
+    floor, or a node already caught up; if it never catches up within the cap we
+    proceed and let the (possibly stale) result stand rather than hang."""
+    if floor_block is None or floor_block >= _REAL_BLOCK_CEILING:
+        return
+    import time as _time
+    _sleep = sleep or _time.sleep
+    from .chain import EthClient
+    try:
+        client = EthClient(chain)
+    except Exception:
+        return
+    cap = _time.monotonic() + _HEAD_CATCHUP_CAP_S
+    if deadline is not None:
+        cap = min(cap, deadline)
+    while True:
+        try:
+            head = _hexint(client.rpc("eth_blockNumber", [])) or 0
+        except Exception:
+            return                       # transport trouble — let the sim try
+        if head >= floor_block or _time.monotonic() >= cap:
+            return
+        _sleep(_HEAD_POLL_S)
+
 
 def _floor_ahead_of_head(chain, floor_block) -> bool:
     """True when ``floor_block`` — this wallet's latest *confirmed* tx — is a
@@ -546,6 +587,13 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
             if isinstance(out, RevertNote):
                 out.verified = True
             return VerifiedLogs(out) if isinstance(out, list) else out
+    # Unverified preview (no Helios, or Helios still behind the floor): the
+    # verified path applies the fork floor itself; here we instead wait for the
+    # load-balanced head to reach it, so a node the LB routed to that trails the
+    # one which mined our latest tx doesn't fork before it and falsely revert a
+    # dependent follow-up. (Skipped for the hermetic fork test seam.)
+    if fork_reader is None:
+        _await_floor(chain, floor_block, deadline=deadline, sleep=sleep)
     if fork_reader is None and _SIMV1_SUPPORT.get(chain.rpc_url) is not False:
         try:
             logs = _simulate_via_rpc(chain, from_addr, to_addr, data, value,

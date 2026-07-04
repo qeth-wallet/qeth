@@ -522,6 +522,57 @@ def test_floor_ahead_of_head(monkeypatch):
     assert _floor_ahead_of_head(CHAIN, 90) is False                 # tx behind head
 
 
+def test_await_floor_waits_until_head_reaches_the_floor(monkeypatch):
+    """The unverified preview waits for the load-balanced head to import the
+    wallet's latest confirmed tx before forking at 'latest', so an approve fired
+    just before its swap isn't missed (false revert). Stops the instant the head
+    catches up."""
+    from qeth.simulate import _HEAD_POLL_S, _await_floor
+    heads = iter([98, 99, 100, 101])    # LB node imports our block on the 3rd poll
+    polls: list = []
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params):
+            polls.append(method)
+            return hex(next(heads))
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    slept: list = []
+    _await_floor(CHAIN, 100, deadline=None, sleep=slept.append)
+    assert polls == ["eth_blockNumber"] * 3         # polled until head >= 100
+    assert slept == [_HEAD_POLL_S, _HEAD_POLL_S]     # waited between, not after
+
+
+def test_await_floor_is_bounded_when_head_never_catches_up(monkeypatch):
+    """A node that never imports our block must not hang the preview — the wait
+    gives up at the cap and lets the (possibly stale) sim proceed."""
+    from qeth import simulate
+    monkeypatch.setattr(simulate, "_HEAD_CATCHUP_CAP_S", 0.0)
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params): return hex(50)   # forever behind floor 100
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    slept: list = []
+    simulate._await_floor(CHAIN, 100, deadline=None, sleep=slept.append)
+    assert slept == []                               # capped out, never slept
+
+
+def test_await_floor_noop_for_sentinel_and_unknown(monkeypatch):
+    """No floor (None) or the pending-tx sentinel means 'fork at head' already —
+    nothing to wait for, and we don't even hit the network."""
+    from qeth.simulate import _REAL_BLOCK_CEILING, _await_floor
+    called: list = []
+
+    class _Client:
+        def __init__(self, chain): pass
+        def rpc(self, method, params): called.append(method); return hex(1)
+    monkeypatch.setattr("qeth.chain.EthClient", _Client)
+    _await_floor(CHAIN, None, deadline=None, sleep=lambda s: None)
+    _await_floor(CHAIN, _REAL_BLOCK_CEILING, deadline=None, sleep=lambda s: None)
+    assert called == []
+
+
 def test_verified_skipped_when_helios_behind_floor(monkeypatch):
     """Right after a tx confirms, the Helios head can still be behind it. The
     verified fork (capped at that head) would run before the tx and miss its
@@ -531,6 +582,11 @@ def test_verified_skipped_when_helios_behind_floor(monkeypatch):
     monkeypatch.setattr(sim, "_SIMV1_SUPPORT", {})
     monkeypatch.setattr(sim, "fork_available", lambda: True)
     monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
+    # This one mock stands in for BOTH the (lagging) Helios head and the
+    # execution head that _await_floor polls; in production they're different
+    # chains (execution is ahead of the floor). Pin the catch-up cap to 0 so the
+    # conflation doesn't make _await_floor wait out its real-time budget here.
+    monkeypatch.setattr(sim, "_HEAD_CATCHUP_CAP_S", 0.0)
 
     class _Client:
         def __init__(self, chain): pass

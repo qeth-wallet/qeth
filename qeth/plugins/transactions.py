@@ -2804,22 +2804,20 @@ class TransactionListPanel(QWidget):
         # is used only when the icon theme lacks the named icon, so a
         # status cell never renders blank.
         if tx.pending:
-            icon_name, glyph, tip = "content-loading", "⏳", "Pending"
+            glyph, tip = "⏳︎", "Pending"
         elif getattr(tx, "dropped", False):
-            icon_name, glyph, tip = (
-                "user-trash", "⊘",
-                "Dropped — replaced by another tx at this nonce",
-            )
+            glyph, tip = "⊘", "Dropped — replaced by another tx at this nonce"
         elif tx.success:
-            icon_name, glyph, tip = "dialog-ok", "✓", "Success"
+            glyph, tip = "✓", "Success"
         else:
-            icon_name, glyph, tip = "dialog-error", "✗", "Reverted"
-        status = QTableWidgetItem()
-        icon = QIcon.fromTheme(icon_name)
-        if icon.isNull():
-            status.setText(glyph)
-        else:
-            status.setIcon(icon)
+            glyph, tip = "✗", "Reverted"
+        # A font glyph, NOT QIcon.fromTheme("dialog-ok"): a themed check ships
+        # wildly different art across themes AND across sizes (SE98's dialog-ok
+        # is a pixelized tick at 16px but a glossy square at 22px+), so the same
+        # wallet's confirmed column rendered differently machine-to-machine. A
+        # glyph tracks the font + palette and is identical everywhere. The
+        # trailing U+FE0E on the hourglass forces its text form, not a colour emoji.
+        status = QTableWidgetItem(glyph)
         status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         status.setToolTip(tip)
 

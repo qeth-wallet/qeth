@@ -549,21 +549,8 @@ class EnsPanel(QWidget):
 
         self._domain_icon = _icon("emblem-web", QStyle.StandardPixmap.SP_DriveNetIcon)
         self._sub_icon = _icon("folder", QStyle.StandardPixmap.SP_DirIcon)
-        # Status-column icons: verified-ok, warning, and "owned but proof still
-        # catching up" (a sync/refresh glyph — distinct from the green ✓).
-        # emblem-ok is the semantic "verified" check, but retro/minimal themes
-        # (e.g. SE98) don't ship it — and then _icon would fall through to
-        # SP_DialogApplyButton, which each Qt STYLE draws differently (a Win98
-        # tick on one machine, a glossy square on another, even under the SAME
-        # icon theme). dialog-ok is what the confirmed-tx check uses and these
-        # themes DO provide it, so listing it keeps this ✓ identical to that one.
-        self._ok_icon = _icon(("emblem-ok", "dialog-ok"),
-                              QStyle.StandardPixmap.SP_DialogApplyButton)
-        self._warn_icon = _icon("dialog-warning",
-                                QStyle.StandardPixmap.SP_MessageBoxWarning)
-        self._pending_icon = _icon(
-            ("view-refresh", "emblem-synchronizing-symbolic", "chronometer"),
-            QStyle.StandardPixmap.SP_BrowserReload)
+        # Status column (ok / warn / pending) is drawn with font GLYPHS, not
+        # themed icons — see _set_status for why.
         self._rec_icons = {
             # A chain link for "points to an address". The SP_* last-resort (bare
             # icon-less themes only) is a plain document — NOT SP_FileLinkIcon
@@ -1100,12 +1087,17 @@ class EnsPanel(QWidget):
 
     def _set_status(self, item: QTreeWidgetItem, status: str,
                     tooltip: str) -> None:
-        """Set the trailing status column's icon + tooltip for a line, ``status``
-        in ``{"ok", "warn", "pending"}``. An icon (not a text ✓/⚠) keeps the row
-        height uniform regardless of the theme's emoji rendering."""
-        icon = {"ok": self._ok_icon, "warn": self._warn_icon,
-                "pending": self._pending_icon}.get(status, self._warn_icon)
-        item.setIcon(self._STATUS_COL, icon)
+        """Set the trailing status column's glyph + tooltip for a line,
+        ``status`` in ``{"ok", "warn", "pending"}``. A FONT GLYPH, not a
+        QIcon.fromTheme check: a themed icon (``emblem-ok``/``dialog-ok``) ships
+        different art per theme and per size — a pixelized SE98 tick vs a glossy
+        square — so the verified ✓ rendered differently machine-to-machine; a
+        glyph tracks the font + palette and matches the confirmed-tx column
+        everywhere. Trailing U+FE0E on ⚠ / ⏳ forces the text (non-emoji) form so
+        the row height stays uniform."""
+        glyph = {"ok": "✓", "warn": "⚠︎", "pending": "⏳︎"}.get(status, "⚠︎")
+        item.setText(self._STATUS_COL, glyph)
+        item.setTextAlignment(self._STATUS_COL, Qt.AlignmentFlag.AlignCenter)
         item.setData(0, _STATUS_ROLE, status)
         item.setToolTip(self._STATUS_COL, tooltip)
 

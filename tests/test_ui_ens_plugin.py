@@ -1792,32 +1792,41 @@ class TestResolvedAddressFollowsRecords:
         assert plugin._rec_cache["curvelend.eth"] == (new_rec, 101, True)
 
 
-def test_ok_status_icon_falls_back_to_dialog_ok_not_the_style(qtbot, monkeypatch):
-    """A retro/minimal theme (SE98) ships 'dialog-ok' (the confirmed-tx check)
-    but not 'emblem-ok', so the verified-ENS ✓ must resolve to dialog-ok — the
-    same icon, present everywhere — rather than the Qt style's
-    SP_DialogApplyButton, which each widget style draws differently. Regression
-    for a verified-domain ✓ that rendered as a glossy square on one machine and
-    a Win98 tick on another under the *same* icon theme."""
+def test_icon_helper_prefers_present_theme_name_over_style(qtbot, monkeypatch):
+    """_icon (the tree's domain/sub row icons) takes the first candidate name
+    the theme provides, and only falls back to the Qt style icon when none are —
+    so a theme missing the primary name still lands on a real themed icon."""
     from PySide6.QtGui import QIcon, QPixmap
     from PySide6.QtWidgets import QStyle
     from qeth.plugins.ens import _icon
 
     px = QPixmap(16, 16)
     px.fill()
-    marker = QIcon(px)                      # stands in for the theme's dialog-ok
-    present = {"dialog-ok"}
+    marker = QIcon(px)
+    present = {"folder"}
     monkeypatch.setattr(
         QIcon, "fromTheme",
         staticmethod(lambda n, *a: marker if n in present else QIcon()))
 
-    # emblem-ok absent, dialog-ok present → dialog-ok wins over the style icon
-    got = _icon(("emblem-ok", "dialog-ok"),
-                QStyle.StandardPixmap.SP_DialogApplyButton)
-    assert got is marker
-
-    # neither present → only THEN the style fallback (never null)
+    got = _icon(("inode-directory", "folder"), QStyle.StandardPixmap.SP_DirIcon)
+    assert got is marker                        # 2nd name present → wins
     present.clear()
-    fb = _icon(("emblem-ok", "dialog-ok"),
-               QStyle.StandardPixmap.SP_DialogApplyButton)
-    assert fb is not marker and not fb.isNull()
+    fb = _icon(("inode-directory", "folder"), QStyle.StandardPixmap.SP_DirIcon)
+    assert fb is not marker and not fb.isNull()  # none present → style fallback
+
+
+def test_status_column_uses_font_glyphs_not_theme_icons(qtbot, tmp_qeth):
+    """The verified/warn/pending status is a font GLYPH (theme-independent), not
+    a QIcon.fromTheme check whose art varies by theme AND size (SE98's dialog-ok
+    is a pixelized tick at 16px, a glossy square at 22px+). So the status column
+    carries TEXT (the glyph) and no themed icon — identical across machines."""
+    from PySide6.QtWidgets import QTreeWidgetItem
+    panel = EnsPanel()
+    qtbot.addWidget(panel)
+    item = QTreeWidgetItem(["name"])
+    panel.tree.addTopLevelItem(item)
+    for status, glyph in (("ok", "✓"), ("warn", "⚠"), ("pending", "⏳")):
+        panel._set_status(item, status, "tip")
+        assert item.text(panel._STATUS_COL).startswith(glyph)   # glyph (+ maybe VS15)
+        assert item.icon(panel._STATUS_COL).isNull()            # no themed icon
+        assert item.data(0, _STATUS_ROLE) == status

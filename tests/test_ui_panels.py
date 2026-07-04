@@ -471,17 +471,11 @@ class TestTransactionListPanel:
         assert panel.table.item(0, 0).toolTip() == "Success"
         assert panel.table.item(1, 0).toolTip() == "Reverted"
 
-    def test_status_falls_back_to_glyph_without_icon_theme(
-        self, qtbot, tmp_qeth, monkeypatch,
-    ):
-        """The status column uses a themed icon when available, but must
-        never render blank — a missing icon falls back to the Unicode
-        glyph. Force fromTheme to return a null icon and check the
-        glyph text is used."""
-        import qeth.plugins.transactions as txmod
-        from PySide6.QtGui import QIcon
-        monkeypatch.setattr(txmod.QIcon, "fromTheme",
-                            staticmethod(lambda *_a, **_k: QIcon()))
+    def test_status_column_uses_font_glyphs(self, qtbot, tmp_qeth):
+        """The status column is drawn with font glyphs, NOT themed icons — a
+        themed dialog-ok/emblem-ok varied wildly across themes and sizes (a
+        pixelized tick vs a glossy square), so the check rendered differently
+        machine-to-machine. Glyphs track the font + palette and are identical."""
         panel = TransactionListPanel()
         qtbot.addWidget(panel)
         panel.set_context(ETH, ADDR)
@@ -490,9 +484,10 @@ class TestTransactionListPanel:
             _tx(to_addr="0xbeef", success=True),
             _tx(to_addr="0xbeef", success=False),
         ])
-        assert panel.table.item(0, 0).text() == "⏳"
-        assert panel.table.item(1, 0).text() == "✓"
-        assert panel.table.item(2, 0).text() == "✗"
+        assert panel.table.item(0, 0).text().startswith("⏳")   # pending (+ maybe VS15)
+        assert panel.table.item(1, 0).text() == "✓"             # confirmed
+        assert panel.table.item(2, 0).text() == "✗"             # reverted
+        assert panel.table.item(1, 0).icon().isNull()           # a glyph, no icon
 
 
     def test_clear_resets_panel(self, qtbot, tmp_qeth):

@@ -1814,7 +1814,15 @@ class AddLedgerDialog(Dialog):
         error(self, "Ledger error", msg)
 
     def selected_accounts(self) -> list[DiscoveredAccount]:
-        return [it.data(Qt.ItemDataRole.UserRole) for it in self.results.selectedItems()]
+        # Iterate the list in DISPLAY order (top to bottom) rather than
+        # selectedItems(), whose order is unspecified — so accounts get added in
+        # the order the user sees them, not a scrambled one.
+        out = []
+        for i in range(self.results.count()):
+            it = self.results.item(i)
+            if it is not None and it.isSelected():
+                out.append(it.data(Qt.ItemDataRole.UserRole))
+        return out
 
 
 class AddQRWalletDialog(AddLedgerDialog):

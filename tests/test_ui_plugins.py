@@ -2946,6 +2946,26 @@ class TestWalletsPlugin:
         dlg = AddLedgerDialog(DEFAULT_CHAINS[0])
         qtbot.addWidget(dlg)
 
+    def test_selected_accounts_are_returned_in_display_order(self, qtbot):
+        """Accounts are added in the order they appear in the list, not the
+        arbitrary order of QListWidget.selectedItems()."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QListWidgetItem
+        from qeth.chains import DEFAULT_CHAINS
+        from qeth.ledger import DiscoveredAccount
+        from qeth.plugins.wallets import AddLedgerDialog
+        dlg = AddLedgerDialog(DEFAULT_CHAINS[0])
+        qtbot.addWidget(dlg)
+        for i in range(3):
+            it = QListWidgetItem(f"row{i}")
+            it.setData(Qt.ItemDataRole.UserRole,
+                       DiscoveredAccount(address=f"0x{i}", path=f"p{i}",
+                                         index=i, nonce=1))
+            dlg.results.addItem(it)
+        for i in (2, 0, 1):                      # select out of order
+            dlg.results.item(i).setSelected(True)
+        assert [a.index for a in dlg.selected_accounts()] == [0, 1, 2]
+
 
 class TestDetailsEventsView:
     """The transaction-details events list: decode receipt logs, default

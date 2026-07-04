@@ -100,6 +100,15 @@ class MainWindow(QMainWindow):
         # alive). Plugins register workers via host.start_worker(...);
         # they self-evict via the ``finished`` signal.
         self._active_workers: set[QThread] = set()
+        # On quit, join any still-running workers before Qt tears them down —
+        # the same QThread-alive-on-destroy abort as above, but at shutdown: it
+        # SIGABRTs, which on macOS pops a "closed unexpectedly" dialog on Ctrl+C.
+        # aboutToQuit fires after the window is gone, so the join isn't a frozen
+        # window. (The ws watcher self-joins in its own stop().)
+        from PySide6.QtWidgets import QApplication
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.aboutToQuit.connect(self._join_workers)
 
         self._build_central()
         self._build_statusbar()
@@ -599,6 +608,28 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
+
+    # Total wall-clock budget for joining in-flight workers at quit. Workers run
+    # concurrently, so this bounds the SLOWEST one, not their sum; they do
+    # timeout-bounded network I/O, so most finish well inside it.
+    _SHUTDOWN_JOIN_S = 5.0
+
+    def _join_workers(self) -> None:
+        """Wait (bounded) for in-flight background workers on quit so none is
+        still running when Qt destroys its QThread — that aborts (SIGABRT). They
+        self-evict via ``finished``, but at quit there's no event loop left to
+        run that, so we join explicitly here."""
+        import time as _t
+        deadline = _t.monotonic() + self._SHUTDOWN_JOIN_S
+        for w in list(self._active_workers):
+            remaining = deadline - _t.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                if w.isRunning():
+                    w.wait(int(remaining * 1000))
+            except RuntimeError:
+                pass          # C++ object already gone — nothing to join
 
     def set_tray(self, tray) -> None:
         """Adopt the tray controller (the desktop-notification sink). Called

@@ -39,6 +39,29 @@ def test_mainwindow_builds(mainwindow):
     assert mainwindow.windowTitle() == "qeth — Ethereum wallet"
 
 
+def test_join_workers_joins_running_and_skips_finished(mainwindow):
+    """On quit, _join_workers waits for still-running workers (else Qt aborts on
+    a live QThread → SIGABRT / macOS 'closed unexpectedly'), but doesn't wait on
+    ones that already finished."""
+    calls = {"running": 0, "done": 0}
+
+    class _FakeWorker:            # a plain class stays hashable (SimpleNamespace isn't)
+        def __init__(self, name, running):
+            self.name, self.running = name, running
+
+        def isRunning(self):
+            return self.running
+
+        def wait(self, ms):
+            calls[self.name] += 1
+            return True
+
+    mainwindow._active_workers = {_FakeWorker("running", True),
+                                  _FakeWorker("done", False)}
+    mainwindow._join_workers()
+    assert calls == {"running": 1, "done": 0}   # only the live thread is joined
+
+
 class TestX11BackingStoreHardening:
     """QT_X11_NO_MITSHM is set before QApplication so the window doesn't
     stop repainting after many hours of X11 uptime (MIT-SHM surface goes

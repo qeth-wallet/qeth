@@ -63,6 +63,37 @@ def test_real_loop_error_still_reaches_default_handler():
     assert seen == [ctx]
 
 
+def test_pending_websockets_teardown_task_is_quieted():
+    """The 'Task was destroyed but it is pending' a shielded websockets close
+    task logs when the loop tears down is teardown noise — quiet it."""
+    w = LiveWatcher(lambda: [])
+    seen = []
+    fake_loop = type("L", (), {
+        "default_exception_handler": lambda self, ctx: seen.append(ctx)
+    })()
+    ws_task = type("T", (), {"__repr__": lambda self:
+        "<Task pending coro=<WebSocketCommonProtocol.transfer_data() running "
+        "at .venv/.../websockets/legacy/protocol.py:956>>"})()
+    w._quiet_ws_disconnects(fake_loop, {
+        "message": "Task was destroyed but it is pending!", "task": ws_task})
+    assert seen == []                              # not dumped by the default handler
+
+
+def test_pending_non_websockets_task_still_reaches_default_handler():
+    """A pending NON-websockets task at teardown is a real orphaned qeth task —
+    stay loud so it gets noticed."""
+    w = LiveWatcher(lambda: [])
+    seen = []
+    fake_loop = type("L", (), {
+        "default_exception_handler": lambda self, ctx: seen.append(ctx)
+    })()
+    our_task = type("T", (), {"__repr__": lambda self:
+        "<Task pending coro=<LiveWatcher._watch_chain()>>"})()
+    ctx = {"message": "Task was destroyed but it is pending!", "task": our_task}
+    w._quiet_ws_disconnects(fake_loop, ctx)
+    assert seen == [ctx]
+
+
 def test_to_int_normalises_hex_and_int():
     """newHeads block numbers arrive as a hex str from DRPC but an int from
     publicnode (web3's subscription formatting is provider-inconsistent);

@@ -184,6 +184,16 @@ class LiveWatcher(QThread):
         if module.startswith("websockets") or name.startswith("ConnectionClosed"):
             log.warning("live ws connection dropped (%s); reconnecting", name)
             return
+        # "Task was destroyed but it is pending!" has no exception — it's logged
+        # by a websockets close task (transfer_data / close_connection) that the
+        # library shields from cancellation, so it can outlive our bounded
+        # shutdown drain and get GC'd still pending. Harmless teardown noise; the
+        # connection is already gone. Quiet it only for websockets tasks so a
+        # real orphaned qeth task still gets flagged.
+        task = context.get("task")
+        if ("Task was destroyed but it is pending" in context.get("message", "")
+                and task is not None and "websockets" in repr(task)):
+            return
         loop.default_exception_handler(context)
 
     async def _serve(self) -> None:
@@ -213,16 +223,21 @@ class LiveWatcher(QThread):
                 return_exceptions=True)
             # web3's legacy-websockets provider leaves a couple of internal
             # tasks (transfer_data / close_connection) finishing the close
-            # handshake after our `async with` exits. If asyncio.run tears the
-            # loop down before they settle, asyncio logs "Task was destroyed
-            # but it is pending". Cancel + await whatever's left so shutdown is
-            # tidy; bounded so a task that ignores cancellation can't hang it.
-            leftovers = [t for t in asyncio.all_tasks()
-                         if t is not asyncio.current_task() and not t.done()]
-            if leftovers:
+            # handshake after our `async with` exits — and closing one can spawn
+            # another — so a single snapshot misses the ones born mid-cancel. If
+            # asyncio.run tears the loop down before they settle, asyncio logs
+            # "Task was destroyed but it is pending". Drain in a few passes (each
+            # re-collecting freshly-spawned tasks), bounded so a shielded task
+            # that ignores cancellation can't hang shutdown — any that survive
+            # are quieted by _quiet_ws_disconnects.
+            for _ in range(3):
+                leftovers = [t for t in asyncio.all_tasks()
+                             if t is not asyncio.current_task() and not t.done()]
+                if not leftovers:
+                    break
                 for t in leftovers:
                     t.cancel()
-                await asyncio.wait(leftovers, timeout=2.0)
+                await asyncio.wait(leftovers, timeout=1.0)
 
     def _desired_targets(self) -> "dict[int, tuple[Chain, str | None]]":
         """Chains to watch and, for the on-screen chain, the account whose

@@ -31,7 +31,9 @@ ACTIVITIES_DIR = CONFIG_DIR / "activities"
 # widening the transfer fetch so older rows gain coins). A cache written by
 # an older build is then ignored and those rows are rebuilt, rather than
 # pinning the stale result forever.
-_BUILD_VERSION = 2
+# v3: clear rows cached with a one-sided result (a TOKEN->ETH swap whose
+# received native ETH was missing while Blockscout's internal-tx index lagged).
+_BUILD_VERSION = 3
 
 
 def _leg_to_json(leg: AssetLeg) -> list:

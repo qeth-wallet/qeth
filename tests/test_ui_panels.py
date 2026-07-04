@@ -378,6 +378,28 @@ class TestTransactionListPanel:
         qtbot.addWidget(panel)
         assert _has_copy_shortcut(panel.table)
 
+    def test_activity_refetch_targets_recent_one_sided_rows(self, qtbot, tmp_qeth):
+        """A TOKEN->ETH swap can cache one-sided (token out, ETH not yet indexed
+        by Blockscout); re-fetch it while recent so it self-heals, but leave
+        settled and two-sided rows alone."""
+        import time
+        from types import SimpleNamespace
+        from qeth.tx_activity import Activity, AssetLeg
+        panel = TransactionListPanel()
+        qtbot.addWidget(panel)
+        now = time.time()
+        tx = lambda h, ts=now: SimpleNamespace(hash=h, timestamp=ts)
+
+        assert panel._activity_needs_fetch(tx("0xNEW"), now) is True   # uncached
+        panel._activities["0xFULL"] = Activity(
+            "exchange", (AssetLeg("USDT", "0x1"),), (AssetLeg("ETH", None),))
+        assert panel._activity_needs_fetch(tx("0xFULL"), now) is False  # two-sided
+        panel._activities["0xSWAP"] = Activity(
+            "exchange", (AssetLeg("USDT", "0x1"),), ())
+        assert panel._activity_needs_fetch(tx("0xSWAP"), now) is True   # one-sided, recent
+        assert panel._activity_needs_fetch(
+            tx("0xSWAP", now - 7 * 3600), now) is False                 # one-sided, settled
+
     def test_empty_list_shows_status_message(self, qtbot, tmp_qeth):
         panel = TransactionListPanel()
         qtbot.addWidget(panel)

@@ -2613,15 +2613,31 @@ class TransactionListPanel(QWidget):
     def set_activity_kicker(self, fn: Callable[..., None] | None) -> None:
         self._activity_kicker = fn
 
+    # A TOKEN->ETH swap's received native ETH comes from Blockscout's
+    # internal-tx index, which lags a confirmed tx by minutes. So a fresh swap
+    # can build one-sided (token out, nothing in); since we normally skip rows
+    # we already have, it would stay that way. Re-fetch a RECENT one-sided row
+    # so it self-heals once the index catches up (older rows are settled).
+    _ACTIVITY_RECHECK_S = 6 * 3600
+
     def _request_activities(self, txs: list[Transaction]) -> None:
-        """Ask the plugin to build Activity for any of ``txs`` we don't
-        have yet. Called from the render methods so every path (initial,
-        append, prepend) enriches the rows it just added."""
+        """Ask the plugin to build Activity for any of ``txs`` we don't have yet
+        (plus recent one-sided rows that may still be missing a lagged native
+        leg). Called from the render methods so every path (initial, append,
+        prepend) enriches the rows it just added."""
         if self._activity_kicker is None or self._chain is None or not self._viewer:
             return
-        pending = [t for t in txs if t.hash not in self._activities]
+        now = time.time()
+        pending = [t for t in txs if self._activity_needs_fetch(t, now)]
         if pending:
             self._activity_kicker(self._chain, self._viewer, pending)
+
+    def _activity_needs_fetch(self, tx: Transaction, now: float) -> bool:
+        act = self._activities.get(tx.hash)
+        if act is None:
+            return True
+        one_sided = bool(act.out) != bool(act.inn)     # coins on exactly one side
+        return one_sided and (now - (tx.timestamp or 0)) < self._ACTIVITY_RECHECK_S
 
     def _on_scroll_change(self, value: int) -> None:
         """Emit ``scrolled_to_bottom`` when the user reaches the

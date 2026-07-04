@@ -248,6 +248,17 @@ def main() -> int:
     # the host's configured font — both before any widget is built.
     _ensure_legible_icon_theme(os.environ)
     _adopt_host_qt_font(app, os.environ)
+    # Record the active icon theme so a "my check icon looks different on machine
+    # B" question is answerable from the log: the confirmed-tx (dialog-ok) and
+    # verified-ENS (emblem-ok) checks are QIcon.fromTheme() lookups, so they
+    # render whatever THIS theme provides. A bundled Qt with no qt6ct/KDE
+    # platform-theme plugin (a venv without --system-site-packages, or a packaged
+    # build) silently ignores the user's chosen theme and falls back to a default.
+    import PySide6
+    from PySide6.QtGui import QIcon
+    logging.getLogger("qeth").info(
+        "Qt icon theme: %r  (PySide6: %s)",
+        QIcon.themeName() or "(none)", PySide6.__file__)
     # A single self-contained tile icon — legible on any surface, so we
     # don't have to (and can't portably) guess the taskbar/panel colour.
     app.setWindowIcon(app_icon())

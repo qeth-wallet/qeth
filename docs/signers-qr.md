@@ -117,9 +117,17 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   is the key de-risking step: the signing math is correct before any UI.
 
 ### 3c — The exchange dialog  *(the camera + animated-QR window)*
-- `qeth/qr_exchange_dialog.py`: top = animated `segno` QR cycling the UR
-  fragments on a timer; bottom = live camera preview with the decoder running
-  per frame; a complete decode → `accept()` returning the bytes; cancel → `None`.
+- `qeth/qr_exchange_dialog.py`: **side-by-side** (a desktop screen is wider than
+  it is tall) — left = the animated `segno` QR (a fresh fountain part per timer
+  tick via `multipart.frame_source`); right = the live camera preview with the
+  decoder running per frame; a complete decode → `accept()` returning the bytes;
+  cancel → `None`. The two panes are equal **squares** (`PANE` px, both the QR
+  and the 1:1 camera view) laid out in a `QGridLayout` — captions in row 0, panes
+  in row 1 — so they stay aligned however a caption wraps. Spacing is the house
+  rhythm: caption↔pane is `item_spacing` (within a paragraph), the between-column
+  gap is `group_spacing` (two distinct groups). The QR is rendered large by
+  `ur_to_pixmap` then scaled to the pane with **nearest-neighbour** (hard module
+  edges, best for the device's scan, vs. grey-fringed smooth scaling).
 - Implement `DialogInteraction.exchange_qr` to open it (already marshaled from
   the worker by step 2). Add the `progress_text==""` skip in `ui.py`.
 - Camera + decoder are injectable so the **frame-cycling and decode-callback

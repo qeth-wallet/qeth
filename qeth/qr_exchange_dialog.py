@@ -19,20 +19,22 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QDialogButtonBox,
+    QGridLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from .dialog import Dialog, item_spacing
+from .dialog import Dialog, group_spacing, item_spacing
 
 
 def ur_to_pixmap(ur_string: str, *, scale: int = 8) -> QPixmap:
     """Render a UR string as a QR ``QPixmap``. UR is uppercased so the QR uses
     the compact alphanumeric mode (``ur:``/``/``/``-`` and digits are all in
-    that charset). ``scale`` is px-per-module — bigger is physically larger on
-    screen, easier for the device camera to lock onto (independent of density)."""
+    that charset). ``scale`` is the source px-per-module — high enough that the
+    dialog can scale the result down to its pane crisply (the on-screen size is
+    the dialog's ``PANE``, not this)."""
     buf = io.BytesIO()
     segno.make(ur_string.upper(), error="l").save(buf, kind="png", scale=scale)
     pixmap = QPixmap()
@@ -41,12 +43,17 @@ def ur_to_pixmap(ur_string: str, *, scale: int = 8) -> QPixmap:
 
 
 class QRExchangeDialog(Dialog):
-    """Modal exchange: our request QR (top) + the live camera (bottom). The
-    first scanned ``ur:…`` accepts and is returned by :meth:`scanned_ur`."""
+    """Modal exchange: our request QR (left) and the live camera (right), side by
+    side to suit a wide desktop screen. The first scanned ``ur:…`` accepts and is
+    returned by :meth:`scanned_ur`."""
 
     # Animated-QR frame cadence (ms). Slow enough for a device camera to lock
     # onto each fragment, fast enough to cycle a few-part request quickly.
     FRAME_MS = 200
+
+    # Side of each square pane (QR and camera), px. Both panes are the same size
+    # so they read as a matched pair; tune here if the QR wants to be larger.
+    PANE = 320
 
     def __init__(
         self, next_frame: Callable[[], str], *, scanner: Any = None,
@@ -64,32 +71,36 @@ class QRExchangeDialog(Dialog):
 
         root = QVBoxLayout(self)
 
-        show = QVBoxLayout()
-        show.setSpacing(item_spacing(self))
-        show.addWidget(QLabel(
-            "1. Show this to your wallet's camera "
-            "(it animates for a large transaction):"))
+        # Captions in row 0, the two square panes in row 1 — the grid keeps the
+        # QR and camera aligned however the captions wrap. Caption↔pane gap is
+        # item_spacing (within a paragraph); the between-column gap is
+        # group_spacing (two logically distinct groups) — the house rhythm.
+        grid = QGridLayout()
+        grid.setVerticalSpacing(item_spacing(self))
+        grid.setHorizontalSpacing(group_spacing(self))
+        top = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+
+        show_caption = QLabel("1. Show this to your wallet's camera:")
+        show_caption.setWordWrap(True)
         self._qr_label = QLabel()
+        self._qr_label.setFixedSize(self.PANE, self.PANE)
         self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        show.addWidget(self._qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addLayout(show)
+        grid.addWidget(show_caption, 0, 0, top)
+        grid.addWidget(self._qr_label, 1, 0)
+
+        scan_caption = QLabel("2. Point your camera at the wallet's signature QR:")
+        scan_caption.setWordWrap(True)
+        self._preview = QLabel("Starting camera…")
+        self._preview.setFixedSize(self.PANE, self.PANE)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(scan_caption, 0, 1, top)
+        grid.addWidget(self._preview, 1, 1)
+        root.addLayout(grid)
 
         self._render_frame()   # first frame
         self._anim: QTimer | None = QTimer(self)
         self._anim.timeout.connect(self._render_frame)
         self._anim.start(self.FRAME_MS)
-
-        scan = QVBoxLayout()
-        scan.setSpacing(item_spacing(self))
-        scan.addWidget(QLabel(
-            "2. Point your camera at the wallet's signature QR:"))
-        self._preview = QLabel("Starting camera…")
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setMinimumSize(560, 420)      # a usably-large camera view
-        self._preview.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        scan.addWidget(self._preview)
-        root.addLayout(scan)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         buttons.rejected.connect(self.reject)
@@ -125,7 +136,14 @@ class QRExchangeDialog(Dialog):
         ur_string = self._next_frame()
         if ur_string != self._shown:      # a constant single part renders once
             self._shown = ur_string
-            self._qr_label.setPixmap(ur_to_pixmap(ur_string))
+            # Fit the QR to the square pane. FastTransformation (nearest) keeps
+            # the module edges hard black/white — best for the device's scan —
+            # rather than the grey-fringed edges smooth scaling would give.
+            pixmap = ur_to_pixmap(ur_string).scaled(
+                self.PANE, self.PANE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation)
+            self._qr_label.setPixmap(pixmap)
 
     # --- scanner signals ---------------------------------------------------
 

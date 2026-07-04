@@ -47,7 +47,7 @@ class QRExchangeDialog(Dialog):
         super().__init__(parent)
         self.setWindowTitle("Scan with your air-gapped wallet")
         self._scanned: str | None = None
-        self._scanner = scanner if scanner is not None else self._make_scanner()
+        self._scanner = scanner if scanner is not None else _default_scanner()
 
         root = QVBoxLayout(self)
 
@@ -78,17 +78,6 @@ class QRExchangeDialog(Dialog):
         if self._scanner is not None:
             self._scanner.decoded.connect(self._on_decoded)
             self._scanner.frame.connect(self._on_frame)
-
-    @staticmethod
-    def _make_scanner() -> Any:
-        """The real camera scanner. Kept behind a method so its QtMultimedia
-        import stays lazy; ``None`` if the camera can't be opened (the dialog
-        still shows the request QR to display)."""
-        try:
-            from .qr_scan import CameraScanner
-            return CameraScanner()
-        except Exception:
-            return None
 
     def scanned_ur(self) -> str | None:
         """The scanned ``ur:…`` string, or ``None`` if the user cancelled."""
@@ -125,3 +114,73 @@ class QRExchangeDialog(Dialog):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._preview.setPixmap(pixmap)
+
+
+class QRScanDialog(Dialog):
+    """Scan-only: run the camera and return the first ``ur:…`` seen (no QR to
+    display). Used to read a wallet's account export at import. Same injectable
+    ``scanner`` as :class:`QRExchangeDialog`."""
+
+    def __init__(
+        self, *, prompt: str = "Scan your wallet's account QR:",
+        scanner: Any = None, parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Scan air-gapped wallet")
+        self._scanned: str | None = None
+        self._scanner = scanner if scanner is not None else _default_scanner()
+
+        root = QVBoxLayout(self)
+        body = QVBoxLayout()
+        body.setSpacing(item_spacing(self))
+        body.addWidget(QLabel(prompt))
+        self._preview = QLabel("Starting camera…")
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setMinimumHeight(240)
+        body.addWidget(self._preview)
+        root.addLayout(body)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        if self._scanner is not None:
+            self._scanner.decoded.connect(self._on_decoded)
+            self._scanner.frame.connect(self._on_frame)
+
+    def scanned_ur(self) -> str | None:
+        return self._scanned
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 — Qt override
+        super().showEvent(event)
+        if self._scanner is not None:
+            self._scanner.start()
+        else:
+            self._preview.setText("No camera available")
+
+    def done(self, result: int) -> None:  # noqa: N802 — Qt override
+        if self._scanner is not None:
+            self._scanner.stop()
+        super().done(result)
+
+    def _on_decoded(self, text: str) -> None:
+        candidate = text.strip()
+        if candidate.lower().startswith("ur:"):
+            self._scanned = candidate
+            self.accept()
+
+    def _on_frame(self, image: Any) -> None:
+        self._preview.setPixmap(QPixmap.fromImage(image).scaled(
+            self._preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+
+def _default_scanner() -> Any:
+    """The real camera scanner, or ``None`` if the camera can't open (QtMultimedia
+    absent / no device). Kept out of import time."""
+    try:
+        from .qr_scan import CameraScanner
+        return CameraScanner()
+    except Exception:
+        return None

@@ -197,6 +197,8 @@ files = [
     "qeth/qr/eth.py",
     "qeth/qr/derive.py",
     "qeth/qr/account.py",
+    "qeth/qr/schemes.py",
+    "qeth/qr_discover.py",
     "qeth/alerts.py",
     "qeth/dialog.py",
     "qeth/branding.py",

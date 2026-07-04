@@ -117,3 +117,28 @@ def test_ur_to_pixmap_is_non_null(qtbot):
     from qeth.qr_exchange_dialog import ur_to_pixmap
     pm = ur_to_pixmap(_signature_ur())
     assert not pm.isNull() and pm.width() > 0
+
+
+def test_scan_dialog_accepts_first_ur_and_runs_camera(qtbot):
+    from PySide6.QtWidgets import QDialog
+
+    from qeth.qr_exchange_dialog import QRScanDialog
+    scanner = _FakeScanner()
+    dlg = QRScanDialog(scanner=scanner)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    assert scanner.started == 1
+    scanner.decoded.emit("ur:crypto-hdkey/aeadcylabntfgm")
+    assert dlg.scanned_ur() == "ur:crypto-hdkey/aeadcylabntfgm"
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert scanner.stopped == 1
+
+
+def test_scan_dialog_cancel_returns_none(qtbot):
+    from qeth.qr_exchange_dialog import QRScanDialog
+    scanner = _FakeScanner()
+    dlg = QRScanDialog(scanner=scanner)
+    qtbot.addWidget(dlg)
+    dlg.show()
+    dlg.reject()
+    assert dlg.scanned_ur() is None and scanner.stopped == 1

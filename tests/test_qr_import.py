@@ -39,6 +39,17 @@ def test_qr_account_shows_air_gapped_root_with_full_path_subgroup(qtbot, tmp_qet
         "BIP44 (m/44'/60'/0'/0/i)"]
 
 
+def test_ledger_scheme_labels_show_full_paths():
+    from qeth.plugins.wallets import _ledger_scheme_label, _scheme_label
+    assert _ledger_scheme_label("Legacy") == "Legacy (m/44'/60'/0'/i)"
+    assert _ledger_scheme_label("Ledger Live") == "Ledger Live (m/44'/60'/i'/0/0)"
+    assert _ledger_scheme_label("BIP44 Standard") == "BIP44 Standard (m/44'/60'/0'/0/i)"
+    assert _ledger_scheme_label("Weird") == "Weird"          # unknown → unchanged
+    # …and through _scheme_label on a stored ledger account record.
+    assert _scheme_label({"scheme": "Legacy", "path": "m/44'/60'/0'/7"}) \
+        == "Legacy (m/44'/60'/0'/i)"
+
+
 def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
     import qeth.qr.account as account_mod
     import qeth.qr_exchange_dialog as exdlg

@@ -66,12 +66,23 @@ ACCOUNT_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 EXPAND_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
+def _ledger_scheme_label(name: str) -> str:
+    """A Ledger scheme name suffixed with its full path template (``i`` = the
+    address index) — ``Legacy (m/44'/60'/0'/i)``. Unknown name → unchanged."""
+    template = PATH_SCHEMES.get(name)
+    return f"{name} (m/{template.format(i='i')})" if template else name
+
+
 def _scheme_label(account: dict) -> str:
-    """An account's derivation scheme as a full-path label — a QR scheme's ``…``
-    expanded to the real origin (``Legacy (m/44'/60'/0'/i)``); Ledger/Custom
-    schemes returned unchanged. Used for tree subgroups and the details panel."""
+    """An account's derivation scheme as a full-path label, so it's clear which
+    path it uses — ``Legacy (m/44'/60'/0'/i)`` (``i`` = the address index):
+    a QR scheme's ``…`` expanded to the real origin, or a Ledger scheme's clean
+    name suffixed with its path template. Unknown schemes returned unchanged.
+    Used for tree subgroups and the details panel."""
     scheme = account.get("scheme", "")
-    return display_scheme(scheme, scheme_origin(scheme, account.get("path", "")))
+    if scheme in QR_ADDRESS_SCHEMES:
+        return display_scheme(scheme, scheme_origin(scheme, account.get("path", "")))
+    return _ledger_scheme_label(scheme)
 
 
 def _palette_aware_error_color(palette) -> str:
@@ -728,7 +739,7 @@ class WalletsPlugin(Plugin):
                 scheme = a.get("scheme", "Custom")
                 grp = groups.get(scheme)
                 if grp is None:
-                    grp = QTreeWidgetItem([scheme])
+                    grp = QTreeWidgetItem([_scheme_label(a)])
                     # Scheme group: drop-enabled so children can be
                     # reordered between siblings via the parent, but not
                     # draggable itself.
@@ -1018,7 +1029,7 @@ class WalletsPlugin(Plugin):
         dlg = AddLedgerDialog(self.host.current_chain(), self._container)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        scheme = dlg.scheme_combo.currentText()
+        scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
         added_addrs: list[str] = []
         for d in dlg.selected_accounts():
             if self._store.add_account({
@@ -1445,7 +1456,10 @@ class AddLedgerDialog(Dialog):
 
         form = QFormLayout()
         self.scheme_combo = QComboBox()
-        self.scheme_combo.addItems(list(PATH_SCHEMES.keys()))
+        # Show each scheme as its full path (i = index); keep the scheme name as
+        # item data so storage / derivation use it (read via currentData()).
+        for name in PATH_SCHEMES:
+            self.scheme_combo.addItem(_ledger_scheme_label(name), name)
         form.addRow("Derivation scheme:", self.scheme_combo)
         self.count_spin = QSpinBox()
         self.count_spin.setRange(0, 100)
@@ -1529,7 +1543,7 @@ class AddLedgerDialog(Dialog):
         self.progress.setVisible(True)
         self.scan_btn.setEnabled(False)
         worker = LedgerWorker(
-            self.scheme_combo.currentText(), n, chain=self._chain
+            self.scheme_combo.currentData(), n, chain=self._chain
         )
         worker.discovered.connect(self._on_found)
         worker.finished_ok.connect(self._on_done)
@@ -1636,7 +1650,7 @@ class AddQRWalletDialog(AddLedgerDialog):
         self.scheme_combo.clear()
         for name in QR_ADDRESS_SCHEMES:
             self.scheme_combo.addItem(display_scheme(name, origin), name)
-        self.scan_btn.setText("&Derive")   # the export QR was already scanned
+        self.scan_btn.setText("&Scan")
 
     def _scan(self) -> None:
         from ..qr_discover import QRAccountWorker

@@ -15,6 +15,22 @@ def test_offscreen_platform_active():
     assert os.environ.get("QT_QPA_PLATFORM") == "offscreen"
 
 
+def test_qt_data_location_sandboxed_away_from_home(qtbot):
+    """conftest redirects XDG_DATA_HOME into a throwaway dir, so a stray Qt /
+    QtWebEngine write (a QWebEngineProfile, an app-data file) can never land in
+    the developer's real ~/.local/share (see the historical `<stdin>/QtWebEngine`
+    leftover). qtbot ensures the QApplication (hence an app-name in the resolved
+    paths) exists. (Config/Cache are intentionally left real so Qt fonts resolve
+    — see the conftest note.)"""
+    from PySide6.QtCore import QStandardPaths as QSP
+    real_data = os.path.join(os.path.expanduser("~"), ".local", "share")
+    for loc in (QSP.StandardLocation.AppDataLocation,
+                QSP.StandardLocation.AppLocalDataLocation,
+                QSP.StandardLocation.GenericDataLocation):
+        path = QSP.writableLocation(loc)
+        assert path and not path.startswith(real_data), (loc, path)
+
+
 def test_mainwindow_builds(mainwindow):
     """Just constructing MainWindow under offscreen + tmp paths +
     no-op workers is itself a non-trivial assertion: it means the

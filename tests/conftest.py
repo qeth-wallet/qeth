@@ -14,7 +14,10 @@ during the first ``qtbot`` use, so importing this module is early
 enough.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,25 @@ import pytest
 # Must come before pytest-qt's QApplication is created. Leaves an
 # already-set value alone (someone might want to run a visible test).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# Sandbox Qt's *data* dir (QStandardPaths AppData / GenericData) into a throwaway
+# session dir so nothing in the suite can write to the developer's real
+# ~/.local/share. tmp_qeth only rebinds qeth's own module-level CACHE_DIR
+# constants — it can't touch QStandardPaths, which resolves via XDG_DATA_HOME,
+# and that's usually unset -> ~/.local/share. A stray Qt/QtWebEngine write (e.g.
+# a QWebEngineProfile) is how a `<stdin>/QtWebEngine/...` dir once landed there.
+# FORCE-set (not setdefault) — overriding the real-home default is the point.
+#
+# We deliberately DON'T touch XDG_CONFIG_HOME / XDG_CACHE_HOME: Qt resolves fonts
+# through them (fontconfig user config + cache), and pointing them at an empty
+# dir yields a broken default font family ("QFont::fromString: Invalid
+# description") that shifts every pixel-based render test. AppData is the real
+# leak vector anyway; AppConfig/Cache would only ever get a namespaced
+# `pytest-qt-qapp/` dir, not a cryptic one, and nothing in the suite writes them.
+# Must run before Qt init (pytest-qt builds the QApplication on first qtbot use).
+_xdg_sandbox = tempfile.mkdtemp(prefix="qeth-test-xdg-")
+os.environ["XDG_DATA_HOME"] = os.path.join(_xdg_sandbox, "data")
+atexit.register(lambda: shutil.rmtree(_xdg_sandbox, ignore_errors=True))
 
 # The ws live watcher is on by default in the app, but tests must not open
 # real ws connections (or spawn QThreads the fixtures don't manage). Disable

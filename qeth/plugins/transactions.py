@@ -2249,6 +2249,8 @@ def _cancel_tx_icon() -> QIcon:
 (_C_STATUS, _C_NONCE, _C_GAP1, _C_TIME,
  _C_GAP2, _C_VERB, _C_COINS) = range(7)
 _N_COLS = 7
+_STATUS_COL_W = 34   # tight around the single status glyph — wide enough for the
+                     # widest (⏳︎) + the 6px cell padding, so it isn't elided away
 
 
 class TransactionListPanel(QWidget):
@@ -2351,7 +2353,7 @@ class TransactionListPanel(QWidget):
         # left-aligned, so the coins sit right after the verb with the
         # spare space trailing.
         h.setSectionResizeMode(_C_STATUS, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(_C_STATUS, 34)
+        self.table.setColumnWidth(_C_STATUS, _STATUS_COL_W)
         h.setSectionResizeMode(_C_NONCE, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(_C_TIME, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(_C_COINS, QHeaderView.ResizeMode.ResizeToContents)
@@ -2564,6 +2566,10 @@ class TransactionListPanel(QWidget):
         t = self.table
         if t.columnCount() < _N_COLS:
             return
+        # Keep the status column tight around its single glyph — a Fixed width
+        # set in __init__ drifts wider (~60px) before the layout settles, which
+        # left the small ✓ swimming in empty space. Re-pin it on every render.
+        t.setColumnWidth(_C_STATUS, _STATUS_COL_W)
         hdr = t.horizontalHeader()
         others = sum(t.columnWidth(i)
                      for i in (_C_STATUS, _C_NONCE, _C_TIME, _C_COINS))

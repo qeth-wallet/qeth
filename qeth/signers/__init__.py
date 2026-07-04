@@ -13,6 +13,7 @@ from __future__ import annotations
 from .base import SignerPlugin
 from .hot import HotWalletSignerPlugin
 from .ledger import LedgerSignerPlugin
+from .qr import QRSignerPlugin
 from .watch_only import WatchOnlySignerPlugin
 
 # source_id → the singleton plugin. Stateless, so one instance each.
@@ -21,6 +22,7 @@ REGISTRY: dict[str, SignerPlugin] = {
     for p in (
         LedgerSignerPlugin(),
         HotWalletSignerPlugin(),
+        QRSignerPlugin(),
         WatchOnlySignerPlugin(),
     )
 }

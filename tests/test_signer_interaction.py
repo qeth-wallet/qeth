@@ -81,4 +81,4 @@ def test_exchange_qr_not_implemented_until_step3(qtbot):
     import pytest
     host, _p = _host(qtbot)
     with pytest.raises(NotImplementedError):
-        host.exchange_qr(b"payload")
+        host.exchange_qr("ur:eth-sign-request/aeadcylabntfgm")

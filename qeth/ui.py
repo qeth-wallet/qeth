@@ -990,7 +990,8 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        interaction.progress(progress_text)
+        if progress_text:                 # empty for a QR signer — it
+            interaction.progress(progress_text)   # drives its own window
 
         worker = SignAndBroadcastWorker(signer, req=finalised, chain=chain)
         worker.broadcast.connect(
@@ -1079,7 +1080,8 @@ class MainWindow(QMainWindow):
             return
 
         dialog.set_signing_in_progress(True)
-        interaction.progress(progress_text)
+        if progress_text:                 # empty for a QR signer — it
+            interaction.progress(progress_text)   # drives its own window
 
         worker = SignMessageWorker(signer, req=req)
         worker.signed.connect(
@@ -1138,7 +1140,8 @@ class MainWindow(QMainWindow):
             )
             return
 
-        interaction.progress(progress_text)
+        if progress_text:                 # empty for a QR signer — it
+            interaction.progress(progress_text)   # drives its own window
 
         from .signing import SignMessageWorker
         worker = SignMessageWorker(signer, req=req)

@@ -39,8 +39,8 @@ def _acct(source):
     return {"address": ADDR, "source": source, "label": ""}
 
 
-def test_registry_has_the_three_known_sources():
-    assert set(REGISTRY) == {"ledger", "hot", "watch_only"}
+def test_registry_has_the_known_sources():
+    assert set(REGISTRY) == {"ledger", "hot", "qr", "watch_only"}
     assert all(isinstance(p, SignerPlugin) for p in REGISTRY.values())
     assert all(sid == p.source_id for sid, p in REGISTRY.items())
 

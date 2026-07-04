@@ -62,9 +62,9 @@ class DialogInteraction(QObject):
     def request_secret(self, prompt: str, *, title: str = "") -> str | None:
         return self._on_main(lambda: self._prompt(prompt, title))
 
-    def exchange_qr(self, payload: bytes) -> bytes | None:
+    def exchange_qr(self, request_ur: str) -> str | None:
         raise NotImplementedError(
-            "QR signing lands in step 3 (docs/signers.md)")
+            "QR exchange dialog lands in step 3c (docs/signers-qr.md)")
 
     def close(self) -> None:
         """Dismiss the spinner (on signing success/failure)."""

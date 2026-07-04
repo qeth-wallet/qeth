@@ -370,6 +370,43 @@ class WalletsPlugin(Plugin):
                 out.append(addr)
         return out
 
+    def _selected_key(self) -> tuple[str, str] | None:
+        """(address, path) of the single selected account row, or None for a
+        zero/multi/group selection. Identifies the exact record across a rebuild."""
+        if self._tree is None:
+            return None
+        rows = [it for it in self._tree.selectedItems()
+                if isinstance(it.data(0, Qt.ItemDataRole.UserRole), str)]
+        if len(rows) != 1:
+            return None
+        it = rows[0]
+        return (it.data(0, Qt.ItemDataRole.UserRole),
+                it.data(0, ACCOUNT_PATH_ROLE) or "")
+
+    def _select_key(self, address: str, path: str) -> bool:
+        """Select the exact row for ``(address, path)``. True if found."""
+        if self._tree is None:
+            return False
+
+        def walk(item: QTreeWidgetItem | None) -> QTreeWidgetItem | None:
+            if item is None:
+                return None
+            if (item.data(0, Qt.ItemDataRole.UserRole) == address
+                    and (item.data(0, ACCOUNT_PATH_ROLE) or "") == (path or "")):
+                return item
+            for i in range(item.childCount()):
+                hit = walk(item.child(i))
+                if hit is not None:
+                    return hit
+            return None
+
+        for i in range(self._tree.topLevelItemCount()):
+            hit = walk(self._tree.topLevelItem(i))
+            if hit is not None:
+                self._tree.setCurrentItem(hit)
+                return True
+        return False
+
     def _find_item(self, address: str) -> QTreeWidgetItem | None:
         """The tree leaf carrying ``address`` (case-insensitive), or None."""
         if self._tree is None or not address:
@@ -775,6 +812,17 @@ class WalletsPlugin(Plugin):
         item.setData(0, EXPAND_KEY_ROLE, key)
         item.setExpanded(snapshot.get(key, True))
 
+    def _effective_label(self, address: str) -> str:
+        """The label to show for ``address``: any non-empty label among the
+        records holding it. A repeat address (the same address in two branches)
+        thus shows its label on every row, even if only one record carries it —
+        older records were only labelled on the first match. Empty if none."""
+        wanted = address.lower()
+        for a in self._store.accounts:
+            if a["address"].lower() == wanted and (a.get("label") or ""):
+                return str(a["label"])
+        return ""
+
     def _make_account_item(self, a: dict) -> tuple[QTreeWidgetItem, bool]:
         """Build the address-leaf row for one account — shared by the Ledger /
         hot / watch-only sections (previously copy-pasted three times). Returns
@@ -786,7 +834,7 @@ class WalletsPlugin(Plugin):
             and addr.lower() == self._store.default_account.lower()
         )
         display = f"[{addr}]" if is_default else f" {addr} "
-        label_text = a.get("label") or ""
+        label_text = self._effective_label(addr)
         it = QTreeWidgetItem([display])
         it.setData(0, Qt.ItemDataRole.UserRole, addr)
         it.setData(0, ACCOUNT_PATH_ROLE, a.get("path", ""))
@@ -820,8 +868,11 @@ class WalletsPlugin(Plugin):
         # Preserve the user's current selection across the rebuild: an async
         # trigger (an ENS reverse-lookup, a background rediscover) must not yank
         # the view to the default account while they're reading another (5c).
-        # Only fall back to the default when there was no single prior selection.
-        prior = self.selected_address
+        # Key on (address, path) — the record's unique identity — so a repeat
+        # address restores the row the user actually had, not its twin in the
+        # other branch (which made "connect to browser" jump trees). Only fall
+        # back to the default when there was no single prior selection.
+        prior_key = self._selected_key()
         expanded = self._capture_expansion()
         self._tree.clear()
         default_item: QTreeWidgetItem | None = None
@@ -830,7 +881,7 @@ class WalletsPlugin(Plugin):
                 source, label, action_attr, grouped, expanded)
             if got is not None:
                 default_item = got
-        if not (prior and self.select_address(prior)):
+        if not (prior_key and self._select_key(*prior_key)):
             if default_item is not None:
                 self._tree.setCurrentItem(default_item)
 

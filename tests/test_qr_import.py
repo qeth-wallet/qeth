@@ -39,6 +39,27 @@ def test_qr_account_shows_air_gapped_root_with_full_path_subgroup(qtbot, tmp_qet
         "BIP44 (m/44'/60'/0'/0/i)"]
 
 
+def test_repeat_address_inherits_label_and_keeps_its_row(qtbot, tmp_qeth):
+    from qeth.plugins.wallets import ACCOUNT_LABEL_ROLE
+    plugin, store = _plugin(qtbot, [
+        {"address": "0xAA", "source": "ledger", "path": "44'/60'/0'/5",
+         "scheme": "Legacy", "label": "my"},
+        {"address": "0xAA", "source": "qr", "path": "m/44'/60'/0'/5",
+         "scheme": "BIP44 (…/0/i)", "label": ""},   # same address, no label
+    ])
+    # Bug 2: the unlabeled QR record inherits the Ledger record's label — both
+    # rows show it.
+    assert plugin._effective_label("0xAA") == "my"
+    labels = {it.data(0, ACCOUNT_LABEL_ROLE) for it in plugin._find_items("0xAA")}
+    assert labels == {"my"}
+
+    # Bug 1: selecting the QR row survives a rebuild — it doesn't snap to the
+    # Ledger twin (which made "connect to browser" jump trees).
+    assert plugin._select_key("0xAA", "m/44'/60'/0'/5")
+    plugin._rebuild_tree()
+    assert plugin._selected_key() == ("0xAA", "m/44'/60'/0'/5")
+
+
 def test_branch_order_follows_store_and_persists(qtbot, tmp_qeth):
     from qeth.plugins.wallets import ROOT_SOURCE_ROLE
     plugin, store = _plugin(qtbot, [

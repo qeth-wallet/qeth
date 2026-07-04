@@ -56,8 +56,14 @@ class _RandomSampler:
         scaled = [w * n / total for w in weights]
         self._prob = [0.0] * n
         self._alias = [0] * n
-        small = [i for i in range(n) if scaled[i] < 1.0]
-        large = [i for i in range(n) if scaled[i] >= 1.0]
+        # Build the small/large index lists in REVERSED order — the reference
+        # (foundation-ur-py random_sampler) does this ("at variance from
+        # Schwarz, we reverse the index order"), and since we pop() from the
+        # end it changes which alias each bucket gets. Getting this wrong yields
+        # the right table only for some seqLens (it happened to match the
+        # seqLen-9 spec vector) and wrong degrees elsewhere → wrong fragment mix.
+        small = [i for i in reversed(range(n)) if scaled[i] < 1.0]
+        large = [i for i in reversed(range(n)) if scaled[i] >= 1.0]
         while small and large:
             s = small.pop()
             g = large.pop()

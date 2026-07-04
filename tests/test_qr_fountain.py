@@ -49,6 +49,24 @@ def test_rateless_part_data_matches_the_spec():
     assert mix(frags, choose_fragments(11, 9, CHECKSUM)) == PART11
 
 
+# Cross-seqLen regression pin: (seqNum, seqLen) → fragment indexes, values
+# captured from the reference decoder (foundation-ur-py) at checksum 0x0167AA07.
+# The spec vector only exercises seqLen=9; a sampler bug (wrong alias index
+# order) matched at 9 but produced WRONG degrees at other seqLens — poisoning
+# the device's decode into a stall+reset. These lock in every seqLen.
+_REFERENCE_INDEXES = {
+    (6, 5): {2}, (7, 5): {2}, (8, 5): {0, 2, 3}, (12, 5): {1, 4},
+    (4, 3): {0, 1}, (5, 3): {1}, (9, 7): {2, 3, 4}, (15, 10): {7},
+    (11, 6): {1, 2, 3, 4}, (3, 2): {0},
+}
+
+
+def test_choose_fragments_matches_reference_across_seqlens():
+    for (seq_num, seq_len), expected in _REFERENCE_INDEXES.items():
+        assert choose_fragments(seq_num, seq_len, CHECKSUM) == expected, (
+            f"seqNum={seq_num} seqLen={seq_len}")
+
+
 def test_mix_of_a_single_index_is_that_fragment():
     frags = _fragments()
     assert mix(frags, {4}) == frags[4]

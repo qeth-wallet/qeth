@@ -58,31 +58,33 @@ def _harden_x11_backing_store(environ, platform) -> None:
         environ.setdefault("QT_X11_NO_MITSHM", "1")
 
 
-def _prioritize_ffmpeg_vaapi(environ, platform) -> None:
-    """Put VA-API first in Qt's ffmpeg video-decode probe order.
+def _pin_ffmpeg_vaapi(environ, platform) -> None:
+    """Stop the camera from logging "Failed to open VDPAU backend
+    libvdpau_va_gl.so".
 
-    Qt's ffmpeg media backend enumerates hardware video-decode backends when it
-    opens the camera (the QR scanner), and ffmpeg's default order lists VDPAU
-    early. On an Intel/AMD GPU there's no native VDPAU driver, so libvdpau falls
-    back to the ``va_gl`` shim — usually not installed — and logs the alarming
-    "Failed to open VDPAU backend libvdpau_va_gl.so" *before* it reaches the
-    path that actually works there, VA-API.
+    To list available hardware video codecs, Qt's ffmpeg backend iterates
+    *every* ffmpeg hw type and creates a device context for each to test it —
+    including VDPAU. On an Intel/AMD GPU there's no native VDPAU driver, so
+    libvdpau reaches for the ``va_gl`` shim (usually not installed) and writes
+    that line straight to stderr. It's a raw C-library message, not a Qt/ffmpeg
+    log, so no log level or probe *reorder* silences it — the whole-list probe
+    simply must not run. And it runs whenever EITHER the decoding or encoding
+    device-type var is unset (setting just one isn't enough — the other's query
+    still fires it; that's why an earlier decoding-only attempt didn't help).
 
-    So don't disable the probing (trying several paths is the right, portable
-    behaviour) — just reorder it: VA-API (Intel/AMD) first, then CUDA/NVDEC and
-    native VDPAU (NVIDIA) and QSV as fallbacks. A box that genuinely needs VDPAU
-    still reaches it, and there it has a native driver, so no shim and no
-    warning. We never actually need GPU decode for a low-res webcam QR scan;
-    this only quiets a pointless probe on the common desktop GPU. (Passing an
-    explicit list also skips ffmpeg's broad auto-enumeration — itself where the
-    stray VDPAU context otherwise gets created.)
+    So give ffmpeg an explicit list for BOTH decode and encode: that skips the
+    probe entirely, and the list omits VDPAU so nothing ever creates a VDPAU
+    context. Pin VA-API — the path that actually works on Intel/AMD (verified:
+    ``vainfo`` loads the iHD driver). Other GPUs / unsupported codecs fall back
+    to software decode, which is free for a low-res webcam QR scan and all we
+    need (add ``cuda`` here if NVIDIA hardware decode is ever wanted).
 
     Linux-only (VA-API/VDPAU are Linux; macOS/Windows use their own decoders),
     read by the ffmpeg plugin at camera init, and ``setdefault`` so an explicit
-    override wins."""
+    user override wins."""
     if platform.startswith("linux"):
-        environ.setdefault(
-            "QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda,vdpau,qsv")
+        environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi")
+        environ.setdefault("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", "vaapi")
 
 
 def _running_bundled_qt(environ) -> bool:
@@ -204,7 +206,7 @@ def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
 
 def main() -> int:
     _harden_x11_backing_store(os.environ, sys.platform)
-    _prioritize_ffmpeg_vaapi(os.environ, sys.platform)
+    _pin_ffmpeg_vaapi(os.environ, sys.platform)
     _raise_open_file_limit()
 
     logging.basicConfig(

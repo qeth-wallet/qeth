@@ -48,30 +48,32 @@ class TestX11BackingStoreHardening:
             assert "QT_X11_NO_MITSHM" not in env
 
 
-class TestFfmpegVaapiPriority:
-    """VA-API is put first in the ffmpeg decode probe order so the camera
-    doesn't hit the missing-VDPAU-shim warning on Intel/AMD (no native VDPAU) —
-    the other paths stay as fallbacks for portability."""
+class TestFfmpegVaapiPin:
+    """Pin ffmpeg's hw video codecs to VA-API for BOTH decode and encode, so the
+    camera never runs the all-types availability probe that creates a VDPAU
+    context (→ the "libvdpau_va_gl.so" stderr warning on Intel/AMD). Both vars
+    must be set — one unset var still triggers the probe. VDPAU is excluded."""
 
-    _VAR = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
+    _DEC = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES"
+    _ENC = "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"
 
-    def test_sets_vaapi_first_on_linux_when_unset(self):
-        from qeth.__main__ import _prioritize_ffmpeg_vaapi
+    def test_pins_both_vars_to_vaapi_on_linux(self):
+        from qeth.__main__ import _pin_ffmpeg_vaapi
         env = {}
-        _prioritize_ffmpeg_vaapi(env, "linux")
-        order = env[self._VAR].split(",")
-        assert order[0] == "vaapi"                      # working path tried first
-        assert "vdpau" in order and order.index("vdpau") > order.index("vaapi")
+        _pin_ffmpeg_vaapi(env, "linux")
+        assert env[self._DEC] == "vaapi" and env[self._ENC] == "vaapi"
+        # VDPAU must not appear — that's the whole point.
+        assert "vdpau" not in env[self._DEC] and "vdpau" not in env[self._ENC]
 
     def test_respects_explicit_override(self):
-        from qeth.__main__ import _prioritize_ffmpeg_vaapi
-        env = {self._VAR: "cuda"}
-        _prioritize_ffmpeg_vaapi(env, "linux")
-        assert env[self._VAR] == "cuda"                 # user choice left alone
+        from qeth.__main__ import _pin_ffmpeg_vaapi
+        env = {self._DEC: "cuda", self._ENC: "cuda"}
+        _pin_ffmpeg_vaapi(env, "linux")
+        assert env[self._DEC] == "cuda" and env[self._ENC] == "cuda"
 
     def test_noop_off_linux(self):
-        from qeth.__main__ import _prioritize_ffmpeg_vaapi
+        from qeth.__main__ import _pin_ffmpeg_vaapi
         for plat in ("darwin", "win32"):
             env = {}
-            _prioritize_ffmpeg_vaapi(env, plat)
-            assert self._VAR not in env
+            _pin_ffmpeg_vaapi(env, plat)
+            assert self._DEC not in env and self._ENC not in env

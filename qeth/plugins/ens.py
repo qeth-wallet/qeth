@@ -551,7 +551,13 @@ class EnsPanel(QWidget):
         self._sub_icon = _icon("folder", QStyle.StandardPixmap.SP_DirIcon)
         # Status-column icons: verified-ok, warning, and "owned but proof still
         # catching up" (a sync/refresh glyph — distinct from the green ✓).
-        self._ok_icon = _icon("emblem-ok",
+        # emblem-ok is the semantic "verified" check, but retro/minimal themes
+        # (e.g. SE98) don't ship it — and then _icon would fall through to
+        # SP_DialogApplyButton, which each Qt STYLE draws differently (a Win98
+        # tick on one machine, a glossy square on another, even under the SAME
+        # icon theme). dialog-ok is what the confirmed-tx check uses and these
+        # themes DO provide it, so listing it keeps this ✓ identical to that one.
+        self._ok_icon = _icon(("emblem-ok", "dialog-ok"),
                               QStyle.StandardPixmap.SP_DialogApplyButton)
         self._warn_icon = _icon("dialog-warning",
                                 QStyle.StandardPixmap.SP_MessageBoxWarning)

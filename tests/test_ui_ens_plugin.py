@@ -1790,3 +1790,34 @@ class TestResolvedAddressFollowsRecords:
         plugin._on_records_ready("curvelend.eth", new_rec, 101, True, True)
         assert self._row_addr(plugin) == self.NEW
         assert plugin._rec_cache["curvelend.eth"] == (new_rec, 101, True)
+
+
+def test_ok_status_icon_falls_back_to_dialog_ok_not_the_style(qtbot, monkeypatch):
+    """A retro/minimal theme (SE98) ships 'dialog-ok' (the confirmed-tx check)
+    but not 'emblem-ok', so the verified-ENS ✓ must resolve to dialog-ok — the
+    same icon, present everywhere — rather than the Qt style's
+    SP_DialogApplyButton, which each widget style draws differently. Regression
+    for a verified-domain ✓ that rendered as a glossy square on one machine and
+    a Win98 tick on another under the *same* icon theme."""
+    from PySide6.QtGui import QIcon, QPixmap
+    from PySide6.QtWidgets import QStyle
+    from qeth.plugins.ens import _icon
+
+    px = QPixmap(16, 16)
+    px.fill()
+    marker = QIcon(px)                      # stands in for the theme's dialog-ok
+    present = {"dialog-ok"}
+    monkeypatch.setattr(
+        QIcon, "fromTheme",
+        staticmethod(lambda n, *a: marker if n in present else QIcon()))
+
+    # emblem-ok absent, dialog-ok present → dialog-ok wins over the style icon
+    got = _icon(("emblem-ok", "dialog-ok"),
+                QStyle.StandardPixmap.SP_DialogApplyButton)
+    assert got is marker
+
+    # neither present → only THEN the style fallback (never null)
+    present.clear()
+    fb = _icon(("emblem-ok", "dialog-ok"),
+               QStyle.StandardPixmap.SP_DialogApplyButton)
+    assert fb is not marker and not fb.isNull()

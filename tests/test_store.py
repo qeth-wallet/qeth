@@ -221,6 +221,48 @@ class TestReorderAccounts:
         s.set_source_order(["qr", "ledger", "hot"])
         assert Store.load().account_source_order == ["qr", "ledger", "hot"]
 
+
+class TestSameAddressTwoSigners:
+    """The same address held by two signers (Ledger + Air-gapped): routing and
+    removal must act on the record, not just the address."""
+
+    def _two(self):
+        s = Store()
+        s.add_account({"address": "0xAA", "path": "44'/60'/0'/5",
+                       "source": "ledger", "label": ""})
+        s.add_account({"address": "0xAA", "path": "m/44'/60'/0'/5",
+                       "source": "qr", "label": ""})
+        return s
+
+    def test_account_for_signing_routes_by_record(self, tmp_qeth):
+        s = self._two()
+        # Exact (address, path) picks the right record.
+        assert s.account_for_signing("0xAA", "m/44'/60'/0'/5")["source"] == "qr"
+        assert s.account_for_signing("0xAA", "44'/60'/0'/5")["source"] == "ledger"
+        # With no path, the connected default's remembered record wins.
+        s.set_default_account("0xAA", "m/44'/60'/0'/5")
+        assert s.account_for_signing("0xAA")["source"] == "qr"
+        s.set_default_account("0xAA", "44'/60'/0'/5")
+        assert s.account_for_signing("0xAA")["source"] == "ledger"
+
+    def test_remove_one_record_keeps_the_twin(self, tmp_qeth):
+        s = self._two()
+        assert s.remove_account("0xAA", "44'/60'/0'/5") is True   # remove Ledger
+        assert [(a["source"], a["path"]) for a in s.accounts] == [
+            ("qr", "m/44'/60'/0'/5")]                             # QR survives
+
+    def test_remove_connected_record_keeps_default_if_twin_remains(self, tmp_qeth):
+        s = self._two()
+        s.set_default_account("0xAA", "44'/60'/0'/5")     # connected via Ledger
+        s.remove_account("0xAA", "44'/60'/0'/5")          # remove that record
+        assert s.default_account == "0xAA"                # twin keeps it default
+        assert s.default_account_path is None             # stale path dropped
+
+    def test_remove_without_path_still_removes_all(self, tmp_qeth):
+        s = self._two()
+        assert s.remove_account("0xAA") is True
+        assert all(a["address"] != "0xAA" for a in s.accounts)
+
     def test_noop_update_returns_false_and_does_not_resave(
         self, tmp_qeth, monkeypatch,
     ):

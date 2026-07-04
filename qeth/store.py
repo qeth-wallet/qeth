@@ -93,6 +93,11 @@ class Store:
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
         self.default_account: str | None = None
+        # The default account's derivation path — its record identity together
+        # with default_account. Disambiguates the signer when the same address
+        # is held by two signers (Ledger + Air-gapped): connecting the QR row
+        # must sign via QR, the Ledger row via Ledger.
+        self.default_account_path: str | None = None
         # User overrides for the token panel: (chain_id, addr_lower) tuples.
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
@@ -137,6 +142,7 @@ class Store:
             s.account_source_order = list(data.get("account_source_order", []))
             s.current_chain_id = data.get("current_chain_id", 1)
             s.default_account = data.get("default_account")
+            s.default_account_path = data.get("default_account_path")
             chains_data = data.get("chains")
             if chains_data:
                 s.chains = [_merge_chain(c) for c in chains_data]
@@ -201,6 +207,7 @@ class Store:
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
                 "default_account": self.default_account,
+                "default_account_path": self.default_account_path,
                 "hidden_tokens": [
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.hidden_tokens)
@@ -247,15 +254,37 @@ class Store:
         self.save()
         return True
 
-    def remove_account(self, address: str) -> bool:
+    def remove_account(self, address: str, path: str | None = None) -> bool:
+        """Remove account record(s) for ``address``. With ``path``, remove ONLY
+        that record — the same address held by another signer (Ledger vs
+        Air-gapped) stays, and since the tx / token caches are keyed by address
+        they keep working for it. Without ``path``, remove every record with the
+        address (legacy). Repoints the default account if it was removed.
+        Returns True if anything was removed."""
+        addr = address.lower()
         with self._lock:
-            addr = address.lower()
             before = len(self.accounts)
-            self.accounts = [a for a in self.accounts if a["address"].lower() != addr]
+            if path is None:
+                self.accounts = [a for a in self.accounts
+                                 if a["address"].lower() != addr]
+            else:
+                self.accounts = [
+                    a for a in self.accounts
+                    if not (a["address"].lower() == addr
+                            and a.get("path", "") == path)]
             if len(self.accounts) == before:
                 return False
+            still_has_addr = any(a["address"].lower() == addr for a in self.accounts)
             if self.default_account and self.default_account.lower() == addr:
-                self.default_account = self.accounts[0]["address"] if self.accounts else None
+                if still_has_addr:
+                    # The address survives in another branch — keep it as the
+                    # default, but drop a now-stale connected-record path.
+                    if self.default_account_path == path:
+                        self.default_account_path = None
+                else:
+                    self.default_account = (
+                        self.accounts[0]["address"] if self.accounts else None)
+                    self.default_account_path = None
         self.save()
         return True
 
@@ -319,10 +348,34 @@ class Store:
             self.save()
         return changed
 
-    def set_default_account(self, address: str) -> None:
+    def set_default_account(self, address: str, path: str | None = None) -> None:
+        """Set the connected/default account. ``path`` records WHICH record it is
+        when the same address is held by two signers, so signing routes to the
+        right one; ``None`` leaves it ambiguous (first record with the address)."""
         with self._lock:
             self.default_account = address
+            self.default_account_path = path
         self.save()
+
+    def account_for_signing(self, address: str, path: str | None = None) -> dict | None:
+        """The account record to sign for ``address`` — disambiguated when the
+        same address is held by two signers (Ledger + Air-gapped). Prefers an
+        exact ``(address, path)``; else the connected default's remembered
+        record; else the first record with the address."""
+        al = address.lower()
+
+        def match(p: str) -> dict | None:
+            return next((a for a in self.accounts
+                         if a["address"].lower() == al and a.get("path", "") == p),
+                        None)
+
+        if path is not None and (hit := match(path)) is not None:
+            return hit
+        if (self.default_account and al == self.default_account.lower()
+                and self.default_account_path is not None
+                and (hit := match(self.default_account_path)) is not None):
+            return hit
+        return next((a for a in self.accounts if a["address"].lower() == al), None)
 
     def add_chain(self, chain: Chain) -> None:
         with self._lock:

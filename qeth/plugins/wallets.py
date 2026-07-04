@@ -829,9 +829,15 @@ class WalletsPlugin(Plugin):
         ``(item, is_default)`` so the caller can track the default row; the
         caller adds it under the right parent."""
         addr = a["address"]
+        # Record-aware: mark only the CONNECTED record as default. When the
+        # default's path is unknown (legacy config, never re-connected), fall
+        # back to matching by address so the marker still shows.
+        default = self._store.default_account
+        dpath = self._store.default_account_path
         is_default = (
-            self._store.default_account is not None
-            and addr.lower() == self._store.default_account.lower()
+            default is not None
+            and addr.lower() == default.lower()
+            and (dpath is None or dpath == a.get("path", ""))
         )
         display = f"[{addr}]" if is_default else f" {addr} "
         label_text = self._effective_label(addr)
@@ -988,10 +994,15 @@ class WalletsPlugin(Plugin):
         addr = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(addr, str) or not addr:
             return
-        current = self._store.default_account
-        if current is not None and addr.lower() == current.lower():
+        path = item.data(0, ACCOUNT_PATH_ROLE) or ""
+        # Skip only if THIS exact record is already connected — the same address
+        # held by another signer (Ledger vs QR) is a different connection, so a
+        # double-click there should switch to it.
+        if (self._store.default_account is not None
+                and addr.lower() == self._store.default_account.lower()
+                and (self._store.default_account_path or "") == path):
             return
-        self._set_default(addr)
+        self._set_default(addr, path)
 
     def _on_tree_enter_pressed(self, address: str) -> None:
         """Enter / Return on a focused account leaf: same as
@@ -1090,18 +1101,30 @@ class WalletsPlugin(Plugin):
             self.host.status_message(f"Copied {addrs[0]} to clipboard", 3000)
 
     def _remove_selected_account(self) -> None:
-        addrs = self.selected_addresses()
-        if not addrs:
+        if self._tree is None:
             return
-        # Bucket the selection by source so the confirmation
-        # message tells the user what's actually happening — a
-        # Ledger removal is reversible (re-scan the device), a
-        # hot-wallet removal DELETES the on-disk keystore (real
-        # data loss unless backed up), watch-only just forgets an
-        # address.
-        addrs_lower = {a.lower() for a in addrs}
-        sources = {a.get("source") for a in self._store.accounts
-                    if a["address"].lower() in addrs_lower}
+        # Remove the selected RECORDS (address, path), not every record with the
+        # address — so removing the Ledger row of an address held in two
+        # branches leaves the Air-gapped row (and its shared, address-keyed tx /
+        # token cache) intact.
+        by_key = {(a["address"].lower(), a.get("path", "")): a
+                  for a in self._store.accounts}
+        rows: list[tuple[str, str, str | None]] = []
+        for it in self._tree.selectedItems():
+            addr = it.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(addr, str) or not addr:
+                continue
+            path = it.data(0, ACCOUNT_PATH_ROLE) or ""
+            rec = by_key.get((addr.lower(), path))
+            rows.append((addr, path, rec.get("source") if rec else None))
+        if not rows:
+            return
+        addrs = [a for a, _, _ in rows]
+        # Bucket by source so the confirmation message tells the user what's
+        # actually happening — a Ledger removal is reversible (re-scan the
+        # device), a hot-wallet removal DELETES the on-disk keystore (real data
+        # loss unless backed up), watch-only just forgets an address.
+        sources = {s for _, _, s in rows}
         if len(addrs) == 1:
             prompt = "Remove this account from the wallet?"
             detail_head = addrs[0]
@@ -1142,19 +1165,22 @@ class WalletsPlugin(Plugin):
             action="&Remove", destructive=True,
         ):
             return
-        # Hot wallets carry an on-disk keystore alongside the
-        # config-level account record; remove both. Ledger / watch-
-        # only accounts have nothing on disk to clean up, only the
-        # config record.
+        # Hot wallets carry an on-disk keystore alongside the config record;
+        # remove both. Ledger / watch-only have nothing on disk, only the record.
         from ..hot_wallet import delete_keystore
-        hot_addrs = {
-            a["address"].lower() for a in self._store.accounts
-            if a.get("source") == "hot" and a["address"].lower() in
-                {x.lower() for x in addrs}
-        }
-        removed = sum(1 for a in addrs if self._store.remove_account(a))
-        for a in addrs:
-            if a.lower() in hot_addrs:
+        removed = 0
+        hot_removed: list[str] = []
+        for address, path, source in rows:
+            if self._store.remove_account(address, path):
+                removed += 1
+                if source == "hot":
+                    hot_removed.append(address)
+        # Delete a hot keystore only once its (unique) hot record is gone — never
+        # when another branch still holds the address as a device/watch account.
+        for a in hot_removed:
+            if not any(x.get("source") == "hot"
+                       and x["address"].lower() == a.lower()
+                       for x in self._store.accounts):
                 try:
                     delete_keystore(a)
                 except Exception:
@@ -1500,8 +1526,15 @@ class WalletsPlugin(Plugin):
                     f"Updated label for {address}", 2500,
                 )
 
-    def _set_default(self, address: str) -> None:
-        self._store.set_default_account(address)
+    def _set_default(self, address: str, path: str | None = None) -> None:
+        # ``path`` records WHICH record is connected when the same address is
+        # held by two signers, so signing routes to the right one (Ledger vs
+        # QR). Fall back to the selected row's path when not given explicitly.
+        if path is None:
+            key = self._selected_key()
+            if key is not None and key[0] == address:
+                path = key[1]
+        self._store.set_default_account(address, path)
         self._rebuild_tree()
         self.default_account_changed.emit()
         # Re-run selection to refresh the details-panel button state.

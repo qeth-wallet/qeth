@@ -1009,21 +1009,18 @@ class MainWindow(QMainWindow):
         self.start_worker(worker)
 
     def _pick_signer_for(
-        self, dialog, address: str, interaction,
+        self, dialog, address: str, interaction, path: str | None = None,
     ) -> tuple[Signer | None, str]:
         """Pick a Signer for the account's ``source`` via the signer REGISTRY
         (``qeth.signers``). The plugin drives ``interaction`` for any up-front
         unlock (a hot wallet prompts for its passphrase on the main thread, so
-        the worker's slow scrypt decrypt runs off-thread). Returns
+        the worker's slow scrypt decrypt runs off-thread). ``path`` disambiguates
+        when the same address is held by two signers (Ledger + Air-gapped) — else
+        the connected default's remembered record is used. Returns
         ``(signer, progress_text)``, or ``(None, None)`` if the user cancelled
         the prompt or the source has no signer (shows the "no signer" warning
         in that case)."""
-        addr_lower = address.lower()
-        acct = next(
-            (a for a in self.store.accounts
-             if a["address"].lower() == addr_lower),
-            None,
-        )
+        acct = self.store.account_for_signing(address, path)
         source = acct.get("source") if acct else None
         from .signers import signer_for_source
         plugin = signer_for_source(source)

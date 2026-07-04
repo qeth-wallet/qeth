@@ -1848,3 +1848,30 @@ def test_status_column_uses_font_glyphs_not_theme_icons(qtbot, tmp_qeth):
         assert item.text(panel._STATUS_COL).startswith(glyph)   # glyph (+ maybe VS15)
         assert item.icon(panel._STATUS_COL).isNull()            # no themed icon
         assert item.data(0, _STATUS_ROLE) == status
+    # ...and the status column's delegate must actually PAINT that text — it used
+    # to be an icon-only delegate, so the glyph (in DisplayRole, not Decoration)
+    # rendered as nothing (the "no ✓ at all" bug).
+    from qeth.plugins.ens import _StatusGlyphDelegate
+    assert isinstance(
+        panel.tree.itemDelegateForColumn(panel._STATUS_COL), _StatusGlyphDelegate)
+
+
+def test_status_glyph_delegate_paints_the_glyph_text(qtbot):
+    """The status delegate paints the item's DisplayRole text (the glyph). It
+    previously painted only DecorationRole (an icon), so switching status to a
+    text glyph rendered blank — this locks the glyph actually reaching the
+    painter."""
+    from unittest.mock import MagicMock
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QStyleOptionViewItem, QTreeWidget
+    from qeth.plugins.ens import _StatusGlyphDelegate
+    tree = QTreeWidget()
+    qtbot.addWidget(tree)
+    delegate = _StatusGlyphDelegate(tree)
+    opt = QStyleOptionViewItem()
+    opt.rect = QRect(0, 0, 30, 20)
+    index = MagicMock()
+    index.data.return_value = "✓"            # DisplayRole glyph
+    painter = MagicMock()
+    delegate.paint(painter, opt, index)
+    assert any("✓" in str(c.args) for c in painter.drawText.call_args_list)

@@ -240,22 +240,33 @@ class _EnsTree(QTreeWidget):
         super().drawBranches(painter, rect, index)
 
 
-class _RightIconDelegate(_EnsItemDelegate):
+class _StatusGlyphDelegate(_EnsItemDelegate):
     """Status column: the focus-aware selection background (from the base) plus
-    the status icon painted flush against the right edge (the default delegate
-    left-aligns the decoration) so the address column keeps the rest."""
+    the status GLYPH (✓ / ⚠︎ / ⏳︎) — a font glyph, not a themed icon, so it's
+    identical across theme/size/DPI (see ``_set_status``). Painted flush against
+    the right edge (the default delegate left-aligns text), so the resolved-
+    address column keeps the rest, and coloured to match selection."""
 
     def paint(self, painter, option, index) -> None:
         fill = self._selection_fill(option)
         if fill is not None:
             painter.fillRect(option.rect, fill)
-        ic = index.data(Qt.ItemDataRole.DecorationRole)
-        if isinstance(ic, QIcon) and not ic.isNull():
-            sz = option.decorationSize
-            r = option.rect
-            x = r.right() - sz.width() - 2
-            y = r.top() + (r.height() - sz.height()) // 2
-            ic.paint(painter, x, y, sz.width(), sz.height())
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if not text:
+            return
+        painter.save()
+        colour = (option.palette.color(
+                      QPalette.ColorRole.HighlightedText if fill.lightness() < 140
+                      else QPalette.ColorRole.Text)
+                  if fill is not None
+                  else option.palette.color(QPalette.ColorRole.Text))
+        painter.setPen(colour)
+        painter.setFont(option.font)
+        painter.drawText(
+            option.rect.adjusted(0, 0, -4, 0),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            str(text))
+        painter.restore()
 
 
 def _record_rows(rec: EnsRecords) -> list[tuple[str, str, str]]:
@@ -526,7 +537,7 @@ class EnsPanel(QWidget):
         # tree keeps the focused/unfocused selection swap immediate.
         self.tree.setItemDelegate(_EnsItemDelegate(self.tree))
         self.tree.setItemDelegateForColumn(
-            self._STATUS_COL, _RightIconDelegate(self.tree))
+            self._STATUS_COL, _StatusGlyphDelegate(self.tree))
         self.tree.installEventFilter(self)
         # Click headers to sort by name / expiry (either direction); the
         # Expires column sorts by real timestamp via _SortItem. Default: name A→Z.

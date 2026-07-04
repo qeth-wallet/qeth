@@ -25,9 +25,15 @@ from cbor2 import dumps, loads
 
 from . import bytewords, ur
 
-# Message bytes per fragment. Small enough that each part's QR stays a low,
-# reliably-scannable version; a typical tx stays single-part, a swap animates.
-MAX_FRAGMENT_LEN = 150
+# A payload up to this size is a single static QR — a normal tx stays one clean
+# code (no animation, no coupon-collector tail). Sized to hold a simple send.
+SINGLE_PART_MAX = 150
+# When a payload IS too big (a swap's calldata), fragment it into pieces this
+# small: each part's QR is then a low, reliably-scanned version, so the device's
+# camera misses fewer frames — which is what shortens the animation's tail. (The
+# tail can't be fully removed without the rateless fountain parts; see the
+# module docstring.)
+FRAGMENT_LEN = 90
 
 
 def _crc32(data: bytes) -> int:
@@ -40,13 +46,15 @@ def _fragments(message: bytes, seq_len: int, frag_len: int) -> list[bytes]:
 
 
 def encode_parts(
-    ur_type: str, message: bytes, *, max_fragment_len: int = MAX_FRAGMENT_LEN,
+    ur_type: str, message: bytes, *,
+    single_part_max: int = SINGLE_PART_MAX, fragment_len: int = FRAGMENT_LEN,
 ) -> list[str]:
-    """A payload → the list of ``ur:…`` part strings for an animated QR (a
-    single plain part when it fits ``max_fragment_len``)."""
-    if len(message) <= max_fragment_len:
+    """A payload → the list of ``ur:…`` part strings for a QR: one plain part
+    when it fits ``single_part_max``, else fragmented into ``fragment_len``-byte
+    animated parts."""
+    if len(message) <= single_part_max:
         return [ur.encode(ur_type, message)]
-    seq_len = math.ceil(len(message) / max_fragment_len)
+    seq_len = math.ceil(len(message) / fragment_len)
     frag_len = math.ceil(len(message) / seq_len)
     checksum = _crc32(message)
     parts = []

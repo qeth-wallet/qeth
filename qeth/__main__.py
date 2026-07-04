@@ -58,7 +58,11 @@ def _harden_x11_backing_store(environ, platform) -> None:
         environ.setdefault("QT_X11_NO_MITSHM", "1")
 
 
-_FFMPEG_HW_DEVICE_TYPES = "vaapi,cuda,qsv"
+# VA-API (Intel/AMD) first, then CUDA (NVIDIA) and QSV; VDPAU LAST as a decode
+# fallback for VDPAU-only boxes (older NVIDIA/nouveau). Encode omits VDPAU —
+# there's no VDPAU encoder. See _set_ffmpeg_hwaccel for why VDPAU-last is safe.
+_FFMPEG_DECODE_HW_DEVICE_TYPES = "vaapi,cuda,qsv,vdpau"
+_FFMPEG_ENCODE_HW_DEVICE_TYPES = "vaapi,cuda,qsv"
 
 
 def _set_ffmpeg_hwaccel(environ, platform) -> None:
@@ -76,22 +80,25 @@ def _set_ffmpeg_hwaccel(environ, platform) -> None:
     still fires it).
 
     So give ffmpeg an explicit list for BOTH decode and encode: that skips the
-    probe entirely. Keep the real hardware paths — VA-API (Intel/AMD), CUDA
-    (NVIDIA), QSV — so non-Intel machines still get hardware decode; ffmpeg
-    creates a context only for the one it actually selects (first match wins),
-    never the whole list. VA-API is first so this Intel box picks it and never
-    attempts the others. Only VDPAU is left out: it's the sole path whose
-    failure writes that raw-stderr line, and its hardware decode is already
-    covered by CUDA (NVIDIA) / VA-API (AMD), so nothing is lost.
+    probe entirely, and — crucially — in the selection path ffmpeg creates a
+    context only for the type it actually SELECTS (first match wins), never the
+    whole list. So we can keep every real hardware path: VA-API (Intel/AMD)
+    first, CUDA (NVIDIA), QSV, and VDPAU LAST. VA-API is first so this Intel box
+    selects it and never reaches VDPAU (→ no va_gl shim, no warning). VDPAU is
+    only ever reached on a machine where nothing before it works — an older
+    NVIDIA/nouveau box that IS VDPAU-only — and there it loads its NATIVE driver
+    (no shim), so it gets hardware decode with no warning. The warning could
+    only return on an Intel box whose VA-API also can't handle the codec, which
+    then just falls to software anyway.
 
     Linux-only (these are Linux decoders; macOS/Windows use their own), read by
     the ffmpeg plugin at camera init, and ``setdefault`` so an explicit user
     override wins."""
     if platform.startswith("linux"):
         environ.setdefault(
-            "QT_FFMPEG_DECODING_HW_DEVICE_TYPES", _FFMPEG_HW_DEVICE_TYPES)
+            "QT_FFMPEG_DECODING_HW_DEVICE_TYPES", _FFMPEG_DECODE_HW_DEVICE_TYPES)
         environ.setdefault(
-            "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", _FFMPEG_HW_DEVICE_TYPES)
+            "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", _FFMPEG_ENCODE_HW_DEVICE_TYPES)
 
 
 def _running_bundled_qt(environ) -> bool:

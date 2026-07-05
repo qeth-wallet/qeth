@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QCoreApplication, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialogButtonBox, QFormLayout,
@@ -44,6 +44,16 @@ log = logging.getLogger("qeth.chain_rpc_dialog")
 # pool reasonable without serializing the wait.
 _PROBE_CONCURRENCY = 16
 _PROBE_TIMEOUT_S = 5.0
+
+# Self-consistent (bg, fg) pills for the URL verdict — each carries its own
+# background so it reads on any palette, the same theme-safe treatment as the
+# Contract: familiarity badge (_IDENTITY_TINT in the transactions plugin;
+# feedback_theme_safe_colors). The red is that badge's "unverified" red, reused
+# so a bad endpoint and a risky contract read as the same kind of warning.
+_URL_STATUS_TINT = {
+    "ok":  ("#d1e7dd", "#0f5132"),   # reachable, right chain — success green
+    "bad": ("#f8d7da", "#842029"),   # unreachable / wrong chain — danger red
+}
 
 
 class _ChainlistLoader(QThread):
@@ -101,6 +111,29 @@ class _ChainlistLoader(QThread):
         self.probing_done.emit()
 
 
+class _UrlProbeWorker(QThread):
+    """Probe one manually-entered URL for reachability + correct chain, off the
+    Qt main thread. Emits its verdict once. Same ``eth_chainId`` probe the
+    picker uses, so 'wrong chain behind this URL' (a paste of another chain's
+    endpoint) is caught, not just an unreachable host."""
+
+    probed = Signal(str, bool, object, object)   # url, ok, latency_ms|None, reason|None
+
+    def __init__(self, url: str, chain_id: int, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._chain_id = chain_id
+
+    def run(self) -> None:
+        from .chainlist import probe_rpc
+        try:
+            ok, latency, reason = probe_rpc(
+                self._url, self._chain_id, timeout=_PROBE_TIMEOUT_S)
+        except Exception as e:            # a probe must never crash the thread
+            ok, latency, reason = False, None, str(e)[:120]
+        self.probed.emit(self._url, ok, latency, reason)
+
+
 class ChainRpcDialog(Dialog):
     """Edit the JSON-RPC URL for one chain, plus the (global)
     Etherscan v2 API key.
@@ -128,6 +161,11 @@ class ChainRpcDialog(Dialog):
 
         outer = QVBoxLayout(self)
         # Margins + paragraph spacing come from the Dialog base (font-derived).
+        # The URL field and its live-reachability verdict are one paragraph
+        # (tight), so group them in a sub-box rather than let the base's
+        # between-paragraph gap push the verdict away from its field.
+        url_para = QVBoxLayout()
+        url_para.setSpacing(item_spacing(self))
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
@@ -136,7 +174,16 @@ class ChainRpcDialog(Dialog):
         self.url_edit.setFont(mono)
         self.url_edit.setMinimumHeight(30)
         form.addRow("RPC &URL:", self.url_edit)
-        outer.addLayout(form)
+        url_para.addLayout(form)
+        # Live reachability verdict: probes the typed/pasted URL once typing
+        # settles and shows a red/green line, so a typo or an offline endpoint
+        # is caught before OK. Hidden while empty (an empty label would still
+        # claim a font line — a stray gap).
+        self.url_status_lbl = QLabel("")
+        self.url_status_lbl.setWordWrap(True)
+        self.url_status_lbl.setVisible(False)
+        url_para.addWidget(self.url_status_lbl)
+        outer.addLayout(url_para)
 
         # The caption, the endpoint list, and its status line are one paragraph
         # (tight); the URL form above and the key form below are separate.
@@ -209,6 +256,19 @@ class ChainRpcDialog(Dialog):
         self._loader.finished.connect(self._loader.deleteLater)
         self._loader.start()
 
+        # Live URL reachability. Debounce so we probe once typing settles, not
+        # per keystroke; workers are tracked so a superseding probe (or the
+        # dialog closing) doesn't fire a stale verdict into a dead receiver.
+        self._url_workers: set[_UrlProbeWorker] = set()
+        self._url_timer = QTimer(self)
+        self._url_timer.setSingleShot(True)
+        self._url_timer.setInterval(600)
+        self._url_timer.timeout.connect(self._kick_url_probe)
+        self.url_edit.textChanged.connect(self._on_url_edited)
+        # Probe whatever's pre-filled (the chain's current RPC) on open, so the
+        # user sees straight away whether their existing endpoint still works.
+        self._kick_url_probe()
+
     def done(self, result):  # noqa: N802 — Qt method name
         # Both Accept and Reject (and any other ``done(...)`` path
         # like the WM close button) flow through here. Disconnect
@@ -226,6 +286,14 @@ class ChainRpcDialog(Dialog):
             except (RuntimeError, TypeError):
                 # Already disconnected, or the QThread destructor
                 # ran ahead of us — nothing useful to do.
+                pass
+        # Same reasoning for the URL probe workers (parented to the app, so they
+        # outlive the dialog): cut their signal so a late verdict can't fire
+        # into a half-destroyed dialog.
+        for w in list(self._url_workers):
+            try:
+                w.probed.disconnect()
+            except (RuntimeError, TypeError):
                 pass
         super().done(result)
 
@@ -349,7 +417,81 @@ class ChainRpcDialog(Dialog):
     def _on_pick(self, item) -> None:
         url = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(url, str):
-            self.url_edit.setText(url)
+            self.url_edit.setText(url)   # fires textChanged → live re-probe
+
+    # --- live URL reachability --------------------------------
+
+    def _on_url_edited(self, _text: str) -> None:
+        # Debounce: restart on every keystroke, probe once typing settles. Clear
+        # the old verdict immediately so a stale green/red doesn't linger over a
+        # URL that's now mid-edit.
+        self._set_url_status("", "none")
+        self._url_timer.start()
+
+    def _kick_url_probe(self) -> None:
+        url = self.url_edit.text().strip()
+        if not url:
+            self._set_url_status("", "none")
+            return
+        if not url.startswith(("http://", "https://")):
+            # Don't nag while a URL is half-typed; a non-empty non-http string
+            # (e.g. a wss:// paste) gets a gentle hint — qeth's chain RPC is
+            # HTTP only (EthClient is HTTPProvider-only).
+            self._set_url_status("Enter an http(s):// endpoint", "checking")
+            return
+        # If the picker already probed this exact URL and it worked, show that
+        # verdict instantly instead of re-probing.
+        cached = self._results.get(url)
+        if cached is not None and cached[1]:
+            self._show_url_verdict(url, True, cached[0], None)
+            return
+        self._set_url_status("Checking…", "checking")
+        worker = _UrlProbeWorker(url, self._chain.chain_id,
+                                 parent=QCoreApplication.instance())
+        worker.probed.connect(self._on_url_probed)
+        worker.finished.connect(lambda w=worker: self._url_workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        self._url_workers.add(worker)
+        worker.start()
+
+    def _on_url_probed(self, url, ok, latency, reason) -> None:
+        # Ignore a verdict for a URL that's no longer in the field (the user
+        # kept typing / picked another) — only the current URL's result shows.
+        if url != self.url_edit.text().strip():
+            return
+        self._show_url_verdict(url, ok, latency, reason)
+
+    def _show_url_verdict(self, url, ok, latency, reason) -> None:
+        if ok:
+            ms = f" · {latency:.0f} ms" if latency is not None else ""
+            self._set_url_status(f"✓ Reachable{ms}", "ok")
+        elif isinstance(reason, str) and reason.startswith("chain mismatch"):
+            # A working node, but for a DIFFERENT chain — the classic paste typo.
+            self._set_url_status(
+                f"✗ Wrong chain — this endpoint isn't chain {self._chain.chain_id}",
+                "bad")
+        else:
+            self._set_url_status("✗ Not reachable", "bad")
+
+    def _set_url_status(self, text: str, kind: str) -> None:
+        """Drive the verdict line. ``kind``: ok / bad render as a tinted pill
+        (like the Contract: familiarity badge); checking / none is plain muted
+        text (the transient 'identifying…' equivalent) or hidden. A ✓/✗ glyph
+        carries the meaning too, so it still reads if a theme mutes the tint."""
+        if not text:
+            self.url_status_lbl.clear()
+            self.url_status_lbl.setVisible(False)
+            return
+        tint = _URL_STATUS_TINT.get(kind)
+        if tint:
+            bg, fg = tint
+            self.url_status_lbl.setStyleSheet(
+                f"background:{bg}; color:{fg}; padding:2px 8px; border-radius:4px;")
+        else:
+            # transient 'Checking…' / hint — plain muted text, no pill yet.
+            self.url_status_lbl.setStyleSheet("color: gray;")
+        self.url_status_lbl.setText(text)
+        self.url_status_lbl.setVisible(True)
 
     # --- formatting -------------------------------------------
 

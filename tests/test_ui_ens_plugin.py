@@ -676,7 +676,8 @@ class TestEnsPanel:
         assert not any(b.isHidden() for b in panel._name_btns)
         assert all(b.isHidden() for b in panel._rec_btns)
         for b in (panel._b_transfer, panel._b_renew, panel._b_manager,
-                  panel._b_addr, panel._b_content, panel._b_copyname):
+                  panel._b_addr, panel._b_content, panel._b_record,
+                  panel._b_subdomain, panel._b_copyname):
             assert b.isEnabled()
 
     def test_action_bar_owner_only_disables_record_buttons(self, qtbot):
@@ -691,6 +692,20 @@ class TestEnsPanel:
         assert panel._b_copyname.isEnabled()
         assert not panel._b_addr.isEnabled()
         assert not panel._b_content.isEnabled()
+        assert not panel._b_record.isEnabled()
+        assert not panel._b_subdomain.isEnabled()
+
+    def test_record_and_subdomain_buttons_emit_write(self, qtbot):
+        # The two write buttons added for menu/button parity fire the same
+        # write_requested kinds the context menu's items do.
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        panel.tree.setCurrentItem(root)
+        seen: list = []
+        panel.write_requested.connect(lambda nm, k: seen.append((nm, k)))
+        assert panel._b_record.isEnabled() and panel._b_subdomain.isEnabled()
+        panel._b_record.click()
+        panel._b_subdomain.click()
+        assert seen == [("crv.eth", "record"), ("crv.eth", "subdomain")]
 
     def test_action_bar_switches_to_copy_edit_on_record(self, qtbot):
         panel, root = self._bar_panel(qtbot, writable={"crv.eth"})

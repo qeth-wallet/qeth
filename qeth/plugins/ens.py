@@ -678,6 +678,11 @@ class EnsPanel(QWidget):
         self._b_manager = util(ic["manager"], "Set manager")
         self._b_addr = util(ic["addr"], "Set ETH address")
         self._b_content = util(ic["content"], "Set content (IPFS)")
+        # The general record editor + subdomain creator — also on the
+        # right-click menu; buttoned here so the two surfaces agree (both
+        # enabled only when this account manages the name).
+        self._b_record = util(ic["record"], "Add or change a record")
+        self._b_subdomain = util(ic["subdomain"], "Add subdomain")
         self._b_copyname = util(ic["copy"], "Copy name")
         # Edit is the labelled primary in record mode (first, framed); Copy is
         # the icon-only utility beside it.
@@ -692,13 +697,16 @@ class EnsPanel(QWidget):
         self._b_manager.clicked.connect(lambda: self._emit_name("manager"))
         self._b_addr.clicked.connect(lambda: self._emit_name("addr"))
         self._b_content.clicked.connect(lambda: self._emit_name("content"))
+        self._b_record.clicked.connect(lambda: self._emit_name("record"))
+        self._b_subdomain.clicked.connect(lambda: self._emit_name("subdomain"))
         self._b_copyname.clicked.connect(self._copy_name)
         self._b_reccopy.clicked.connect(self._copy_value)
         self._b_recedit.clicked.connect(self._edit_current)
         self._b_add.clicked.connect(lambda: self.add_custom_requested.emit())
 
         self._name_btns = [self._b_transfer, self._b_renew, self._b_manager,
-                           self._b_addr, self._b_content, self._b_copyname]
+                           self._b_addr, self._b_content, self._b_record,
+                           self._b_subdomain, self._b_copyname]
         self._rec_btns = [self._b_recedit, self._b_reccopy]
 
     def action_buttons(self) -> list[QWidget]:
@@ -746,6 +754,8 @@ class EnsPanel(QWidget):
             nl in self._reclaimable or nl in self._subnode_manageable)
         self._b_addr.setEnabled(manages)
         self._b_content.setEnabled(manages)
+        self._b_record.setEnabled(manages)
+        self._b_subdomain.setEnabled(manages)
 
     def _set_record_mode(self, item: QTreeWidgetItem) -> None:
         for b in self._name_btns:

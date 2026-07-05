@@ -17,8 +17,10 @@ ETH = Chain("Ethereum", 1, "https://eth.example")
 @pytest.fixture(autouse=True)
 def _clean_registry():
     hl._sidecars.clear()
+    hl._proof_incapable.clear()
     yield
     hl._sidecars.clear()
+    hl._proof_incapable.clear()
 
 
 def _enable(monkeypatch, binary="/fake/helios"):
@@ -264,6 +266,72 @@ def test_sidecar_respawns_when_rpc_changes(monkeypatch):
     third = hl.verified_chain(changed, wait_s=5)
     assert len(spawned) == 2
     assert third.rpc_url == second.rpc_url
+
+
+def test_proof_window_error_detection():
+    """mevblocker's -32602 and pruned/archive errors are proof-window failures
+    (reroute Helios); a rate-limit or plain revert is NOT."""
+    is_pw = hl.is_proof_window_error
+    assert is_pw("error code -32602: distance to target block exceeds "
+                 "maximum proof window")
+    assert is_pw(Exception("missing trie node; state is pruned"))
+    assert is_pw("this endpoint serves no historical state")
+    assert not is_pw("rate limit exceeded")
+    assert not is_pw("execution reverted: ERC20: insufficient balance")
+
+
+def test_capable_user_rpc_is_used_as_is():
+    """A user RPC that serves historical proofs (a local node, a full provider)
+    is respected by default — Helios reads from it, not from the public
+    default; nothing marks it incapable."""
+    local = Chain("Ethereum", 1, "http://localhost:8545")
+    assert hl._execution_rpc(local) == "http://localhost:8545"
+
+
+def test_incapable_rpc_reroutes_to_bundled_default():
+    """Once a verified fork proves an RPC can't serve historical proofs,
+    note_execution_rpc_incapable routes Helios's reads to the bundled default —
+    while the user's RPC keeps doing balances / MEV-protected broadcasts."""
+    from qeth.chains import DEFAULT_CHAINS
+    send_only = Chain("Ethereum", 1, "https://send-only.example")
+    assert hl._execution_rpc(send_only) == "https://send-only.example"  # optimistic
+
+    assert hl.note_execution_rpc_incapable(send_only) is True   # routing changed
+    bundled = next(c for c in DEFAULT_CHAINS if c.chain_id == 1).rpc_url
+    assert hl._execution_rpc(send_only) == bundled              # now via DRPC
+    assert hl.note_execution_rpc_incapable(send_only) is False  # already switched
+
+
+def test_note_incapable_no_op_without_a_fallback():
+    """A chainlist chain with no bundled default has nowhere proof-capable to
+    fall back to, so marking it incapable changes nothing."""
+    custom = Chain("Custom", 999999, "https://custom.example")
+    assert hl.note_execution_rpc_incapable(custom) is False
+    assert hl._execution_rpc(custom) == "https://custom.example"
+
+
+def test_incapable_rpc_respawns_sidecar_to_bundled_default(monkeypatch):
+    """After the reroute, verified_chain replaces the mevblocker-backed sidecar
+    with one spawned against the bundled default (the execution-rpc changed)."""
+    from qeth.chains import DEFAULT_CHAINS
+    _enable(monkeypatch)
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)
+    spawned = []
+    monkeypatch.setattr(hl.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(argv) or _FakeProc(argv))
+    send_only = Chain("Ethereum", 1, "https://send-only.example")
+
+    hl.verified_chain(send_only, wait_s=5)
+    assert hl._sidecars[1].execution_rpc == "https://send-only.example"
+
+    hl.note_execution_rpc_incapable(send_only)     # a verified fork just failed
+    hl.verified_chain(send_only, wait_s=5)         # retry reroutes + respawns
+
+    bundled = next(c for c in DEFAULT_CHAINS if c.chain_id == 1).rpc_url
+    assert hl._sidecars[1].execution_rpc == bundled
+    assert len(spawned) == 2
+    argv = spawned[-1]
+    assert argv[argv.index("--execution-rpc") + 1] == bundled
 
 
 def test_prewarm_spawns_once_and_never_blocks(monkeypatch):

@@ -504,6 +504,53 @@ def test_verified_revert_is_flagged(monkeypatch):
     assert out.verified is True
 
 
+def test_verified_proof_window_reroutes_and_retries(monkeypatch):
+    """A verified fork that fails because Helios's execution-rpc can't serve
+    historical proofs (a send-only RPC like mevblocker) reroutes Helios and
+    retries — the proof-capable second attempt's logs come back tagged verified,
+    not blank."""
+    import qeth.helios as helios_mod
+    from qeth.simulate import VerifiedLogs, _ProofWindowUnavailable
+    monkeypatch.setattr(sim, "fork_available", lambda: True)
+    monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
+    noted = []
+    monkeypatch.setattr(helios_mod, "note_execution_rpc_incapable",
+                        lambda chain: noted.append(chain) or True)
+    calls = {"n": 0}
+
+    def fork(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:      # first attempt: mevblocker can't prove the block
+            raise _ProofWindowUnavailable(
+                "distance to target block exceeds maximum proof window")
+        return ["evt"]           # retry against the proof-capable endpoint
+    monkeypatch.setattr(sim, "_simulate_via_fork", fork)
+
+    out = simulate_logs(CHAIN, FROM, USDC, "0x1234", 0)
+    assert isinstance(out, VerifiedLogs) and list(out) == ["evt"]
+    assert calls["n"] == 2 and noted    # retried once, after recording incapable
+
+
+def test_verified_proof_window_falls_through_to_unverified(monkeypatch):
+    """If the reroute retry still can't prove (or there's nowhere to reroute),
+    the user still gets a preview: fall through to the unverified fast path,
+    tagged RemoteLogs so the UI badges it rather than showing a blank."""
+    import qeth.helios as helios_mod
+    from qeth.simulate import RemoteLogs, _ProofWindowUnavailable
+    monkeypatch.setattr(sim, "fork_available", lambda: True)
+    monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
+    monkeypatch.setattr(helios_mod, "note_execution_rpc_incapable",
+                        lambda chain: False)   # no bundled fallback to switch to
+    monkeypatch.setattr(sim, "_simulate_via_fork",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _ProofWindowUnavailable("proof window")))
+    # the unverified fast path works (mevblocker supports eth_simulateV1)
+    monkeypatch.setattr(sim, "_simulate_via_rpc", lambda *a, **k: ["remote-evt"])
+
+    out = simulate_logs(CHAIN, FROM, USDC, "0x1234", 0)
+    assert isinstance(out, RemoteLogs) and list(out) == ["remote-evt"]
+
+
 def test_floor_ahead_of_head(monkeypatch):
     """The helper that detects when the wallet's just-confirmed tx is at a
     block the (Helios) head hasn't reached yet — the window where a verified

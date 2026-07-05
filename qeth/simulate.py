@@ -59,6 +59,13 @@ class _SimV1Unsupported(Exception):
     the local fork."""
 
 
+class _ProofWindowUnavailable(Exception):
+    """A verified fork couldn't read state because Helios's execution-rpc can't
+    serve a historical proof for the fork block (a send-only endpoint like
+    ``rpc.mevblocker.io/fast`` → -32602). Signals ``simulate_logs`` to reroute
+    Helios to a proof-capable endpoint and retry, rather than fail the preview."""
+
+
 class SimulationNote:
     """A 'ran fine, but an events list would mislead' outcome. The UI
     shows ``text`` as the placeholder instead of an (empty) events list."""
@@ -437,7 +444,7 @@ def _latest_block(chain, lag: int = 0, floor_block=None) -> "dict | None":
 
 def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                        *, fork_reader=None, fork_block=None, hint_url=None,
-                       fork_lag=0, floor_block=None,
+                       fork_lag=0, floor_block=None, raise_proof_errors=False,
                        retries=4, sleep=None, deadline=None):
     """Local py-evm fork (``qeth.pyevm_fork``). ``fork_reader`` is the
     test seam: a fake ``StateReader`` makes the run hermetic (the real
@@ -500,6 +507,12 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                          attempt + 1, retries - 1, delay)
                 sleep(delay)
                 continue
+            if raise_proof_errors:
+                from .helios import is_proof_window_error
+                if is_proof_window_error(e):
+                    # Helios's execution-rpc can't prove the fork block — let the
+                    # orchestrator reroute Helios and retry rather than blank out.
+                    raise _ProofWindowUnavailable(str(e)) from e
             log.warning("fork simulation failed (block %s): %s",
                         fork_no, _decode_revert(str(e)))
             return None
@@ -566,27 +579,57 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         if helios_chain is not None:
             log.info("simulating on helios-verified state (%s)",
                      helios_chain.rpc_url)
-            out = _simulate_via_fork(
-                helios_chain, from_addr, to_addr, data, value,
-                # Hint from the untrusted upstream (fast prestateTracer),
-                # not the Helios shadow (slow iterative proving). Keys
-                # only — values are re-proven through Helios.
-                hint_url=chain.rpc_url,
-                # Fork a few blocks behind the head so the RPC backends have
-                # converged on the state Helios verified — otherwise the
-                # bleeding-edge eth_getProof fails root verification (-32000).
-                # floor_block clamps that backoff so we never fork before the
-                # wallet's own latest tx (don't hide our just-sent approval).
-                fork_lag=_VERIFIED_FORK_LAG.get(chain.chain_id, _DEFAULT_FORK_LAG),
-                floor_block=floor_block,
-                retries=retries, sleep=sleep, deadline=deadline)
+            _fork_lag = _VERIFIED_FORK_LAG.get(chain.chain_id, _DEFAULT_FORK_LAG)
+
+            def _verified_fork(hc):
+                return _simulate_via_fork(
+                    hc, from_addr, to_addr, data, value,
+                    # Hint from the untrusted upstream (fast prestateTracer),
+                    # not the Helios shadow (slow iterative proving). Keys
+                    # only — values are re-proven through Helios.
+                    hint_url=chain.rpc_url,
+                    # Fork a few blocks behind the head so the RPC backends have
+                    # converged on the state Helios verified — otherwise the
+                    # bleeding-edge eth_getProof fails root verification (-32000).
+                    # floor_block clamps that backoff so we never fork before the
+                    # wallet's own latest tx (don't hide our just-sent approval).
+                    fork_lag=_fork_lag, floor_block=floor_block,
+                    raise_proof_errors=True,
+                    retries=retries, sleep=sleep, deadline=deadline)
+
+            out = None
+            try:
+                out = _verified_fork(helios_chain)
+            except _ProofWindowUnavailable:
+                # Helios's execution-rpc can't serve historical proofs (a
+                # send-only endpoint like mevblocker.io/fast). Reroute Helios to
+                # the bundled proof-capable default and retry once against the
+                # respawned sidecar — a good user RPC never gets here.
+                from .helios import note_execution_rpc_incapable
+                if note_execution_rpc_incapable(chain):
+                    hc2 = verified_chain(chain)
+                    if hc2 is not None:
+                        log.info("retrying verified sim via proof-capable %s",
+                                 hc2.rpc_url)
+                        try:
+                            out = _verified_fork(hc2)
+                        except _ProofWindowUnavailable:
+                            out = None
             # Mark success (incl. an empty log list) as verified; None /
             # SimulationNote pass through unchanged. A revert proven over
             # Helios state is trustworthy too — flag it so the warning can say
             # the RPC couldn't have faked it.
-            if isinstance(out, RevertNote):
-                out.verified = True
-            return VerifiedLogs(out) if isinstance(out, list) else out
+            if out is not None:
+                if isinstance(out, RevertNote):
+                    out.verified = True
+                return VerifiedLogs(out) if isinstance(out, list) else out
+            # The verified path produced nothing (proof-capable reroute still
+            # failed, or the fork errored). Don't leave a blank preview: fall
+            # through to the unverified fast path — which a send-only RPC does
+            # support — badged 'verifying…' like the Helios-behind-floor case.
+            log.info("verified simulation unavailable; serving an unverified "
+                     "preview this round")
+            catching_up = True
     # Unverified preview (no Helios, or Helios still behind the floor): the
     # verified path applies the fork floor itself; here we instead wait for the
     # load-balanced head to reach it, so a node the LB routed to that trails the

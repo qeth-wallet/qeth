@@ -43,10 +43,79 @@ import urllib.request
 from collections import deque
 from typing import Any
 
-from .chains import Chain
+from .chains import DEFAULT_CHAINS, Chain
 
 log = logging.getLogger("qeth.helios")
 
+
+# execution-rpc endpoints found unable to serve HISTORICAL eth_getProof — what a
+# verified fork needs (it forks a few blocks behind head, and Helios proves each
+# state read against that block). Learned reactively from a real verified-fork
+# failure (see note_execution_rpc_incapable), NOT a URL allow/deny list and NOT
+# an upfront probe: a send relay like rpc.mevblocker.io/fast is load-balanced and
+# answers eth_getProof for a random ~half of requests, so a short probe passes by
+# luck while the proof-heavy fork reliably fails. Capability is thus MEASURED by
+# use, so a private/local node or full-node provider is trusted on its merits.
+_proof_incapable: set[str] = set()
+# JSON-RPC error text meaning "I can't serve a proof for a block that far back"
+# (vs a transient blip). -32602 "distance to target block exceeds maximum proof
+# window" is mevblocker's; the rest cover pruned / archive-less nodes.
+_PROOF_WINDOW_RE = re.compile(
+    r"proof window|distance to target|is not available|no historical|"
+    r"missing trie|state.*(unavailable|not available)|pruned|archive|"
+    r"getproof.*(not|unsupported)",
+    re.IGNORECASE,
+)
+
+
+def _bundled_rpc(chain_id: int) -> str | None:
+    c = next((c for c in DEFAULT_CHAINS if c.chain_id == chain_id), None)
+    return c.rpc_url if c is not None else None
+
+
+def _execution_rpc(chain: Chain) -> str:
+    """The endpoint Helios reads state/proofs from. The user's configured RPC by
+    default — a local node or full-node provider is used as-is (faster and more
+    private than a public fallback) — UNLESS a verified fork has proven it can't
+    serve historical eth_getProof, in which case Helios reads from the chain's
+    bundled default instead. The verified fork forks a few blocks behind head, so
+    a send-optimised RPC like ``rpc.mevblocker.io/fast`` (tiny, erratic proof
+    window → -32602) can't back it. Helios VERIFIES whatever this endpoint
+    returns against the consensus-proven state root, so it needn't be trusted —
+    only proof-capable; the user's RPC still governs balances, token discovery
+    and MEV-protected broadcasts."""
+    if chain.rpc_url in _proof_incapable:
+        bundled = _bundled_rpc(chain.chain_id)
+        if bundled is not None and bundled != chain.rpc_url:
+            return bundled
+    return chain.rpc_url
+
+
+def is_proof_window_error(err: object) -> bool:
+    """True when ``err`` (an exception or message) means the execution-rpc can't
+    serve a historical proof for the fork block — the signal to reroute Helios
+    off a send-only endpoint. Distinct from a rate-limit / transient error."""
+    return bool(_PROOF_WINDOW_RE.search(str(err)))
+
+
+def note_execution_rpc_incapable(chain: Chain) -> bool:
+    """Record that ``chain``'s configured RPC can't serve historical proofs (a
+    verified fork hit its proof-window limit), so :func:`_execution_rpc` routes
+    Helios's reads to the bundled default. Returns True when that actually
+    changes the routing — i.e. there's a different bundled default to switch to
+    and we hadn't already switched — so the caller knows a retry is worthwhile.
+    The running sidecar is left for :func:`_ensure_sidecar` to replace on the
+    next :func:`verified_chain` (its execution-rpc no longer matches)."""
+    url = chain.rpc_url
+    if url in _proof_incapable:
+        return False
+    bundled = _bundled_rpc(chain.chain_id)
+    if bundled is None or bundled == url:
+        return False                           # nowhere proof-capable to fall back to
+    _proof_incapable.add(url)
+    log.info("RPC %s can't serve historical proofs for verified sims; routing "
+             "Helios's verified reads through %s instead", url, bundled)
+    return True
 
 # chain_id -> (helios subcommand, --network value or None for the
 # subcommand's default). Only networks Helios actually verifies: the
@@ -137,10 +206,11 @@ class HeliosSidecar:
         popen = popen or subprocess.Popen
         module, network = HELIOS_NETWORKS[chain.chain_id]
         self.chain_id = chain.chain_id
-        # The execution-rpc is baked into argv below and can't be changed on a
-        # running process, so remember it: _ensure_sidecar respawns when the
-        # chain's RPC is swapped out from under a live sidecar.
-        self.execution_rpc = chain.rpc_url
+        # A proof-capable endpoint (see _execution_rpc), not blindly the user's
+        # RPC. Baked into argv below and unchangeable on a running process, so
+        # remember it: _ensure_sidecar respawns when it changes under a live
+        # sidecar (e.g. a chainlist chain whose user RPC was swapped).
+        self.execution_rpc = _execution_rpc(chain)
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._ready = False
@@ -275,12 +345,14 @@ def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
     retire: HeliosSidecar | None = None
     with _lock:
         sc = _sidecars.get(chain.chain_id)
-        # Reuse only a live sidecar still pointed at the chain's CURRENT RPC.
-        # A dead one, or one launched against a since-changed execution-rpc
-        # (the user swapped the endpoint in the chain-RPC dialog), is replaced —
-        # otherwise verified reads keep hitting the old node until app restart.
+        # Reuse only a live sidecar still pointed at the chain's CURRENT
+        # execution-rpc (see _execution_rpc — the user's endpoint, or the bundled
+        # default if theirs was proven proof-incapable). A dead sidecar, a
+        # swapped RPC (chain-RPC dialog), or a capability re-classification is
+        # replaced — otherwise verified reads keep hitting the old node until
+        # app restart.
         if (sc is not None and sc.alive()
-                and sc.execution_rpc == chain.rpc_url):
+                and sc.execution_rpc == _execution_rpc(chain)):
             return sc
         if sc is not None and sc.alive():
             retire = sc          # stale RPC: replace it, tear it down off-lock
@@ -316,6 +388,10 @@ def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
 
     Blocking unless prewarmed (first call spawns + syncs, ~6–10 s) —
     call from a worker thread. Reuses the running sidecar.
+
+    The sidecar spawns against the chain's configured RPC unless it was found
+    unable to serve historical proofs (see :func:`note_execution_rpc_incapable`),
+    in which case Helios reads from the bundled proof-capable default.
     """
     sc = _ensure_sidecar(chain)
     if sc is None:

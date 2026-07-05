@@ -137,6 +137,13 @@ for mod in WebEngineCore WebEngineWidgets WebEngineQuick WebChannel WebChannelQu
 done
 # Keep plugins/multimedia — it holds libffmpegmediaplugin.so, the camera backend.
 rm -rf "$PS"/Qt/plugins/{qmltooling,webview,sqldrivers,designer,position,sensors,texttospeech,scenegraph} 2>/dev/null
+# The camera plugin dlopens the Quick/Qml/OpenGL C++ libs kept above, but qeth
+# imports none of them from Python — so drop their multi-MB shiboken BINDINGS +
+# stubs (the .so libs stay). QtMultimedia's own binding is kept (qeth imports it;
+# it needs only Core/Gui/Network, whose bindings also stay).
+for b in Quick Qml QmlModels QmlWorkerScript QmlMeta OpenGL; do
+    rm -f "$PS/Qt${b}.abi3.so" "$PS/Qt${b}.pyi" 2>/dev/null
+done
 echo "DIAG: AppDir after trim = $(du -sh "$APPDIR" | cut -f1)"
 
 # 4. Bundle the external (non-wheel) shared-lib deps of Qt's libs + plugins.

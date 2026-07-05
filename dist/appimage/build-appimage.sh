@@ -31,10 +31,14 @@ rm -rf "$WORK"; mkdir -p "$APPDIR/usr/lib" "$OUT"
 #    from the container (old glibc, generic), never the host. NOTE: this list
 #    is a starting point — the real test is launching on a clean target (the
 #    VM) and chasing whatever the xcb plugin reports missing.
+#    pulseaudio-libs provides libpulse.so.0, which libQt6Multimedia (the QR
+#    signer's camera) hard-links (DT_NEEDED) — without it the multimedia module
+#    won't even load. The client lib alone is enough; no audio server is needed
+#    for camera capture.
 dnf install -y -q \
     libxcb libxkbcommon libxkbcommon-x11 xcb-util-cursor xcb-util-image \
     xcb-util-keysyms xcb-util-renderutil xcb-util-wm libX11 libXext libXrender \
-    libXrandr libXi libSM libICE fontconfig freetype mesa-libGL \
+    libXrandr libXi libSM libICE fontconfig freetype mesa-libGL pulseaudio-libs \
     >/dev/null 2>&1 || echo "WARN: some packages unavailable — refine for the target"
 
 # 2. A relocatable CPython from the container ($ORIGIN-relative RPATH, so it
@@ -72,8 +76,10 @@ tar -C "$SRC" \
 # PYTHONHOME reliably redirects pip — --prefix is explicit and deterministic.
 # [simulate] = pure-Python py-evm fork engine (previews on simV1-less RPCs;
 # Helios-verified previews when a helios binary is on the host).
+# [qr] = the air-gapped QR signer decode stack (cbor2 + zxing-cpp + Pillow),
+# from manylinux wheels — pairs with the QtMultimedia camera kept in 3b.
 "$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
-    "${BUILD_SRC}[bundled,simulate]"
+    "${BUILD_SRC}[bundled,simulate,qr]"
 # Fail loudly if Qt didn't actually land in the bundle, rather than shipping a
 # tiny empty AppImage.
 if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&1; then
@@ -96,30 +102,41 @@ if [ -n "${QETH_BUNDLE_HELIOS:-}" ]; then
     echo "DIAG: bundled helios $("$QETH_BUNDLE_HELIOS" --version 2>/dev/null | head -1)"
 fi
 
-# 3b. Trim Qt modules qeth doesn't use. It's a pure QtWidgets app (only
-#     QtCore/QtGui/QtWidgets; QtSvg/QtNetwork/QtDBus stay as runtime deps), so
-#     the heavyweight Addons — WebEngine, the whole QML/Quick stack, 3D, Charts,
-#     Multimedia, Pdf, Designer — are dead weight that dominates the size. None
-#     is a dependency of QtWidgets, so removing them is safe.
+# 3b. Trim Qt modules qeth doesn't use. It's mostly a QtWidgets app, so the
+#     heavyweight Addons — WebEngine, 3D, Charts, Pdf, Designer — are dead
+#     weight and get removed.
+#     EXCEPTION: QtMultimedia (the QR signer's live camera) is kept, and with it
+#     the modules its FFmpeg backend plugin hard-links (DT_NEEDED, verified from
+#     the wheel): Quick + the QtQml libs (Qml/QmlModels/QmlWorkerScript/QmlMeta)
+#     + OpenGL. Those libQt6*.so must stay or libffmpegmediaplugin.so won't load
+#     — even though qeth never touches QML (we only need the .so, not the qml/
+#     module dir, which is still removed below). The bundled LGPL ffmpeg libav*
+#     live in Qt/lib and aren't libQt6*, so they survive this loop untouched.
 PS="$(echo "$APPDIR"/usr/python/lib/python*/site-packages/PySide6)"
 rm -rf "$PS/Qt/qml" "$PS/Qt/resources" "$PS/Qt/translations" \
        "$PS"/Qt/libexec 2>/dev/null
+# NB: Quick, Qml, QmlModels, QmlWorkerScript, QmlMeta and Multimedia are
+# deliberately ABSENT from this list — they're the FFmpeg camera plugin's
+# dependency closure (see 3b). The remaining Quick*/Qml*/3D*/Multimedia* here
+# (QuickWidgets, QmlCore, MultimediaWidgets, …) are NOT in that closure, so
+# they stay stripped.
 for mod in WebEngineCore WebEngineWidgets WebEngineQuick WebChannel WebChannelQuick \
-           WebView Quick Quick3D QuickWidgets QuickControls2 QuickControls2Impl \
+           WebView Quick3D QuickWidgets QuickControls2 QuickControls2Impl \
            QuickTemplates2 QuickShapes QuickParticles QuickTest QuickLayouts \
            QuickDialogs2 QuickDialogs2QuickImpl QuickDialogs2Utils QuickEffects \
-           QuickTimeline QuickVectorImage Qml QmlModels QmlWorkerScript \
-           QmlLocalStorage QmlCore QmlXmlListModel QmlMeta 3DCore 3DRender 3DInput \
+           QuickTimeline QuickVectorImage \
+           QmlLocalStorage QmlCore QmlXmlListModel 3DCore 3DRender 3DInput \
            3DLogic 3DAnimation 3DExtras 3DQuick 3DQuickRender 3DQuickScene2D \
            Charts ChartsQml DataVisualization DataVisualizationQml Graphs \
-           GraphsWidgets Multimedia MultimediaWidgets MultimediaQuick SpatialAudio \
+           GraphsWidgets MultimediaWidgets MultimediaQuick SpatialAudio \
            Pdf PdfWidgets PdfQuick Designer DesignerComponents Help UiTools \
            Sql Test Bluetooth Nfc Positioning PositioningQuick Location Sensors \
            SensorsQuick SerialPort SerialBus RemoteObjects RemoteObjectsQml \
            Scxml ScxmlQml TextToSpeech WebSockets StateMachine StateMachineQml; do
     rm -f "$PS/Qt/lib/libQt6${mod}".so* "$PS/Qt${mod}.abi3.so" "$PS/Qt${mod}.pyi" 2>/dev/null
 done
-rm -rf "$PS"/Qt/plugins/{qmltooling,webview,multimedia,sqldrivers,designer,position,sensors,texttospeech,scenegraph} 2>/dev/null
+# Keep plugins/multimedia — it holds libffmpegmediaplugin.so, the camera backend.
+rm -rf "$PS"/Qt/plugins/{qmltooling,webview,sqldrivers,designer,position,sensors,texttospeech,scenegraph} 2>/dev/null
 echo "DIAG: AppDir after trim = $(du -sh "$APPDIR" | cut -f1)"
 
 # 4. Bundle the external (non-wheel) shared-lib deps of Qt's libs + plugins.
@@ -127,11 +144,31 @@ echo "DIAG: AppDir after trim = $(du -sh "$APPDIR" | cut -f1)"
 #    the system libs those link that aren't in the wheel.
 QTDIR="$(echo "$APPDIR"/usr/python/lib/python*/site-packages/PySide6/Qt)"
 { find "$QTDIR/lib" -name 'libQt6*.so*' 2>/dev/null
-  find "$QTDIR/plugins/platforms" -name '*.so' 2>/dev/null; } | while read -r so; do
+  find "$QTDIR/plugins/platforms" -name '*.so' 2>/dev/null
+  find "$QTDIR/plugins/multimedia" -name '*.so' 2>/dev/null; } | while read -r so; do
     ldd "$so" 2>/dev/null || true
 done | awk '/=> \// {print $3}' \
   | grep -vE 'PySide6/|/libQt6|/libpython|/ld-linux|/libc\.so|/libm\.so|/libdl|/libpthread|/librt|/libstdc\+\+|/libgcc_s' \
   | sort -u | xargs -r -I{} cp -Lu {} "$APPDIR/usr/lib/" 2>/dev/null || true
+
+# 4a. Camera-stack sanity — the QR signer's live camera must ALWAYS work, so fail
+#     the build here (not on the user's machine) if the FFmpeg backend plugin,
+#     the bundled ffmpeg, or a Qt lib it hard-links went missing in the trim.
+#     ldd resolves against the wheel's $ORIGIN/../../lib (libQt6*/libav*) plus
+#     the container's system libs (incl. the pulseaudio-libs installed in step 1
+#     — libQt6Multimedia hard-links libpulse), so a 'not found' here is a real
+#     gap. libavcodec/libQt6Quick are checked because they're the two easiest
+#     things to break: an over-eager libav strip and the QML closure (see 3b).
+CAM="$QTDIR/plugins/multimedia/libffmpegmediaplugin.so"
+for f in "$CAM" "$QTDIR"/lib/libQt6Multimedia.so.6 \
+         "$QTDIR"/lib/libQt6Quick.so.6 "$QTDIR"/lib/libavcodec.so.*; do
+    ls $f >/dev/null 2>&1 || { echo "FATAL: camera stack incomplete — missing $f"; exit 1; }
+done
+if ldd "$CAM" 2>/dev/null | grep -q 'not found'; then
+    echo "FATAL: libffmpegmediaplugin.so has unresolved deps:"; ldd "$CAM" | grep 'not found'
+    exit 1
+fi
+echo "DIAG: camera stack OK ($(basename "$(ls "$QTDIR"/lib/libavcodec.so.* | head -1)") bundled)"
 
 # 4b. Strip debug symbols from every bundled .so — safe for shared objects
 #     (--strip-unneeded preserves what dynamic linking needs) and saves tens of

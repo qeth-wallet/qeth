@@ -81,7 +81,7 @@ Package: qeth
 Version: $VERSION
 Architecture: amd64
 Maintainer: Michael Egorov <michwill@yieldbasis.com>
-Depends: python3.11, libqt6widgets6, libqt6gui6, libqt6core6, libqt6svg6, libqt6network6, libqt6dbus6, libqt6multimedia6, libqt6multimediawidgets6, gstreamer1.0-plugins-good
+Depends: python3.11, libqt6widgets6, libqt6gui6, libqt6core6, libqt6svg6, libqt6network6, libqt6dbus6, libqt6multimedia6, gstreamer1.0-plugins-good
 Installed-Size: $INSTALLED_KB
 Section: utils
 Priority: optional

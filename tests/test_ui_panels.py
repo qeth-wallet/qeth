@@ -335,6 +335,84 @@ class TestTokenListPanel:
         assert token_panel.table.item(1, 0).text() == "USDC"
         assert token_panel.table.item(1, 1).text() == "2.5"
 
+    def test_context_menu_mirrors_send_button(self, qtbot, tmp_qeth, monkeypatch):
+        """The row context menu mirrors the action buttons for the clicked
+        row: every row (native asset included) offers Send; ERC-20 rows add
+        Copy/Pin/Hide. The native row previously got no menu at all, and the
+        token menu lacked Send even though the Send button below handles both."""
+        import qeth.plugins.tokens as tokmod
+
+        class _FakeAction:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeMenu:
+            instances: list = []
+            choose: str | None = None
+
+            def __init__(self, *a, **k):
+                self.actions: list = []
+                _FakeMenu.instances.append(self)
+
+            def addAction(self, *a, **k):
+                act = _FakeAction(a[-1] if a else "")
+                self.actions.append(act)
+                return act
+
+            def addSeparator(self):
+                pass
+
+            def exec(self, *a, **k):
+                return next((act for act in self.actions
+                             if act.text == _FakeMenu.choose), None)
+
+        monkeypatch.setattr(tokmod, "QMenu", _FakeMenu)
+
+        store = Store.load()
+        panel = TokenListPanel(IconCache(), store)
+        qtbot.addWidget(panel)
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        tokens = [TokenBalance(contract=usdc, symbol="USDC", name="USD Coin",
+                               decimals=6, balance_raw=2_500_000)]
+        panel.show_balances(ETH, native_wei=10**18, tokens=tokens, list_entries={})
+        panel.show()
+        qtbot.wait(50)
+
+        def meta(row):
+            return panel.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+
+        native_row = next(r for r in range(panel.table.rowCount())
+                          if meta(r)[1] == "")
+        erc_row = next(r for r in range(panel.table.rowCount())
+                       if meta(r)[1] != "")
+
+        sent: list = []
+        panel.send_requested.connect(lambda cid, addr: sent.append((cid, addr)))
+
+        def open_menu(row):
+            _FakeMenu.instances.clear()
+            rect = panel.table.visualItemRect(panel.table.item(row, 0))
+            panel._on_context_menu(rect.center())
+            return _FakeMenu.instances[-1]
+
+        # Native row: Send is the only applicable action (no contract to
+        # copy, can't pin/hide) — but it MUST offer a menu now.
+        _FakeMenu.choose = "Send ETH"
+        m = open_menu(native_row)
+        assert [a.text for a in m.actions] == ["Send ETH"]
+        assert sent == [meta(native_row)]
+
+        # ERC-20 row: Send heads the menu, then Copy/Pin/Hide.
+        sent.clear()
+        _FakeMenu.choose = "Send USDC"
+        m = open_menu(erc_row)
+        labels = [a.text for a in m.actions]
+        assert labels[0] == "Send USDC"
+        assert "Copy Contract Address" in labels
+        assert any(x.startswith("Pin ") for x in labels)
+        assert any(x.startswith("Hide ") for x in labels)
+        assert sent == [meta(erc_row)]
+
     def test_huge_erc20_balance_does_not_overflow(self, token_panel):
         """ASF-style raw balances exceed qint64; if we ever marshal them
         through PySide6's int signals they overflow. Rendering should

@@ -2805,20 +2805,33 @@ class TokenListPanel(QWidget):
         if not meta:
             return
         cid, addr = meta
-        if addr == self.NATIVE_CONTRACT:
-            return  # native asset can't be hidden
+        is_native = (addr == self.NATIVE_CONTRACT)
         menu = QMenu(self)
-        # Reuse the panel buttons' icons so the menu matches the toolbar.
-        act_copy = menu.addAction(self.btn_copy.icon(), "Copy Contract Address")
-        # Pin is one-shot (no unpin UI yet); skip it for already-pinned
-        # tokens so the menu doesn't suggest a no-op.
-        act_pin = None
-        if not self._store.is_force_shown(cid, addr):
-            act_pin = menu.addAction(self.btn_pin.icon(), f"Pin {sym_item.text()}")
-        menu.addSeparator()
-        act_hide = menu.addAction(self.btn_hide.icon(), f"Hide {sym_item.text()}")
+        # Convention: the menu mirrors the panel's action buttons for the
+        # clicked row. Send is the primary action and works for both the
+        # native asset and ERC-20s, so it heads every row's menu (the native
+        # row previously got no menu at all — only Send applies to it).
+        act_send = menu.addAction(self.btn_send.icon(), f"Send {sym_item.text()}")
+        # The remaining items are ERC-20-only: the native asset has no
+        # contract address to copy and can't be pinned/hidden.
+        act_copy = act_pin = act_hide = None
+        if not is_native:
+            menu.addSeparator()
+            act_copy = menu.addAction(
+                self.btn_copy.icon(), "Copy Contract Address")
+            # Pin is one-shot (no unpin UI yet); skip it for already-pinned
+            # tokens so the menu doesn't suggest a no-op.
+            if not self._store.is_force_shown(cid, addr):
+                act_pin = menu.addAction(
+                    self.btn_pin.icon(), f"Pin {sym_item.text()}")
+            act_hide = menu.addAction(
+                self.btn_hide.icon(), f"Hide {sym_item.text()}")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen is act_hide:
+        if chosen is None:
+            return
+        if chosen is act_send:
+            self.send_requested.emit(cid, addr)
+        elif chosen is act_hide:
             self.hide_requested.emit(cid, addr)
         elif chosen is act_copy:
             QApplication.clipboard().setText(addr)

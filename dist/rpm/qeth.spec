@@ -41,6 +41,10 @@ BuildRequires:  python3-eth-abi
 BuildRequires:  python3-eth-keys
 BuildRequires:  python3-hexbytes
 BuildRequires:  python3-ckzg
+# QR air-gapped signer decode stack (the [qr] extra): CBOR + the zxing-cpp QR
+# reader. Fedora ships both, so pip vendors nothing extra for it.
+BuildRequires:  python3-cbor2
+BuildRequires:  python3-zxing-cpp
 
 # Runtime: pull the same stack from the distro (system Qt -> native theming).
 Requires:       python3
@@ -57,6 +61,14 @@ Requires:       python3-eth-abi
 Requires:       python3-eth-keys
 Requires:       python3-hexbytes
 Requires:       python3-ckzg
+# QR air-gapped signer: the [qr] decode stack (CBOR + zxing-cpp reader) and the
+# camera. python3-pyside6 already auto-Requires libQt6Multimedia.so.6, but name
+# qt6-qtmultimedia explicitly so the camera backend (its bundled ffmpeg/
+# gstreamer media plugins, which pull libavcodec) is a guaranteed, documented
+# dependency — the QR scanner's live camera must always work.
+Requires:       python3-cbor2
+Requires:       python3-zxing-cpp
+Requires:       qt6-qtmultimedia
 # qt6ct bridges the user's Qt theme to the app; not strictly required.
 Recommends:     qt6ct
 
@@ -80,8 +92,10 @@ does not ship (web3, ledgereth, …) or whose version web3 pins differently
 python3 -m venv --system-site-packages %{_builddir}/qeth-venv
 # [simulate] ships the pure-Python py-evm fork engine: event previews on
 # RPCs without eth_simulateV1, and Helios-verified previews when the user
-# has a helios binary installed.
-%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile '.[simulate]'
+# has a helios binary installed. [qr] adds the air-gapped QR signer decode
+# stack (cbor2 + zxing-cpp) — both satisfied by the system BuildRequires, so
+# nothing extra is vendored.
+%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile '.[simulate,qr]'
 
 VENDOR=%{buildroot}%{_prefix}/lib/%{name}/vendor
 install -d "$VENDOR"

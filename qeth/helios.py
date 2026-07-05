@@ -31,12 +31,14 @@ import atexit
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
 import threading
 import time
 import urllib.request
+from collections import deque
 from typing import Any
 
 from .chains import Chain
@@ -148,9 +150,43 @@ class HeliosSidecar:
         ]
         log.info("spawning helios for chain %d: %s",
                  chain.chain_id, " ".join(argv[1:]))
+        # Capture helios's own logging instead of discarding it. Helios logs its
+        # sync progress AND its failures — bad/aged checkpoint, unreachable
+        # consensus RPC, execution-rpc errors — to STDOUT (at INFO by default, no
+        # RUST_LOG needed), e.g. "finalized block number=… / latest block …
+        # age=25s". With it DEVNULL'd, a sidecar that never reached ready was
+        # undiagnosable: "spawning" then silence. Merge stderr in, pump both. A
+        # pump thread is REQUIRED once we PIPE it (an unread pipe fills its ~64 KB
+        # buffer and blocks helios). Problem-ish lines surface at WARNING live;
+        # progress goes to DEBUG; the tail is dumped if readiness times out.
+        self._log_tail: deque[str] = deque(maxlen=60)
         self._proc = popen(
-            argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
         )
+        stream = getattr(self._proc, "stdout", None)
+        if stream is not None:
+            threading.Thread(target=self._pump_output,
+                             args=(stream,), daemon=True).start()
+
+    _ALARM = ("error", "warn", "panic", "fatal", "unavailable",
+              "refused", "unable", "failed", "timeout")
+    _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+    def _pump_output(self, stream: Any) -> None:
+        try:
+            for line in stream:
+                line = self._ANSI.sub("", line).rstrip()
+                if not line:
+                    continue
+                self._log_tail.append(line)
+                low = line.lower()
+                if any(k in low for k in self._ALARM):
+                    log.warning("helios[%d]: %s", self.chain_id, line)
+                else:
+                    log.debug("helios[%d]: %s", self.chain_id, line)
+        except Exception:
+            pass
 
     def alive(self) -> bool:
         return self._proc.poll() is None
@@ -183,8 +219,10 @@ class HeliosSidecar:
         # Not-ready is the expected answer there, so don't cry wolf at WARNING;
         # a real wait (timeout > 0) that still times out IS worth a warning.
         if timeout > 0:
-            log.warning("helios for chain %d not ready after %.0fs",
-                        self.chain_id, timeout)
+            tail = "\n".join(self._log_tail) or "(no output captured)"
+            log.warning("helios for chain %d not ready after %.0fs; "
+                        "last helios output:\n%s",
+                        self.chain_id, timeout, tail)
         else:
             log.debug("helios for chain %d not ready (non-blocking probe)",
                       self.chain_id)

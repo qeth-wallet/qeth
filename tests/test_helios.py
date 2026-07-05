@@ -30,6 +30,7 @@ class _FakeProc:
     def __init__(self, argv, **kwargs):
         self.argv = argv
         self.returncode = None
+        self.stdout = None          # no output pipe → sidecar skips the pump thread
 
     def poll(self):
         return self.returncode
@@ -120,6 +121,27 @@ def test_wait_ready_times_out(monkeypatch):
     t = iter(range(100))
     assert sc.wait_ready(timeout=3, sleep=lambda s: None,
                          clock=lambda: next(t)) is False
+
+
+def test_output_captured_ansi_stripped_and_dumped_on_timeout(monkeypatch, caplog):
+    # Helios logs its sync progress + failures to STDOUT; the sidecar captures it
+    # (ANSI stripped) into a tail so a sidecar that never reaches ready is
+    # diagnosable — the tail is dumped when a real readiness wait times out.
+    import io
+    import logging
+    monkeypatch.setattr(hl, "_rpc",
+                        lambda *a, **k: {"startingBlock": "0x0"})
+    sc = hl.HeliosSidecar(ETH, "/fake/helios", popen=_FakeProc)
+    sc._pump_output(io.StringIO(
+        "\x1b[32m INFO\x1b[0m helios::client: latest block number=1\n"
+        "ERROR helios::consensus: checkpoint unavailable\n"))
+    assert any("latest block" in ln for ln in sc._log_tail)
+    assert not any("\x1b" in ln for ln in sc._log_tail)        # ANSI stripped
+    with caplog.at_level(logging.WARNING, logger="qeth.helios"):
+        t = iter(range(100))
+        assert sc.wait_ready(timeout=3, sleep=lambda s: None,
+                             clock=lambda: next(t)) is False
+    assert "checkpoint unavailable" in caplog.text             # tail surfaced
 
 
 def test_spawn_argv_shape():

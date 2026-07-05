@@ -365,6 +365,12 @@ class MainWindow(QMainWindow):
         )
         key_changed = self.store.set_etherscan_api_key(dlg.etherscan_api_key)
         if url_changed:
+            # Helios bakes the execution-rpc in at spawn, so a running sidecar
+            # is now stale. Re-prewarm the current chain: _ensure_sidecar sees
+            # the changed RPC, retires the old process and spawns a fresh one on
+            # the new endpoint (no-op if the chain isn't Helios-supported).
+            from .helios import prewarm as _helios_prewarm
+            _helios_prewarm(self.store.current_chain())
             self.status_message(
                 f"RPC for {chain.name} updated to {new_url}", 4000,
             )

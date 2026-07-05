@@ -234,6 +234,38 @@ def test_dead_sidecar_is_respawned(monkeypatch):
     assert second.rpc_url != first.rpc_url    # fresh port, fresh process
 
 
+def test_sidecar_respawns_when_rpc_changes(monkeypatch):
+    """Swapping the chain's RPC must retire the sidecar spawned against the old
+    endpoint and start a fresh one on the new one — otherwise verified reads
+    stay pinned to the old node until restart (the reported bug)."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)
+    spawned = []
+
+    def popen(argv, **kw):
+        spawned.append(argv)
+        return _FakeProc(argv)
+
+    monkeypatch.setattr(hl.subprocess, "Popen", popen)
+    first = hl.verified_chain(ETH, wait_s=5)
+    assert hl._sidecars[1].execution_rpc == ETH.rpc_url
+
+    changed = Chain("Ethereum", 1, "https://new-eth.example")
+    second = hl.verified_chain(changed, wait_s=5)
+    assert second is not None
+    assert len(spawned) == 2                          # respawned, not reused
+    assert second.rpc_url != first.rpc_url            # fresh port/process
+    assert hl._sidecars[1].execution_rpc == "https://new-eth.example"
+    # the new argv carries the new execution-rpc
+    new_argv = spawned[1]
+    assert new_argv[new_argv.index("--execution-rpc") + 1] == "https://new-eth.example"
+
+    # …and an unchanged RPC still reuses (no needless churn)
+    third = hl.verified_chain(changed, wait_s=5)
+    assert len(spawned) == 2
+    assert third.rpc_url == second.rpc_url
+
+
 def test_prewarm_spawns_once_and_never_blocks(monkeypatch):
     """prewarm = one instant Popen, NO readiness polling (that's the
     whole point — sync overlaps with the user looking at the wallet).

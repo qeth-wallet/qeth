@@ -19,7 +19,9 @@ Design (settled in docs/eth-browsing.md "Helios integration shape"):
   and reports not-ready rather than serving unverified data early.
 - **Lazy per-chain singletons**, spawned on first use from the worker
   thread that wants one, terminated via atexit. ``QETH_HELIOS=0``
-  disables the whole feature.
+  disables the whole feature. A sidecar is respawned when the chain's RPC
+  is changed under it (the execution-rpc is fixed at spawn) — otherwise
+  verified reads would stay pinned to the old endpoint until restart.
 
 The sidecar's execution-rpc is the chain's configured RPC: the same
 endpoint qeth already uses, just stripped of its power to lie.
@@ -44,6 +46,7 @@ from typing import Any
 from .chains import Chain
 
 log = logging.getLogger("qeth.helios")
+
 
 # chain_id -> (helios subcommand, --network value or None for the
 # subcommand's default). Only networks Helios actually verifies: the
@@ -134,6 +137,10 @@ class HeliosSidecar:
         popen = popen or subprocess.Popen
         module, network = HELIOS_NETWORKS[chain.chain_id]
         self.chain_id = chain.chain_id
+        # The execution-rpc is baked into argv below and can't be changed on a
+        # running process, so remember it: _ensure_sidecar respawns when the
+        # chain's RPC is swapped out from under a live sidecar.
+        self.execution_rpc = chain.rpc_url
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._ready = False
@@ -144,7 +151,7 @@ class HeliosSidecar:
         if fallback:
             argv.append(fallback)   # self-heal a stale checkpoint (see _FALLBACK_FLAG)
         argv += [
-            "--execution-rpc", chain.rpc_url,
+            "--execution-rpc", self.execution_rpc,
             "--rpc-bind-ip", "127.0.0.1",
             "--rpc-port", str(self.port),
         ]
@@ -265,17 +272,31 @@ def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
     binary = helios_binary()
     if binary is None:
         return None
+    retire: HeliosSidecar | None = None
     with _lock:
         sc = _sidecars.get(chain.chain_id)
-        if sc is None or not sc.alive():
-            try:
-                sc = HeliosSidecar(chain, binary)
-            except Exception:
-                log.exception("failed to spawn helios for chain %d",
-                              chain.chain_id)
-                return None
-            _sidecars[chain.chain_id] = sc
-        return sc
+        # Reuse only a live sidecar still pointed at the chain's CURRENT RPC.
+        # A dead one, or one launched against a since-changed execution-rpc
+        # (the user swapped the endpoint in the chain-RPC dialog), is replaced —
+        # otherwise verified reads keep hitting the old node until app restart.
+        if (sc is not None and sc.alive()
+                and sc.execution_rpc == chain.rpc_url):
+            return sc
+        if sc is not None and sc.alive():
+            retire = sc          # stale RPC: replace it, tear it down off-lock
+        try:
+            sc = HeliosSidecar(chain, binary)
+        except Exception:
+            log.exception("failed to spawn helios for chain %d",
+                          chain.chain_id)
+            return None
+        _sidecars[chain.chain_id] = sc
+    if retire is not None:
+        # terminate()+wait() can block; keep _ensure_sidecar (and thus the
+        # main-thread prewarm) instant by reaping the old process in the
+        # background. Best-effort — a lingering helios is harmless.
+        threading.Thread(target=retire.stop, daemon=True).start()
+    return sc
 
 
 def prewarm(chain: Chain) -> None:

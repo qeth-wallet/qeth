@@ -177,11 +177,31 @@ if ldd "$CAM" 2>/dev/null | grep -q 'not found'; then
 fi
 echo "DIAG: camera stack OK ($(basename "$(ls "$QTDIR"/lib/libavcodec.so.* | head -1)") bundled)"
 
-# 4b. Strip debug symbols from every bundled .so — safe for shared objects
-#     (--strip-unneeded preserves what dynamic linking needs) and saves tens of
-#     MB across the Qt libs, python extensions and the bundled system libs.
-find "$APPDIR" -type f -name '*.so*' -exec strip --strip-unneeded {} \; 2>/dev/null || true
+# 4b. Strip debug symbols from bundled .so — EXCEPT the bundled ffmpeg libs.
+#     Stripping libav*/libsw* with the container's (old binutils) strip misaligns
+#     their PT_LOAD segments (offset%align != vaddr%align), so a NEWER-glibc host
+#     rejects the dlopen with "ELF load command address/offset not page-aligned"
+#     — which silently disables the camera backend. It slips past the 4a gate:
+#     that runs pre-strip, and the build container's own glibc 2.28 loads the
+#     misaligned lib fine (the strictness is newer). The ffmpeg libs ship
+#     release-stripped in the wheel, so skipping them costs no size.
+find "$APPDIR" -type f -name '*.so*' \
+    ! -name 'libav*' ! -name 'libsw*' \
+    -exec strip --strip-unneeded {} \; 2>/dev/null || true
 echo "DIAG: AppDir after strip = $(du -sh "$APPDIR" | cut -f1)"
+
+# 4c. Regression guard for 4b: verify strip left the ffmpeg libs' LOAD segments
+#     page-aligned. A hit here is exactly the corruption that kills the camera on
+#     a newer-glibc host — fail the build now instead of shipping a dead scanner.
+bad_align="$(find "$QTDIR/lib" -type f \( -name 'libav*' -o -name 'libsw*' \) | while read -r f; do
+    readelf -lW "$f" 2>/dev/null | awk -v F="$f" '/LOAD/{a=strtonum($NF); if(a>0 && (strtonum($2)%a)!=(strtonum($3)%a)){print F; exit}}'
+done)"
+if [ -n "$bad_align" ]; then
+    echo "FATAL: ffmpeg lib(s) have misaligned LOAD segments (strip corruption — camera would fail on newer glibc):"
+    echo "$bad_align"
+    exit 1
+fi
+echo "DIAG: ffmpeg libs page-aligned after strip OK"
 
 # 5. AppImage metadata at the AppDir root (AppImage conventions: AppRun + one
 #    top-level .desktop + a matching icon).

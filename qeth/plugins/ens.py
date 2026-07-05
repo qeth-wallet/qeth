@@ -1904,6 +1904,14 @@ class EnsPlugin(Plugin):
         return self._panel.action_buttons() if self._panel is not None else []
 
     def on_account_changed(self, address: str | None) -> None:
+        # Ignore a re-broadcast of the account we're already showing: reloading
+        # restarts discovery + verification, which bumps the verify generation
+        # and DROPS an in-flight Helios ownership proof (the ✓ then never lands).
+        # Only for a real address — None means "no selection", which must always
+        # clear. A real account change still differs from _loaded_for and reloads;
+        # a genuine re-verify goes through _on_refresh directly, not this path.
+        if address is not None and address == self._loaded_for:
+            return
         self._load(address)
 
     def on_activated(self) -> None:

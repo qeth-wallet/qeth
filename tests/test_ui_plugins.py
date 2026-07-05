@@ -2474,6 +2474,34 @@ class TestWalletsTreeExpansion:
         plugin._rebuild_tree()                                   # any trigger
         assert plugin.selected_address == a2                     # not a1
 
+    def test_rebuild_preserving_selection_does_not_rebroadcast(
+            self, qtbot, tmp_qeth):
+        # A rebuild that KEEPS the same selection must not re-emit
+        # selected_address_changed: every mounted plugin reloads that account on
+        # the broadcast, and for ENS each reload drops the in-flight Helios
+        # ownership proof — so a rebuild-heavy startup left the ✓ never landing
+        # ("no checkbox, not every start"). The rebuild used to fire it twice
+        # (None on clear, addr on restore).
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)
+        assert plugin.select_address(a2)
+        emits: list = []
+        plugin.selected_address_changed.connect(emits.append)
+        plugin._rebuild_tree()
+        assert emits == []                                       # stayed silent
+        assert plugin.selected_address == a2
+
+    def test_rebuild_dropping_selected_account_rebroadcasts(
+            self, qtbot, tmp_qeth):
+        # ...but when the selected account is GONE after the rebuild, the change
+        # must still propagate so downstream panels stop showing it.
+        plugin, store, a1, a2 = self._plugin(qtbot, default=1)
+        assert plugin.select_address(a2)
+        emits: list = []
+        plugin.selected_address_changed.connect(emits.append)
+        store.accounts = [a for a in store.accounts if a["address"] == a1]
+        plugin._rebuild_tree()
+        assert emits and emits[-1] != a2                         # a2 dropped
+
     def test_ens_reverse_updates_label_in_place_without_hijack(
             self, qtbot, tmp_qeth):
         # An async ENS reverse-lookup resolving updates the row label WITHOUT a

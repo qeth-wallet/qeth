@@ -308,6 +308,10 @@ class WalletsPlugin(Plugin):
         # doesn't require a running Qt event loop.
         self._container: QWidget | None = None
         self._tree: QTreeWidget | None = None
+        # The last address we broadcast on selected_address_changed. A rebuild
+        # re-broadcasts only when the current selection differs from this, so a
+        # rebuild that PRESERVES the selection stays silent (no downstream churn).
+        self._last_emitted: str | None = None
         # Retired: the bottom details panel + its enclosing splitter.
         # Kept as a None attribute so test/host code that probes for
         # "is there a details panel" reads False rather than raising.
@@ -880,16 +884,36 @@ class WalletsPlugin(Plugin):
         # back to the default when there was no single prior selection.
         prior_key = self._selected_key()
         expanded = self._capture_expansion()
-        self._tree.clear()
-        default_item: QTreeWidgetItem | None = None
-        for source, label, action_attr, grouped in self._ordered_sections():
-            got = self._build_source_section(
-                source, label, action_attr, grouped, expanded)
-            if got is not None:
-                default_item = got
-        if not (prior_key and self._select_key(*prior_key)):
-            if default_item is not None:
-                self._tree.setCurrentItem(default_item)
+        # Clearing + re-selecting the tree fires itemSelectionChanged (→
+        # _on_tree_selection → selected_address_changed) twice — emit(None) on
+        # clear, emit(addr) on restore — i.e. a spurious "selection changed" even
+        # though the selection is PRESERVED. Every mounted plugin then reloads
+        # that account; for ENS each reload bumps the verify generation and drops
+        # the in-flight Helios ownership proof, so on a rebuild-heavy startup
+        # (balances/tokens streaming in, a chain switch) the ✓ never lands ("no
+        # checkbox, not every start"). Block the churn during the rebuild, then
+        # re-broadcast once — and only if the selection actually moved (compared
+        # against the last address we broadcast, not the pre-rebuild tree state,
+        # so removing the selected account still propagates the change).
+        self._tree.blockSignals(True)
+        try:
+            self._tree.clear()
+            default_item: QTreeWidgetItem | None = None
+            for source, label, action_attr, grouped in self._ordered_sections():
+                got = self._build_source_section(
+                    source, label, action_attr, grouped, expanded)
+                if got is not None:
+                    default_item = got
+            if not (prior_key and self._select_key(*prior_key)):
+                if default_item is not None:
+                    self._tree.setCurrentItem(default_item)
+        finally:
+            self._tree.blockSignals(False)
+        # _on_tree_selection was blocked; do its work once, deliberately.
+        self._update_account_buttons()
+        now_addr = self._emit_address()
+        if now_addr != self._last_emitted:
+            self._broadcast_selection(now_addr)
 
     def _build_source_section(
         self, source: str, label: str, action_attr: str, grouped: bool,
@@ -1013,18 +1037,26 @@ class WalletsPlugin(Plugin):
             return
         self._set_default(address)
 
+    def _emit_address(self, addrs: list[str] | None = None) -> str | None:
+        """The address a selection broadcast carries: the single selected KNOWN
+        account, or None (multi-select, or a non-account row). Factored out so a
+        rebuild can compare the before/after selection and re-broadcast only on a
+        real change (see _rebuild_tree)."""
+        if addrs is None:
+            addrs = self.selected_addresses()
+        if len(addrs) == 1 and any(
+                a["address"] == addrs[0] for a in self._store.accounts):
+            return addrs[0]
+        return None
+
+    def _broadcast_selection(self, addr: str | None) -> None:
+        self._last_emitted = addr
+        self.selected_address_changed.emit(addr)
+
     def _on_tree_selection(self) -> None:
         addrs = self.selected_addresses()
         self._update_account_buttons(addrs)
-        if len(addrs) == 1:
-            acct = next(
-                (a for a in self._store.accounts if a["address"] == addrs[0]),
-                None,
-            )
-            if acct:
-                self.selected_address_changed.emit(addrs[0])
-                return
-        self.selected_address_changed.emit(None)
+        self._broadcast_selection(self._emit_address(addrs))
 
     def _update_account_buttons(self, addrs: list[str] | None = None) -> None:
         """Sync the bottom-row action buttons to the current selection.

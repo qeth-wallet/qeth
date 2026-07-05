@@ -1045,6 +1045,22 @@ class TestEnsPlugin:
         plugin.on_account_changed(None)
         assert plugin.widget().tree.topLevelItemCount() == 0
 
+    def test_redundant_same_account_broadcast_is_ignored(self, qtbot):
+        # A re-broadcast of the SAME account (e.g. a wallet-tree rebuild that
+        # preserved the selection) must NOT restart discovery/verify — that
+        # bumps the verify generation and drops an in-flight Helios proof, so the
+        # ✓ never lands. Only a real account change reloads.
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.on_account_changed(ADDR)
+        started = len(host.started_workers)
+        assert started >= 1                       # first load spawned discovery
+        plugin.on_account_changed(ADDR)           # redundant re-broadcast
+        plugin.on_account_changed(ADDR)           # redundant re-broadcast
+        assert len(host.started_workers) == started   # no restart
+
     def test_add_custom_pins_and_refreshes(self, qtbot, monkeypatch):
         store = _StubStore()
         plugin = EnsPlugin(store)

@@ -1,11 +1,19 @@
 name: AppImage
 
+# AUTOMATIC CI BUILD DISABLED. The AppImage is now built LOCALLY in a manylinux
+# docker container via dist/appimage/build-in-container.sh (the dev box has
+# docker), so CI no longer builds/attaches it on release tags — the local build
+# is validated end-to-end (incl. the camera-stack 4a gate + a real-camera probe)
+# before the .AppImage is uploaded to the release by hand. This workflow is kept
+# for manual, clean-room runs only (workflow_dispatch); to restore the old
+# tag-triggered behaviour, un-comment the `push:` trigger below.
+#
 # Build the portable AppImage in a manylinux container so it requires only an
 # OLD glibc (2.34) and a GENERIC x86-64 baseline — never the CI/dev host's libc
-# or CPU tuning. Runs on tags (attaches to the release) or on demand.
+# or CPU tuning.
 on:
-  push:
-    tags: ['v*']
+  # push:
+  #   tags: ['v*']          # DISABLED — the AppImage is built locally via docker
   workflow_dispatch:
 
 jobs:

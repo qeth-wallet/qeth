@@ -1097,18 +1097,27 @@ class WalletsPlugin(Plugin):
             )
 
     def _on_tree_context_menu(self, pos) -> None:
-        """Tree right-click menu. Mirrors the Add / Copy / Remove
-        button row and exposes Set-as-default — which the details
-        pane below already offers, but having it on the row's right-
-        click means the user doesn't have to navigate down."""
+        """Tree right-click menu. Mirrors the account action-button row
+        one-for-one — Add / Copy / Sign / QR / Label / Connect / Remove —
+        so every button below is also reachable from the row's right-click.
+        The per-account items reuse the buttons' QActions, so their
+        enabled state (Sign/Connect off for watch-only) matches. Connect
+        appears as one-shot "Connect to Browser" only when the account
+        isn't already the dapp default."""
         assert (self.act_add is not None and self.act_copy is not None
                 and self.act_remove is not None and self.act_connect is not None
+                and self.act_sign is not None and self.act_qr is not None
+                and self.act_label is not None
                 and self._tree is not None)  # built before signals connect
         addrs = self.selected_addresses()
         menu = QMenu(self._tree)
         menu.addAction(self.act_add)
         if len(addrs) == 1:
+            menu.addSeparator()
             menu.addAction(self.act_copy)
+            menu.addAction(self.act_sign)
+            menu.addAction(self.act_qr)
+            menu.addAction(self.act_label)
             addr = addrs[0]
             default = self._store.default_account
             already_default = (

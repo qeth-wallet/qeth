@@ -2933,6 +2933,58 @@ class TestWalletsPlugin:
         assert wallets_plugin.act_qr.isEnabled()
         assert wallets_plugin.act_label.isEnabled()
 
+    def test_context_menu_mirrors_account_buttons(
+        self, qtbot, wallets_plugin, monkeypatch,
+    ):
+        """The tree right-click menu offers every per-account action that
+        the button row below does: Copy / Sign / QR / Label / Connect, plus
+        Add and Remove. Sign/QR/Label used to have buttons but no menu
+        entry. The per-account items reuse the buttons' QActions so their
+        enabled state matches (Sign off for watch-only)."""
+        import qeth.plugins.wallets as wmod
+        from types import SimpleNamespace
+        from PySide6.QtCore import QPoint
+
+        class _FakeMenu:
+            last: "_FakeMenu | None" = None
+
+            def __init__(self, *a, **k):
+                self.items: list[str] = []
+                _FakeMenu.last = self
+
+            def addAction(self, *a, **k):
+                if len(a) == 1 and hasattr(a[0], "text"):   # addAction(QAction)
+                    act = a[0]
+                    self.items.append(act.text().replace("&", ""))
+                    return act
+                self.items.append(str(a[-1]).replace("&", ""))   # (icon, text)
+                return SimpleNamespace(
+                    triggered=SimpleNamespace(connect=lambda *a, **k: None))
+
+            def addSeparator(self):
+                pass
+
+            def exec(self, *a, **k):
+                return None
+
+        plugin = wallets_plugin
+        plugin.widget()
+        other = "0x" + "44" * 20                      # first-added → the default
+        addr = "0x" + "33" * 20                       # ledger → signing-capable
+        for a in (other, addr):
+            plugin._store.add_account({"address": a, "source": "ledger",
+                                       "scheme": "Ledger Live", "label": ""})
+        plugin.rebuild_tree()
+        plugin.select_address(addr)                    # not the default → Connect shows
+
+        monkeypatch.setattr(wmod, "QMenu", _FakeMenu)
+        plugin._on_tree_context_menu(QPoint(0, 0))
+        items = _FakeMenu.last.items
+        for expected in ("Add Account", "Copy Address", "Sign Message…",
+                         "Show QR / Info…", "Edit Label…",
+                         "Connect to Browser", "Remove Account"):
+            assert expected in items, (expected, items)
+
     def test_add_hot_wallet_dialog_gating(self, qtbot, tmp_qeth):
         """Walks the Add button's enable/disable through every
         gate: empty field, bad key, bad passphrase, mismatched

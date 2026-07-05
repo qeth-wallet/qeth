@@ -85,6 +85,22 @@ def test_branch_order_follows_store_and_persists(qtbot, tmp_qeth):
     assert store.account_source_order == ["qr", "ledger"]
 
 
+def test_addresses_for_source_is_branch_scoped(qtbot, tmp_qeth):
+    """The gray-out set is per branch: an address held only on Ledger is NOT in
+    the 'qr' set, so it stays addable under the QR branch (and vice versa)."""
+    a = "0x" + "aa" * 20
+    b = "0x" + "bb" * 20
+    plugin, _store = _plugin(qtbot, [
+        {"address": a, "path": "p", "source": "ledger", "label": ""},
+        {"address": b, "path": "p", "source": "qr", "label": ""},
+    ])
+    assert plugin._addresses_for_source("ledger") == {a.lower()}
+    assert plugin._addresses_for_source("qr") == {b.lower()}
+    # the Ledger-only address is free to add under QR (different branch)
+    assert a.lower() not in plugin._addresses_for_source("qr")
+    assert plugin._addresses_for_source("hot") == set()
+
+
 def test_ledger_scheme_labels_show_full_paths():
     from qeth.plugins.wallets import _ledger_scheme_label, _scheme_label
     assert _ledger_scheme_label("Legacy") == "Legacy (m/44'/60'/0'/i)"
@@ -121,7 +137,7 @@ def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
         address="0x" + "ab" * 20, path="m/44'/60'/0'/0/0", index=0, nonce=3)
 
     class _AddStub:
-        def __init__(self, key, chain, parent=None):
+        def __init__(self, key, chain, parent=None, existing_addresses=None):
             self.scheme_combo = SimpleNamespace(
                 currentData=lambda: "BIP44 (…/0/i)")   # the key, via item data
 

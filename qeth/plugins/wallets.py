@@ -1233,10 +1233,21 @@ class WalletsPlugin(Plugin):
             if self.host is not None:
                 self.host.status_message(f"Removed {removed} account(s)", 3000)
 
+    def _addresses_for_source(self, source: str) -> set[str]:
+        """Lower-cased addresses already held under one tree branch. An add
+        dialog greys out a candidate that's already in ITS branch, but leaves
+        it addable elsewhere — the same address can live under Ledger and QR,
+        or be watch-only and later imported as a hot wallet (a different
+        branch), which the user explicitly wants to allow."""
+        return {a["address"].lower() for a in self._store.accounts
+                if a.get("source") == source}
+
     def _add_ledger(self) -> None:
         if self.host is None:
             return
-        dlg = AddLedgerDialog(self.host.current_chain(), self._container)
+        dlg = AddLedgerDialog(
+            self.host.current_chain(), self._container,
+            existing_addresses=self._addresses_for_source("ledger"))
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
@@ -1282,7 +1293,8 @@ class WalletsPlugin(Plugin):
                  f"That doesn't look like a wallet account export.\n\n{e}")
             return
         dlg = AddQRWalletDialog(
-            account_key, self.host.current_chain(), self._container)
+            account_key, self.host.current_chain(), self._container,
+            existing_addresses=self._addresses_for_source("qr"))
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
@@ -1381,8 +1393,10 @@ class WalletsPlugin(Plugin):
         from ..hot_wallet import save_keystore
         dlg = ImportHotWalletsDialog(
             source,
-            existing_addresses={a["address"].lower()
-                                 for a in self._store.accounts},
+            # Source-scoped like the Ledger/QR flows: an address already held
+            # only on Ledger/QR/watch-only stays importable as a hot wallet
+            # (a different branch) — only an existing "hot" record greys it out.
+            existing_addresses=self._addresses_for_source("hot"),
             parent=self._container,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1670,9 +1684,14 @@ class AccountInfoDialog(Dialog):
 
 
 class AddLedgerDialog(Dialog):
-    def __init__(self, chain, parent=None):
+    def __init__(self, chain, parent=None, existing_addresses=None):
         super().__init__(parent)
         self._chain = chain
+        # Addresses already held under THIS dialog's branch (Ledger for the
+        # base, "qr" for the subclass). A scanned row matching one is shown but
+        # greyed out — you can't re-add it here, though it stays addable under a
+        # different branch since this set is source-scoped, not global.
+        self._existing = {a.lower() for a in (existing_addresses or ())}
         self.setWindowTitle("Add Ledger Accounts")
         self.setMinimumSize(640, 460)
 
@@ -1788,19 +1807,32 @@ class AddLedgerDialog(Dialog):
             usage = "1 tx"
         else:
             usage = f"{acct.nonce} txs"
+        already = acct.address.lower() in self._existing
         label = f"#{acct.index:<3} {acct.address}   {usage}"
+        if already:
+            label += "   (already added)"
         item = QListWidgetItem(label)
         item.setData(Qt.ItemDataRole.UserRole, acct)
-        item.setSelected(acct.nonce > 0)
         self.results.addItem(item)
+        # Selection lives on the model, so set it AFTER addItem. An address
+        # already in this branch can't be re-added: strip its flags
+        # (NoItemFlags → muted + non-selectable) so it's visible but out of the
+        # selection. A new row pre-selects when it's been used (nonce > 0), the
+        # same "active wallet" rule as before.
+        if already:
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+        else:
+            item.setSelected(acct.nonce > 0)
         if self.progress.maximum() > 0:
             self.progress.setValue(self.progress.value() + 1)
         # Async ENS reverse-lookup so we can show ``ens.eth``
         # alongside the address in the scan list — helps the user
         # tell their "swiss-stake.eth" account from a fresh one
         # before they tick which to add. Quietly drops if nothing
-        # resolves.
-        self._kick_ens_for_row(item, acct.address)
+        # resolves. Skipped for already-added rows: they're in the wallet
+        # already, with their own resolved label, and can't be re-added.
+        if not already:
+            self._kick_ens_for_row(item, acct.address)
 
     def _kick_ens_for_row(self, item, address: str) -> None:
         from ..chains import DEFAULT_CHAINS
@@ -1861,7 +1893,11 @@ class AddLedgerDialog(Dialog):
         out = []
         for i in range(self.results.count()):
             it = self.results.item(i)
-            if it is not None and it.isSelected():
+            # The enabled-flag check is belt-and-braces: an already-added row is
+            # NoItemFlags so it can never be selected, but this guarantees a
+            # greyed row never slips into the add batch.
+            if (it is not None and it.isSelected()
+                    and it.flags() & Qt.ItemFlag.ItemIsEnabled):
                 out.append(it.data(Qt.ItemDataRole.UserRole))
         return out
 
@@ -1871,8 +1907,8 @@ class AddQRWalletDialog(AddLedgerDialog):
     them locally from an imported account xpub (``QRAccountWorker``) instead of
     talking to a Ledger. Constructed with the already-scanned ``account_key``."""
 
-    def __init__(self, account_key, chain, parent=None):
-        super().__init__(chain, parent)
+    def __init__(self, account_key, chain, parent=None, existing_addresses=None):
+        super().__init__(chain, parent, existing_addresses=existing_addresses)
         self._account_key = account_key
         self.setWindowTitle("Add air-gapped (QR) accounts")
         # Show each scheme as its FULL path (origin from the scanned account

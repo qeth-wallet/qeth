@@ -3071,6 +3071,33 @@ class TestWalletsPlugin:
             dlg.results.item(i).setSelected(True)
         assert [a.index for a in dlg.selected_accounts()] == [0, 1, 2]
 
+    def test_already_added_row_is_greyed_and_excluded(self, qtbot):
+        """A scanned address already held in this branch shows in the list but
+        greyed out (non-selectable), and never enters the add batch — while a
+        new, used address is still pre-selected."""
+        from PySide6.QtCore import Qt
+        from qeth.chains import DEFAULT_CHAINS
+        from qeth.ledger import DiscoveredAccount
+        from qeth.plugins.wallets import AddLedgerDialog
+
+        have = "0x" + "aa" * 20
+        fresh = "0x" + "bb" * 20
+        dlg = AddLedgerDialog(DEFAULT_CHAINS[0],
+                              existing_addresses={have.upper()})   # case-insensitive
+        qtbot.addWidget(dlg)
+        dlg._kick_ens_for_row = lambda *a, **k: None    # no ENS worker in a unit test
+
+        dlg._on_found(DiscoveredAccount(address=have, path="p0", index=0, nonce=5))
+        dlg._on_found(DiscoveredAccount(address=fresh, path="p1", index=1, nonce=5))
+
+        greyed, new = dlg.results.item(0), dlg.results.item(1)
+        assert "already added" in greyed.text()
+        assert greyed.flags() == Qt.ItemFlag.NoItemFlags   # muted + non-selectable
+        assert not greyed.isSelected()
+        assert new.isSelected()                            # used → pre-selected
+        # only the new account is handed to add_account
+        assert [a.address for a in dlg.selected_accounts()] == [fresh]
+
 
 class TestDetailsEventsView:
     """The transaction-details events list: decode receipt logs, default

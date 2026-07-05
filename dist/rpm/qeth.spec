@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.14.0
+Version:        0.15.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,16 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Jul 05 2026 Michael Egorov <michwill@yieldbasis.com> - 0.15.0-1
+- Air-gapped QR signer now works from every distributed package: the
+  QtMultimedia camera backend (qt6-qtmultimedia → ffmpeg) and the QR decode
+  stack (python3-zxing-cpp + python3-cbor2) are now hard dependencies.
+- Context menus and action buttons now match across the Tokens, Accounts and
+  ENS panels (Send on token/native rows, Sign/QR/Label on accounts, and
+  Add-record / Add-subdomain on ENS names).
+- ENS verified (checkmark) badge is reliable again: proof-emit + wallet-tree
+  rebuild race fixes and a longer Helios readiness wait.
+
 * Thu Jul 03 2026 Michael Egorov <michwill@yieldbasis.com> - 0.14.0-1
 - ENS name management: the ENS panel now shows owner + manager roles in the
   tree, discovers names you own as registrant but don't manage (e.g. crv.eth)

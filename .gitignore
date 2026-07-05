@@ -11,6 +11,7 @@ build/
 /dist/flatpak/qeth.flatpak
 !/dist/appimage/
 /dist/appimage/out/
+/dist/appimage/.helios/
 !/dist/rpm/
 /dist/rpm/*.rpm
 !/dist/deb/

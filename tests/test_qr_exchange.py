@@ -34,6 +34,69 @@ def test_decode_qr_returns_none_on_a_blank_image():
     assert decode_qr(Image.new("RGB", (64, 64), "white")) is None
 
 
+def test_decode_qr_from_grayscale_qimage(qtbot):
+    """The camera path decodes a Format_Grayscale8 QImage (the luminance zxing
+    wants), not RGB — round-trip a QR through _qimage_to_gray."""
+    from PySide6.QtGui import QImage
+    from qeth.qr_scan import _qimage_to_gray
+    urs = _signature_ur()
+    buf = io.BytesIO()
+    segno.make(urs.upper(), error="l").save(buf, kind="png", scale=6)
+    qimg = QImage.fromData(buf.getvalue())
+    assert not qimg.isNull()
+    assert decode_qr(_qimage_to_gray(qimg)) == urs.upper()
+
+
+# --- _pick_video_format: ~720p sweet spot with graceful fallback ------------
+
+def _fmt(w, h, fps=30.0):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QSize
+    size = QSize(w, h)
+    return SimpleNamespace(resolution=lambda: size, maxFrameRate=lambda: fps)
+
+
+def _device(*formats):
+    from types import SimpleNamespace
+    return SimpleNamespace(videoFormats=lambda: list(formats))
+
+
+def test_pick_format_prefers_720p():
+    from qeth.qr_scan import _pick_video_format
+    dev = _device(_fmt(640, 480), _fmt(1280, 720), _fmt(1920, 1080))
+    assert _pick_video_format(dev).resolution().height() == 720
+
+
+def test_pick_format_falls_back_to_best_when_no_720p():
+    """A 640×480-only webcam keeps its best format rather than forcing 720p."""
+    from qeth.qr_scan import _pick_video_format
+    dev = _device(_fmt(320, 240), _fmt(640, 480))
+    assert _pick_video_format(dev).resolution().height() == 480
+
+
+def test_pick_format_uses_1080_when_720_absent():
+    from qeth.qr_scan import _pick_video_format
+    dev = _device(_fmt(640, 480), _fmt(1920, 1080))
+    assert _pick_video_format(dev).resolution().height() == 1080
+
+
+def test_pick_format_avoids_4k():
+    from qeth.qr_scan import _pick_video_format
+    dev = _device(_fmt(640, 480), _fmt(3840, 2160))
+    assert _pick_video_format(dev).resolution().height() == 480   # 4K skipped
+
+
+def test_pick_format_higher_fps_wins_at_same_resolution():
+    from qeth.qr_scan import _pick_video_format
+    dev = _device(_fmt(1280, 720, 15.0), _fmt(1280, 720, 30.0))
+    assert _pick_video_format(dev).maxFrameRate() == 30.0
+
+
+def test_pick_format_none_when_device_reports_nothing():
+    from qeth.qr_scan import _pick_video_format
+    assert _pick_video_format(_device()) is None
+
+
 class _FakeScanner(QObject):
     decoded = Signal(str)
     frame = Signal(object)

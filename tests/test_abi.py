@@ -332,6 +332,33 @@ class TestDecodeCall:
             ERC20_ABI, "0xdeadbeef00000000000000000000000000000000",
         ) is None
 
+    def test_clean_call_has_no_extra(self):
+        calldata = ("0xa9059cbb" + "00" * 12 + "11" * 20 + f"{1000:064x}")
+        out = decode_call(ERC20_ABI, calldata,
+                          address="0xdac17f958d2ee523a2206206994597c13d831ec7")
+        assert "extra" not in out
+
+    def test_gas_packed_call_reports_additional_calldata(self):
+        """A method whose ABI takes no params but whose calldata carries a fat
+        body it reads via assembly (Odos swapCompact) surfaces that body as
+        'extra' instead of silently dropping it."""
+        abi = [{"type": "function", "name": "swapCompact", "inputs": [],
+                "outputs": [{"type": "uint256"}], "stateMutability": "payable"}]
+        packed = "ab" * 200
+        out = decode_call(abi, "0x83bd37f9" + packed)
+        assert out["function"] == "swapCompact" and out["args"] == []
+        assert out["extra"] == "0x" + packed
+
+    def test_tag_appended_after_abi_args_is_extra(self):
+        """Bytes appended past the ABI-encoded args (an affiliate tag) show as
+        extra while the real args still decode."""
+        clean = "0xa9059cbb" + "00" * 12 + "11" * 20 + f"{1000:064x}"
+        out = decode_call(ERC20_ABI, clean + "deadbeef",
+                          address="0xdac17f958d2ee523a2206206994597c13d831ec7")
+        assert out["function"] == "transfer"
+        assert [a["value"] for a in out["args"]][1] == "1000"   # args intact
+        assert out["extra"] == "0xdeadbeef"
+
 
 class TestDecodeCallTuples:
     """Tuple/struct args turn into branch nodes with per-component

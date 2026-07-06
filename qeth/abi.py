@@ -568,10 +568,38 @@ def decode_call(abi: Abi | None, input_data: str,
             except IndexError:
                 value = None
         args_list.append(_describe(value, inp))
-    return {
+    result: dict = {
         "function": getattr(func, "fn_name", None) or str(func),
         "args": args_list,
     }
+    extra = _trailing_calldata(contract, func, args, input_data)
+    if extra:
+        result["extra"] = extra
+    return result
+
+
+def _trailing_calldata(contract, func, args, input_data: str) -> str | None:
+    """Calldata past what the ABI actually describes, or ``None``. Re-encode the
+    decoded call and treat anything beyond the canonical encoding as extra: a
+    gas-packed router reads its arguments straight from calldata via assembly
+    (Odos ``swapCompact`` has an empty-param ABI yet carries a fat packed body),
+    and some aggregators append an affiliate tag after the ABI args. Only
+    returned when the canonical prefix genuinely matches the head of the real
+    calldata, so a non-canonically encoded argument can't manufacture a phantom
+    tail."""
+    try:
+        canonical = contract.encode_abi(func.fn_name, args=list(args.values()))
+    except Exception:
+        return None
+    actual = _strip_0x(input_data).lower()
+    canon = _strip_0x(canonical).lower()
+    if len(actual) > len(canon) and actual.startswith(canon):
+        return "0x" + actual[len(canon):]
+    return None
+
+
+def _strip_0x(s: str) -> str:
+    return s[2:] if s[:2].lower() == "0x" else s
 
 
 def _describe(value, inp: dict) -> dict:

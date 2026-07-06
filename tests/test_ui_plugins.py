@@ -742,6 +742,34 @@ class TestTransactionsPlugin:
         assert weights_by_text.get("transfer", QFont.Normal) >= QFont.Bold
         assert weights_by_text.get("(", QFont.Bold) < QFont.Bold
 
+    def test_render_decoded_shows_additional_calldata(self, qtbot, tmp_qeth):
+        """A gas-packed call (empty ABI, fat packed body) renders the leftover
+        calldata as an 'additional calldata' section, not a bare 'swapCompact()'
+        that hides the 251 real bytes."""
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {
+            "function": "swapCompact", "args": [],
+            "extra": "0x" + "ab" * 200,
+        })
+        text = edit.toPlainText()
+        assert "swapCompact(" in text
+        assert "additional calldata" in text.lower()
+        assert "200 bytes" in text
+        assert "0x" + "ab" * 200 in text
+
+    def test_render_decoded_no_extra_section_when_absent(self, qtbot, tmp_qeth):
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {"function": "transfer", "args": []})
+        assert "additional calldata" not in edit.toPlainText().lower()
+
     def test_render_decoded_highlights_own_addresses(self, qtbot, tmp_qeth):
         """An address argument that's one of the user's own wallets
         renders bold + italic; a stranger address does not."""

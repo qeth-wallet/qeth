@@ -629,7 +629,22 @@ def _render_decoded(text_edit, decoded: dict,
             token_context=token_context if use_amounts else None,
             known_addresses=known_addresses,
         ))
-    parts.append(")</div>")
+    parts.append(")")
+    # Calldata the ABI didn't account for — a gas-packed router (Odos
+    # swapCompact reads raw calldata via assembly; its ABI has no params) or an
+    # affiliate tag appended after the args. Show it verbatim rather than
+    # silently dropping it, so "empty-looking" methods aren't mistaken for
+    # no-op / parameterless calls.
+    extra = decoded.get("extra")
+    if isinstance(extra, str) and extra not in ("", "0x", "0X"):
+        n_bytes = (len(extra) - 2) // 2
+        parts.append(
+            f'\n\n<span style="color:{_COMMENT_COLOR}; font-style:italic;">'
+            f"# {n_bytes} bytes of additional calldata — not described by the "
+            f"ABI, read directly from calldata</span>\n"
+            f'<span style="color:{_VALUE_COLOR};">{_escape_html(extra)}</span>'
+        )
+    parts.append("</div>")
     text_edit.setHtml("".join(parts))
 
 

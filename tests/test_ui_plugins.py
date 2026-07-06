@@ -3321,6 +3321,101 @@ class TestEventPreviewTab:
         qtbot.addWidget(dlg)
         return dlg
 
+    _USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+
+    def _approve_dlg(self, qtbot, *, amount, decimals=6, symbol="USDC"):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        import qeth.plugins.transactions as txmod
+        from qeth.plugins.transactions import SignTransactionDialog
+        from qeth.signing import SigningRequest
+        spender = "0x" + "11" * 20
+        abi_cache = MagicMock(); abi_cache.load.return_value = None
+
+        def tinfo(c, a):
+            # decimals=None models an off-list token: no entry at all.
+            if a and a.lower() == self._USDC and decimals is not None:
+                return SimpleNamespace(symbol=symbol, decimals=decimals,
+                                       logo_uri=None)
+            return None
+        req = SigningRequest(chain_id=1, from_addr=ADDR, to_addr=self._USDC,
+                             value_wei=0, data=txmod._encode_approve(spender, amount))
+        dlg = SignTransactionDialog(
+            req, ETH, abi_source=MagicMock(), abi_cache=abi_cache,
+            start_worker=lambda w: None, token_info=tinfo,
+            known_addresses=[ADDR])
+        qtbot.addWidget(dlg)
+        return dlg, req, spender
+
+    def test_approve_editor_prefills_unlimited(self, qtbot):
+        dlg, req, _ = self._approve_dlg(qtbot, amount=(1 << 256) - 1)
+        assert dlg._approve_spender is not None            # editor present
+        assert dlg._allow_unlimited.isChecked()            # infinite → ticked
+        assert dlg._allow_edit.isEnabled()                 # never disabled
+        assert dlg._allow_edit.text() == ""                # empty…
+        assert dlg._allow_edit.placeholderText() == "∞"    # …with a grey ∞
+
+    def test_approve_typing_unticks_unlimited(self, qtbot):
+        import qeth.plugins.transactions as txmod
+        dlg, req, _ = self._approve_dlg(qtbot, amount=(1 << 256) - 1)
+        assert dlg._allow_unlimited.isChecked()
+        # Simulate the user typing into the field (textEdited fires per key).
+        dlg._allow_edit.setText("42")
+        dlg._on_allowance_edited("42")
+        assert not dlg._allow_unlimited.isChecked()        # typing → unticked
+        _, amt = txmod._parse_approve(req.data)
+        assert amt == 42_000_000                           # 42 USDC @ 6dp
+
+    def test_approve_editor_prefills_specific_amount(self, qtbot):
+        dlg, req, _ = self._approve_dlg(qtbot, amount=250_000_000)  # 250 @ 6dp
+        assert not dlg._allow_unlimited.isChecked()
+        assert dlg._allow_edit.text() == "250"
+
+    def test_approve_edit_reencodes_calldata_live(self, qtbot):
+        import qeth.plugins.transactions as txmod
+        dlg, req, spender = self._approve_dlg(qtbot, amount=(1 << 256) - 1)
+        dlg._allow_unlimited.setChecked(False)
+        dlg._allow_edit.setText("500")
+        dlg._on_allowance_edited("500")
+        sp, amt = txmod._parse_approve(req.data)
+        assert amt == 500_000_000                          # 500 USDC @ 6 decimals
+        assert sp.lower() == spender.lower()               # spender preserved
+        assert dlg._allowance_valid
+
+    def test_approve_unlimited_toggle_sets_max(self, qtbot):
+        import qeth.plugins.transactions as txmod
+        dlg, req, _ = self._approve_dlg(qtbot, amount=250_000_000)
+        dlg._allow_unlimited.setChecked(True)              # → unlimited
+        _, amt = txmod._parse_approve(req.data)
+        assert amt == (1 << 256) - 1
+        assert dlg._allow_edit.text() == ""                # stale value cleared
+        assert dlg._allow_edit.placeholderText() == "∞"    # ∞ example shown
+
+    def test_approve_invalid_amount_blocks_confirm(self, qtbot):
+        dlg, req, _ = self._approve_dlg(qtbot, amount=250_000_000)
+        dlg._allow_edit.setText("not a number")
+        dlg._on_allowance_edited("not a number")
+        assert not dlg._allowance_valid
+        assert not dlg._inputs_valid()
+
+    def test_approve_unknown_decimals_edits_raw_units(self, qtbot):
+        """Off-list token (decimals unknown) → edit the raw uint256 directly
+        rather than guess 18 decimals and mis-scale the allowance."""
+        import qeth.plugins.transactions as txmod
+        dlg, req, _ = self._approve_dlg(qtbot, amount=250_000_000, decimals=None)
+        assert dlg._approve_decimals == 0
+        assert dlg._allow_edit.text() == "250000000"     # raw, shown verbatim
+        dlg._allow_edit.setText("777")
+        dlg._on_allowance_edited("777")
+        _, amt = txmod._parse_approve(req.data)
+        assert amt == 777                                # raw, not ×10**18
+
+    def test_non_approve_request_has_no_allowance_editor(self, qtbot):
+        started = self._started()[1]
+        dlg = self._sign(qtbot, started, data="0xa9059cbb" + "00" * 64)
+        assert dlg._approve_spender is None
+        assert dlg._allow_edit is None
+
     def test_value_total_in_summary_with_usd_not_wei(self, qtbot):
         # Value + Total sit in the fee summary (next to Expected fee), read
         # like the fee line — "X ETH (≈$Y)", never a raw "(… wei)" — and hide

@@ -42,7 +42,7 @@ from PySide6.QtGui import (
     QStandardItemModel, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCompleter, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCheckBox, QCompleter, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMenu, QPushButton, QSizePolicy, QSpinBox, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
@@ -5307,6 +5307,17 @@ class SignTransactionDialog(_TxComposerDialog):
         # _refresh_decoded_view() again from _update_state (post gas) doesn't
         # re-kick the AbiFetchWorker and stomp a completed decode.
         self._decode_kicked = False
+        # Editable-allowance state — populated by _build_header_rows when the
+        # request is an ERC-20 approve. _approve_spender is the marker (non-None
+        # ⇒ the allowance editor is present); _allowance_valid gates Confirm and
+        # must exist before super().__init__ (the base's _inputs_valid reads it).
+        self._approve_spender: str | None = None
+        self._approve_decimals = 18
+        self._approve_symbol = ""
+        self._allowance_valid = True
+        self._allow_edit: QLineEdit | None = None
+        self._allow_unlimited: QCheckBox | None = None
+        self._allow_hint = "amount"
         super().__init__(
             chain,
             to_checksum_address(req.from_addr) if req.from_addr else req.from_addr,
@@ -5364,6 +5375,126 @@ class SignTransactionDialog(_TxComposerDialog):
         # Value (+ Total) live in the fee summary now, next to Expected fee —
         # see the base _build_extra_summary_rows / _update_extra_totals, which
         # also hide them for a value-0 call.
+        self._build_allowance_editor(header)
+
+    # --- editable allowance (ERC-20 approve) -----------------------
+
+    def _build_allowance_editor(self, header: QFormLayout) -> None:
+        """When the request is an ERC-20 ``approve``, add an editable allowance
+        row so the user can cap what the dapp asked for — approvals are very
+        often unlimited (2**256-1) and users often want a specific amount. Edits
+        re-encode the calldata live, so the Decoded call view and the tx that
+        gets signed both follow the field."""
+        parsed = _parse_approve(self.req.data)
+        if parsed is None:
+            return
+        spender, amount = parsed
+        self._approve_spender = spender
+        # Decimals must be KNOWN to edit in human units — guessing 18 for an
+        # off-list token could mis-scale the allowance by orders of magnitude
+        # (dangerous). Unknown ⇒ decimals 0, i.e. edit the raw uint256 directly.
+        decimals_known = False
+        if self._token_info is not None and self.req.to_addr:
+            entry = self._token_info(self.chain.chain_id, self.req.to_addr)
+            if entry is not None and entry.decimals is not None:
+                self._approve_symbol = entry.symbol or ""
+                self._approve_decimals = int(entry.decimals)
+                decimals_known = True
+        if not decimals_known:
+            self._approve_decimals = 0
+
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        # Placeholder shown when the field is empty: a grey "∞" while the
+        # approval is unlimited, otherwise the amount hint.
+        self._allow_hint = "amount" if decimals_known else "amount (base units)"
+        self._allow_edit = QLineEdit()
+        self._allow_edit.setFont(self._mono_font)
+        row.addWidget(self._allow_edit, 1)
+        if self._approve_symbol:
+            row.addWidget(QLabel(self._approve_symbol))
+        self._allow_unlimited = QCheckBox("&Unlimited")
+        self._allow_unlimited.setToolTip(
+            "Approve the maximum (2²⁵⁶−1) — the dapp never has to ask again, "
+            "but it can move this token until you revoke it.")
+        row.addWidget(self._allow_unlimited)
+        header.addRow("&Allowance:", box)
+
+        # Pre-fill from the request. Unlimited → tick the box and leave the
+        # field empty with a grey "∞" placeholder; a specific amount → show it.
+        # The field is NEVER disabled — that would swap its native frame for a
+        # flat one; typing a value just unticks Unlimited (see below).
+        unlimited = amount >= _APPROVE_UNLIMITED_MIN
+        self._allow_unlimited.setChecked(unlimited)
+        if unlimited:
+            self._allow_edit.setPlaceholderText("∞")
+        else:
+            self._allow_edit.setPlaceholderText(self._allow_hint)
+            self._allow_edit.setText(
+                _format_amount_plain(amount, self._approve_decimals))
+        self._allow_unlimited.toggled.connect(self._on_allowance_unlimited)
+        self._allow_edit.textEdited.connect(self._on_allowance_edited)
+
+    def _on_allowance_unlimited(self, checked: bool) -> None:
+        assert self._allow_edit is not None
+        if checked:
+            # Unlimited owns the value now — clear the field and show the grey
+            # "∞" example; the box is the source of truth.
+            self._allow_edit.clear()
+            self._allow_edit.setPlaceholderText("∞")
+        else:
+            self._allow_edit.setPlaceholderText(self._allow_hint)
+            self._allow_edit.setFocus()
+        self._recompute_allowance()
+
+    def _on_allowance_edited(self, text: str) -> None:
+        # Typing a specific amount means "not unlimited" — untick the box
+        # (without disturbing the field the user is typing into).
+        assert self._allow_unlimited is not None and self._allow_edit is not None
+        if text.strip() and self._allow_unlimited.isChecked():
+            self._allow_unlimited.blockSignals(True)
+            self._allow_unlimited.setChecked(False)
+            self._allow_unlimited.blockSignals(False)
+            self._allow_edit.setPlaceholderText(self._allow_hint)
+        self._recompute_allowance()
+
+    def _recompute_allowance(self) -> None:
+        """Turn the current field/checkbox into an amount, re-encode the approve
+        calldata onto ``self.req``, and mirror it into the Decoded view + the
+        Events preview. Invalid input disables Confirm and leaves the last good
+        calldata in place."""
+        assert self._allow_edit is not None and self._allow_unlimited is not None
+        if self._allow_unlimited.isChecked():
+            amount: int | None = _UINT256_MAX
+        else:
+            amount = _parse_amount_to_raw(
+                self._allow_edit.text(), self._approve_decimals)
+        valid = amount is not None
+        self._allowance_valid = valid
+        if valid:
+            assert self._approve_spender is not None and amount is not None
+            self.req.data = _encode_approve(self._approve_spender, amount)
+            decoded = decode_call(_ERC20_APPROVE_ABI, self.req.data,
+                                  address=self.req.to_addr)
+            if decoded is not None:
+                self._render_decoded_call(decoded)      # live mirror
+            self.request_simulation()                    # re-preview (debounced)
+        # Invalid input just disables Confirm — no field restyle, so its native
+        # frame stays identical to the other inputs (gas etc.).
+        self.confirm_btn.setEnabled(self._gas_ready and self._inputs_valid())
+
+    def _inputs_valid(self) -> bool:
+        return self._allowance_valid
+
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        # Lock the allowance editor while the host runs signing (the whole
+        # dialog is disabled then, so the transient grey is expected).
+        if self._approve_spender is not None and self._allow_edit is not None:
+            assert self._allow_unlimited is not None
+            self._allow_unlimited.setEnabled(enabled)
+            self._allow_edit.setEnabled(enabled)
 
     # --- decoded call (base hook) — async, Sign-specific -----------
 
@@ -5450,6 +5581,75 @@ def _erc20_transfer_calldata(recipient: str, amount_raw: int) -> str:
     selector = bytes.fromhex("a9059cbb")
     encoded = encode(["address", "uint256"], [recipient, amount_raw])
     return "0x" + (selector + encoded).hex()
+
+
+_APPROVE_SELECTOR = "0x095ea7b3"
+# A requested allowance at or above this reads as "unlimited": 2**255 is half the
+# uint256 space, far beyond any honest cap, so it captures 2**256-1 and its
+# near-max variants — what the Unlimited toggle pre-checks.
+_APPROVE_UNLIMITED_MIN = 2 ** 255
+_ERC20_APPROVE_ABI = [{
+    "type": "function", "name": "approve", "stateMutability": "nonpayable",
+    "inputs": [{"name": "spender", "type": "address"},
+               {"name": "amount", "type": "uint256"}],
+    "outputs": [{"type": "bool"}],
+}]
+
+
+def _parse_approve(data: str | None) -> tuple[str, int] | None:
+    """``(spender, amount)`` when ``data`` is an ERC-20
+    ``approve(address,uint256)``, else ``None``. Static ABI: 4-byte selector +
+    a 32-byte spender word + a 32-byte amount word."""
+    if not data or not data.lower().startswith(_APPROVE_SELECTOR):
+        return None
+    body = data[10:]
+    if len(body) < 128:
+        return None
+    try:
+        spender = to_checksum_address("0x" + body[24:64])   # low 20B of word 1
+        amount = int(body[64:128], 16)
+    except Exception:      # malformed calldata / bad address
+        return None
+    return spender, amount
+
+
+def _encode_approve(spender: str, amount: int) -> str:
+    from eth_abi import encode
+    selector = bytes.fromhex(_APPROVE_SELECTOR[2:])
+    return "0x" + (selector + encode(["address", "uint256"],
+                                     [spender, amount])).hex()
+
+
+def _format_amount_plain(raw: int, decimals: int) -> str:
+    """``raw`` base units → a bare number string for an input field (no symbol,
+    no exponent, no trailing zeros). ``12345678`` at 6 decimals → ``"12.345678"``;
+    whole values lose the ``.0``."""
+    if decimals <= 0:
+        return str(raw)
+    from decimal import Decimal
+    d = Decimal(raw) / (Decimal(10) ** decimals)
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _parse_amount_to_raw(text: str, decimals: int) -> int | None:
+    """A human amount string → base units, or ``None`` if it isn't a valid
+    non-negative number that fits uint256. Fractional base units are truncated
+    (there's nothing smaller to hold them)."""
+    from decimal import Decimal, InvalidOperation
+    t = text.strip()
+    if not t:
+        return None
+    try:
+        d = Decimal(t)
+    except InvalidOperation:
+        return None
+    if d < 0:
+        return None
+    raw = int(d * (Decimal(10) ** decimals))
+    return raw if 0 <= raw <= _UINT256_MAX else None
 
 
 class _AddressBookCompleter(QCompleter):

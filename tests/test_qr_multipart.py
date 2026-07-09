@@ -6,7 +6,15 @@ import zlib
 
 from cbor2 import dumps, loads
 
-from qeth.qr.multipart import _split_part, decode_parts, encode_parts
+from qeth.qr.multipart import (
+    MAX_FRAGMENTS,
+    _fragment_len_for,
+    _plan,
+    _split_part,
+    decode_parts,
+    encode_parts,
+    frame_source,
+)
 
 
 def test_part_cbor_matches_the_spec_vector():
@@ -66,3 +74,40 @@ def test_decode_rejects_incomplete():
     import pytest
     with pytest.raises(ValueError, match="incomplete"):
         decode_parts(parts[:1])   # only 1 of 2 parts
+
+
+def test_frame_source_small_payload_is_a_constant_single_part():
+    nf = frame_source("x", bytes(range(120)))
+    assert nf() == nf()                           # same static QR every tick
+    assert nf().count("/") == 1                   # no seqNum-seqLen segment
+
+
+def test_frame_source_reinjects_pure_fragments_every_cycle():
+    # A large payload streams pure fragments (seqNum 1..seqLen), then a batch of
+    # rateless parts (seqNum > seqLen), then the pure fragments AGAIN — so a
+    # device that joined late can still catch a pure fragment.
+    msg = bytes((i * 7 + 3) % 256 for i in range(2000))
+    nf = frame_source("eth-sign-request", msg, fragment_len=150)
+    seq_len = _plan(msg, 150)[0]
+    frames = [nf() for _ in range(3 * seq_len)]
+    seqnums = [_split_part(f)[1] for f in frames]
+    assert seqnums[:seq_len] == list(range(1, seq_len + 1))          # pure block first
+    assert all(s > seq_len for s in seqnums[seq_len:2 * seq_len])    # then rateless
+    assert seqnums[2 * seq_len:] == list(range(1, seq_len + 1))      # pures re-injected
+    # a pure block reconstructs the message on its own
+    assert decode_parts(frames[:seq_len]) == ("eth-sign-request", msg)
+
+
+def test_fragment_len_caps_parts_for_a_huge_payload():
+    # FRAGMENT_LEN (v12) for a normal-sized payload...
+    assert _fragment_len_for(10_000) == 220
+    # ...but a payload too big for 128 parts at 220 packs denser to stay under the
+    # cap that a Keycard-class receiver enforces.
+    big = 128 * 220 + 5_000
+    fl = _fragment_len_for(big)
+    assert fl > 220
+    assert _plan(bytes(big), fl)[0] <= MAX_FRAGMENTS
+
+    # frame_source uses the capped fragment length by default
+    nf = frame_source("eth-sign-request", bytes(big))
+    assert all(_split_part(nf())[2] <= MAX_FRAGMENTS for _ in range(10))

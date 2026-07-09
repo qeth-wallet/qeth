@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.15.1
+Version:        0.16.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,17 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Thu Jul 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.16.0-1
+- Air-gapped QR signing: large transactions (e.g. a multicall carrying Merkle-
+  Patricia proofs) that stalled some hardware wallets now transmit reliably --
+  the animated QR uses fewer, denser frames (~QR version 12) and re-injects the
+  self-recovering fragments each cycle so a device that locks on late still
+  completes.
+- Token prices: fixed a DefiLlama API change (over-long batch request URLs now
+  return 404) that made every price request fail and emptied the token list.
+  Prices are batched by URL length, and the panel now falls back to the last-
+  known cached price during a price-source outage instead of hiding every token.
+
 * Thu Jul 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.15.1-1
 - Signing now routes to the account ROW you selected: when one address is held
   by both a Ledger and an Air-gapped (QR) record, picking the Air-gapped row and

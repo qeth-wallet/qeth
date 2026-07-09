@@ -1,0 +1,17 @@
+#!/bin/sh
+# qeth launcher (LMDE 7 / Debian 13 "Trixie" build). Unlike the Mint/Ubuntu
+# .deb — which has to COMPILE PySide6 6.4 from source because Ubuntu 24.04 ships
+# no PySide6 that fits its Qt6.4 + py3.12 combo — Debian 13 ships PySide6 6.8
+# natively (the split python3-pyside6.* module packages). So this build DEPENDS
+# on the system bindings and runs under the system python3 (3.13); only the eth
+# stack (web3, eth-*, ledgereth, zxing-cpp, ...), which Debian doesn't package,
+# is vendored privately. The system PySide6 links the system Qt and finds the
+# system Qt plugins on its own, so — unlike the Mint launcher — no QT_PLUGIN_PATH
+# is needed; the user's qt6ct/Kvantum theme applies natively.
+# QETH_HELIOS_BIN points at the (optional) bundled Helios light client — present
+# only in the "verify" variant. When absent (the normal package)
+# qeth.helios.helios_binary() falls through to PATH / ~/.helios/bin, so this is
+# harmless either way.
+exec env PYTHONPATH="/usr/lib/qeth/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+     QETH_HELIOS_BIN="${QETH_HELIOS_BIN:-/usr/lib/qeth/helios}" \
+     python3 -m qeth "$@"

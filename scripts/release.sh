@@ -3,15 +3,18 @@
 #
 # Builds the host-buildable artifacts (AppImage + Flatpak, each in a normal and
 # a -verify variant), collects the .deb / .rpm you built in their target
-# environments, checks the full 8-asset set, and — only with --publish — tags
-# v<version>, pushes the tag, and creates the GitHub release with all 8 assets.
+# environments, checks the full 10-asset set, and — only with --publish — tags
+# v<version>, pushes the tag, and creates the GitHub release with all 10 assets.
 #
 # Why the .deb/.rpm are external: they can't be built portably on the dev host
-# (the .deb needs Ubuntu/Mint's Qt 6.4 + deadsnakes py3.11; the .rpm needs
-# Fedora's rpmbuild). Build them there — NORMAL and VERIFY — and drop all four
-# into dist/release/ (or point QETH_PKG_INDIR at them):
+# (the Mint/Ubuntu .deb needs Ubuntu/Mint's Qt 6.4 + deadsnakes py3.11; the LMDE
+# .deb needs Debian 13's native PySide6; the .rpm needs Fedora's rpmbuild). Build
+# them there — NORMAL and VERIFY — and drop all six into dist/release/ (or point
+# QETH_PKG_INDIR at them):
 #   deb:  (on Ubuntu/Mint)  ./dist/deb/build-deb.sh <out>
 #         (verify)          QETH_BUNDLE_HELIOS=/path/helios ./dist/deb/build-deb.sh <out>
+#   deb:  (on LMDE/Debian13)./dist/deb/build-deb-debian.sh <out>
+#         (verify)          QETH_BUNDLE_HELIOS=/path/helios ./dist/deb/build-deb-debian.sh <out>
 #   rpm:  (on Fedora)       rpmbuild -bb dist/rpm/qeth.spec
 #         (verify)          rpmbuild -bb --define "bundle_helios /path/helios" dist/rpm/qeth.spec
 #                           then rename the verify output to qeth-verify-<v>-1.fc*.x86_64.rpm
@@ -59,30 +62,32 @@ cp -f dist/flatpak/qeth-verify.flatpak "$OUT/qeth-verify-$VERSION.flatpak"
 # 3. Collect the externally-built .deb / .rpm.
 echo ">> [4/4] collecting .deb / .rpm from $INDIR"
 if [ "$INDIR" != "$OUT" ]; then
-    for pat in "qeth_${VERSION}_amd64.deb" "qeth-verify_${VERSION}_amd64.deb" \
+    for pat in "qeth_${VERSION}_amd64.deb"      "qeth-verify_${VERSION}_amd64.deb" \
+               "qeth_${VERSION}_debian13_amd64.deb" "qeth-verify_${VERSION}_debian13_amd64.deb" \
                "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm"; do
         # shellcheck disable=SC2086
         for f in "$INDIR"/$pat; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
     done
 fi
 
-# 4. Verify the full 8-asset set.
+# 4. Verify the full 10-asset set.
 missing=0
 for pat in \
     "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm" \
     "qeth_${VERSION}_amd64.deb"          "qeth-verify_${VERSION}_amd64.deb" \
+    "qeth_${VERSION}_debian13_amd64.deb"     "qeth-verify_${VERSION}_debian13_amd64.deb" \
     "qeth-${VERSION}-x86_64.AppImage"    "qeth-verify-${VERSION}-x86_64.AppImage" \
     "qeth-${VERSION}.flatpak"            "qeth-verify-${VERSION}.flatpak"; do
     # shellcheck disable=SC2086
     ls "$OUT"/$pat >/dev/null 2>&1 || { echo "  MISSING: $pat"; missing=1; }
 done
 if [ "$missing" = 1 ]; then
-    echo "!! Not all 8 assets are present. Build the missing .deb/.rpm in their"
+    echo "!! Not all 10 assets are present. Build the missing .deb/.rpm in their"
     echo "   target environments and drop them in $INDIR (or set QETH_PKG_INDIR)."
     exit 1
 fi
 ls -la "$OUT"/*.rpm "$OUT"/*.deb "$OUT"/*.AppImage "$OUT"/*.flatpak | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
-echo ">> all 8 assets present"
+echo ">> all 10 assets present"
 [ "$PUBLISH" = 1 ] || { echo ">> done (dry run — pass --publish to tag + release)"; exit 0; }
 
 # 5. Publish (opt-in): tag, push, gh release create.
@@ -96,6 +101,7 @@ notes_arg=(--generate-notes)
 gh release create "v$VERSION" --title "qeth $VERSION" "${notes_arg[@]}" \
   "$OUT"/qeth-"$VERSION"-1.fc*.x86_64.rpm "$OUT"/qeth-verify-"$VERSION"-1.fc*.x86_64.rpm \
   "$OUT/qeth_${VERSION}_amd64.deb" "$OUT/qeth-verify_${VERSION}_amd64.deb" \
+  "$OUT/qeth_${VERSION}_debian13_amd64.deb" "$OUT/qeth-verify_${VERSION}_debian13_amd64.deb" \
   "$OUT/qeth-$VERSION-x86_64.AppImage" "$OUT/qeth-verify-$VERSION-x86_64.AppImage" \
   "$OUT/qeth-$VERSION.flatpak" "$OUT/qeth-verify-$VERSION.flatpak"
 gh release view "v$VERSION" --json url --jq '">> published: \(.url)"'

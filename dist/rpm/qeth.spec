@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.15.0
+Version:        0.15.1
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,20 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Thu Jul 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.15.1-1
+- Signing now routes to the account ROW you selected: when one address is held
+  by both a Ledger and an Air-gapped (QR) record, picking the Air-gapped row and
+  hitting Send no longer demands the Ledger device ("Ledger not connected").
+- QR air-gapped signer: camera capture + decode pipeline retuned for reliable
+  reads; already-added accounts are greyed out in the Ledger/QR/import scan lists.
+- Sign dialog: the ERC-20 approve allowance is now editable, and calldata the
+  ABI doesn't describe is surfaced explicitly as "additional calldata".
+- Chain RPC dialog: a live reachability verdict for the URL you type or paste.
+- Verified previews (Helios): reroute off a proof-incapable RPC so verified
+  sims work, and respawn the sidecar when a chain's execution-RPC changes.
+- Transactions: recover a TOKEN->native swap's received ETH via a node trace
+  when the explorer's internal-tx feed lags.
+
 * Sun Jul 05 2026 Michael Egorov <michwill@yieldbasis.com> - 0.15.0-1
 - Air-gapped QR signer now works from every distributed package: the
   QtMultimedia camera backend (qt6-qtmultimedia → ffmpeg) and the QR decode

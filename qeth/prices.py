@@ -28,7 +28,13 @@ from .fsatomic import atomic_write_bytes
 log = logging.getLogger("qeth.prices")
 
 DEFAULT_TIMEOUT = 8.0
-BATCH_SIZE = 100  # URL length is the real constraint; 100 keys is well under it.
+# DefiLlama's CDN 404s request URLs beyond ~5 KB (and 414s past ~10 KB), so we
+# batch by URL LENGTH, not by a fixed key count. The old fixed 100-key batch
+# built ~5.2 KB URLs and every request 404'd — which, since an unpriced token is
+# dropped from the panel, silently emptied the whole token list. Keep each URL
+# well under the observed threshold.
+PRICES_URL = "https://coins.llama.fi/prices/current/"
+MAX_URL_LEN = 3000
 
 # chain_id -> DefiLlama chain slug used in coin keys like "ethereum:0x...".
 # When a chain is missing here, fetch() silently skips all ERC-20
@@ -162,9 +168,21 @@ class PriceSource(ABC):
         ...
 
 
-def _batched(items: list[str], n: int) -> Iterable[list[str]]:
-    for i in range(0, len(items), n):
-        yield items[i:i + n]
+def _price_url(keys: list[str]) -> str:
+    return PRICES_URL + urllib.parse.quote(",".join(keys), safe=":,")
+
+
+def _url_batches(keys: list[str], max_url_len: int = MAX_URL_LEN) -> Iterable[list[str]]:
+    """Group ``keys`` so each request URL stays under ``max_url_len`` — bounding
+    by URL length (not key count), since that is what DefiLlama's CDN rejects."""
+    chunk: list[str] = []
+    for k in keys:
+        if chunk and len(_price_url([*chunk, k])) > max_url_len:
+            yield chunk
+            chunk = []
+        chunk.append(k)
+    if chunk:
+        yield chunk
 
 
 class DefiLlamaPrices(PriceSource):
@@ -192,11 +210,8 @@ class DefiLlamaPrices(PriceSource):
             return {}
 
         out: dict[str, Price] = {}
-        for chunk in _batched(keys, BATCH_SIZE):
-            url = (
-                "https://coins.llama.fi/prices/current/"
-                + urllib.parse.quote(",".join(chunk), safe=":,")
-            )
+        for chunk in _url_batches(keys):
+            url = _price_url(chunk)
             try:
                 req = urllib.request.Request(
                     url,

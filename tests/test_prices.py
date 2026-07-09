@@ -111,3 +111,48 @@ class TestNativeIdDiscovery:
             raise OSError("network down")
         monkeypatch.setattr(prices.urllib.request, "urlopen", boom)
         assert prices.load_native_coin_ids(cache_dir=tmp_path, force=True) == {}
+
+
+class TestUrlBatching:
+    """DefiLlama's CDN 404s request URLs past ~5 KB; a 100-key fixed batch built
+    ~5.2 KB URLs and every request failed, emptying the token panel. We batch by
+    URL length instead — each request URL must stay under the cap."""
+
+    def test_batches_stay_under_the_url_cap_and_preserve_all_keys(self):
+        from qeth.prices import MAX_URL_LEN, _price_url, _url_batches
+        keys = [f"ethereum:0x{i:040x}" for i in range(400)]
+        batches = list(_url_batches(keys))
+        assert len(batches) > 1                                   # actually split
+        assert [k for b in batches for k in b] == keys            # nothing dropped/reordered
+        assert all(len(_price_url(b)) <= MAX_URL_LEN for b in batches)
+
+    def test_fetch_splits_large_sets_so_no_url_exceeds_the_cap(self, monkeypatch):
+        import urllib.parse
+        import qeth.prices as prices
+        from qeth.chains import DEFAULT_CHAINS
+        from qeth.prices import MAX_URL_LEN, DefiLlamaPrices
+
+        seen: list[str] = []
+
+        class R:
+            def __init__(self, url): self.url = url
+            def read(self):
+                path = self.url.split("/current/", 1)[1]
+                keys = urllib.parse.unquote(path).split(",")
+                return json.dumps({"coins": {
+                    k: {"price": 1.0, "timestamp": 1, "confidence": 1.0} for k in keys
+                }}).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            seen.append(req.full_url)
+            return R(req.full_url)
+        monkeypatch.setattr(prices.urllib.request, "urlopen", fake_urlopen)
+
+        eth = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+        contracts = [f"0x{i:040x}" for i in range(300)]
+        out = DefiLlamaPrices().fetch(eth, contracts)
+        assert len(seen) > 1                                      # multiple requests
+        assert all(len(u) <= MAX_URL_LEN for u in seen)          # the 404 regression guard
+        assert len(out) == 300                                    # every token priced

@@ -1641,6 +1641,20 @@ class TokensPlugin(Plugin):
             if (e := self._token_lists.get(chain.chain_id, b.contract)) is not None
         }
 
+        # Price resilience: for any asset the fresh fetch didn't return, fall back
+        # to its last-known price from the cache. Without this a price-source
+        # outage (e.g. DefiLlama 404ing every batch) leaves every token unpriced,
+        # which the visibility filter then hides — emptying the whole panel.
+        # Fresh prices always win; a token never priced stays unpriced (grace).
+        if cached_now is not None:
+            if "" not in prices and cached_now.native_price_usd:
+                prices[""] = Price(Decimal(cached_now.native_price_usd),
+                                   cached_now.native_price_updated, "cache")
+            for cl, ct in cached_by.items():
+                if cl not in prices and ct.price_usd:
+                    prices[cl] = Price(Decimal(ct.price_usd),
+                                       ct.price_updated, "cache")
+
         visible = self._compute_visible_tokens(chain, tokens, prices)
         apply_dust = not self._show_all
         if self._panel.contract_set_matches(chain, visible):

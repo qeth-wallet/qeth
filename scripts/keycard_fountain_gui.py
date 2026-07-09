@@ -128,6 +128,31 @@ def qr_version(ur_string: str) -> int:
     return segno.make(ur_string.upper(), error=QR_ERROR).version
 
 
+def write_gif(path: str, ur_type: str, message: bytes, fragment_len: int, *,
+              frames: int, include_pures: bool, px: int) -> None:
+    """Write a looping animated-QR GIF of the OLD (offending) stream, for a
+    self-contained on-device repro. Default is rateless-ONLY (the pure fragments
+    skipped): a GIF loops, and looping would otherwise re-show the pure fragments
+    every cycle — which is the very workaround — so to reproduce the "stuck at 0%"
+    a device must be kept in the rateless phase, exactly what a late-joining
+    device sees on the live stream."""
+    from PIL import Image                        # from the [qr] extra
+    nf = current_stream(ur_type, message, fragment_len)   # old, monotonic
+    seq_len = _plan(message, fragment_len)[0]
+    if not include_pures:
+        for _ in range(seq_len):
+            nf()                                 # drop the one-time pure window
+    imgs = []
+    for _ in range(frames):
+        buf = io.BytesIO()
+        segno.make(nf().upper(), error=QR_ERROR).save(buf, kind="png", scale=8, border=4)
+        imgs.append(Image.open(buf).convert("RGB").resize((px, px), Image.NEAREST))
+    imgs[0].save(path, save_all=True, append_images=imgs[1:],
+                 duration=FRAME_MS, loop=0, disposal=2, optimize=True)
+    print(f"wrote {path}: {len(imgs)} frames, {px}px, {FRAME_MS} ms/frame, seqLen={seq_len}, "
+          f"{'pure+rateless' if include_pures else 'rateless-only'}")
+
+
 def render_qr(ur_string: str, size: int) -> QPixmap:
     """UR string -> QR QPixmap, rendered like qeth (uppercased for the compact
     alphanumeric mode, error level L, nearest-neighbour scaling)."""
@@ -276,6 +301,13 @@ def main() -> int:
                     help="file with the real tx calldata as hex (0x-optional) to sign")
     ap.add_argument("--qr-size", type=int, default=320,
                     help="on-screen QR size in px (default 320, matching qeth's dialog)")
+    ap.add_argument("--gif", metavar="PATH",
+                    help="instead of the window, write a looping animated-QR GIF here")
+    ap.add_argument("--gif-frames", type=int, default=0,
+                    help="frames in the GIF (default 3×seqLen)")
+    ap.add_argument("--gif-include-pures", action="store_true",
+                    help="include the pure fragments (default: rateless-only, which is what reproduces the hang)")
+    ap.add_argument("--gif-px", type=int, default=480, help="GIF QR size in px (default 480)")
     args = ap.parse_args()
 
     calldata = None
@@ -287,6 +319,12 @@ def main() -> int:
     seq_len = _plan(message, args.fragment_len)[0]
     print(f"payload {len(message)} bytes -> seqLen={seq_len} fragments at "
           f"fragment_len={args.fragment_len} ({FRAME_MS} ms/frame)")
+
+    if args.gif:
+        write_gif(args.gif, ur_type, message, args.fragment_len,
+                  frames=args.gif_frames or 3 * seq_len,
+                  include_pures=args.gif_include_pures, px=args.gif_px)
+        return 0
 
     app = QApplication(sys.argv)
     win = FountainWindow(ur_type, message, args.fragment_len, args.qr_size)

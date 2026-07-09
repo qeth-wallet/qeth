@@ -211,7 +211,10 @@ install -Dm644 "$SRC/qeth/assets/logos/qeth-icon-rounded.svg"       "$APPDIR/io.
 
 # 6. Pack. --appimage-extract-and-run avoids needing FUSE inside the container.
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$BUILD_SRC/qeth/__init__.py")"
-curl -sSL -o "$WORK/appimagetool" \
+# -f so a transient 5xx (GitHub's "continuous" release CDN 504s intermittently)
+# fails the curl instead of saving the HTML error page as the "binary"; retry a
+# few times so a hiccup doesn't sink the whole release build.
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$WORK/appimagetool" \
   "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
 chmod +x "$WORK/appimagetool"
 ARCH="$ARCH" "$WORK/appimagetool" --appimage-extract-and-run \

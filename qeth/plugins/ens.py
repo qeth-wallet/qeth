@@ -1959,6 +1959,11 @@ class EnsPlugin(Plugin):
         # _owned, used to gate the record-write actions (a registrant who isn't
         # the manager can't set records until they reclaim the manager role).
         self._controller: set[str] = set()
+        # Names present in the CURRENT ENS registry (recordExists → True). A
+        # legacy name that lives only in the pre-2019 registry reads an owner
+        # (via fallback) but its registry WRITES revert, so registry-level
+        # subdomain removal (setRecord / setSubnodeRecord) is gated on this.
+        self._in_new_registry: set[str] = set()
         # Subdomains whose PARENT this account controls — can (re)assign the
         # subnode's manager via setSubnodeOwner (gates the subdomain "Set
         # manager"). Recomputed in _refresh_writable.
@@ -2038,6 +2043,7 @@ class EnsPlugin(Plugin):
             self._wrapped.clear()
             self._registrant.clear()
             self._controller.clear()
+            self._in_new_registry.clear()
             if self._panel is not None:
                 self._panel.set_writable(set())
                 self._panel.set_transferable(set())
@@ -2185,6 +2191,12 @@ class EnsPlugin(Plugin):
                 self._wrapped.add(name_l)
             else:
                 self._wrapped.discard(name_l)
+            # In the current registry? Gates registry-level removal (a legacy
+            # old-registry name reads an owner but its registry writes revert).
+            if st.in_registry:
+                self._in_new_registry.add(name_l)
+            else:
+                self._in_new_registry.discard(name_l)
             # Registrant (NFT owner) — for a wrapped name this is the ERC-1155
             # holder (substituted in by the verify read). Only the registrant
             # can transfer; controller-only ownership can't.
@@ -2224,6 +2236,7 @@ class EnsPlugin(Plugin):
             nl for nl, n in self._names_by_l.items()
             if n.is_subdomain and n.parent
             and n.parent.lower() in self._controller
+            and n.parent.lower() in self._in_new_registry
             and n.parent.lower() not in self._wrapped
             and nl not in self._wrapped
         }
@@ -2240,11 +2253,12 @@ class EnsPlugin(Plugin):
             if not n.is_subdomain:
                 continue
             pl = (n.parent or "").lower()
-            if nl in self._controller and nl not in self._wrapped:
-                subnode_removable.add(nl)
+            if (nl in self._controller and nl not in self._wrapped
+                    and nl in self._in_new_registry):
+                subnode_removable.add(nl)          # self setRecord (new registry)
             elif (nl in self._wrapped and pl
                   and pl in self._controller and pl in self._wrapped):
-                subnode_removable.add(nl)
+                subnode_removable.add(nl)          # NameWrapper (always new registry)
         if self._panel is not None:
             self._panel.set_writable(self._controller if can_sign else set())
             self._panel.set_transferable(
@@ -2420,7 +2434,8 @@ class EnsPlugin(Plugin):
         elif (nl in self._wrapped and pl in self._controller
               and pl in self._wrapped):
             op = self._remove_wrapped_subnode_op(name)
-        elif nl in self._controller and nl not in self._wrapped:
+        elif (nl in self._controller and nl not in self._wrapped
+              and nl in self._in_new_registry):
             op = self._relinquish_subnode_op(name)
         else:
             return

@@ -1717,6 +1717,7 @@ class TestEnsWriteActions:
         plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
         plugin._controller = {"ops.swiss.eth"}
+        plugin._in_new_registry = {"ops.swiss.eth"}
         plugin._subnode_manageable = set()
         plugin._remove_subdomain("ops.swiss.eth")
         assert len(host.ens_ops) == 1
@@ -1781,6 +1782,30 @@ class TestEnsWriteActions:
             ["bytes32", "string", "address", "uint32", "uint64"],
             [namehash("yb.eth"), "cbbtc", ens_write.ZERO_ADDRESS, 0, 0]).hex()
 
+    def test_remove_subdomain_skips_legacy_old_registry_name(self, qtbot):
+        # A subnode you 'own' only via the old-registry fallback (recordExists
+        # False → not in _in_new_registry): a registry setRecord would revert,
+        # so removal is neither offered nor built.
+        plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))
+        plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        plugin._controller = {"ops.swiss.eth"}
+        plugin._in_new_registry = set()                  # legacy: old registry only
+        plugin._refresh_writable(ADDR)
+        assert "ops.swiss.eth" not in plugin.widget()._subnode_removable
+        plugin._remove_subdomain("ops.swiss.eth")
+        assert host.ens_ops == []
+
+    def test_remove_subdomain_parent_side_skips_old_registry_parent(self, qtbot):
+        # Own an unwrapped parent, but it's an old-registry name (setSubnodeRecord
+        # on it would revert) → not offered.
+        plugin, host, store = self._plugin(qtbot, owned=("swiss.eth",))
+        plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        plugin._controller = {"swiss.eth"}               # own the parent
+        plugin._in_new_registry = set()                  # ...but it's old-registry
+        plugin._refresh_writable(ADDR)
+        assert "ops.swiss.eth" not in plugin.widget()._subnode_manageable
+        assert "ops.swiss.eth" not in plugin.widget()._subnode_removable
+
     def test_refresh_writable_marks_wrapped_parent_owned_subnode_removable(
             self, qtbot):
         plugin, host, store = self._plugin(qtbot, owned=("yb.eth",))
@@ -1796,6 +1821,7 @@ class TestEnsWriteActions:
         plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
         plugin._controller = {"ops.swiss.eth"}           # manage subnode, not parent
+        plugin._in_new_registry = {"ops.swiss.eth"}
         plugin._refresh_writable(ADDR)
         panel = plugin.widget()
         assert "ops.swiss.eth" in panel._subnode_removable      # deletable

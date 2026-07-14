@@ -403,6 +403,45 @@ def test_read_name_states_unwraps_namewrapper():
     assert st.owned_by(REAL)
 
 
+def test_read_name_states_record_exists_flags_legacy_name():
+    # recordExists False → the name lives only in the old registry (owner()
+    # falls back), so registry writes would revert: in_registry must read False.
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_OWNER:
+            return True, "0xLegacyOwner"
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RECORD_EXISTS:
+            return True, False
+        return False, None
+
+    states, _ = ea._read_name_states(_FakeClient(resp), ["legacy.eth"])
+    assert states["legacy.eth"].controller == "0xLegacyOwner"
+    assert states["legacy.eth"].in_registry is False
+
+
+def test_read_name_states_record_exists_true_is_current():
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_OWNER:
+            return True, "0xOwner"
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_RECORD_EXISTS:
+            return True, True
+        return False, None
+
+    states, _ = ea._read_name_states(_FakeClient(resp), ["new.eth"])
+    assert states["new.eth"].in_registry is True
+
+
+def test_read_name_states_record_exists_read_fail_defaults_true():
+    # A transient recordExists read failure must not block removal of a normal
+    # name — in_registry stays at its safe default (True).
+    def resp(target, sel):
+        if target == ea.ENS_REGISTRY and sel == ea._SEL_OWNER:
+            return True, "0xOwner"
+        return False, None                   # recordExists read didn't land
+
+    states, _ = ea._read_name_states(_FakeClient(resp), ["glitch.eth"])
+    assert states["glitch.eth"].in_registry is True
+
+
 def test_read_records_via_client_batches():
     RESOLVER = "0x" + "ab" * 20
 

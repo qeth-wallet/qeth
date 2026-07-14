@@ -79,6 +79,7 @@ ENS_NAME_WRAPPER = "0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401"
 ENS_ETH_CONTROLLER = "0x253553366Da8546fC250F225fe3d25d0C782303b"
 
 _SEL_OWNER = bytes.fromhex("02571be3")      # registry.owner(bytes32)
+_SEL_RECORD_EXISTS = bytes.fromhex("f79fe538")  # registry.recordExists(bytes32)
 _SEL_RESOLVER = bytes.fromhex("0178b8bf")   # registry.resolver(bytes32)
 _SEL_OWNER_OF = bytes.fromhex("6352211e")   # ERC721.ownerOf(uint256)
 _SEL_NAME_EXPIRES = bytes.fromhex("d6e4fa86")  # BaseRegistrar.nameExpires(uint256)
@@ -183,6 +184,14 @@ class OwnershipCheck:
     # authority for the Expires column, vs BENS's grace-inclusive expiry_date.
     expiry: int | None = None
     wrapped: bool = False               # held by the ENS NameWrapper
+    # recordExists(node) on the CURRENT registry (no old-registry fallback).
+    # ``owner``/``resolver`` fall back to the pre-2019 registry, so a legacy name
+    # reads an owner yet ``records[node].owner`` here is 0 — and registry WRITES
+    # (setRecord / setSubnodeRecord / setOwner) check that internal slot and
+    # revert. Gate registry-level subdomain removal on this (records go via the
+    # resolver, which honours the fallback, so they're unaffected). Defaults True
+    # (don't over-restrict a name whose existence wasn't read).
+    in_registry: bool = True
     # True when the ownership read DEFINITIVELY landed — so a None controller
     # means "the node has no owner / doesn't exist" (a droppable indexer lie),
     # not "the read failed" (unknown, keep). False on a failed/transient read.
@@ -669,6 +678,7 @@ def _read_name_states(
     out = {n.lower(): OwnershipCheck() for n in names}
 
     owner_p: dict = {}
+    exists_p: dict = {}
     resolver_p: dict = {}
     registrant_p: dict = {}
     expiry_p: dict = {}
@@ -686,6 +696,11 @@ def _read_name_states(
             node = nodes[n]
             owner_p[n] = mc.add(ENS_REGISTRY, _SEL_OWNER + node,
                                 decoder=_decode_addr_word)
+            # recordExists(node) — is the name in the CURRENT registry (vs. only
+            # the pre-2019 one, which owner() falls back to). Gates registry
+            # writes (removal) that check the internal slot without fallback.
+            exists_p[n] = mc.add(ENS_REGISTRY, _SEL_RECORD_EXISTS + node,
+                                 decoder=_decode_bool)
             resolver_p[n] = mc.add(ENS_REGISTRY, _SEL_RESOLVER + node,
                                    decoder=_decode_addr_word)
             # NameWrapper.ownerOf(uint256(node)) — the real owner when wrapped;
@@ -729,6 +744,11 @@ def _read_name_states(
         if st.wrapped:
             owner_known = owner_known and wrapped_p[n].success
         st.owner_known = owner_known
+        # In the current registry? Only mark False when the read DEFINITIVELY
+        # says so (recordExists → False); a failed read leaves the default True
+        # so a transient glitch doesn't wrongly block removal of a normal name.
+        if exists_p[n].success:
+            st.in_registry = bool(exists_p[n].value)
         if resolver_p[n].success and resolver_p[n].value:
             st.resolver = resolver_p[n].value
             resolvers[n] = resolver_p[n].value

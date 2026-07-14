@@ -2915,11 +2915,13 @@ class EnsPlugin(Plugin):
         def build(nm: str, fields: Any) -> tuple[str, str]:
             label, owner = _parse(fields)
             # Record the name being created so the post-confirm hook can inject
-            # it (the indexer lags on new names). The final Confirm-time build
-            # wins (validation may build repeatedly while editing).
+            # it (the indexer lags on new names) + mark it writable at once — we
+            # set its resolver here, so records can be set without a round-trip.
+            # The final Confirm-time build wins (validation may build repeatedly).
             if created is not None:
                 created["name"] = f"{label}.{nm}"
                 created["owner"] = owner
+                created["resolver"] = ens_write.PUBLIC_RESOLVER
             return ens_write.add_subnode(nm, label, owner, wrapped=wrapped)
 
         def decoded(nm: str, fields: Any) -> dict:
@@ -3372,6 +3374,11 @@ class EnsPlugin(Plugin):
         owner = created.get("owner")
         self._denied.discard(nl)
         self._pending_adds[nl] = EnsName(name, owner=owner, source="owned")
+        # Cache the resolver we set at creation, so a record write on the new
+        # subnode doesn't fall into the "no resolver" gate.
+        resolver = created.get("resolver")
+        if resolver:
+            self._resolver_cache[nl] = resolver
         # Re-render from the account's cache (holds the parent, so build_tree
         # nests the new subnode under it) + the pending merge.
         self._render(self._cache.load(ENS_CHAIN_ID, self._loaded_for or "") or [])
@@ -3380,6 +3387,19 @@ class EnsPlugin(Plugin):
         # can't regress it.
         if owner:
             self._panel.apply_role(name, controller=owner, block=block)
+        # If WE own it, it's ours to manage now — mark it writable (control it,
+        # in the current registry) so the record actions enable at once rather
+        # than after the verify. The block stamp above lets a lagging verify that
+        # reads it disowned be rejected, so this can't be wrongly un-writabled.
+        acct = (self._loaded_for or "").lower()
+        if owner and owner.lower() == acct:
+            self._owned.add(nl)
+            self._controller.add(nl)
+            self._in_new_registry.add(nl)
+            parent = name.split(".", 1)[1].lower() if "." in name else ""
+            if parent in self._wrapped:
+                self._wrapped.add(nl)
+            self._refresh_writable(self._loaded_for or "")
 
     def _purge_name_from_caches(self, name: str) -> None:
         """Drop a just-deleted subdomain from EVERY account's disk cache, so the

@@ -1716,6 +1716,55 @@ class TestEnsWriteActions:
         assert "sub.me.eth" in panel._items_by_name       # survived the stale read
         assert "sub.me.eth" not in plugin._denied         # and not denied
 
+    def test_mark_added_owned_makes_subnode_writable_now(self, qtbot, tmp_path):
+        # A just-created subnode we OWN is writable at once — record actions
+        # enabled + resolver cached — without waiting on the verify pass.
+        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens import ENS_CHAIN_ID
+        from qeth.ens_write import PUBLIC_RESOLVER
+        plugin, host, store = self._plugin(qtbot, owned=("me.eth",))
+        plugin._cache = EnsCache(tmp_path)
+        plugin._loaded_for = ADDR
+        plugin._cache.save(ENS_CHAIN_ID, ADDR, [EnsName("me.eth")])
+        plugin._mark_added(
+            {"name": "sub.me.eth", "owner": ADDR, "resolver": PUBLIC_RESOLVER},
+            500)
+        panel = plugin.widget()
+        assert "sub.me.eth" in panel._writable         # record actions enabled
+        assert "sub.me.eth" in plugin._controller
+        assert plugin._resolver_cache["sub.me.eth"] == PUBLIC_RESOLVER
+        # ...and a record write opens the composer, not the resolver gate
+        host.ens_ops.clear()
+        plugin._write_addr("sub.me.eth")
+        assert len(host.ens_ops) == 1
+
+    def test_mark_added_for_other_owner_not_writable(self, qtbot, tmp_path):
+        # A subnode created FOR SOMEONE ELSE — we don't control it → no record write.
+        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens import ENS_CHAIN_ID
+        from qeth.ens_write import PUBLIC_RESOLVER
+        plugin, host, store = self._plugin(qtbot, owned=("me.eth",))
+        plugin._cache = EnsCache(tmp_path)
+        plugin._loaded_for = ADDR
+        plugin._cache.save(ENS_CHAIN_ID, ADDR, [EnsName("me.eth")])
+        plugin._mark_added(
+            {"name": "sub.me.eth", "owner": self.OTHER,
+             "resolver": PUBLIC_RESOLVER}, 500)
+        assert "sub.me.eth" not in plugin.widget()._writable
+        assert "sub.me.eth" not in plugin._controller
+
+    def test_subnode_op_records_resolver(self, qtbot):
+        from qeth.ens_write import PUBLIC_RESOLVER
+        plugin, host, store = self._plugin(qtbot)
+        created: dict = {}
+        op = plugin._subnode_op("vitalik.eth", ADDR, created)
+        dlg = self._composer(op, "vitalik.eth")
+        qtbot.addWidget(dlg)
+        dlg._fields.label.setText("blog")
+        dlg._fields.owner.setText(ADDR)
+        op.build("vitalik.eth", dlg._fields)
+        assert created["resolver"] == PUBLIC_RESOLVER
+
     def test_pending_add_survives_lagging_rediscovery(self, qtbot):
         # A rediscover whose result LACKS the just-added name still shows it.
         plugin, host, store = self._plugin(qtbot)

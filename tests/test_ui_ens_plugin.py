@@ -1746,15 +1746,51 @@ class TestEnsWriteActions:
         assert dlg._build_request().data[2:10] == "5ef2c7f0"   # setSubnodeRecord
 
     def test_remove_subdomain_wrapped_self_managed_not_offered(self, qtbot):
-        # A wrapped subnode is held by the NameWrapper, not the caller, so the
-        # registry self-relinquish can't apply → no removal.
+        # A wrapped subnode you manage but DON'T own the parent of: the registry
+        # self-relinquish can't apply (NameWrapper holds it) and the NameWrapper
+        # delete needs the parent, which you don't own → no removal.
         plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
-        plugin._controller = {"ops.swiss.eth"}
+        plugin._controller = {"ops.swiss.eth"}           # subnode only, not parent
         plugin._wrapped = {"ops.swiss.eth"}
         plugin._subnode_manageable = set()
         plugin._remove_subdomain("ops.swiss.eth")
         assert host.ens_ops == []
+
+    def test_remove_wrapped_subdomain_via_namewrapper(self, qtbot):
+        # Own the WRAPPED parent of a WRAPPED subnode → delete through the
+        # NameWrapper: setSubnodeOwner(parent, label, 0, 0, 0) burns it.
+        from eth_abi import encode as abi_encode
+        from qeth.ens_app import ENS_NAME_WRAPPER, namehash
+        from qeth import ens_write
+        plugin, host, store = self._plugin(qtbot, owned=("yb.eth",))
+        plugin._render([EnsName("yb.eth"), EnsName("cbbtc.yb.eth")])
+        plugin._controller = {"yb.eth", "cbbtc.yb.eth"}   # own parent + subnode
+        plugin._wrapped = {"yb.eth", "cbbtc.yb.eth"}       # both wrapped
+        plugin._subnode_manageable = set()                 # parent wrapped → not registry
+        plugin._remove_subdomain("cbbtc.yb.eth")
+        assert len(host.ens_ops) == 1
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op, "cbbtc.yb.eth")
+        qtbot.addWidget(dlg)
+        assert dlg._fields is None
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
+        assert req.data[2:10] == "c658e086"                # setSubnodeOwner
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "string", "address", "uint32", "uint64"],
+            [namehash("yb.eth"), "cbbtc", ens_write.ZERO_ADDRESS, 0, 0]).hex()
+
+    def test_refresh_writable_marks_wrapped_parent_owned_subnode_removable(
+            self, qtbot):
+        plugin, host, store = self._plugin(qtbot, owned=("yb.eth",))
+        plugin._render([EnsName("yb.eth"), EnsName("cbbtc.yb.eth")])
+        plugin._controller = {"yb.eth", "cbbtc.yb.eth"}
+        plugin._wrapped = {"yb.eth", "cbbtc.yb.eth"}
+        plugin._refresh_writable(ADDR)
+        panel = plugin.widget()
+        assert "cbbtc.yb.eth" in panel._subnode_removable       # deletable (wrapped)
+        assert "cbbtc.yb.eth" not in panel._subnode_manageable  # not registry-manageable
 
     def test_refresh_writable_marks_self_managed_subnode_removable(self, qtbot):
         plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))

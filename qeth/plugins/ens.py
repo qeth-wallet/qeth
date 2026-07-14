@@ -2228,15 +2228,23 @@ class EnsPlugin(Plugin):
             and nl not in self._wrapped
         }
         subnode_mgr = self._subnode_manageable
-        # Deletable subdomains: own the parent (a clean parent-side
-        # setSubnodeRecord delete) OR manage the unwrapped subnode itself (a
-        # self setRecord relinquish). The self case means "if you can edit its
-        # records, you can remove it" even without owning the parent name.
-        subnode_removable = set(subnode_mgr) | {
-            nl for nl, n in self._names_by_l.items()
-            if n.is_subdomain and nl in self._controller
-            and nl not in self._wrapped
-        }
+        # Deletable subdomains, by authorised path:
+        #  • own an UNWRAPPED parent → parent-side registry setSubnodeRecord
+        #    (subnode_mgr, computed above);
+        #  • manage an UNWRAPPED subnode yourself → self registry setRecord
+        #    ("if you can edit its records, you can remove it");
+        #  • own the WRAPPED parent of a WRAPPED subnode → NameWrapper
+        #    setSubnodeOwner(parent, label, 0) (burns it).
+        subnode_removable = set(subnode_mgr)
+        for nl, n in self._names_by_l.items():
+            if not n.is_subdomain:
+                continue
+            pl = (n.parent or "").lower()
+            if nl in self._controller and nl not in self._wrapped:
+                subnode_removable.add(nl)
+            elif (nl in self._wrapped and pl
+                  and pl in self._controller and pl in self._wrapped):
+                subnode_removable.add(nl)
         if self._panel is not None:
             self._panel.set_writable(self._controller if can_sign else set())
             self._panel.set_transferable(
@@ -2394,18 +2402,24 @@ class EnsPlugin(Plugin):
         self._open_composer(name, self._remove_record_op(name, res, label, value))
 
     def _remove_subdomain(self, name: str) -> None:
-        """Delete a subdomain (unwrapped). Two authorised paths:
-          • own the PARENT → registry.setSubnodeRecord(parent, label, 0,0,0)
+        """Delete a subdomain. Three authorised paths, by how the name is held:
+          • own an UNWRAPPED parent → registry.setSubnodeRecord(parent,label,0…)
             (the authoritative parent-side delete);
-          • manage the SUBNODE itself → registry.setRecord(node, 0,0,0)
+          • own the WRAPPED parent of a WRAPPED subnode → NameWrapper
+            .setSubnodeOwner(parent, label, 0) (burns the wrapper + clears it);
+          • manage the UNWRAPPED subnode itself → registry.setRecord(node,0,0,0)
             (relinquish it — so a subdomain's own manager can remove it even
             without owning the parent name).
-        Same end state either way; the caller the chain authorises differs."""
+        Same end state; only the caller the chain authorises differs."""
         if self._panel is None:
             return
         nl = name.lower()
+        pl = name.split(".", 1)[1].lower() if "." in name else ""
         if nl in self._subnode_manageable:
             op = self._remove_subnode_op(name)
+        elif (nl in self._wrapped and pl in self._controller
+              and pl in self._wrapped):
+            op = self._remove_wrapped_subnode_op(name)
         elif nl in self._controller and nl not in self._wrapped:
             op = self._relinquish_subnode_op(name)
         else:
@@ -2860,6 +2874,38 @@ class EnsPlugin(Plugin):
             rediscover=True,
             note=f"This deletes {name}. As the owner of {parent} you can remove "
                  "the subdomain — clearing its owner, resolver and records.",
+            confirm_icon_names=("edit-delete", "user-trash", "list-remove"),
+            confirm_fallback=QStyle.StandardPixmap.SP_TrashIcon)
+
+    def _remove_wrapped_subnode_op(self, name: str) -> _EnsOp:
+        """Delete a WRAPPED subdomain you own the wrapped parent of, via
+        NameWrapper.setSubnodeOwner(parent, label, 0, 0, 0) — burns the wrapper
+        token and clears the registry entry. The wrapped analogue of
+        _remove_subnode_op."""
+        from .. import ens_write
+        parent = name.split(".", 1)[1]
+        label = name.split(".", 1)[0]
+
+        def build(_nm: str, _fields: Any) -> tuple[str, str]:
+            return ens_write.remove_wrapped_subnode(parent, label)
+
+        def decoded(_nm: str, _fields: Any) -> dict:
+            return {"function": "setSubnodeOwner", "args": [
+                {"name": "parentNode", "type": "bytes32", "value": parent},
+                {"name": "label", "type": "string", "value": label},
+                {"name": "owner", "type": "address",
+                 "value": ens_write.ZERO_ADDRESS},
+                {"name": "fuses", "type": "uint32", "value": "0"},
+                {"name": "expiry", "type": "uint64", "value": "0"}]}
+
+        return _EnsOp(
+            title=f"Remove subdomain · {name}",
+            confirm_label="Remove subdomain",
+            make_fields=lambda _composer: None, build=build, decoded=decoded,
+            rediscover=True,
+            note=f"This deletes the wrapped subdomain {name} — burning its "
+                 f"wrapper and clearing it in the registry. As the owner of "
+                 f"{parent} you can remove it.",
             confirm_icon_names=("edit-delete", "user-trash", "list-remove"),
             confirm_fallback=QStyle.StandardPixmap.SP_TrashIcon)
 

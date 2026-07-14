@@ -214,3 +214,14 @@ class TestRemoveSubnode:
             ["bytes32", "address", "address", "uint64"],
             [namehash(full), ens_write.ZERO_ADDRESS,
              ens_write.ZERO_ADDRESS, 0])
+
+    def test_remove_wrapped_subnode_burns_via_namewrapper(self):
+        # A wrapped subname is deleted through the NameWrapper:
+        # setSubnodeOwner(parentNode, label, 0, 0, 0) — string label, owner 0
+        # burns the wrapper + clears the registry entry.
+        to, data = ens_write.remove_wrapped_subnode(NAME, "cbbtc")
+        assert to == ENS_NAME_WRAPPER
+        assert _selector(data) == "c658e086"           # setSubnodeOwner
+        assert _body(data) == abi_encode(
+            ["bytes32", "string", "address", "uint32", "uint64"],
+            [namehash(NAME), "cbbtc", ens_write.ZERO_ADDRESS, 0, 0])

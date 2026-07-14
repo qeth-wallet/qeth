@@ -40,6 +40,9 @@ _SEL_SUBNODE_OWNER = bytes.fromhex("06ab5923")
 _SEL_SET_RECORD = bytes.fromhex("cf408823")
 # NameWrapper.setSubnodeRecord(bytes32,string,address,address,uint64,uint32,uint64)
 _SEL_WRAPPED_SUBNODE = bytes.fromhex("24c1af44")
+# NameWrapper.setSubnodeOwner(bytes32,string,address,uint32,uint64) — reassign a
+# wrapped subnode's owner, or (with owner=0) BURN it: the wrapped delete path.
+_SEL_WRAPPED_SUBNODE_OWNER = bytes.fromhex("c658e086")
 _SEL_RENEW = bytes.fromhex("acf1a841")             # controller.renew(string,uint256)
 # Ownership transfer — the .eth name is an NFT: ERC-721 on the BaseRegistrar
 # (unwrapped, tokenId = labelhash) or ERC-1155 on the NameWrapper (wrapped,
@@ -272,6 +275,23 @@ def relinquish_subnode(name: str) -> Tx:
     body = _abi(["bytes32", "address", "address", "uint64"],
                 [namehash(name), ZERO_ADDRESS, ZERO_ADDRESS, 0])
     return _tx(ENS_REGISTRY, _SEL_SET_RECORD, body)
+
+
+def remove_wrapped_subnode(parent_name: str, label: str) -> Tx:
+    """Delete a *wrapped* subdomain ``label.parent_name`` via the NameWrapper:
+    ``setSubnodeOwner(parentNode, label, address(0), 0, 0)`` burns the subnode's
+    wrapper token and clears its registry owner (``_unwrap`` to the zero
+    address) — the wrapped analogue of ``remove_subnode`` (which is registry-
+    only, for unwrapped names).
+
+    Callable by the wrapped PARENT's token owner (``onlyTokenOwner(parentNode)``)
+    — so the owner of a wrapped name removes a subdomain under it. Reverts if the
+    subnode has ``CANNOT_UNWRAP`` burned or is emancipated
+    (``PARENT_CANNOT_CONTROL``); the sign dialog's simulation surfaces that
+    before signing rather than us reading fuses up front."""
+    body = _abi(["bytes32", "string", "address", "uint32", "uint64"],
+                [namehash(parent_name), label, ZERO_ADDRESS, 0, 0])
+    return _tx(ENS_NAME_WRAPPER, _SEL_WRAPPED_SUBNODE_OWNER, body)
 
 
 def eth_addr_bytes(address: str) -> bytes:

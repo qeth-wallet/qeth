@@ -34,9 +34,9 @@ from PySide6.QtWidgets import (
 
 from ..ens_app import (
     ENS_APP_URL, TEXT_KEYS, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode,
-    EnsRecords, OwnershipCheck, build_tree, expiry_status, fetch_name,
-    lookup_owned_names, name_warning, read_name_states, read_records,
-    verified_read_records, verify_names,
+    EnsRecords, OwnershipCheck, build_tree, discover_custom_text_keys,
+    expiry_status, fetch_name, lookup_owned_names, name_warning,
+    read_name_states, read_records, verified_read_records, verify_names,
 )
 from ..plugin import Plugin
 from ..dialog import Dialog, address_field_min_width, prompt_text
@@ -488,6 +488,22 @@ class EnsRenewPriceWorker(QThread):
         price = rent_price(self._chain, self._label, self._duration)
         usd = _eth_usd_rate(self._chain) if self._with_usd else None
         self.ready.emit(price, usd)
+
+
+class EnsTextKeysWorker(QThread):
+    """Scan the account's tx history for the custom ENS text keys it set (off
+    the Qt thread), so records under keys that can't be enumerated on-chain
+    resurface. Emits ``ready(keys)`` — a ``set[str]`` of non-standard keys."""
+
+    ready = Signal(object)             # set[str]
+
+    def __init__(self, chain, address: str, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._address = address
+
+    def run(self) -> None:
+        self.ready.emit(discover_custom_text_keys(self._chain, self._address))
 
 
 class EnsPanel(QWidget):
@@ -1280,6 +1296,12 @@ class EnsPanel(QWidget):
             if idx >= 0:
                 self.tree.takeTopLevelItem(idx)
         self._items_by_name.pop(name_l, None)
+
+    def expanded_loaded_names(self) -> list[str]:
+        """Names whose records are currently on screen (expanded + loaded) — the
+        set to re-read when newly-discovered custom text keys arrive."""
+        return [nl for nl, it in self._items_by_name.items()
+                if it.isExpanded() and it.data(0, _LOADED_ROLE)]
 
     def drop_name(self, name: str) -> None:
         """Remove a name's row now (a delete confirmed on-chain) — no wait on the
@@ -2105,6 +2127,10 @@ class EnsPlugin(Plugin):
         # an older name set — races that address-equality alone can't catch
         # (both workers are for the same address).
         self._epoch = 0
+        # Accounts we've already scanned for custom text keys this session (a
+        # tx-history sweep — run once per account; the keys it finds persist in
+        # the store, so subsequent sessions don't need it for old keys).
+        self._scanned_text_keys: set[str] = set()
 
     # --- plugin contract --------------------------------------------------
 
@@ -2194,6 +2220,33 @@ class EnsPlugin(Plugin):
         if cached is not None:
             self._render(cached)
         self._on_refresh()
+        self._scan_custom_text_keys(address, chain)
+
+    def _scan_custom_text_keys(self, address: str, chain) -> None:
+        """Once per account per session, sweep the account's tx history for the
+        custom ENS text keys it has set (setText), so records under keys that
+        can't be enumerated on-chain resurface. Cheap to skip when already done;
+        the keys it finds persist in the store."""
+        al = address.lower()
+        if chain is None or al in self._scanned_text_keys:
+            return
+        self._scanned_text_keys.add(al)
+        worker = EnsTextKeysWorker(chain, address)
+        worker.ready.connect(self._on_text_keys_ready)
+        self._start(worker)
+
+    def _on_text_keys_ready(self, keys: set) -> None:
+        if not keys:
+            return
+        added = [k for k in keys if k not in self._store.custom_text_keys]
+        for k in added:
+            self._store.add_custom_text_key(k)
+        # Re-read the records already on screen so a recovered key shows now;
+        # collapsed names pick it up on their next expand (the read queries the
+        # store's keys). No-op when nothing new was discovered.
+        if added and self._panel is not None:
+            for name in self._panel.expanded_loaded_names():
+                self._on_records_requested(name)
 
     def _on_refresh(self, *, catchup: bool = False) -> None:
         host = self.host

@@ -697,3 +697,63 @@ def test_verify_names_gives_up_after_retries(monkeypatch):
     states, verified, _block = ea.verify_names(object(), ["vitalik.eth"])
     assert verified is True
     assert states["vitalik.eth"].controller is None
+
+
+# --- custom text-key discovery from tx history -----------------------------
+
+def _mk_settext_tx(key, val="x"):
+    from eth_abi import encode as abi_encode
+    from qeth.transactions import Transaction
+    body = abi_encode(["bytes32", "string", "string"], [b"\x00" * 32, key, val])
+    return Transaction(
+        chain_id=1, hash="0x" + "11" * 32, block_number=1, timestamp=0, nonce=0,
+        from_addr="0xabc", to_addr="0xres", value_wei=0, gas_used=0,
+        gas_price_wei=0, method_id="0x10f13a8c",
+        input_data="0x10f13a8c" + body.hex(), success=True)
+
+
+def test_discover_custom_text_keys_from_txs():
+    from qeth.chains import DEFAULT_CHAINS
+    from qeth.transactions import Transaction
+    other = Transaction(
+        chain_id=1, hash="0x" + "22" * 32, block_number=1, timestamp=0, nonce=0,
+        from_addr="0xabc", to_addr="0xtok", value_wei=0, gas_used=0,
+        gas_price_wei=0, method_id="0xa9059cbb", input_data="0xa9059cbb",
+        success=True)
+    txs = [_mk_settext_tx("lt"), _mk_settext_tx("market_id"),
+           _mk_settext_tx("url"), other]          # url = standard; other != setText
+
+    class FakeSource:
+        def supports(self, chain):
+            return True
+
+        def list_transactions(self, chain, address, page=1, limit=50,
+                              before_block=None):
+            return txs if page == 1 else []
+
+    ch = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+    keys = ea.discover_custom_text_keys(ch, "0xabc", source=FakeSource())
+    assert keys == {"lt", "market_id"}            # custom only, standard excluded
+
+
+def test_discover_custom_text_keys_unsupported_or_failing():
+    from qeth.chains import DEFAULT_CHAINS
+    ch = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+
+    class NoSource:
+        def supports(self, chain):
+            return False
+
+        def list_transactions(self, *a, **k):
+            raise AssertionError("must not be called when unsupported")
+
+    assert ea.discover_custom_text_keys(ch, "0xabc", source=NoSource()) == set()
+
+    class BoomSource:
+        def supports(self, chain):
+            return True
+
+        def list_transactions(self, *a, **k):
+            raise RuntimeError("network down")
+
+    assert ea.discover_custom_text_keys(ch, "0xabc", source=BoomSource()) == set()

@@ -1225,8 +1225,10 @@ class TestEnsPlugin:
         plugin.on_account_changed(ADDR)
         # cache rendered synchronously
         assert plugin.widget().tree.topLevelItemCount() == 1
-        # a refresh fetch is also kicked off (one worker)
-        assert len(host.started_workers) == 1
+        # a refresh fetch (discovery) + a custom-text-key scan are kicked off
+        from qeth.plugins.ens import EnsNamesWorker, EnsTextKeysWorker
+        assert any(isinstance(w, EnsNamesWorker) for w in host.started_workers)
+        assert any(isinstance(w, EnsTextKeysWorker) for w in host.started_workers)
 
     def test_account_none_clears(self, qtbot):
         plugin = EnsPlugin(_StubStore())
@@ -1772,6 +1774,31 @@ class TestEnsWriteActions:
         plugin._on_records_requested("vitalik.eth")          # no cached record
         assert isinstance(started[0], EnsRecordsWorker)
         assert "lt" in started[0]._text_keys
+
+    def test_text_keys_ready_stores_and_rereads_expanded(self, qtbot):
+        from qeth.ens_app import EnsRecords
+        plugin, host, store = self._plugin(qtbot)            # vitalik.eth in tree
+        panel = plugin.widget()
+        panel.add_records("vitalik.eth", EnsRecords(texts={"url": "x"}))
+        panel._items_by_name["vitalik.eth"].setExpanded(True)
+        assert "vitalik.eth" in panel.expanded_loaded_names()
+        reread: list = []
+        plugin._on_records_requested = lambda name, **k: reread.append(name)
+        plugin._on_text_keys_ready({"lt", "market_id"})      # discovered from history
+        assert store.custom_text_keys == {"lt", "market_id"}   # persisted
+        assert "vitalik.eth" in reread                        # re-read to show them
+        reread.clear()
+        plugin._on_text_keys_ready({"lt"})                    # nothing new
+        assert reread == []                                  # → no re-read
+
+    def test_scan_custom_text_keys_runs_once_per_account(self, qtbot):
+        from qeth.plugins.ens import EnsTextKeysWorker
+        plugin, host, store = self._plugin(qtbot)
+        plugin._scan_custom_text_keys(ADDR, ETH)
+        plugin._scan_custom_text_keys(ADDR, ETH)             # second call: skipped
+        scans = [w for w in host.started_workers
+                 if isinstance(w, EnsTextKeysWorker)]
+        assert len(scans) == 1
 
     def test_push_records_persists_custom_key_to_disk(self, qtbot, tmp_path):
         # The optimistic value reaches disk immediately, so a custom key survives

@@ -970,6 +970,51 @@ def verified_read_records(
     return EnsRecords(), False, None
 
 
+_SEL_SET_TEXT_HEX = "0x10f13a8c"       # setText(bytes32,string,string)
+
+
+def discover_custom_text_keys(
+        chain: Chain, address: str, *, source=None,
+        max_pages: int = 5, limit: int = 100) -> set[str]:
+    """Scan an address's recent transactions for ENS ``setText`` calls and
+    return the NON-standard text keys it set. ENS text records can't be
+    enumerated on-chain, so a key set outside qeth (or before we started
+    remembering keys) is invisible to a read; recovering it from the account's
+    own tx history lets us re-query it. Best-effort: returns ``set()`` on any
+    failure (unsupported chain, network error, undecodable input). Pure w.r.t.
+    Qt; the ``source`` (a ``qeth.transactions.TransactionSource``) is injectable
+    for tests."""
+    from eth_abi import decode as abi_decode
+    if source is None:
+        from .transactions import BlockscoutTransactionSource
+        source = BlockscoutTransactionSource()
+    try:
+        if not source.supports(chain):
+            return set()
+    except Exception:
+        return set()
+    keys: set[str] = set()
+    for page in range(1, max_pages + 1):
+        try:
+            txs = source.list_transactions(chain, address, page=page, limit=limit)
+        except Exception:
+            break
+        for tx in txs:
+            if (tx.method_id or "").lower() != _SEL_SET_TEXT_HEX:
+                continue
+            try:
+                _node, key, _val = abi_decode(
+                    ["bytes32", "string", "string"],
+                    bytes.fromhex(tx.input_data[10:]))
+            except Exception:
+                continue
+            if key and key not in TEXT_KEYS:
+                keys.add(key)
+        if len(txs) < limit:
+            break                      # last page reached
+    return keys
+
+
 def _abi_bytes(raw) -> str | None:
     """Decode an ABI-encoded ``bytes`` return (offset, length, payload) to a
     ``0x…`` hex string, or None when empty."""

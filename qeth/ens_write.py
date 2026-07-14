@@ -233,6 +233,25 @@ def set_subnode_manager(parent_name: str, label: str, manager: str) -> Tx:
     return _tx(ENS_REGISTRY, _SEL_SUBNODE_OWNER, body)
 
 
+def remove_subnode(parent_name: str, label: str) -> Tx:
+    """Delete an *unwrapped* subdomain ``label.parent_name`` — clear its owner,
+    resolver and TTL in the registry via
+    ``setSubnodeRecord(parentNode, labelHash, 0, 0, 0)``.
+
+    Setting the subnode's owner to the zero address makes ``recordExists``
+    false, so the subdomain is gone (this is the ENS-app "Delete subname" for an
+    unwrapped name). Only the PARENT's controller may call, so the owner of a
+    name can remove a subdomain it granted — the deletion analogue of
+    ``set_subnode_manager``. Records are removed too (resolver → 0).
+
+    Wrapped parents delete subnodes through the NameWrapper — out of scope here;
+    gate to unwrapped (like ``set_subnode_manager``)."""
+    body = _abi(["bytes32", "bytes32", "address", "address", "uint64"],
+                [namehash(parent_name), _labelhash(label),
+                 ZERO_ADDRESS, ZERO_ADDRESS, 0])
+    return _tx(ENS_REGISTRY, _SEL_SUBNODE_RECORD, body)
+
+
 def eth_addr_bytes(address: str) -> bytes:
     """The 20 raw bytes of a 0x address — for ``set_coin_addr`` on EVM coins."""
     a = address[2:] if address.startswith("0x") else address

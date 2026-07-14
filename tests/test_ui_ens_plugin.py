@@ -707,6 +707,120 @@ class TestEnsPanel:
         panel._b_subdomain.click()
         assert seen == [("crv.eth", "record"), ("crv.eth", "subdomain")]
 
+    # --- removal (records + subdomains) -----------------------------------
+
+    def _subnode_panel(self, qtbot, *, manageable=("ops.swiss.eth",),
+                       writable=()):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree(
+            [EnsName("swiss.eth"), EnsName("ops.swiss.eth")]), NOW)
+        panel.set_subnode_manageable(set(manageable))
+        panel.set_writable(set(writable))
+        sub = panel._items_by_name["ops.swiss.eth"]
+        return panel, sub
+
+    def test_remove_button_on_subdomain_emits_remove(self, qtbot):
+        panel, sub = self._subnode_panel(qtbot)
+        panel.tree.setCurrentItem(sub)
+        seen: list = []
+        panel.write_requested.connect(lambda nm, k: seen.append((nm, k)))
+        assert panel._b_remove.isEnabled()             # own the parent
+        panel._b_remove.click()
+        assert seen == [("ops.swiss.eth", "remove")]
+
+    def test_remove_button_disabled_on_2ld(self, qtbot):
+        # A 2LD isn't "removable" (it expires, you don't delete it).
+        panel, root = self._bar_panel(
+            qtbot, writable={"crv.eth"}, transferable={"crv.eth"},
+            reclaimable={"crv.eth"})
+        panel.tree.setCurrentItem(root)
+        assert not panel._b_remove.isEnabled()
+
+    def test_remove_button_disabled_on_unmanaged_subdomain(self, qtbot):
+        panel, sub = self._subnode_panel(qtbot, manageable=())
+        panel.tree.setCurrentItem(sub)
+        assert not panel._b_remove.isEnabled()
+
+    def test_remove_record_button_emits(self, qtbot):
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
+        url = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "url")
+        panel.tree.setCurrentItem(url)
+        assert not any(b.isHidden() for b in panel._rec_btns)
+        assert panel._b_recremove.isEnabled()          # parent is writable
+        seen: list = []
+        panel.remove_record_requested.connect(lambda *a: seen.append(a))
+        panel._b_recremove.click()
+        assert seen == [("crv.eth", "url", "https://x")]
+
+    def test_remove_record_button_disabled_on_role_row(self, qtbot):
+        # The owner/manager role rows carry a value but aren't records → no Remove.
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        me = "0x" + "11" * 20
+        panel.mark_verified({"crv.eth": OwnershipCheck(
+            controller=me, registrant=me, owner_known=True)}, me)
+        mgr = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "manager")
+        panel.tree.setCurrentItem(mgr)
+        assert not panel._b_recremove.isEnabled()
+
+    def test_remove_record_disabled_when_parent_not_writable(self, qtbot):
+        panel, root = self._bar_panel(qtbot)          # not writable
+        panel.set_writable(set())
+        panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
+        url = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "url")
+        assert panel._remove_target(url) is None
+
+    def test_delete_key_action_registered_on_tree(self, qtbot):
+        from PySide6.QtGui import QKeySequence
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        del_seq = QKeySequence(Qt.Key.Key_Delete)
+        acts = [a for a in panel.tree.actions() if a.shortcut() == del_seq]
+        assert acts
+        assert (acts[0].shortcutContext()
+                == Qt.ShortcutContext.WidgetWithChildrenShortcut)
+
+    def test_delete_current_removes_selected_record(self, qtbot):
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
+        url = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "url")
+        panel.tree.setCurrentItem(url)
+        seen: list = []
+        panel.remove_record_requested.connect(lambda *a: seen.append(a))
+        panel._remove_current()                        # the DEL handler
+        assert seen == [("crv.eth", "url", "https://x")]
+
+    def test_delete_current_removes_selected_subdomain(self, qtbot):
+        panel, sub = self._subnode_panel(qtbot)
+        panel.tree.setCurrentItem(sub)
+        seen: list = []
+        panel.write_requested.connect(lambda nm, k: seen.append((nm, k)))
+        panel._remove_current()
+        assert seen == [("ops.swiss.eth", "remove")]
+
+    def test_remove_in_context_menu_for_record_and_subdomain(self, qtbot):
+        panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
+        panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
+        url = next(root.child(i) for i in range(root.childCount())
+                   if root.child(i).text(0) == "url")
+        rec_menu = panel._build_menu(url)
+        assert "Remove" in [a.text() for a in rec_menu.actions()]
+        # and its icon is the trash glyph
+        rem = next(a for a in rec_menu.actions() if a.text() == "Remove")
+        assert rem.icon().cacheKey() == panel._act_icons["remove"].cacheKey()
+
+    def test_no_remove_in_menu_for_2ld_name(self, qtbot):
+        panel, root = self._bar_panel(
+            qtbot, writable={"crv.eth"}, transferable={"crv.eth"},
+            reclaimable={"crv.eth"})
+        menu = panel._build_menu(root)
+        assert "Remove subdomain" not in [a.text() for a in menu.actions()]
+
     def test_action_bar_switches_to_copy_edit_on_record(self, qtbot):
         panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
         panel.add_records("crv.eth", EnsRecords(texts={"url": "https://x"}))
@@ -907,13 +1021,14 @@ class TestEnsPanel:
         n = EnsName(name)
         return [kind for group in panel._write_menu_groups(n) for _label, kind in group]
 
-    def test_subnode_manageable_offers_only_set_manager(self, qtbot):
+    def test_subnode_manageable_offers_set_manager_and_remove(self, qtbot):
         # A subdomain you own the parent of offers "Set manager" (reassign the
-        # subnode) — not the record actions, until you actually control it.
+        # subnode) + "Remove subdomain" (delete it) — not the record actions,
+        # until you actually control it.
         panel = EnsPanel()
         qtbot.addWidget(panel)
         panel.set_subnode_manageable({"ops.parent.eth"})
-        assert self._menu_kinds(panel, "ops.parent.eth") == ["manager"]
+        assert self._menu_kinds(panel, "ops.parent.eth") == ["manager", "remove"]
         assert self._menu_kinds(panel, "nope.parent.eth") == []   # not ours
 
     def test_owner_only_name_offers_transfer_and_set_manager(self, qtbot):
@@ -1474,6 +1589,133 @@ class TestEnsWriteActions:
         _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
         assert refreshed == [True]
+
+    # --- removal (records + subdomains) -----------------------------------
+
+    def test_remove_record_clears_eth_address(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_remove_record("vitalik.eth", "address", "0x" + "ab" * 20)
+        assert len(host.ens_ops) == 1
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        assert dlg._fields is None                       # input-less
+        req = dlg._build_request()
+        assert req.to_addr.lower() == self.RESOLVER.lower()
+        assert req.data[2:10] == "d5fa2b00"              # setAddr(node,address)
+        assert req.data.endswith("00" * 20)             # cleared to 0x0
+
+    def test_remove_record_clears_text(self, qtbot):
+        from eth_abi import encode as abi_encode
+        from qeth.ens_app import namehash
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_remove_record("vitalik.eth", "url", "https://x")
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        req = dlg._build_request()
+        assert req.data[2:10] == "10f13a8c"              # setText
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "string", "string"],
+            [namehash("vitalik.eth"), "url", ""]).hex()  # empty value clears
+
+    def test_remove_record_clears_content(self, qtbot):
+        from eth_abi import encode as abi_encode
+        from qeth.ens_app import namehash
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_remove_record("vitalik.eth", "content", "ipfs://x")
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        req = dlg._build_request()
+        assert req.data[2:10] == "304e6ade"              # setContenthash
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "bytes"], [namehash("vitalik.eth"), b""]).hex()
+
+    def test_remove_record_clears_other_chain_addr(self, qtbot):
+        from eth_abi import encode as abi_encode
+        from qeth.ens_app import namehash
+        from qeth import ens_write
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_remove_record("vitalik.eth", "address (OP)", "0xdef")
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        req = dlg._build_request()
+        assert req.data[2:10] == "8b95dd71"              # setAddr(node,coinType,bytes)
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "uint256", "bytes"],
+            [namehash("vitalik.eth"), ens_write.COIN_TYPES["OP"], b""]).hex()
+
+    def test_remove_record_confirm_force_rereads(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        forced: list = []
+        plugin._on_records_requested = (
+            lambda name, force=False: forced.append((name, force)))
+        plugin._on_remove_record("vitalik.eth", "url", "https://x")
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
+        on_confirmed({"status": "0x1"})
+        assert forced == [("vitalik.eth", True)]
+
+    def test_remove_record_needs_resolver(self, qtbot):
+        plugin, host, store = self._plugin(qtbot)
+        plugin._resolver_cache.clear()                   # no resolver known
+        plugin._on_remove_record("vitalik.eth", "url", "https://x")
+        assert host.ens_ops == []                         # nothing to target
+
+    def test_remove_subdomain_builds_setsubnoderecord(self, qtbot):
+        from eth_abi import encode as abi_encode
+        from qeth.ens_app import ENS_REGISTRY, _labelhash, namehash
+        from qeth import ens_write
+        plugin, host, store = self._plugin(qtbot, owned=("swiss.eth",))
+        plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        plugin._subnode_manageable = {"ops.swiss.eth"}
+        plugin._remove_subdomain("ops.swiss.eth")
+        assert len(host.ens_ops) == 1
+        _name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op, "ops.swiss.eth")
+        qtbot.addWidget(dlg)
+        assert dlg._fields is None
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_REGISTRY.lower()
+        assert req.data[2:10] == "5ef2c7f0"              # setSubnodeRecord
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "bytes32", "address", "address", "uint64"],
+            [namehash("swiss.eth"), _labelhash("ops"),
+             ens_write.ZERO_ADDRESS, ens_write.ZERO_ADDRESS, 0]).hex()
+
+    def test_remove_subdomain_gated_on_ownership(self, qtbot):
+        plugin, host, store = self._plugin(qtbot, owned=("swiss.eth",))
+        plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        plugin._subnode_manageable = set()               # we don't own the parent
+        plugin._remove_subdomain("ops.swiss.eth")
+        assert host.ens_ops == []
+
+    def test_remove_subdomain_confirm_purges_caches_and_rediscovers(
+            self, qtbot, tmp_path):
+        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens import ENS_CHAIN_ID
+        store = _StubStore()
+        store.accounts = [{"address": ADDR, "source": "hot"},
+                          {"address": self.OTHER, "source": "hot"}]
+        plugin = EnsPlugin(store)
+        plugin._cache = EnsCache(tmp_path)
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
+        plugin._subnode_manageable = {"ops.swiss.eth"}
+        # a sibling account's cache lists the subname (the cross-account source)
+        plugin._cache.save(ENS_CHAIN_ID, self.OTHER,
+                           [EnsName("ops.swiss.eth", owner=self.OTHER)])
+        rediscovered: list = []
+        plugin._on_refresh = lambda **k: rediscovered.append(k)
+        plugin._remove_subdomain("ops.swiss.eth")
+        _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
+        on_confirmed({"status": "0x1"})
+        # purged from the sibling cache → the deleted subname can't re-surface
+        assert plugin._cache.load(ENS_CHAIN_ID, self.OTHER) == []
+        assert rediscovered == [{"catchup": True}]
 
     # --- renewal ----------------------------------------------------------
 

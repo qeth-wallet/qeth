@@ -188,3 +188,16 @@ class TestSetManager:
         assert _body(data) == abi_encode(
             ["bytes32", "bytes32", "address"],
             [namehash(NAME), _labelhash("ops"), self.MANAGER])
+
+
+class TestRemoveSubnode:
+    def test_remove_subnode_zeroes_owner_resolver_ttl(self):
+        # Deleting an unwrapped subname is setSubnodeRecord(parentNode,
+        # labelhash, 0, 0, 0) on the registry — owner=0 makes it not exist.
+        to, data = ens_write.remove_subnode(NAME, "ops")
+        assert to == ENS_REGISTRY
+        assert _selector(data) == "5ef2c7f0"           # setSubnodeRecord
+        assert _body(data) == abi_encode(
+            ["bytes32", "bytes32", "address", "address", "uint64"],
+            [namehash(NAME), _labelhash("ops"),
+             ens_write.ZERO_ADDRESS, ens_write.ZERO_ADDRESS, 0])

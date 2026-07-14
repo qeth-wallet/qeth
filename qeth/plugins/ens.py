@@ -488,8 +488,9 @@ class EnsPanel(QWidget):
 
     add_custom_requested = Signal()
     records_requested = Signal(str)    # name → load its records (lazy)
-    write_requested = Signal(str, str)  # (name, kind) — kind: addr|content|text|record|subdomain
+    write_requested = Signal(str, str)  # (name, kind) — addr|content|text|record|subdomain|remove
     edit_record_requested = Signal(str, str, str)  # (name, label, value)
+    remove_record_requested = Signal(str, str, str)  # (name, label, value)
     copied = Signal(str)               # text just put on the clipboard
 
     # Trailing column = verification status, shown as a fixed-size icon (a text
@@ -564,6 +565,16 @@ class EnsPanel(QWidget):
             Qt.ShortcutContext.WidgetWithChildrenShortcut)
         edit_act.triggered.connect(self._edit_current)
         self.tree.addAction(edit_act)
+        # Delete removes the selected removable row — a resolver record (you
+        # manage the name) or a subdomain (you own its parent). It opens the
+        # rich composer to review + sign, exactly like the Remove buttons, so an
+        # accidental keypress never deletes anything on its own.
+        del_act = QAction(self.tree)
+        del_act.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        del_act.setShortcutContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        del_act.triggered.connect(self._remove_current)
+        self.tree.addAction(del_act)
         layout.addWidget(self.tree)
 
         self._domain_icon = _icon("emblem-web", QStyle.StandardPixmap.SP_DriveNetIcon)
@@ -628,6 +639,11 @@ class EnsPanel(QWidget):
             "text": self._rec_icons["text"],
             "record": _icon("document-properties", _sp.SP_FileIcon),
             "subdomain": _icon("folder-new", _sp.SP_FileDialogNewFolder),
+            # A trash/delete glyph for the destructive remove actions — distinct
+            # from every other action icon so "remove" never collapses onto a
+            # neighbour on a sparse theme.
+            "remove": _icon(("edit-delete", "user-trash", "list-remove",
+                             "trash-empty"), _sp.SP_TrashIcon),
         }
         # Selection-driven action buttons. They're created here but MOUNTED by
         # the slot's shared bottom row (via the plugin's action_widgets), so the
@@ -684,10 +700,14 @@ class EnsPanel(QWidget):
         self._b_record = util(ic["record"], "Add or change a record")
         self._b_subdomain = util(ic["subdomain"], "Add subdomain")
         self._b_copyname = util(ic["copy"], "Copy name")
-        # Edit is the labelled primary in record mode (first, framed); Copy is
-        # the icon-only utility beside it.
+        # Remove a subdomain (you own its parent) — a destructive utility, so
+        # icon-only with the trash glyph, enabled only for a removable subdomain.
+        self._b_remove = util(ic["remove"], "Remove subdomain")
+        # Edit is the labelled primary in record mode (first, framed); Copy and
+        # Remove are the icon-only utilities beside it.
         self._b_recedit = named(ic["edit"], "&Edit", "Edit value")
         self._b_reccopy = util(ic["copy"], "Copy value")
+        self._b_recremove = util(ic["remove"], "Remove record")
         self._b_add = util(
             _icon("list-add", QStyle.StandardPixmap.SP_FileDialogNewFolder),
             "Add a name")
@@ -702,12 +722,14 @@ class EnsPanel(QWidget):
         self._b_copyname.clicked.connect(self._copy_name)
         self._b_reccopy.clicked.connect(self._copy_value)
         self._b_recedit.clicked.connect(self._edit_current)
+        self._b_remove.clicked.connect(self._remove_current)
+        self._b_recremove.clicked.connect(self._remove_current)
         self._b_add.clicked.connect(lambda: self.add_custom_requested.emit())
 
         self._name_btns = [self._b_transfer, self._b_renew, self._b_manager,
                            self._b_addr, self._b_content, self._b_record,
-                           self._b_subdomain, self._b_copyname]
-        self._rec_btns = [self._b_recedit, self._b_reccopy]
+                           self._b_subdomain, self._b_copyname, self._b_remove]
+        self._rec_btns = [self._b_recedit, self._b_reccopy, self._b_recremove]
 
     def action_buttons(self) -> list[QWidget]:
         """The full button list for the slot's bottom row (selection decides
@@ -756,6 +778,9 @@ class EnsPanel(QWidget):
         self._b_content.setEnabled(manages)
         self._b_record.setEnabled(manages)
         self._b_subdomain.setEnabled(manages)
+        # Remove a subdomain: only for a subdomain whose parent you own.
+        self._b_remove.setEnabled(
+            n.is_subdomain and nl in self._subnode_manageable)
 
     def _set_record_mode(self, item: QTreeWidgetItem) -> None:
         for b in self._name_btns:
@@ -769,6 +794,8 @@ class EnsPanel(QWidget):
         # or — for the manager/owner role rows — the Set-manager / Transfer
         # dialog. Enabled only when that action is actually available.
         self._b_recedit.setEnabled(self._edit_target(item) is not None)
+        # Remove clears a resolver record (never the owner/manager role rows).
+        self._b_recremove.setEnabled(self._remove_target(item) is not None)
 
     def _edit_target(self, item: QTreeWidgetItem):
         """What "Edit" does for ``item``: ``("record", name, label, value)`` for
@@ -811,6 +838,44 @@ class EnsPanel(QWidget):
         sel = self.tree.selectedItems()
         if sel:
             self._edit_item(sel[0])
+
+    def _remove_target(self, item: QTreeWidgetItem):
+        """What "Remove" (DEL / the trash button / the menu) does for ``item``:
+        ``("record", name, label, value)`` for a resolver-record row on a name
+        this account manages, ``("subdomain", name)`` for a subdomain whose
+        parent this account owns, or None when the row can't be removed (a 2LD,
+        an owner/manager role row, a record on a name you don't manage)."""
+        n = item.data(0, _NAME_ROLE)
+        if isinstance(n, EnsName):
+            nl = n.name.lower()
+            if n.is_subdomain and nl in self._subnode_manageable:
+                return ("subdomain", n.name)
+            return None
+        if item.data(0, _VALUE_ROLE) is None or item.data(0, _OWNERSHIP_ROLE):
+            return None                  # a role row (owner/manager) isn't a record
+        parent = item.parent()
+        pn = parent.data(0, _NAME_ROLE) if parent is not None else None
+        if not isinstance(pn, EnsName) or pn.name.lower() not in self._writable:
+            return None
+        return ("record", pn.name, item.text(0),
+                str(item.data(0, _VALUE_ROLE)))
+
+    def _remove_item_action(self, item: QTreeWidgetItem) -> None:
+        target = self._remove_target(item)
+        if target is None:
+            return
+        if target[0] == "record":
+            _kind, name, label, value = target
+            self.remove_record_requested.emit(name, label, value)
+        else:
+            _kind, name = target
+            self.write_requested.emit(name, "remove")
+
+    def _remove_current(self) -> None:
+        """DEL / a Remove button — remove the selected record or subdomain."""
+        sel = self.tree.selectedItems()
+        if sel:
+            self._remove_item_action(sel[0])
 
     def _emit_name(self, kind: str) -> None:
         if self._cur_name is not None:
@@ -1214,6 +1279,10 @@ class EnsPanel(QWidget):
                 ("Add / change record", "record"),
             ])
             groups.append([("Add subdomain", "subdomain")])
+        # Deleting a subdomain (you own its parent) is destructive → its own
+        # trailing group, separated from everything above.
+        if n.is_subdomain and nl in self._subnode_manageable:
+            groups.append([("Remove subdomain", "remove")])
         return groups
 
     def _on_menu(self, pos) -> None:
@@ -1258,6 +1327,12 @@ class EnsPanel(QWidget):
                 label = "Set manager" if kind == "manager" else "Transfer name"
                 menu.addAction(ic[kind], label,
                                lambda: self._edit_item(item))
+            # Remove clears a resolver record (never a role row) on a name you
+            # manage — a destructive entry, so last.
+            rem = self._remove_target(item)
+            if rem is not None and rem[0] == "record":
+                menu.addAction(ic["remove"], "Remove",
+                               lambda: self._remove_item_action(item))
         return menu
 
 
@@ -1900,6 +1975,7 @@ class EnsPlugin(Plugin):
             self._panel.add_custom_requested.connect(self._on_add_custom)
             self._panel.write_requested.connect(self._on_write_requested)
             self._panel.edit_record_requested.connect(self._on_edit_record)
+            self._panel.remove_record_requested.connect(self._on_remove_record)
             self._panel.copied.connect(self._on_copied)
         return self._panel
 
@@ -2266,6 +2342,8 @@ class EnsPlugin(Plugin):
             self._transfer(name)
         elif kind == "manager":
             self._set_manager(name)
+        elif kind == "remove":
+            self._remove_subdomain(name)
 
     def _on_edit_record(self, name: str, label: str, value: str) -> None:
         """Re-open the matching editor for an existing record row, prefilled.
@@ -2281,6 +2359,26 @@ class EnsPlugin(Plugin):
             self._write_content(name, prefill=value)
         else:
             self._write_text(name, key=lab, value=value)
+
+    def _on_remove_record(self, name: str, label: str, value: str) -> None:
+        """Clear a resolver record (DEL / the Remove button / the menu). The row
+        exists, so its name already has a resolver — no resolver gate. The
+        composer shows the decoded clearing call for review + signing."""
+        if self._panel is None:
+            return
+        res = self._resolver_for(name)
+        if res is None:
+            return
+        self._open_composer(name, self._remove_record_op(name, res, label, value))
+
+    def _remove_subdomain(self, name: str) -> None:
+        """Delete a subdomain whose parent this account owns (unwrapped), via
+        registry.setSubnodeRecord(parent, label, 0, 0, 0)."""
+        if self._panel is None or name.lower() not in self._subnode_manageable:
+            return
+        self._open_composer(
+            name, self._remove_subnode_op(name),
+            after_confirm=lambda: self._purge_name_from_caches(name))
 
     # --- per-kind editors --------------------------------------------------
 
@@ -2646,6 +2744,92 @@ class EnsPlugin(Plugin):
             note=f"You own {parent}, so you can set this subdomain's manager. "
                  "Set it to yourself to then edit its records.")
 
+    def _remove_record_op(self, name: str, res: str, label: str,
+                          value: str) -> _EnsOp:
+        """Clear a single resolver record — the removal of the ``label`` row.
+        ``label`` is the tree row label from ``_record_rows``: ``address`` /
+        ``address (COIN)`` / ``content`` / a text key. Input-less: the value is
+        forced empty (0x0 / b"" / ""), so the composer shows the decoded
+        clearing call + a note and the user just reviews + signs."""
+        from .. import ens_write
+        lab = label.strip()
+
+        def _coin_of(lb: str) -> str | None:
+            if lb.startswith("address (") and lb.endswith(")"):
+                return lb[len("address ("):-1]
+            return None
+
+        def build(nm: str, _fields: Any) -> tuple[str, str]:
+            if lab == "address":
+                return ens_write.set_addr(res, nm, ens_write.ZERO_ADDRESS)
+            coin = _coin_of(lab)
+            if coin is not None:
+                coin_type = ens_write.COIN_TYPES.get(coin)
+                if coin_type is None:
+                    raise ValueError("Unknown coin.")
+                return ens_write.set_coin_addr(res, nm, coin_type, b"")
+            if lab == "content":
+                return ens_write.set_contenthash(res, nm, "")
+            return ens_write.set_text(res, nm, lab, "")
+
+        def decoded(nm: str, _fields: Any) -> dict:
+            node = {"name": "node", "type": "bytes32", "value": nm}
+            if lab == "address":
+                return {"function": "setAddr", "args": [
+                    node, {"name": "a", "type": "address",
+                           "value": ens_write.ZERO_ADDRESS}]}
+            coin = _coin_of(lab)
+            if coin is not None:
+                return {"function": "setAddr", "args": [
+                    node, {"name": "coinType", "type": "uint256",
+                           "value": str(ens_write.COIN_TYPES.get(coin, "?"))},
+                    {"name": "a", "type": "bytes", "value": "(clear)"}]}
+            if lab == "content":
+                return {"function": "setContenthash", "args": [
+                    node, {"name": "hash", "type": "bytes", "value": "(clear)"}]}
+            return {"function": "setText", "args": [
+                node, {"name": "key", "type": "string", "value": lab},
+                {"name": "value", "type": "string", "value": "(clear)"}]}
+
+        shown = f" ({value})" if value else ""
+        return _EnsOp(
+            title=f"Remove record · {name}", confirm_label="Remove record",
+            make_fields=lambda _composer: None, build=build, decoded=decoded,
+            note=f"This clears the “{lab}” record{shown}.",
+            confirm_icon_names=("edit-delete", "user-trash", "list-remove"),
+            confirm_fallback=QStyle.StandardPixmap.SP_TrashIcon)
+
+    def _remove_subnode_op(self, name: str) -> _EnsOp:
+        """Delete a subdomain you own the PARENT of, via
+        registry.setSubnodeRecord(parent, label, 0, 0, 0) — clears its owner,
+        resolver and records. Input-less + rediscovers (the name disappears)."""
+        from .. import ens_write
+        parent = name.split(".", 1)[1]
+        label = name.split(".", 1)[0]
+
+        def build(_nm: str, _fields: Any) -> tuple[str, str]:
+            return ens_write.remove_subnode(parent, label)
+
+        def decoded(_nm: str, _fields: Any) -> dict:
+            return {"function": "setSubnodeRecord", "args": [
+                {"name": "parentNode", "type": "bytes32", "value": parent},
+                {"name": "label", "type": "bytes32", "value": label},
+                {"name": "owner", "type": "address",
+                 "value": ens_write.ZERO_ADDRESS},
+                {"name": "resolver", "type": "address",
+                 "value": ens_write.ZERO_ADDRESS},
+                {"name": "ttl", "type": "uint64", "value": "0"}]}
+
+        return _EnsOp(
+            title=f"Remove subdomain · {name}",
+            confirm_label="Remove subdomain",
+            make_fields=lambda _composer: None, build=build, decoded=decoded,
+            rediscover=True,
+            note=f"This deletes {name}. As the owner of {parent} you can remove "
+                 "the subdomain — clearing its owner, resolver and records.",
+            confirm_icon_names=("edit-delete", "user-trash", "list-remove"),
+            confirm_fallback=QStyle.StandardPixmap.SP_TrashIcon)
+
     def _set_resolver_op(self, name: str) -> _EnsOp:
         """The input-less set-resolver bootstrap (the resolver-gate target)."""
         from .. import ens_write
@@ -2698,11 +2882,13 @@ class EnsPlugin(Plugin):
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.warning(self._panel, "ENS", text)
 
-    def _open_composer(self, name: str, op: _EnsOp) -> None:
+    def _open_composer(self, name: str, op: _EnsOp,
+                       *, after_confirm: Callable[[], None] | None = None) -> None:
         """Open the rich ``_EnsWriteComposer`` for ``op`` via the host opener,
         wiring the post-confirm refresh (rediscover vs. force-reread records).
-        Falls back to a no-op when the host can't host a composer (mirrors the
-        old ``request_transaction`` capability check)."""
+        ``after_confirm`` runs first on confirmation (e.g. purge a deleted
+        subdomain from caches). Falls back to a no-op when the host can't host a
+        composer (mirrors the old ``request_transaction`` capability check)."""
         host = self.host
         chain = self._mainnet()
         addr = host.selected_address if host is not None else None
@@ -2719,6 +2905,8 @@ class EnsPlugin(Plugin):
             # resolver records; a plain record write force-re-reads instead so
             # the new value shows now, marked "confirmed" until finality earns
             # it the ✓ (rather than waiting on finality to show it at all).
+            if after_confirm is not None:
+                after_confirm()
             if op.rediscover:
                 # catchup=True: a transfer/reclaim changed ownership, so wait
                 # for the verified head to reflect it before the proof overwrites
@@ -2729,6 +2917,22 @@ class EnsPlugin(Plugin):
 
         host.open_ens_composer(name, op, chain, to_checksum_address(addr),
                                on_confirmed=_on_confirmed)
+
+    def _purge_name_from_caches(self, name: str) -> None:
+        """Drop a just-deleted subdomain from EVERY account's disk cache, so the
+        cross-account subnode surfacing (``_with_cross_account_subdomains``)
+        can't re-float it from a sibling account's now-stale cache after
+        removal. The current account's cache is rewritten by the rediscover that
+        follows anyway; a sibling's isn't until that account is next loaded."""
+        nl = name.lower()
+        for acct in self._store.accounts:
+            addr = acct.get("address", "")
+            if not addr:
+                continue
+            cached = self._cache.load(ENS_CHAIN_ID, addr)
+            if cached and any(n.name.lower() == nl for n in cached):
+                self._cache.save(ENS_CHAIN_ID, addr,
+                                 [n for n in cached if n.name.lower() != nl])
 
     # --- worker lifetime --------------------------------------------------
 

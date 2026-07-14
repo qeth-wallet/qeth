@@ -1459,6 +1459,24 @@ def _receipt_block(receipt: object) -> int | None:
         return None
 
 
+def _receipt_ok(receipt: object) -> bool:
+    """False when the receipt says the tx REVERTED (status 0) — a mined-but-
+    failed tx (e.g. out of gas) changed nothing, so its optimistic display must
+    NOT be applied. A missing/None/unparseable status is treated as success
+    (unknown → don't suppress). Handles int 1/0, bool, and ``0x`` hex."""
+    if receipt is None or not hasattr(receipt, "get"):
+        return True
+    status = receipt.get("status")
+    if status is None:
+        return True
+    if isinstance(status, str):
+        try:
+            return int(status, 16) != 0
+        except ValueError:
+            return True
+    return bool(status)
+
+
 def _qdate_from_ts(ts: int) -> QDate:
     """The local calendar day of a unix timestamp, as a ``QDate``."""
     from datetime import datetime
@@ -3321,8 +3339,13 @@ class EnsPlugin(Plugin):
         nm = name
 
         def _on_confirmed(receipt: object) -> None:
-            # The write mined: reflect it against the tx's block right away, then
-            # let the async read confirm/upgrade it. Stamping the tx block is what
+            # The write mined — but a mined tx can REVERT (out of gas, a failed
+            # require). A reverted tx changed nothing, so don't optimistically
+            # show its effect (nor refresh — the state is unchanged).
+            if not _receipt_ok(receipt):
+                return
+            # Succeeded: reflect it against the tx's block right away, then let
+            # the async read confirm/upgrade it. Stamping the tx block is what
             # makes a lagging or failed async read unable to regress the change.
             block = _receipt_block(receipt)
             if after_confirm is not None:

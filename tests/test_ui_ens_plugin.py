@@ -1697,6 +1697,33 @@ class TestEnsWriteActions:
         assert _receipt_block({"status": "0x1"}) is None     # no blockNumber
         assert _receipt_block(None) is None
 
+    def test_receipt_ok_detects_revert(self):
+        from qeth.plugins.ens import _receipt_ok
+        assert _receipt_ok({"status": 1}) is True
+        assert _receipt_ok({"status": "0x1"}) is True
+        assert _receipt_ok({"status": 0}) is False           # reverted
+        assert _receipt_ok({"status": "0x0"}) is False       # reverted (out of gas)
+        assert _receipt_ok({}) is True                       # unknown → assume ok
+        assert _receipt_ok(None) is True
+
+    def test_reverted_tx_does_not_apply_optimistic_update(self, qtbot):
+        # A mined-but-reverted setText (out of gas) must NOT show its value.
+        plugin, host, store = self._plugin(qtbot)            # vitalik.eth in tree
+        forced: list = []
+        plugin._on_records_requested = lambda *a, **k: forced.append(a)
+        plugin._write_text("vitalik.eth")
+        _name, op, _chain, _from, on_confirmed = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        dlg._fields.key.setCurrentText("lt")
+        dlg._fields.value.setText("0x771")
+        dlg._build_request()                                 # records the change
+        on_confirmed({"status": "0x0", "blockNumber": 100})  # REVERTED
+        item = plugin.widget()._items_by_name["vitalik.eth"]
+        labels = [item.child(i).text(0) for i in range(item.childCount())]
+        assert "lt" not in labels                            # not shown
+        assert forced == []                                  # no refresh either
+
     def test_add_then_stale_verify_keeps_name_and_manager(self, qtbot, tmp_path):
         # The reported cbbtc case: a just-added subnode must survive a LAGGING
         # verify that reads it disowned (older block than the add tx).

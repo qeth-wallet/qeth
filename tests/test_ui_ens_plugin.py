@@ -1831,7 +1831,7 @@ class TestEnsWriteActions:
         plugin._refresh_writable(ADDR)
         assert "ops.swiss.eth" not in plugin.widget()._subnode_removable
 
-    def test_remove_subdomain_confirm_purges_caches_and_rediscovers(
+    def test_remove_subdomain_confirm_drops_denies_purges_rediscovers(
             self, qtbot, tmp_path):
         from qeth.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
@@ -1845,6 +1845,7 @@ class TestEnsWriteActions:
         qtbot.addWidget(plugin.widget())
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
         plugin._subnode_manageable = {"ops.swiss.eth"}
+        assert "ops.swiss.eth" in plugin.widget()._items_by_name   # row present
         # a sibling account's cache lists the subname (the cross-account source)
         plugin._cache.save(ENS_CHAIN_ID, self.OTHER,
                            [EnsName("ops.swiss.eth", owner=self.OTHER)])
@@ -1853,9 +1854,39 @@ class TestEnsWriteActions:
         plugin._remove_subdomain("ops.swiss.eth")
         _name, _op, _chain, _from, on_confirmed = host.ens_ops[0]
         on_confirmed({"status": "0x1"})
-        # purged from the sibling cache → the deleted subname can't re-surface
+        # the row is dropped NOW (not waiting on the verify pass)
+        assert "ops.swiss.eth" not in plugin.widget()._items_by_name
+        # denied → a lagging-indexer rediscover can't re-float it
+        assert "ops.swiss.eth" in plugin._denied
+        # purged from the sibling cache → the cross-account surfacing won't re-add
         assert plugin._cache.load(ENS_CHAIN_ID, self.OTHER) == []
         assert rediscovered == [{"catchup": True}]
+
+    def test_denied_name_not_re_cached_on_discovery(self, qtbot, tmp_path):
+        # A denied (just-deleted) name a lagging indexer still returns must not be
+        # written back to the disk cache — else it flashes back on the next load.
+        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens import ENS_CHAIN_ID
+        plugin, host, store = self._plugin(qtbot)
+        plugin._cache = EnsCache(tmp_path)
+        plugin._verify = lambda *a, **k: None
+        plugin._denied.add("gone.vitalik.eth")
+        plugin._on_names_ready(
+            ADDR, [EnsName("vitalik.eth"), EnsName("gone.vitalik.eth")],
+            epoch=plugin._epoch)
+        cached = {n.name for n in (plugin._cache.load(ENS_CHAIN_ID, ADDR) or [])}
+        assert "vitalik.eth" in cached
+        assert "gone.vitalik.eth" not in cached          # denied → not cached
+
+    def test_panel_drop_name_removes_row_and_state(self, qtbot):
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        panel.populate(build_tree(
+            [EnsName("swiss.eth"), EnsName("ops.swiss.eth")]), NOW)
+        assert "ops.swiss.eth" in panel._items_by_name
+        panel.drop_name("ops.swiss.eth")
+        assert "ops.swiss.eth" not in panel._items_by_name
+        panel.drop_name("ops.swiss.eth")                 # idempotent no-op
 
     # --- renewal ----------------------------------------------------------
 

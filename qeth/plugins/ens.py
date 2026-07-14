@@ -1208,6 +1208,19 @@ class EnsPanel(QWidget):
                 self.tree.takeTopLevelItem(idx)
         self._items_by_name.pop(name_l, None)
 
+    def drop_name(self, name: str) -> None:
+        """Remove a name's row now (a delete confirmed on-chain) — no wait on the
+        verify pass. A no-op if the row isn't present."""
+        item = self._items_by_name.get(name.lower())
+        if item is not None:
+            self._remove_item(item, name.lower())
+            # Its stored ownership/records state is stale now — clear it so a
+            # later re-add rebuilds cleanly.
+            self._ownership.pop(name.lower(), None)
+            self._ownership_verified.discard(name.lower())
+            self._ownership_sig.pop(name.lower(), None)
+            self._records_sig.pop(name.lower(), None)
+
     # --- interaction ------------------------------------------------------
 
     def eventFilter(self, obj, event) -> bool:
@@ -2099,8 +2112,11 @@ class EnsPlugin(Plugin):
         if host is None or host.selected_address != address:
             return                                  # view moved on
         # Cache only the account's OWN discovered names (the cross-account
-        # surfacing below is derived, not this account's).
-        self._cache.save(ENS_CHAIN_ID, address, names)
+        # surfacing below is derived, not this account's), and never re-cache a
+        # name we've denied this session (a just-deleted subdomain a lagging
+        # indexer still returns) — else it would flash back on the next reload.
+        self._cache.save(ENS_CHAIN_ID, address,
+                         [n for n in names if n.name.lower() not in self._denied])
         self._render(names)                          # augments + sets _names_by_l
         self._verify(address, list(self._names_by_l))  # verify the surfaced set too
 
@@ -2440,7 +2456,7 @@ class EnsPlugin(Plugin):
         else:
             return
         self._open_composer(
-            name, op, after_confirm=lambda: self._purge_name_from_caches(name))
+            name, op, after_confirm=lambda: self._mark_removed(name))
 
     # --- per-kind editors --------------------------------------------------
 
@@ -3041,6 +3057,22 @@ class EnsPlugin(Plugin):
 
         host.open_ens_composer(name, op, chain, to_checksum_address(addr),
                                on_confirmed=_on_confirmed)
+
+    def _mark_removed(self, name: str) -> None:
+        """A subdomain delete just CONFIRMED on-chain — remove it locally and
+        keep it gone, rather than waiting on the verify pass to drop it. That
+        pass can't: the fast read never drops (only the Helios-proven read does),
+        and a just-deleted name's verified head lags — so without this a stale
+        row lingers while a lagging indexer still returns it. We KNOW it's gone
+        (the delete tx we built mined), so: deny the name (─→ filtered from every
+        re-render + not re-cached), purge it from all account caches, and drop
+        its row now. Self-heals if it's ever recreated (``_on_verified`` discards
+        a re-owned name from ``_denied``)."""
+        nl = name.lower()
+        self._denied.add(nl)
+        self._purge_name_from_caches(name)
+        if self._panel is not None:
+            self._panel.drop_name(nl)
 
     def _purge_name_from_caches(self, name: str) -> None:
         """Drop a just-deleted subdomain from EVERY account's disk cache, so the

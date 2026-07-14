@@ -368,8 +368,13 @@ class EthClient:
     def max_priority_fee(self) -> int:
         return int(self._w3.eth.max_priority_fee)
 
-    def estimate_gas(self, tx: dict) -> int:
-        return int(self._w3.eth.estimate_gas(cast("TxParams", tx)))
+    def estimate_gas(self, tx: dict, block: str = "pending") -> int:
+        """Gas estimate against ``block`` (default ``"pending"`` — the state the
+        tx will actually execute against, and consistent with the ``"pending"``
+        nonce, so our own still-in-flight txs are reflected; web3's own default
+        is ``"latest"``, which misses them)."""
+        return int(self._w3.eth.estimate_gas(
+            cast("TxParams", tx), cast("BlockIdentifier", block)))
 
     def call(self, tx: dict, block: str = "latest") -> str:
         """Returns hex-encoded return data (with 0x prefix)."""

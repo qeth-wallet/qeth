@@ -4379,14 +4379,25 @@ class GasSuggestionWorker(QThread):
             }
             if self._req.to_addr:
                 tx_for_estimate["to"] = self._req.to_addr
-            try:
-                estimated = client.estimate_gas(tx_for_estimate)
-            except Exception as e:
-                # Estimation can fail (reverting tx, missing
-                # allowance, etc.); fall back to a generous default
-                # so the user can still confirm — they can edit the
-                # gas limit before submission.
-                log.warning("estimate_gas failed: %s", e)
+            def _est(block: str) -> int:
+                try:
+                    return client.estimate_gas(tx_for_estimate, block=block)
+                except Exception as e:
+                    # Estimation can fail (a reverting tx, a missing prior
+                    # state); a 0 drops out of the max() below.
+                    log.warning("estimate_gas(%s) failed: %s", block, e)
+                    return 0
+            # Estimate against BOTH states and take the higher. "pending"
+            # includes our own still-in-flight txs (matches the pending nonce),
+            # but a pending write that warms storage can UNDER-estimate a
+            # first-time write; "latest" is immune to that (cold storage) but
+            # misses a still-pending prior tx. The max is safe either way —
+            # over-estimating is free (unused gas is refunded), under-estimating
+            # reverts out of gas.
+            estimated = max(_est("pending"), _est("latest"))
+            if estimated == 0:
+                # Both reads failed (e.g. a genuinely reverting tx) → a generous
+                # default so the user can still confirm (and edit the limit).
                 estimated = 21_000 if self._req.data in ("", "0x") else 250_000
 
             max_priority = 0

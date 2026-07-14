@@ -172,7 +172,7 @@ class _StubClient:
     def __init__(self, chain):
         pass
 
-    def estimate_gas(self, tx):
+    def estimate_gas(self, tx, block="pending"):
         return 21_000
 
     def gas_price(self):
@@ -215,3 +215,66 @@ def test_worker_floors_above_mined(qtbot, monkeypatch):
 
 def test_worker_floor_ignored_when_below_mined(qtbot, monkeypatch):
     assert _run_worker(monkeypatch, 2)["nonce"] == 3
+
+
+# --- GasSuggestionWorker: gas estimated against pending AND latest, max wins --
+
+class _BlockEstClient:
+    """Records the block each estimate is asked at and returns a per-block gas
+    (a ``RuntimeError`` for a block simulates that read failing)."""
+
+    def __init__(self, chain, by_block):
+        self.calls: list = []
+        self._by_block = by_block
+
+    def estimate_gas(self, tx, block="pending"):
+        self.calls.append(block)
+        v = self._by_block[block]
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    def gas_price(self):
+        return 1_000_000_000
+
+    def max_priority_fee(self):
+        return 0
+
+    def get_transaction_count(self, addr, block):
+        return 0
+
+    def rpc(self, *a, **k):
+        return {}
+
+
+def _run_est(monkeypatch, by_block, data="0x12"):
+    import qeth.plugins.transactions as tx
+    client = _BlockEstClient(None, by_block)
+    monkeypatch.setattr(tx, "EthClient", lambda chain: client)
+    chain = Chain("Polygon", 137, "https://x", eip1559=False)
+    req = SigningRequest(chain_id=137, from_addr=ADDR, to_addr=ADDR,
+                         value_wei=0, data=data)
+    worker = GasSuggestionWorker(chain, req)
+    out: dict = {}
+    worker.suggested.connect(lambda d: out.update(d))
+    worker.run()
+    return out, client
+
+
+def test_worker_estimates_both_blocks_and_takes_max(qtbot, monkeypatch):
+    out, client = _run_est(monkeypatch, {"pending": 40_000, "latest": 90_000})
+    assert set(client.calls) == {"pending", "latest"}    # both queried
+    assert out["estimated_gas"] == 90_000                # the higher wins
+    assert out["gas"] == (90_000 * 3) // 2               # 1.5x the max
+
+
+def test_worker_uses_surviving_block_when_one_fails(qtbot, monkeypatch):
+    out, _ = _run_est(
+        monkeypatch, {"pending": 55_000, "latest": RuntimeError("reverts")})
+    assert out["estimated_gas"] == 55_000                # pending survived
+
+
+def test_worker_falls_back_when_both_estimates_fail(qtbot, monkeypatch):
+    out, _ = _run_est(
+        monkeypatch, {"pending": RuntimeError("x"), "latest": RuntimeError("y")})
+    assert out["estimated_gas"] == 250_000               # generous data-tx default

@@ -224,6 +224,15 @@ def is_provider_limit_error(err: object) -> bool:
     return bool(_LIMIT_MSG_RE.search(str(err.get("message") or "")))
 
 
+def _qthread_interrupted() -> bool:
+    """Whether the current Qt worker was asked to stop during app shutdown."""
+    from PySide6.QtCore import QThread
+    try:
+        return QThread.currentThread().isInterruptionRequested()
+    except RuntimeError:
+        return False
+
+
 def _failover_provider(urls: list[str], *, request_kwargs: dict,
                        session: Any) -> "HTTPProvider":
     """An ``HTTPProvider`` whose ``make_request`` rotates through ``urls`` on
@@ -231,21 +240,22 @@ def _failover_provider(urls: list[str], *, request_kwargs: dict,
     on every eth_call), a connection error, a timeout — or a rate-limit
     error body (a 200 whose JSON-RPC error is the provider's limiter, not
     the chain answering), and then sticks to whichever endpoint answered.
+    Between attempts it honors QThread interruption, so shutdown cannot turn
+    one in-flight request into a full walk across fallback endpoints.
     Any other JSON-RPC *error* response (a revert, a request the node
     understood and rejected) is a valid answer every provider would repeat,
-    so it does NOT trigger failover. With a single URL it's a plain
-    HTTPProvider."""
+    so it does NOT trigger failover."""
     members = [HTTPProvider(u, request_kwargs=request_kwargs, session=session)
                for u in urls]
     provider = members[0]
-    if len(members) == 1:
-        return provider
     state = {"i": 0}
 
     def make_request(method: Any, params: Any) -> Any:
         last_exc: Exception | None = None
         last_limited: Any = None
         for offset in range(len(members)):
+            if _qthread_interrupted():
+                raise InterruptedError("qeth is shutting down")
             i = (state["i"] + offset) % len(members)
             try:
                 # Call the *class* method on the member so the primary's
@@ -298,8 +308,8 @@ class EthClient:
         # RPC only. Relaying a *signed* tx to a fallback would defeat a private /
         # MEV-protecting endpoint (the tx would surface in a public mempool,
         # exposed to frontrunning) and override the user's explicit choice; if
-        # their RPC is unreachable the broadcast simply errors. (With a single
-        # URL, ``_failover_provider`` is a plain, non-rotating ``HTTPProvider``.)
+        # their RPC is unreachable the broadcast simply errors. With a single
+        # URL, ``_failover_provider`` still never rotates.
         self._w3 = Web3(_failover_provider(
             _rpc_urls(chain),
             request_kwargs={"timeout": timeout},

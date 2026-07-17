@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from qeth.__main__ import (
-    _adopt_host_qt_font, _ensure_legible_icon_theme, _install_sigint_shutdown,
+    _ShutdownCoordinator, _adopt_host_qt_font, _ensure_legible_icon_theme,
+    _install_sigint_shutdown,
 )
 
 
@@ -101,3 +103,58 @@ def test_sigint_shutdown_closes_window_via_close_event(qtbot):
     finally:
         timer.stop()
         timer.deleteLater()
+
+
+def test_quit_waits_for_running_qthreads(qtbot):
+    class FakeApp(QObject):
+        def __init__(self):
+            super().__init__()
+            self.quit_calls = 0
+
+        def quit(self):
+            self.quit_calls += 1
+
+    class FakeWorker:
+        running = True
+        interrupted = False
+
+        def requestInterruption(self):
+            self.interrupted = True
+
+    class FakeWindow:
+        visible = False
+
+        def __init__(self, worker):
+            self.worker = worker
+            self.shutdown_calls = 0
+
+        def begin_shutdown(self):
+            self.shutdown_calls += 1
+            self.worker.requestInterruption()
+
+        def has_running_workers(self):
+            return self.worker.running
+
+        def isVisible(self):
+            return self.visible
+
+        def close(self):
+            self.visible = False
+
+    app = FakeApp()
+    worker = FakeWorker()
+    window = FakeWindow(worker)
+    coordinator = _ShutdownCoordinator(app, window)
+    quit_event = QEvent(QEvent.Type.Quit)
+
+    assert coordinator.eventFilter(app, quit_event)
+    assert not quit_event.isAccepted()
+    assert window.shutdown_calls == 1
+    assert worker.interrupted
+    assert app.quit_calls == 0
+
+    worker.running = False
+    coordinator._finish_if_ready()
+
+    assert app.quit_calls == 1
+    coordinator._poll.stop()

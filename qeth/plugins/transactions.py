@@ -904,11 +904,17 @@ class ReceiptScanWorker(QThread):
         self._hashes = hashes
 
     def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
         client = EthClient(self._chain)
         cid = self._chain.chain_id
         for h in self._hashes:
+            if self.isInterruptionRequested():
+                return
             try:
                 receipt = client.rpc("eth_getTransactionReceipt", [h])
+            except InterruptedError:
+                return
             except Exception as e:
                 log.debug("receipt scan failed for %s: %s", h, e)
                 continue

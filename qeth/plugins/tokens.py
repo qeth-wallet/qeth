@@ -191,6 +191,8 @@ class MetadataWorker(QThread):
             client = EthClient(self.chain)
             meta = client.multicall_erc20_metadata(self.contracts)
             self.fetched.emit(self.chain.chain_id, meta)
+        except InterruptedError:
+            return
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -237,6 +239,8 @@ class BalanceWorker(QThread):
                 # separately.
                 native = client.get_balance(self.address, "latest")
             self.refreshed.emit(self.chain.chain_id, native, balances, block, blocks)
+        except InterruptedError:
+            return
         except Exception as e:
             self.failed.emit(str(e))
 

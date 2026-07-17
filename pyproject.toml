@@ -83,6 +83,12 @@ dev = [
     "Pillow>=10",
 ]
 
+# Build the native macOS .app required for camera permission prompts. Kept out
+# of the runtime and normal dev environments; dist/macos/build.sh opts in.
+macos-build = [
+    "pyinstaller>=6.21",
+]
+
 [tool.uv]
 # Supply-chain policy: never resolve a package version newer than ~1 week old.
 # A malicious/compromised fresh upload is usually caught + yanked within days,

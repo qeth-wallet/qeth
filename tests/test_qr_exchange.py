@@ -97,9 +97,66 @@ def test_pick_format_none_when_device_reports_nothing():
     assert _pick_video_format(_device()) is None
 
 
+def _permission_scanner(*, start_requested=True):
+    """A CameraScanner shell for permission tests, without QtMultimedia."""
+    from types import SimpleNamespace
+
+    from qeth.qr_scan import CameraScanner
+
+    scanner = CameraScanner.__new__(CameraScanner)
+    QObject.__init__(scanner)
+    scanner._camera = SimpleNamespace(starts=0)
+    scanner._camera.start = lambda: setattr(
+        scanner._camera, "starts", scanner._camera.starts + 1)
+    scanner._permission_request_in_flight = True
+    scanner._start_requested = start_requested
+    return scanner
+
+
+def _permission(status):
+    from types import SimpleNamespace
+    return SimpleNamespace(status=lambda: status)
+
+
+def test_permission_grant_starts_camera():
+    from PySide6.QtCore import Qt
+
+    scanner = _permission_scanner()
+    scanner._permission_decided(_permission(Qt.PermissionStatus.Granted))
+    assert scanner._camera.starts == 1
+
+
+def test_non_macos_starts_without_permission_api(monkeypatch):
+    import qeth.qr_scan as qr_scan
+
+    scanner = _permission_scanner(start_requested=False)
+    monkeypatch.setattr(qr_scan.sys, "platform", "linux")
+    scanner.start()
+    assert scanner._camera.starts == 1
+
+
+def test_late_permission_grant_does_not_restart_stopped_camera():
+    from PySide6.QtCore import Qt
+
+    scanner = _permission_scanner(start_requested=False)
+    scanner._permission_decided(_permission(Qt.PermissionStatus.Granted))
+    assert scanner._camera.starts == 0
+
+
+def test_permission_denial_is_reported():
+    from PySide6.QtCore import Qt
+
+    scanner = _permission_scanner()
+    failures = []
+    scanner.failed.connect(failures.append)
+    scanner._permission_decided(_permission(Qt.PermissionStatus.Denied))
+    assert len(failures) == 1
+
+
 class _FakeScanner(QObject):
     decoded = Signal(str)
     frame = Signal(object)
+    failed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -158,6 +215,14 @@ def test_dialog_ignores_non_ur_barcodes(qtbot):
     scanner.decoded.emit("https://example.com/not-a-ur")
     assert dlg.scanned_ur() is None
     assert dlg.isVisible()                          # still waiting
+
+
+def test_dialog_surfaces_camera_start_failure(qtbot):
+    scanner = _FakeScanner()
+    dlg = _dialog(qtbot, scanner)
+    dlg.show()
+    scanner.failed.emit("Camera permission was denied")
+    assert dlg._preview.text() == "Camera permission was denied"
 
 
 def test_dialog_cancel_returns_none(qtbot):

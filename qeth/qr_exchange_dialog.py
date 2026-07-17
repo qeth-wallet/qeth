@@ -122,6 +122,7 @@ class QRExchangeDialog(Dialog):
         self._preview = QLabel("Starting camera…")
         self._preview.setFixedSize(PANE, PANE)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setWordWrap(True)
         grid.addWidget(scan_caption, 0, 1, top)
         grid.addWidget(_view_framed(self._preview), 1, 1)
         root.addLayout(grid)
@@ -138,6 +139,7 @@ class QRExchangeDialog(Dialog):
         if self._scanner is not None:
             self._scanner.decoded.connect(self._on_decoded)
             self._scanner.frame.connect(self._on_frame)
+            self._scanner.failed.connect(self._on_camera_failed)
 
     def scanned_ur(self) -> str | None:
         """The scanned ``ur:…`` string, or ``None`` if the user cancelled."""
@@ -190,6 +192,10 @@ class QRExchangeDialog(Dialog):
         self._preview.setPixmap(_fill_square(
             QPixmap.fromImage(image), self._preview.size()))
 
+    def _on_camera_failed(self, message: str) -> None:
+        self._preview.clear()
+        self._preview.setText(message)
+
 
 class QRScanDialog(Dialog):
     """Scan-only: run the camera and return the first ``ur:…`` seen (no QR to
@@ -213,6 +219,7 @@ class QRScanDialog(Dialog):
         self._preview = QLabel("Starting camera…")
         self._preview.setFixedSize(PANE, PANE)     # square, matching the exchange
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setWordWrap(True)
         body.addWidget(_view_framed(self._preview))
         root.addLayout(body)
 
@@ -223,6 +230,7 @@ class QRScanDialog(Dialog):
         if self._scanner is not None:
             self._scanner.decoded.connect(self._on_decoded)
             self._scanner.frame.connect(self._on_frame)
+            self._scanner.failed.connect(self._on_camera_failed)
 
     def scanned_ur(self) -> str | None:
         return self._scanned
@@ -250,6 +258,10 @@ class QRScanDialog(Dialog):
     def _on_frame(self, image: Any) -> None:
         self._preview.setPixmap(_fill_square(
             QPixmap.fromImage(image), self._preview.size()))
+
+    def _on_camera_failed(self, message: str) -> None:
+        self._preview.clear()
+        self._preview.setText(message)
 
 
 def _default_scanner() -> Any:

@@ -315,7 +315,7 @@ def notification_icon(
 # coordinates (outer tips at N/E/S/W radius 1, inner points on the diagonals)
 # scaled at draw time.
 _VAULT_BADGE_COLOR = QColor(255, 209, 59)      # gold-yellow fill
-_VAULT_BADGE_OUTLINE = QColor(43, 33, 0)       # dark border
+_VAULT_BADGE_OUTLINE = QColor(122, 74, 10)     # brown border (defines the star)
 _SPARKLE_POINTS = (
     (0.0, -1.0), (0.24, -0.24), (1.0, 0.0), (0.24, 0.24),
     (0.0, 1.0), (-0.24, 0.24), (-1.0, 0.0), (-0.24, -0.24),
@@ -356,7 +356,9 @@ def vault_icon(base: "QPixmap | None", size: int = 64) -> QPixmap:
     if base is not None and not base.isNull():
         p.drawPixmap(0, 0, to_circular(base, size))
         r = size * 0.36                       # a bigger sparkle than the old disc
-        off = size - r - size * 0.04          # margin so the outline isn't clipped
+        # Push the centre toward the bottom-right corner so the sparkle sits in
+        # the corner (partly off the round icon) rather than over its middle.
+        off = size - r * 0.8
         _draw_sparkle_badge(p, off, off, r)
     else:
         _draw_sparkle_badge(p, size / 2.0, size / 2.0, size * 0.44)

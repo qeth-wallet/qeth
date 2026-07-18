@@ -290,6 +290,23 @@ class _ReorderTree(QTreeWidget):
         return None
 
 
+class _SearchEdit(QLineEdit):
+    """The Accounts find-bar field. Emits ``escape_pressed`` on Escape so the
+    plugin can close the bar + clear the filter (browser-style), while the field
+    has focus. A subclass rather than a QShortcut: keyPressEvent delivery is
+    deterministic under headless QTest, and it matches the browser rule that
+    Escape only dismisses when the find field is focused (mirrors
+    ``_ReorderTree.keyPressEvent`` above)."""
+
+    escape_pressed = Signal()
+
+    def keyPressEvent(self, event):  # noqa: N802 — Qt method name
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape_pressed.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class WalletsPlugin(Plugin):
     name = "Accounts"
 
@@ -330,6 +347,19 @@ class WalletsPlugin(Plugin):
         self.act_connect: QAction | None = None
         # The checkable Connect button (synced to the default account).
         self._connect_btn: QPushButton | None = None
+        # Browser-style find bar (Ctrl+F): a QLineEdit under the tree that
+        # filters rows by label-or-address. act_search is the checkable toggle
+        # (an icon button on the bottom row); act_find is the Ctrl+F accelerator
+        # (always show + focus, so a second Ctrl+F never closes the bar). Both
+        # funnel through _show_search / _hide_search.
+        self.act_search: QAction | None = None
+        self.act_find: QAction | None = None
+        self._search_edit: QLineEdit | None = None
+        self._filter_text: str = ""
+        # Expansion snapshot taken when a filter first activates, so the forced
+        # expand-to-show-matches never leaks into the user's saved collapse
+        # state (restored on clear). None when no filter is active.
+        self._pre_filter_expansion: dict | None = None
         # ENS workers kicked from post-import label-fill; tracked
         # here so Python's GC doesn't drop them mid-run (Qt's
         # QThread destructor aborts on a still-running thread).
@@ -478,6 +508,11 @@ class WalletsPlugin(Plugin):
             if verified:
                 it.setToolTip(0, f"{name} — cryptographically verified")
             found = True
+        # A newly arrived label can change whether this row matches an active
+        # filter (label-or-address). Re-apply so it appears/disappears
+        # accordingly — this path skips _rebuild_tree, so nothing else would.
+        if found and self._filter_text.strip():
+            self._apply_filter()
         return found
 
     def select_address(self, address: str) -> bool:
@@ -584,6 +619,24 @@ class WalletsPlugin(Plugin):
         # on the bottom action row + popups (Sign / QR-info / Label),
         # so the tree fills the whole panel.
         v.addWidget(self._tree, 1)
+
+        # Browser-style find bar under the tree: a bare QLineEdit, hidden until
+        # Ctrl+F or the bottom-row search button. It sits directly above the
+        # slot's action row (v has 0 spacing), reading like a browser find
+        # strip. Kept INSIDE the plugin widget (not the slot's action row,
+        # which is torn down on tab switch) so it persists.
+        self._search_edit = _SearchEdit()
+        self._search_edit.setPlaceholderText("Filter by label or address")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setVisible(False)
+        self._search_edit.textChanged.connect(self._on_search_text)
+        self._search_edit.escape_pressed.connect(self._hide_search)
+        v.addWidget(self._search_edit)
+        # Scope Ctrl+F to the whole Accounts panel (tree OR find field), so it
+        # fires wherever focus is in this slot and won't shadow a find in the
+        # Tokens/Transactions panels. Mirrors the Copy/Del scoping above.
+        assert self.act_find is not None    # _build_account_actions set it
+        self._container.addAction(self.act_find)
 
     def _build_account_actions(self) -> None:
         """Build the account-level action buttons (Add / Copy / Remove)
@@ -728,6 +781,30 @@ class WalletsPlugin(Plugin):
         self.act_connect.setEnabled(False)
         self.act_connect.triggered.connect(self._toggle_connect)
 
+        # Find bar toggle. Magnifier/find glyph; a DIFFERENT QStyle fallback
+        # (InfoView) from the row's other buttons so it stays tellable apart on
+        # a bare theme. Checkable — pressed = the find field is visible. Always
+        # enabled (a view control, never selection-dependent), so it stays out
+        # of _update_account_buttons.
+        self.act_search = QAction(
+            _icon("edit-find", "system-search", "search",
+                  QStyle.StandardPixmap.SP_FileDialogInfoView),
+            "&Find Account",
+        )
+        self.act_search.setToolTip("Search accounts (Ctrl+F)")
+        self.act_search.setCheckable(True)
+        self.act_search.toggled.connect(self._on_search_toggled)
+
+        # Ctrl+F accelerator. Distinct from act_search so its semantics can be
+        # pure "show + focus + select-all" (browser find): pressing Ctrl+F while
+        # the bar is already open re-focuses it rather than toggling it shut.
+        # Parented so it can be given to the panel container in _build().
+        self.act_find = QAction("Find", self)
+        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.act_find.setShortcutContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.act_find.triggered.connect(self._show_search)
+
         # Scope the shortcuts to the accounts tree: Ctrl+C / Del act on
         # the selected address only when that panel has focus, so they
         # don't shadow copy/delete in the token or transaction tables.
@@ -761,11 +838,14 @@ class WalletsPlugin(Plugin):
         # (which carry the tree's Ctrl+C / Del shortcuts and the enabled
         # state); the label moves to the tooltip since there's no text.
         # Connect is checkable (pressed = this account is connected to
-        # the browser); the rest are momentary. We keep a ref to the
-        # Connect button so _update_account_buttons can sync its checked
-        # state to the store's default.
+        # the browser); Search is checkable (pressed = find bar visible);
+        # the rest are momentary. We keep a ref to the Connect button so
+        # _update_account_buttons can sync its checked state to the store's
+        # default. Search sits last — a view control, visually after the
+        # per-account actions.
         for act in (self.act_copy, self.act_remove, self.act_sign,
-                    self.act_qr, self.act_label, self.act_connect):
+                    self.act_qr, self.act_label, self.act_connect,
+                    self.act_search):
             btn = QPushButton()
             btn.setIcon(act.icon())
             btn.setToolTip(act.toolTip() or act.text().replace("&", ""))
@@ -783,6 +863,17 @@ class WalletsPlugin(Plugin):
                 # un-press it.
                 btn.clicked.connect(lambda _checked: self._toggle_connect())
                 self._connect_btn = btn
+            elif act is self.act_search:
+                # Two-way sync the button and the action so the pressed state
+                # tracks bar visibility however it's toggled (button click,
+                # Ctrl+F, Escape). act_search.toggled fires only on a real
+                # state change, so this can't recurse. The clicked→setChecked
+                # hop goes through a lambda: QPushButton.clicked declares a
+                # default-arg overload, so a bare connect would call setChecked()
+                # with no argument (TypeError).
+                btn.setCheckable(True)
+                btn.clicked.connect(lambda checked, a=act: a.setChecked(checked))
+                act.toggled.connect(btn.setChecked)
             else:
                 btn.clicked.connect(act.trigger)
             # Keep a Python ref so the C++ widgets survive function exit.
@@ -892,7 +983,23 @@ class WalletsPlugin(Plugin):
         # other branch (which made "connect to browser" jump trees). Only fall
         # back to the default when there was no single prior selection.
         prior_key = self._selected_key()
-        expanded = self._capture_expansion()
+        if prior_key is None and self._filter_text.strip():
+            # An active filter may HIDE the selected row, and Qt drops a hidden
+            # item from selectedItems() (so _selected_key sees nothing) even
+            # though currentItem() persists. Recover the key from currentItem
+            # so a rebuild-while-filtered doesn't lose the selection and jump to
+            # the default (the churn the block-signals discipline below guards).
+            cur = self._tree.currentItem()
+            if cur is not None and isinstance(
+                    cur.data(0, Qt.ItemDataRole.UserRole), str):
+                prior_key = (cur.data(0, Qt.ItemDataRole.UserRole),
+                             cur.data(0, ACCOUNT_PATH_ROLE) or "")
+        # While a filter is active the tree carries the FORCED expand-to-show-
+        # matches state, not the user's — snapshot from the stashed pre-filter
+        # state so the rebuild restores what the user actually set.
+        expanded = (dict(self._pre_filter_expansion)
+                    if self._pre_filter_expansion is not None
+                    else self._capture_expansion())
         # Clearing + re-selecting the tree fires itemSelectionChanged (→
         # _on_tree_selection → selected_address_changed) twice — emit(None) on
         # clear, emit(addr) on restore — i.e. a spurious "selection changed" even
@@ -904,6 +1011,7 @@ class WalletsPlugin(Plugin):
         # re-broadcast once — and only if the selection actually moved (compared
         # against the last address we broadcast, not the pre-rebuild tree state,
         # so removing the selected account still propagates the change).
+        sel_addrs: list[str] = []      # the selection, captured pre-filter below
         self._tree.blockSignals(True)
         try:
             self._tree.clear()
@@ -916,11 +1024,27 @@ class WalletsPlugin(Plugin):
             if not (prior_key and self._select_key(*prior_key)):
                 if default_item is not None:
                     self._tree.setCurrentItem(default_item)
+            # Capture the selection while every rebuilt row is still VISIBLE.
+            # Re-applying the filter below re-hides non-matches, and Qt drops a
+            # hidden row from selectedItems() — so reading the selection after
+            # the filter would see nothing and spuriously broadcast a cleared
+            # account. The buttons + emit below use this pre-filter snapshot.
+            sel_addrs = self.selected_addresses()
+            # The freshly built rows carry the user's true collapse state
+            # (restored above); re-apply any active filter to re-hide non-
+            # matches and re-force-expand matched branches. setHidden/
+            # setExpanded fire no signals, so the block-signals discipline is
+            # untouched. Reset the stash first so _apply_filter re-snapshots
+            # the just-restored (true) state, not the previous one.
+            if self._filter_text.strip():
+                self._pre_filter_expansion = None
+                self._apply_filter()
         finally:
             self._tree.blockSignals(False)
-        # _on_tree_selection was blocked; do its work once, deliberately.
-        self._update_account_buttons()
-        now_addr = self._emit_address()
+        # _on_tree_selection was blocked; do its work once, deliberately —
+        # against the pre-filter selection so a filter-hidden row still counts.
+        self._update_account_buttons(sel_addrs)
+        now_addr = self._emit_address(sel_addrs)
         if now_addr != self._last_emitted:
             self._broadcast_selection(now_addr)
 
@@ -1066,6 +1190,104 @@ class WalletsPlugin(Plugin):
         addrs = self.selected_addresses()
         self._update_account_buttons(addrs)
         self._broadcast_selection(self._emit_address(addrs))
+
+    # --- find bar -----------------------------------------------------------
+
+    def _show_search(self) -> None:
+        """Reveal + focus the find bar and select any existing text (browser
+        Ctrl+F). Idempotent: a second Ctrl+F just re-focuses/re-selects."""
+        if self._search_edit is None:
+            return
+        self._search_edit.setVisible(True)
+        if self.act_search is not None:
+            self.act_search.setChecked(True)   # no-op if already checked
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
+
+    def _hide_search(self) -> None:
+        """Hide the find bar and clear the filter (Escape, or un-toggling the
+        button). Clearing the field drives textChanged → filter reset."""
+        if self._search_edit is None:
+            return
+        self._search_edit.setVisible(False)
+        self._search_edit.clear()              # → _on_search_text("") → reset
+        if self.act_search is not None:
+            self.act_search.setChecked(False)
+        if self._tree is not None:
+            self._tree.setFocus()              # keyboard flow returns to rows
+
+    def _on_search_toggled(self, checked: bool) -> None:
+        if checked:
+            self._show_search()
+        else:
+            self._hide_search()
+
+    def _on_search_text(self, text: str) -> None:
+        self._filter_text = text
+        self._apply_filter()
+
+    def _restore_expansion_snapshot(self, snapshot: dict) -> None:
+        """Re-apply a captured expand/collapse state to the keyed group/root
+        rows (read-side twin of _capture_expansion). Rows absent from the
+        snapshot default to expanded, matching _restore_expand."""
+        if self._tree is None:
+            return
+
+        def walk(item: QTreeWidgetItem | None) -> None:
+            if item is None:
+                return
+            key = item.data(0, EXPAND_KEY_ROLE)
+            if key:
+                item.setExpanded(snapshot.get(key, True))
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            walk(self._tree.topLevelItem(i))
+
+    def _apply_filter(self) -> None:
+        """Show only rows whose address OR label contains the filter text
+        (case-insensitive), hiding group/scheme rows whose leaves all hide and
+        force-expanding branches that hold a match so results are visible. Uses
+        setHidden only — it never touches the selection/current item, so no
+        itemSelectionChanged ripple (a filtered-out selected row stays
+        selected-but-hidden). Clearing the filter restores every row and the
+        user's pre-filter collapse state."""
+        if self._tree is None:
+            return
+        needle = self._filter_text.strip().lower()
+        filtering = bool(needle)
+        # Snapshot the true collapse state on the empty→non-empty transition so
+        # the forced expand below can be undone on clear.
+        if filtering and self._pre_filter_expansion is None:
+            self._pre_filter_expansion = self._capture_expansion()
+
+        def visit(item: QTreeWidgetItem | None) -> bool:
+            if item is None:
+                return False
+            addr = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(addr, str) and addr:          # address leaf
+                label = str(item.data(0, ACCOUNT_LABEL_ROLE) or "")
+                show = (not filtering
+                        or needle in addr.lower()
+                        or needle in label.lower())
+                item.setHidden(not show)
+                return show
+            shown = False                               # group / scheme row
+            for i in range(item.childCount()):
+                if visit(item.child(i)):
+                    shown = True
+            item.setHidden(filtering and not shown)
+            if filtering and shown:
+                item.setExpanded(True)                  # surface the match
+            return shown
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i))
+
+        if not filtering and self._pre_filter_expansion is not None:
+            snap, self._pre_filter_expansion = self._pre_filter_expansion, None
+            self._restore_expansion_snapshot(snap)
 
     def _update_account_buttons(self, addrs: list[str] | None = None) -> None:
         """Sync the bottom-row action buttons to the current selection.

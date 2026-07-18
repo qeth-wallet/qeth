@@ -2590,6 +2590,127 @@ class TestWalletsTreeHidesEmptyRoots:
             "Ledger", "Hot wallet", "Watch only"]
 
 
+class TestWalletsFindBar:
+    """Browser-style Ctrl+F find bar in the Accounts tab: filters the tree to
+    rows whose label OR address contains the typed text (case-insensitive),
+    force-expanding matched branches and hiding empty ones, restoring the
+    collapse state on clear — all without churning the selection broadcast."""
+
+    def _plugin(self, qtbot):
+        from qeth.store import Store
+        from qeth.plugins.wallets import WalletsPlugin
+        a1 = "0x" + "11" * 20
+        a2 = "0x" + "22" * 20
+        store = Store.load()
+        # a1 lives in a grouped Ledger branch and carries a label; a2 in a
+        # flat Hot-wallet branch. Distinct branches let us assert a whole
+        # branch hides when none of its accounts match.
+        store.accounts = [
+            {"address": a1, "source": "ledger", "scheme": "Ledger Live",
+             "label": "Treasury"},
+            {"address": a2, "source": "hot", "label": ""},
+        ]
+        store.default_account = a1
+        plugin = WalletsPlugin(store)
+        qtbot.addWidget(plugin.widget())
+        plugin._rebuild_tree()
+        return plugin, a1, a2
+
+    def _root_of(self, plugin, addr):
+        """The top-level branch root above ``addr``'s leaf."""
+        it = plugin._find_item(addr)
+        assert it is not None
+        while it.parent() is not None:
+            it = it.parent()
+        return it
+
+    def test_filter_matches_address_case_insensitive(self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        plugin._search_edit.setText("2222")          # only a2's address
+        assert plugin._find_item(a2).isHidden() is False
+        assert plugin._find_item(a1).isHidden() is True
+
+    def test_filter_matches_label(self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        plugin._search_edit.setText("treas")         # vs stored "Treasury"
+        assert plugin._find_item(a1).isHidden() is False
+        assert plugin._find_item(a2).isHidden() is True
+
+    def test_nonmatching_branch_hides_and_clear_restores(self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        plugin._search_edit.setText("1111")          # only a1 (Ledger) matches
+        assert self._root_of(plugin, a2).isHidden() is True   # Hot root hidden
+        assert self._root_of(plugin, a1).isHidden() is False
+        plugin._search_edit.setText("")              # clear → restore all
+        assert self._root_of(plugin, a2).isHidden() is False
+        assert plugin._find_item(a1).isHidden() is False
+        assert plugin._find_item(a2).isHidden() is False
+
+    def test_ctrl_f_shows_and_escape_hides_and_clears(self, qtbot, tmp_qeth):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        plugin, a1, a2 = self._plugin(qtbot)
+        plugin.widget().show()                       # for reliable key delivery
+        plugin.act_find.trigger()                    # Ctrl+F
+        assert plugin._search_edit.isHidden() is False
+        assert plugin.act_search.isChecked() is True
+        plugin._search_edit.setText("1111")
+        assert plugin._find_item(a2).isHidden() is True
+        QTest.keyClick(plugin._search_edit, Qt.Key.Key_Escape)
+        assert plugin._search_edit.isHidden() is True
+        assert plugin._filter_text == ""
+        assert plugin.act_search.isChecked() is False
+        assert plugin._find_item(a1).isHidden() is False
+        assert plugin._find_item(a2).isHidden() is False
+
+    def test_toggle_button_action_syncs_both_ways(self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        # The Search button is the last bottom-row widget.
+        search_btn = plugin.action_widgets()[-1]
+        assert search_btn.isCheckable()
+        search_btn.click()                           # open via the button
+        assert plugin._search_edit.isHidden() is False
+        assert plugin.act_search.isChecked() is True
+        plugin.act_search.setChecked(False)          # close via the action
+        assert plugin._search_edit.isHidden() is True
+        assert search_btn.isChecked() is False
+
+    def test_filter_survives_rebuild_without_rebroadcast(self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        assert plugin.select_address(a2)             # user reads a2
+        emits: list = []
+        plugin.selected_address_changed.connect(emits.append)
+        plugin._search_edit.setText("1111")          # hides a2 (still current)
+        plugin._rebuild_tree()                        # async trigger mid-filter
+        # Filter re-applied after the rebuild.
+        assert plugin._find_item(a2).isHidden() is True
+        assert plugin._find_item(a1).isHidden() is False
+        # Selection preserved (recovered from currentItem) — not jumped to the
+        # default — and NOT re-broadcast (the Helios-drop churn).
+        assert emits == []
+        assert plugin._last_emitted == a2
+        cur = plugin._tree.currentItem()
+        assert cur is not None and cur.data(0, Qt.ItemDataRole.UserRole) == a2
+
+    def test_match_force_expands_then_clear_restores_collapse(
+            self, qtbot, tmp_qeth):
+        plugin, a1, a2 = self._plugin(qtbot)
+        ledger_root = self._root_of(plugin, a1)
+        ledger_root.setExpanded(False)               # user collapses the branch
+        assert ledger_root.isExpanded() is False
+        plugin._search_edit.setText("1111")          # matches a1 inside Ledger
+        assert self._root_of(plugin, a1).isExpanded() is True   # forced open
+        plugin._search_edit.setText("")              # clear
+        assert self._root_of(plugin, a1).isExpanded() is False  # collapse back
+        # A rebuild WHILE filtered must snapshot the true (collapsed) state, not
+        # the forced-open one, so clearing afterwards still restores collapse.
+        self._root_of(plugin, a1).setExpanded(False)
+        plugin._search_edit.setText("1111")
+        plugin._rebuild_tree()
+        plugin._search_edit.setText("")
+        assert self._root_of(plugin, a1).isExpanded() is False
+
+
 class TestTokensStartupNonBlocking:
     """Pin the no-wait-for-token-lists startup behaviour: when the
     wallet cache holds tokens for the selected view, the panel must
@@ -2658,12 +2779,13 @@ class TestWalletsPlugin:
 
     def test_action_widgets_are_account_buttons(self, wallets_plugin):
         # Add / Copy / Remove plus the per-account Sign / QR / Label /
-        # Connect icon buttons mount on the slot's bottom row.
+        # Connect icon buttons and the find-bar Search toggle mount on the
+        # slot's bottom row.
         wallets_plugin.widget()  # ensure the buttons are built
         actions = wallets_plugin.action_widgets()
         assert actions == wallets_plugin._account_buttons
-        # Add, Copy, Remove, Sign, QR, Label, Connect.
-        assert len(actions) == 7
+        # Add, Copy, Remove, Sign, QR, Label, Connect, Search.
+        assert len(actions) == 8
 
     def test_account_buttons_mirror_action_enabled(self, wallets_plugin):
         # Copy/Remove are QPushButtons (styled like the Tokens Send

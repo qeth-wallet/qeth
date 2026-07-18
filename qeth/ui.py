@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         # alive). Plugins register workers via host.start_worker(...);
         # they self-evict via the ``finished`` signal.
         self._active_workers: set[QThread] = set()
+        self._shutting_down = False
         # On quit, join any still-running workers before Qt tears them down —
         # the same QThread-alive-on-destroy abort as above, but at shutdown: it
         # SIGABRTs, which on macOS pops a "closed unexpectedly" dialog on Ctrl+C.
@@ -644,11 +645,42 @@ class MainWindow(QMainWindow):
 
     def start_worker(self, worker: QThread) -> QThread:
         """Track a worker so Python doesn't GC it while running."""
+        if self._shutting_down:
+            # Timers and queued plugin signals can race with the initial quit
+            # event. Do not let that race extend shutdown with fresh work.
+            worker.deleteLater()
+            return worker
         self._active_workers.add(worker)
         worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
+
+    def begin_shutdown(self) -> None:
+        """Stop admitting work and ask active QThreads to finish early."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        for worker in list(self._active_workers):
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass          # C++ object already gone
+        if self._tray is not None:
+            self._tray.shutdown()
+
+    def has_running_workers(self) -> bool:
+        """Whether any tracked QThread is still executing."""
+        running = False
+        for worker in list(self._active_workers):
+            try:
+                if worker.isRunning():
+                    running = True
+                else:
+                    self._active_workers.discard(worker)
+            except RuntimeError:
+                self._active_workers.discard(worker)
+        return running
 
     # Total wall-clock budget for joining in-flight workers at quit. Workers run
     # concurrently, so this bounds the SLOWEST one, not their sum; they do

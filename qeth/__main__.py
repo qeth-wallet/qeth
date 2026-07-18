@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtWidgets import QApplication
 from .alerts import warn
 
@@ -218,6 +218,58 @@ def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
     return timer
 
 
+class _ShutdownCoordinator(QObject):
+    """Delay Qt's final quit until every tracked QThread has stopped.
+
+    Closing the last window, choosing Quit from the macOS application menu,
+    the tray's Exit action, and SIGINT all eventually deliver ``QEvent.Quit``
+    to QApplication. PySide aborts if finalization destroys a running QThread,
+    so intercept that event while workers drain instead of exiting after a
+    short, blocking timeout.
+    """
+
+    def __init__(self, app, window):
+        super().__init__(app)
+        self._app = app
+        self._window = window
+        self._quit_requested = False
+        self._allow_quit = False
+        self._poll = QTimer(self)
+        self._poll.setInterval(50)
+        self._poll.timeout.connect(self._finish_if_ready)
+        app.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+        if (
+            watched is self._app
+            and event.type() == QEvent.Type.Quit
+            and not self._allow_quit
+        ):
+            event.ignore()
+            self._request_quit()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _request_quit(self) -> None:
+        if self._quit_requested:
+            return
+        self._quit_requested = True
+        self._window.begin_shutdown()
+        # A menu/tray quit can arrive while the main window is still visible.
+        # Close it normally so geometry and panel state are persisted.
+        if self._window.isVisible():
+            QTimer.singleShot(0, self._window.close)
+        self._poll.start()
+        QTimer.singleShot(0, self._finish_if_ready)
+
+    def _finish_if_ready(self) -> None:
+        if self._window.has_running_workers():
+            return
+        self._poll.stop()
+        self._allow_quit = True
+        self._app.quit()
+
+
 def main() -> int:
     _harden_x11_backing_store(os.environ, sys.platform)
     _set_ffmpeg_hwaccel(os.environ, sys.platform)
@@ -307,6 +359,10 @@ def main() -> int:
     # ties its lifetime to the window.
     _tray = install_tray(app, win)  # noqa: F841 — kept-alive ref
     win.set_tray(_tray)             # the desktop-notification sink (or None)
+    # Hold Qt's final quit while tracked QThreads drain. In particular this
+    # keeps PySide from destroying a network-blocked BalanceWorker and turning
+    # a normal macOS window close into SIGABRT / "application exited".
+    _shutdown = _ShutdownCoordinator(app, win)  # noqa: F841 — kept-alive ref
     # Ctrl+C → window.close() (persists state) → app quits. Timer is
     # app-parented, so no kept-alive ref needed.
     _install_sigint_shutdown(app, win)

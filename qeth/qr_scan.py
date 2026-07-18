@@ -24,6 +24,7 @@ light (see the module functions):
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal
@@ -109,6 +110,7 @@ class CameraScanner(QObject):
 
     decoded = Signal(str)
     frame = Signal(object)          # QImage, for the live preview
+    failed = Signal(str)            # camera/permission failure for the UI
     _want_decode = Signal(object)   # QImage → the worker thread (queued)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -123,6 +125,9 @@ class CameraScanner(QObject):
         self._session.setCamera(self._camera)
         self._session.setVideoSink(self._sink)
         self._configure_camera()
+        self._camera.errorOccurred.connect(self._on_camera_error)
+        self._start_requested = False
+        self._permission_request_in_flight = False
 
         # Decode off the GUI thread; ``_busy`` (only ever touched on the GUI
         # thread — set here, cleared by the worker's queued ``done``) drops
@@ -171,12 +176,41 @@ class CameraScanner(QObject):
             cam.setWhiteBalanceMode(auto_wb)
 
     def start(self) -> None:
-        self._camera.start()
+        """Start capture once the platform has granted camera access.
+
+        macOS starts at ``Undetermined`` and requires an explicit request;
+        calling ``QCamera.start()`` directly only logs "Access to camera not
+        granted" and never reports an error to the application. Other desktop
+        platforms retain the direct start path, including Linux distributions
+        whose system Qt predates ``QCameraPermission``.
+        """
+        self._start_requested = True
+        if sys.platform != "darwin":
+            self._camera.start()
+            return
+
+        from PySide6.QtCore import QCameraPermission, QCoreApplication, Qt
+
+        app = QCoreApplication.instance()
+        if app is None:
+            self.failed.emit("Camera access is unavailable")
+            return
+
+        permission = QCameraPermission()
+        status = app.checkPermission(permission)
+        if status == Qt.PermissionStatus.Granted:
+            self._camera.start()
+        elif status == Qt.PermissionStatus.Denied:
+            self._emit_permission_denied()
+        elif not self._permission_request_in_flight:
+            self._permission_request_in_flight = True
+            app.requestPermission(permission, self, self._permission_decided)
 
     def stop(self) -> None:
         # Detach the frame callback FIRST so no frame arrives mid-teardown, then
         # stop the camera and drain the decode thread. Idempotent (stop may be
         # called more than once).
+        self._start_requested = False
         try:
             self._sink.videoFrameChanged.disconnect(self._on_frame)
         except (RuntimeError, TypeError):
@@ -185,6 +219,26 @@ class CameraScanner(QObject):
         if self._decode_thread.isRunning():
             self._decode_thread.quit()
             self._decode_thread.wait(2000)
+
+    def _permission_decided(self, permission: Any) -> None:
+        """Continue an asynchronous permission request while the dialog lives."""
+        from PySide6.QtCore import Qt
+
+        self._permission_request_in_flight = False
+        if not self._start_requested:
+            return
+        if permission.status() == Qt.PermissionStatus.Granted:
+            self._camera.start()
+        else:
+            self._emit_permission_denied()
+
+    def _emit_permission_denied(self) -> None:
+        self.failed.emit(
+            "Camera access denied. Allow qeth to use the camera in System Settings."
+        )
+
+    def _on_camera_error(self, _error: Any, message: str) -> None:
+        self.failed.emit(message or "The camera could not be started")
 
     def _on_frame(self, video_frame: Any) -> None:
         image = video_frame.toImage()

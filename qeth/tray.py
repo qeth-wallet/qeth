@@ -154,3 +154,7 @@ class _TrayController(QObject):
             self._win.isVisible()
             and not bool(self._win.windowState() & Qt.WindowState.WindowMinimized)
         )
+
+    def shutdown(self) -> None:
+        """Remove the tray affordance while the application drains workers."""
+        self.tray.hide()

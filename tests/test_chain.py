@@ -608,6 +608,26 @@ class TestRpcFailover:
         out = p2.make_request("eth_call", [])
         assert "error" in out and seen == ["http://a"]   # stopped at first
 
+    def test_shutdown_interruption_stops_failover(self, monkeypatch):
+        import qeth.chain as ch
+        ch._ensure_heavy_imports()
+        seen = []
+        interrupted = iter((False, True))
+
+        def fail(self, method, params):
+            seen.append(self.endpoint_uri)
+            raise ch.requests.exceptions.Timeout("still reading")
+
+        monkeypatch.setattr(ch, "_qthread_interrupted",
+                            lambda: next(interrupted))
+        monkeypatch.setattr(ch.HTTPProvider, "make_request", fail)
+        provider = ch._failover_provider(
+            ["http://slow", "http://fallback"], request_kwargs={}, session=None)
+
+        with pytest.raises(InterruptedError, match="shutting down"):
+            provider.make_request("eth_call", [])
+        assert seen == ["http://slow"]
+
     def test_failover_rotates_past_rate_limit_body(self, monkeypatch):
         """A 200 whose JSON-RPC error is the provider's LIMITER (not the
         chain answering the request) rotates to the next member — and when

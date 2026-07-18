@@ -57,8 +57,9 @@ class TestRoundTrip:
         s1 = Store()
         s1.accounts = [
             {"address": "0xAAA", "path": "44'/60'/0'/0/0", "source": "ledger",
-             "scheme": "Ledger Live", "label": ""},
+             "scheme": "Ledger Live", "tree": "0xaaa", "label": ""},
         ]
+        s1.tree_labels = {"ledger/0xaaa": "0xAAA…"}
         s1.default_account = "0xAAA"
         s1.current_chain_id = 10
         s1.hide_token(1, "0xDeadBeef00000000000000000000000000000001")
@@ -74,6 +75,7 @@ class TestRoundTrip:
         assert s2.custom_tokens == {
             (1, "0xcafe00000000000000000000000000000000cafe")}
         assert s2.accounts == s1.accounts
+        assert s2.tree_labels == s1.tree_labels
         assert s2.default_account == "0xAAA"
         assert s2.current_chain_id == 10
         assert s2.hidden_tokens == {(1, "0xdeadbeef00000000000000000000000000000001")}
@@ -220,6 +222,144 @@ class TestReorderAccounts:
         s = Store()
         s.set_source_order(["qr", "ledger", "hot"])
         assert Store.load().account_source_order == ["qr", "ledger", "hot"]
+
+
+def _led(addr, path, scheme="Ledger Live"):
+    return {"address": addr, "path": path, "source": "ledger",
+            "scheme": scheme, "label": ""}
+
+
+def _qr(addr, path, xfp, scheme="BIP44 (…/0/i)"):
+    return {"address": addr, "path": path, "source": "qr",
+            "scheme": scheme, "xfp": xfp, "label": ""}
+
+
+class TestTreeMigration:
+    def test_ledger_one_scheme_is_one_tree(self, tmp_qeth):
+        accts = [_led("0xAAA", "44'/60'/0'/0/0"), _led("0xBBB", "44'/60'/1'/0/0")]
+        labels: dict = {}
+        from qeth.store import _assign_tree_ids
+        _assign_tree_ids(accts, labels)
+        # Both accounts land in one tree, anchored on the first address.
+        assert accts[0]["tree"] == "0xaaa"
+        assert accts[1]["tree"] == "0xaaa"
+        assert labels == {"ledger/0xaaa": "0xAAA…"}
+
+    def test_qr_distinct_xfp_split_into_two_trees(self, tmp_qeth):
+        accts = [_qr("0xAAA", "m/44'/60'/0'/0/0", "0x11111111"),
+                 _qr("0xBBB", "m/44'/60'/0'/0/0", "0x22222222")]
+        from qeth.store import _assign_tree_ids
+        _assign_tree_ids(accts, {})
+        assert accts[0]["tree"] == "0xaaa"
+        assert accts[1]["tree"] == "0xbbb"      # different device → own tree
+
+    def test_existing_label_not_overwritten(self, tmp_qeth):
+        accts = [_led("0xAAA", "44'/60'/0'/0/0")]
+        labels = {"ledger/0xaaa": "My Nano"}
+        from qeth.store import _assign_tree_ids
+        _assign_tree_ids(accts, labels)
+        assert labels["ledger/0xaaa"] == "My Nano"
+
+    def test_already_stamped_records_untouched(self, tmp_qeth):
+        accts = [{"address": "0xAAA", "path": "p", "source": "ledger",
+                  "scheme": "Ledger Live", "tree": "0xkept", "label": ""}]
+        from qeth.store import _assign_tree_ids
+        _assign_tree_ids(accts, {})
+        assert accts[0]["tree"] == "0xkept"
+
+    def test_migration_persists_and_is_idempotent(self, tmp_qeth):
+        s = Store()
+        s.accounts = [_led("0xAAA", "44'/60'/0'/0/0")]
+        s.save()
+        s2 = Store.load()                       # migration runs on load
+        assert s2.accounts[0]["tree"] == "0xaaa"
+        assert s2.tree_labels == {"ledger/0xaaa": "0xAAA…"}
+        s2.save()
+        s3 = Store.load()                       # second load must not change it
+        assert s3.accounts == s2.accounts
+        assert s3.tree_labels == s2.tree_labels
+
+
+class TestTreeLabels:
+    def test_set_tree_label_round_trips_and_noop(self, tmp_qeth):
+        s = Store()
+        assert s.set_tree_label("ledger/0xaaa", "Cold") is True
+        assert s.set_tree_label("ledger/0xaaa", "Cold") is False   # no change
+        assert Store.load().tree_labels == {"ledger/0xaaa": "Cold"}
+
+    def test_remove_last_account_prunes_label_sibling_survives(self, tmp_qeth):
+        s = Store()
+        s.accounts = [
+            {"address": "0xAAA", "path": "p0", "source": "ledger",
+             "scheme": "Ledger Live", "tree": "0xaaa", "label": ""},
+            {"address": "0xBBB", "path": "p1", "source": "ledger",
+             "scheme": "Ledger Live", "tree": "0xbbb", "label": ""},
+        ]
+        s.tree_labels = {"ledger/0xaaa": "A", "ledger/0xbbb": "B"}
+        s.remove_account("0xAAA", "p0")
+        assert s.tree_labels == {"ledger/0xbbb": "B"}   # A pruned, B survives
+
+    def test_default_tree_label_from_current_first_account(self, tmp_qeth):
+        s = Store()
+        s.accounts = [
+            {"address": "0x425dEEEE", "path": "p", "source": "ledger",
+             "scheme": "Ledger Live", "tree": "0xanchor", "label": ""},
+        ]
+        # Derived from the tree's current first account, not the id.
+        assert s.default_tree_label("ledger/0xanchor") == "0x425d…"
+        # Empty tree → falls back to the id (itself an address).
+        assert s.default_tree_label("ledger/0xdead00") == "0xdead…"
+
+    def test_ensure_tree_label_seeds_once(self, tmp_qeth):
+        s = Store()
+        s.accounts = [
+            {"address": "0x425dEEEE", "path": "p", "source": "ledger",
+             "scheme": "Ledger Live", "tree": "0x425deeee", "label": ""},
+        ]
+        s.ensure_tree_label("ledger", "0x425deeee")
+        assert s.tree_labels["ledger/0x425deeee"] == "0x425d…"
+        s.set_tree_label("ledger/0x425deeee", "Renamed")
+        s.ensure_tree_label("ledger", "0x425deeee")     # must not clobber
+        assert s.tree_labels["ledger/0x425deeee"] == "Renamed"
+
+
+class TestResolveTree:
+    def _store(self):
+        s = Store()
+        s.accounts = [
+            _led("0xA1", "44'/60'/0'/0/0") | {"tree": "0xa1"},
+            _led("0xA2", "44'/60'/1'/0/0") | {"tree": "0xa1"},
+            _qr("0xQ1", "m/44'/60'/0'/0/0", "0x11111111") | {"tree": "0xq1"},
+        ]
+        return s
+
+    def test_ledger_overlap_join(self, tmp_qeth):
+        s = self._store()
+        # Re-scan hits an existing (address, path) — even one not being re-added.
+        tid = s.resolve_tree("ledger", "Ledger Live",
+                             [("0xA2", "44'/60'/1'/0/0")])
+        assert tid == "0xa1"
+
+    def test_ledger_disjoint_is_new_tree(self, tmp_qeth):
+        s = self._store()
+        assert s.resolve_tree("ledger", "Ledger Live", [("0xZZ", "x")]) is None
+
+    def test_qr_fingerprint_join(self, tmp_qeth):
+        s = self._store()
+        assert s.resolve_tree("qr", "BIP44 (…/0/i)", [],
+                              xfp="0x11111111") == "0xq1"
+
+    def test_qr_zero_xfp_falls_back_to_overlap(self, tmp_qeth):
+        s = self._store()
+        tid = s.resolve_tree("qr", "BIP44 (…/0/i)",
+                             [("0xQ1", "m/44'/60'/0'/0/0")], xfp="0x00000000")
+        assert tid == "0xq1"
+
+    def test_scheme_mismatch_is_new_tree(self, tmp_qeth):
+        s = self._store()
+        # Same addresses, different scheme → a different tree.
+        assert s.resolve_tree("ledger", "Legacy",
+                             [("0xA1", "44'/60'/0'/0/0")]) is None
 
 
 class TestSameAddressTwoSigners:

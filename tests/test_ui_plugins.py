@@ -2750,6 +2750,156 @@ class TestWalletsFindBar:
         assert plugin.selected_address == a2
 
 
+class TestPerDeviceTrees:
+    """Grouped sources (ledger/qr) split into one subtree per DEVICE, keyed on
+    the record's tree id. Each subtree row keeps the scheme+path text and gains
+    a renameable label pill (TREE_LABEL_ROLE)."""
+
+    A1 = "0x" + "11" * 20
+    A2 = "0x" + "22" * 20
+    B1 = "0x" + "33" * 20
+
+    def _plugin(self, qtbot, accounts, tree_labels=None):
+        from qeth.store import Store
+        from qeth.plugins.wallets import WalletsPlugin
+        store = Store.load()
+        store.accounts = list(accounts)
+        store.tree_labels = dict(tree_labels or {})
+        store.default_account = accounts[0]["address"] if accounts else None
+        plugin = WalletsPlugin(store)
+        qtbot.addWidget(plugin.widget())
+        plugin._rebuild_tree()
+        return plugin, store
+
+    def _two_tree_accounts(self):
+        led = lambda addr, path, tid: {                       # noqa: E731
+            "address": addr, "path": path, "source": "ledger",
+            "scheme": "Ledger Live", "tree": tid, "label": ""}
+        return [
+            led(self.A1, "44'/60'/0'/0/0", "0xa"),
+            led(self.A2, "44'/60'/1'/0/0", "0xa"),   # same device
+            led(self.B1, "44'/60'/0'/0/0", "0xb"),   # different device
+        ]
+
+    def _subtrees(self, plugin):
+        root = plugin._tree.topLevelItem(0)
+        return [root.child(i) for i in range(root.childCount())]
+
+    def test_two_trees_two_rows(self, qtbot, tmp_qeth):
+        plugin, _ = self._plugin(qtbot, self._two_tree_accounts(),
+                                 {"ledger/0xa": "Nano", "ledger/0xb": "Blue"})
+        from qeth.plugins.wallets import TREE_KEY_ROLE, TREE_LABEL_ROLE
+        subs = self._subtrees(plugin)
+        assert len(subs) == 2                              # split per device
+        # Same text (scheme+path), distinct keys + label pills.
+        assert subs[0].text(0) == subs[1].text(0)
+        assert [s.data(0, TREE_KEY_ROLE) for s in subs] == [
+            "ledger/0xa", "ledger/0xb"]
+        assert [s.data(0, TREE_LABEL_ROLE) for s in subs] == ["Nano", "Blue"]
+
+    def test_unstamped_records_stay_one_row(self, qtbot, tmp_qeth):
+        # No tree id → the old scheme-grouped behaviour (one row), no pill.
+        plugin, _ = self._plugin(qtbot, [
+            {"address": self.A1, "path": "44'/60'/0'/0/0", "source": "ledger",
+             "scheme": "Ledger Live", "label": ""},
+            {"address": self.A2, "path": "44'/60'/1'/0/0", "source": "ledger",
+             "scheme": "Ledger Live", "label": ""},
+        ])
+        from qeth.plugins.wallets import TREE_KEY_ROLE
+        subs = self._subtrees(plugin)
+        assert len(subs) == 1
+        assert subs[0].data(0, TREE_KEY_ROLE) is None
+
+    def test_per_tree_expansion_survives_rebuild(self, qtbot, tmp_qeth):
+        plugin, _ = self._plugin(qtbot, self._two_tree_accounts(),
+                                 {"ledger/0xa": "Nano", "ledger/0xb": "Blue"})
+        subs = self._subtrees(plugin)
+        subs[0].setExpanded(False)                         # collapse first tree
+        subs[1].setExpanded(True)
+        plugin._rebuild_tree()
+        subs = self._subtrees(plugin)
+        assert subs[0].isExpanded() is False               # stays collapsed
+        assert subs[1].isExpanded() is True                # twin unaffected
+
+    def test_tree_row_selection_enables_only_label(self, qtbot, tmp_qeth):
+        plugin, _ = self._plugin(qtbot, self._two_tree_accounts(),
+                                 {"ledger/0xa": "Nano", "ledger/0xb": "Blue"})
+        grp = self._subtrees(plugin)[0]
+        plugin._tree.setCurrentItem(grp)                   # select the tree row
+        assert plugin.selected_addresses() == []           # not an account
+        assert plugin._selected_tree_key() == "ledger/0xa"
+        assert plugin.act_label.isEnabled() is True
+        assert plugin.act_copy.isEnabled() is False
+        assert plugin.act_sign.isEnabled() is False
+        assert plugin.act_connect.isEnabled() is False
+        assert plugin.act_remove.isEnabled() is False
+
+    def test_rename_updates_pill_and_empty_resets_to_default(
+            self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.plugins.wallets as wmod
+        from types import SimpleNamespace
+        from qeth.plugins.wallets import TREE_LABEL_ROLE
+        plugin, store = self._plugin(qtbot, self._two_tree_accounts(),
+                                     {"ledger/0xa": "Nano", "ledger/0xb": "Blue"})
+        plugin.host = SimpleNamespace(status_message=lambda *a, **k: None)
+        plugin._tree.setCurrentItem(self._subtrees(plugin)[0])
+        # Rename to a custom label.
+        monkeypatch.setattr(wmod, "prompt_text", lambda *a, **k: ("Cold Ledger", True))
+        plugin._edit_label()
+        assert store.tree_labels["ledger/0xa"] == "Cold Ledger"
+        assert self._subtrees(plugin)[0].data(0, TREE_LABEL_ROLE) == "Cold Ledger"
+        # Empty input resets to the default derived from the anchor address.
+        plugin._tree.setCurrentItem(self._subtrees(plugin)[0])
+        monkeypatch.setattr(wmod, "prompt_text", lambda *a, **k: ("   ", True))
+        plugin._edit_label()
+        assert store.tree_labels["ledger/0xa"] == self.A1[:6] + "…"
+
+    def test_context_menu_on_tree_row_has_edit_label(
+            self, qtbot, tmp_qeth, monkeypatch):
+        import qeth.plugins.wallets as wmod
+        from types import SimpleNamespace as SN
+        from PySide6.QtCore import QPoint
+
+        class _FakeMenu:
+            last = None
+
+            def __init__(self, *a, **k):
+                self.items: list[str] = []
+                _FakeMenu.last = self
+
+            def addAction(self, *a, **k):
+                if len(a) == 1 and hasattr(a[0], "text"):
+                    self.items.append(a[0].text().replace("&", ""))
+                    return a[0]
+                self.items.append(str(a[-1]).replace("&", ""))
+                return SN(triggered=SN(connect=lambda *a, **k: None))
+
+            def addSeparator(self):
+                pass
+
+            def exec(self, *a, **k):
+                return None
+
+        plugin, _ = self._plugin(qtbot, self._two_tree_accounts(),
+                                 {"ledger/0xa": "Nano", "ledger/0xb": "Blue"})
+        plugin._tree.setCurrentItem(self._subtrees(plugin)[0])
+        monkeypatch.setattr(wmod, "QMenu", _FakeMenu)
+        plugin._on_tree_context_menu(QPoint(0, 0))
+        assert "Edit Label…" in _FakeMenu.last.items
+
+    def test_find_bar_matches_tree_label(self, qtbot, tmp_qeth):
+        from qeth.plugins.wallets import ACCOUNT_PATH_ROLE  # noqa: F401
+        plugin, _ = self._plugin(qtbot, self._two_tree_accounts(),
+                                 {"ledger/0xa": "Treasury", "ledger/0xb": "Blue"})
+        plugin._search_edit.setText("treasury")            # matches tree 0xa label
+        subs = self._subtrees(plugin)
+        # The Treasury subtree shows with all its leaves; the other hides.
+        assert subs[0].isHidden() is False
+        assert all(not subs[0].child(i).isHidden()
+                   for i in range(subs[0].childCount()))
+        assert subs[1].isHidden() is True
+
+
 class TestTokensStartupNonBlocking:
     """Pin the no-wait-for-token-lists startup behaviour: when the
     wallet cache holds tokens for the selected view, the panel must

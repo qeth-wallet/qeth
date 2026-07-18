@@ -26,7 +26,9 @@ from .plugins.tokens import TokensPlugin
 from .plugins.transactions import (
     SignTransactionDialog, TransactionsPlugin,
 )
-from .plugins.wallets import ACCOUNT_LABEL_ROLE, WalletsPlugin
+from .plugins.wallets import (
+    ACCOUNT_LABEL_ROLE, TREE_LABEL_ROLE, WalletsPlugin,
+)
 
 # Sticky-note colours for the wallet-label pill: a self-consistent (bg, fg)
 # pair (pale yellow / dark brown) that reads on any palette because the pill
@@ -34,6 +36,11 @@ from .plugins.wallets import ACCOUNT_LABEL_ROLE, WalletsPlugin
 # Send-dialog recipient tints (feedback_theme_safe_colors).
 _STICKY_BG = "#fcefa1"
 _STICKY_FG = "#43360a"
+# The per-device tree label rides the same pill, in a distinct pale-blue / dark-
+# navy pair so a whole-tree label reads apart from a per-account one (same
+# lightness as the yellow, so it stays legible on light and dark palettes).
+_TREE_STICKY_BG = "#c7e0f7"
+_TREE_STICKY_FG = "#123a5e"
 # Pill geometry: horizontal/vertical text padding, gap from the address,
 # and right margin inside the row.
 _STICKY_PAD_H = 6
@@ -1611,7 +1618,8 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         y = option.rect.top() + (option.rect.height() - h) // 2
         return QRect(x, y, w, h)
 
-    def _draw_sticky_pill(self, painter, pill, label, font):
+    def _draw_sticky_pill(self, painter, pill, label, font,
+                          bg=_STICKY_BG, fg=_STICKY_FG):
         if pill is None:
             return
         painter.save()
@@ -1619,12 +1627,12 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         # A 1px outline a few shades darker than the fill gives the pill a
         # defined sticky-note edge. Shrink by the pen width so the stroke
         # stays inside the reserved rect.
-        pen = QPen(QColor(_STICKY_BG).darker(150))
+        pen = QPen(QColor(bg).darker(150))
         pen.setWidthF(1.0)
         painter.setPen(pen)
-        painter.setBrush(QColor(_STICKY_BG))
+        painter.setBrush(QColor(bg))
         painter.drawRoundedRect(pill.adjusted(0, 0, -1, -1), 4, 4)
-        painter.setPen(QColor(_STICKY_FG))
+        painter.setPen(QColor(fg))
         painter.setFont(font)
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
@@ -1679,8 +1687,15 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
 
         # A labeled wallet row draws the label as a sticky-note pill on the
         # right; reserve its width so the address text (which the tree
-        # elides) shrinks to make room, leaving only the label tinted.
+        # elides) shrinks to make room, leaving only the label tinted. An
+        # account label (yellow) wins over a device-tree label (blue) when a
+        # row somehow carries both — though in practice they're on different
+        # rows (leaf vs subgroup).
         label = index.data(ACCOUNT_LABEL_ROLE)
+        pill_bg, pill_fg = _STICKY_BG, _STICKY_FG
+        if not label:
+            label = index.data(TREE_LABEL_ROLE)
+            pill_bg, pill_fg = _TREE_STICKY_BG, _TREE_STICKY_FG
         pill = self._sticky_pill_rect(option, label) if label else None
         text_rect = (
             option.rect.adjusted(0, 0, -(pill.width() + _STICKY_GAP), 0)
@@ -1721,7 +1736,8 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             opt.palette.setColor(QPalette.ColorRole.Base, highlight)
             opt.palette.setColor(QPalette.ColorRole.AlternateBase, highlight)
             super().paint(painter, opt, index)
-            self._draw_sticky_pill(painter, pill, label, option.font)
+            self._draw_sticky_pill(painter, pill, label, option.font,
+                                   pill_bg, pill_fg)
             self._redraw_disclosure(painter, option, index)
             return
 
@@ -1754,7 +1770,8 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             opt.palette.setColor(QPalette.ColorRole.Base, muted)
             opt.palette.setColor(QPalette.ColorRole.AlternateBase, muted)
             super().paint(painter, opt, index)
-            self._draw_sticky_pill(painter, pill, label, option.font)
+            self._draw_sticky_pill(painter, pill, label, option.font,
+                                   pill_bg, pill_fg)
             self._redraw_disclosure(painter, option, index)
             return
 
@@ -1774,7 +1791,8 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.StateFlag.State_HasFocus
         opt.state &= ~QStyle.StateFlag.State_MouseOver
         super().paint(painter, opt, index)
-        self._draw_sticky_pill(painter, pill, label, option.font)
+        self._draw_sticky_pill(painter, pill, label, option.font,
+                               pill_bg, pill_fg)
 
 
 class _FocusRepainter(QObject):

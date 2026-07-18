@@ -72,6 +72,14 @@ ACCOUNT_PATH_ROLE = Qt.ItemDataRole.UserRole + 3
 # The source key ("ledger" / "hot" / "watch_only" / "qr") on a top-level branch
 # root, so a branch drag can be persisted as a source order.
 ROOT_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 4
+# A per-device subtree's user label on its scheme subgroup row. The shared
+# selection delegate (ui.py) paints it as a pill like ACCOUNT_LABEL_ROLE, but in
+# a distinct colour to read as a whole-tree label. The row's TEXT is unchanged
+# (still the scheme + path).
+TREE_LABEL_ROLE = Qt.ItemDataRole.UserRole + 5
+# "source/tree_id" on a subgroup row — the Store.tree_labels key, so a rename
+# knows which tree it edits. Present only on rows that carry a tree id.
+TREE_KEY_ROLE = Qt.ItemDataRole.UserRole + 6
 
 # Top-level branches in their built-in default order:
 # (source key, root label, add-action attribute, grouped-by-scheme). The user
@@ -437,6 +445,18 @@ class WalletsPlugin(Plugin):
         return (it.data(0, Qt.ItemDataRole.UserRole),
                 it.data(0, ACCOUNT_PATH_ROLE) or "")
 
+    def _selected_tree_key(self) -> str | None:
+        """The Store.tree_labels key ("source/tree_id") of the single selected
+        device-subtree row, or None when the selection isn't exactly one tree
+        row. Leaves never carry TREE_KEY_ROLE, so this is None for accounts."""
+        if self._tree is None:
+            return None
+        sel = self._tree.selectedItems()
+        if len(sel) != 1:
+            return None
+        key = sel[0].data(0, TREE_KEY_ROLE)
+        return key if isinstance(key, str) and key else None
+
     def _select_key(self, address: str, path: str) -> bool:
         """Select the exact row for ``(address, path)``. True if found."""
         if self._tree is None:
@@ -773,7 +793,7 @@ class WalletsPlugin(Plugin):
                   QStyle.StandardPixmap.SP_FileDialogListView),
             "Edit &Label…",
         )
-        self.act_label.setToolTip("Edit this account's label")
+        self.act_label.setToolTip("Edit the account's or device's label")
         self.act_label.setEnabled(False)
         self.act_label.triggered.connect(self._edit_label)
 
@@ -1091,17 +1111,29 @@ class WalletsPlugin(Plugin):
 
         default_item: QTreeWidgetItem | None = None
         if grouped:
-            # Group by derivation scheme — a Ledger / air-gapped wallet can hold
-            # several (BIP44, Legacy, …). The subgroup label is the full path.
+            # One subtree per DEVICE: group by the record's tree id so two
+            # physical devices on the same scheme (two Ledgers, a Keystone +
+            # a Keycard) get separate subtrees instead of a merged one. The
+            # row TEXT stays the scheme + full path (unchanged); the device is
+            # disambiguated by a right-aligned label pill (TREE_LABEL_ROLE).
+            # Records without a tree id (hand-built stores, exotic configs)
+            # fall back to grouping by scheme label, rendering exactly as before.
             groups: dict[str, QTreeWidgetItem] = {}
             for a in accts:
-                key = _scheme_label(a) or "Custom"
+                tid = str(a.get("tree") or "")
+                key = tid or (_scheme_label(a) or "Custom")
                 grp = groups.get(key)
                 if grp is None:
-                    grp = QTreeWidgetItem([key])
+                    grp = QTreeWidgetItem([_scheme_label(a) or "Custom"])
                     grp.setFlags(
                         Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
                         | Qt.ItemFlag.ItemIsDropEnabled)
+                    if tid:
+                        tree_key = f"{source}/{tid}"
+                        grp.setData(0, TREE_KEY_ROLE, tree_key)
+                        tlabel = self._store.tree_labels.get(tree_key, "")
+                        if tlabel:
+                            grp.setData(0, TREE_LABEL_ROLE, tlabel)
                     root.addChild(grp)
                     groups[key] = grp
                 it, is_default = self._make_account_item(a)
@@ -1331,20 +1363,26 @@ class WalletsPlugin(Plugin):
         if filtering and self._pre_filter_expansion is None:
             self._pre_filter_expansion = self._capture_expansion()
 
-        def visit(item: QTreeWidgetItem | None) -> bool:
+        def visit(item: QTreeWidgetItem | None, force: bool = False) -> bool:
             if item is None:
                 return False
             addr = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(addr, str) and addr:          # address leaf
                 label = str(item.data(0, ACCOUNT_LABEL_ROLE) or "")
-                show = (not filtering
+                show = (force or not filtering
                         or needle in addr.lower()
                         or needle in label.lower())
                 item.setHidden(not show)
                 return show
-            shown = False                               # group / scheme row
+            # group / scheme / device row. A matching device-tree label force-
+            # shows the whole subtree (so filtering by a device's name reveals
+            # all its accounts), the same way a matching account label shows
+            # its leaf.
+            tlabel = str(item.data(0, TREE_LABEL_ROLE) or "")
+            self_match = filtering and bool(tlabel) and needle in tlabel.lower()
+            shown = False
             for i in range(item.childCount()):
-                if visit(item.child(i)):
+                if visit(item.child(i), force or self_match):
                     shown = True
             item.setHidden(filtering and not shown)
             if filtering and shown:
@@ -1381,10 +1419,14 @@ class WalletsPlugin(Plugin):
             )
         is_watch = acct is not None and acct.get("source") == "watch_only"
         is_default = single and addrs[0] == self._store.default_account
+        # The Label action doubles as the device-tree rename: it's enabled for a
+        # single account OR a single selected tree row (the other buttons stay
+        # off for a tree row — it has no address to act on).
+        is_tree = not single and self._selected_tree_key() is not None
         self.act_copy.setEnabled(single)
         self.act_remove.setEnabled(len(addrs) >= 1)
         self.act_qr.setEnabled(single)
-        self.act_label.setEnabled(single)
+        self.act_label.setEnabled(single or is_tree)
         self.act_sign.setEnabled(single and not is_watch)
         self.act_connect.setEnabled(single and not is_watch and not is_default)
         self.act_connect.setChecked(bool(is_default))
@@ -1429,6 +1471,11 @@ class WalletsPlugin(Plugin):
                 act_default.triggered.connect(
                     lambda _checked=False, a=addr: self._set_default(a)
                 )
+        elif self._selected_tree_key() is not None:
+            # A device-subtree row: only the rename applies (button ↔ menu
+            # parity — the Label button is enabled here too).
+            menu.addSeparator()
+            menu.addAction(self.act_label)
         if addrs:
             menu.addSeparator()
             menu.addAction(self.act_remove)
@@ -1551,16 +1598,25 @@ class WalletsPlugin(Plugin):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
+        # Join the device tree these accounts belong to (a re-scan of a known
+        # Ledger), or start a new one anchored on the first added address.
+        discovered = [(d.address, d.path) for d in dlg.discovered_accounts()]
+        tid = self._store.resolve_tree("ledger", scheme, discovered)
         added_addrs: list[str] = []
         for d in dlg.selected_accounts():
+            if tid is None:
+                tid = d.address.lower()
             if self._store.add_account({
                 "address": d.address,
                 "path": d.path,
                 "source": "ledger",
                 "scheme": scheme,
+                "tree": tid,
                 "label": "",
             }):
                 added_addrs.append(d.address)
+        if added_addrs and tid is not None:
+            self._store.ensure_tree_label("ledger", tid)
         self._rebuild_tree()
         self.default_account_changed.emit()
         if added_addrs and self.host is not None:
@@ -1599,17 +1655,26 @@ class WalletsPlugin(Plugin):
             return
         scheme = dlg.scheme_combo.currentData()   # the key, not the full-path text
         xfp = f"0x{account_key.master_fingerprint():08x}"
+        # Join this device's tree — by fingerprint (distinct per Keystone/
+        # Keycard) or by an address overlap — or start a new one.
+        discovered = [(d.address, d.path) for d in dlg.discovered_accounts()]
+        tid = self._store.resolve_tree("qr", scheme, discovered, xfp=xfp)
         added_addrs: list[str] = []
         for d in dlg.selected_accounts():
+            if tid is None:
+                tid = d.address.lower()
             if self._store.add_account({
                 "address": d.address,
                 "path": d.path,
                 "source": "qr",
                 "scheme": scheme,
                 "xfp": xfp,
+                "tree": tid,
                 "label": "",
             }):
                 added_addrs.append(d.address)
+        if added_addrs and tid is not None:
+            self._store.ensure_tree_label("qr", tid)
         self._rebuild_tree()
         self.default_account_changed.emit()
         if added_addrs and self.host is not None:
@@ -1850,9 +1915,13 @@ class WalletsPlugin(Plugin):
 
     def _edit_label(self) -> None:
         """Label button → small text popup to edit the account's
-        label; persists via the same path as the old inline field."""
+        label; persists via the same path as the old inline field.
+        On a device-subtree row it edits that tree's label instead."""
         addr = self.selected_address
         if not addr:
+            key = self._selected_tree_key()
+            if key is not None:
+                self._edit_tree_label(key)
             return
         # Pre-fill the EFFECTIVE label (what the row actually shows) so editing a
         # repeat address doesn't start from a blank when only its twin carried
@@ -1863,6 +1932,21 @@ class WalletsPlugin(Plugin):
         )
         if ok and new.strip() != current:
             self._on_label_changed(addr, new.strip())
+
+    def _edit_tree_label(self, key: str) -> None:
+        """Rename a device subtree. Empty input resets to the default derived
+        from the tree's first account (so the pill never disappears)."""
+        current = self._store.tree_labels.get(key, "")
+        new, ok = prompt_text(
+            self._container, "Edit Label", "Label for this device:", current,
+        )
+        if not ok:
+            return
+        text = new.strip() or self._store.default_tree_label(key)
+        if self._store.set_tree_label(key, text):
+            self._rebuild_tree()
+            if self.host is not None:
+                self.host.status_message(f"Renamed device tree to “{text}”", 3000)
 
     def _toggle_connect(self) -> None:
         """Connect button → make the selected account the dapp-facing
@@ -2199,6 +2283,18 @@ class AddLedgerDialog(Dialog):
             if (it is not None and it.isSelected()
                     and it.flags() & Qt.ItemFlag.ItemIsEnabled):
                 out.append(it.data(Qt.ItemDataRole.UserRole))
+        return out
+
+    def discovered_accounts(self) -> list[DiscoveredAccount]:
+        """Every scanned account in display order, INCLUDING greyed
+        "(already added)" rows. Those overlaps are exactly the evidence
+        Store.resolve_tree uses to recognise a re-scan of a known device."""
+        out = []
+        for i in range(self.results.count()):
+            it = self.results.item(i)
+            acct = it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+            if acct is not None:
+                out.append(acct)
         return out
 
 

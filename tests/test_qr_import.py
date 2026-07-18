@@ -39,6 +39,27 @@ def test_qr_account_shows_air_gapped_root_with_full_path_subgroup(qtbot, tmp_qet
         "BIP44 (m/44'/60'/0'/0/i)"]
 
 
+def test_two_devices_same_scheme_split_into_labelled_subtrees(qtbot, tmp_qeth):
+    from qeth.plugins.wallets import TREE_KEY_ROLE, TREE_LABEL_ROLE
+    plugin, store = _plugin(qtbot, [
+        {"address": "0x" + "11" * 20, "source": "qr", "path": "m/44'/60'/0'/0/0",
+         "scheme": "BIP44 (…/0/i)", "xfp": "0x1111", "tree": "0xa1", "label": ""},
+        {"address": "0x" + "22" * 20, "source": "qr", "path": "m/44'/60'/0'/0/0",
+         "scheme": "BIP44 (…/0/i)", "xfp": "0x2222", "tree": "0xb2", "label": ""},
+    ])
+    store.tree_labels = {"qr/0xa1": "Keystone", "qr/0xb2": "Keycard"}
+    plugin._rebuild_tree()
+    root = plugin._tree.topLevelItem(0)
+    # Two device subtrees, IDENTICAL text (scheme + path), distinct tree keys.
+    assert root.childCount() == 2
+    texts = [root.child(i).text(0) for i in range(2)]
+    assert texts == ["BIP44 (m/44'/60'/0'/0/i)"] * 2
+    keys = [root.child(i).data(0, TREE_KEY_ROLE) for i in range(2)]
+    assert keys == ["qr/0xa1", "qr/0xb2"]
+    pills = [root.child(i).data(0, TREE_LABEL_ROLE) for i in range(2)]
+    assert pills == ["Keystone", "Keycard"]
+
+
 def test_repeat_address_inherits_label_and_keeps_its_row(qtbot, tmp_qeth):
     from qeth.plugins.wallets import ACCOUNT_LABEL_ROLE
     plugin, store = _plugin(qtbot, [
@@ -146,6 +167,9 @@ def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
 
         def selected_accounts(self):
             return [picked]
+
+        def discovered_accounts(self):
+            return [picked]
     monkeypatch.setattr(wallets_mod, "AddQRWalletDialog", _AddStub)
 
     plugin.host = SimpleNamespace(
@@ -162,3 +186,7 @@ def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
     assert acct["path"] == "m/44'/60'/0'/0/0"
     assert acct["scheme"] == "BIP44 (…/0/i)"
     assert acct["xfp"] == "0x12345678"      # master fingerprint, hex
+    # A fresh device gets its own tree, anchored on the first added address,
+    # with a default "0x…"-shortened label.
+    assert acct["tree"] == picked.address.lower()
+    assert store.tree_labels["qr/" + picked.address.lower()] == picked.address[:6] + "…"

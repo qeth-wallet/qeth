@@ -53,6 +53,55 @@ def _merge_chain(persisted: dict) -> Chain:
         base["ws_url"] = ()
     return Chain(**{k: v for k, v in base.items() if k in _CHAIN_FIELDS})
 
+
+# Sources whose accounts are grouped into per-device subtrees in the wallet UI
+# (a Ledger/Keystone/Keycard produces many derived addresses). "hot" and
+# "watch_only" are flat — a single address each — and never carry a tree.
+_GROUPED_SOURCES = ("ledger", "qr")
+
+
+def _default_tree_label(address: str) -> str:
+    """The label a device tree gets when first added: '0x425d…' — the 0x prefix
+    plus the first four hex digits of the tree's anchor address. Short, and the
+    full addresses sit right below it in the tree."""
+    return f"{address[:6]}…"
+
+
+def _assign_tree_ids(accounts: list[dict], tree_labels: dict[str, str]) -> None:
+    """Load-time migration (idempotent): stamp a ``tree`` id on grouped-source
+    account records that lack one, and seed a default ``tree_labels`` entry per
+    tree.
+
+    A tree id is the lowercase address of the tree's first account in store
+    order — opaque thereafter (it survives that account's removal). Records are
+    bucketed by ``(source, scheme, xfp-or-None)``: two QR devices carry distinct
+    ``xfp`` so an already-mixed config splits correctly, while Ledger records of
+    one scheme collapse into a single tree (Ledger carries no device identity).
+    Records already stamped are left untouched, so a re-run is a no-op."""
+    anchors: dict[tuple[str, str, str | None], str] = {}
+    for a in accounts:
+        source = a.get("source")
+        if source not in _GROUPED_SOURCES:
+            continue
+        if a.get("tree"):
+            continue
+        bucket = (source, a.get("scheme", ""), a.get("xfp"))
+        tid = anchors.get(bucket)
+        if tid is None:
+            tid = a["address"].lower()
+            anchors[bucket] = tid
+        a["tree"] = tid
+    # Seed a default label for every tree that doesn't have one yet. Walk in
+    # store order so the tree's anchor (first record) supplies the default.
+    for a in accounts:
+        source = a.get("source")
+        tid = a.get("tree")
+        if source in _GROUPED_SOURCES and tid:
+            key = f"{source}/{tid}"
+            if key not in tree_labels:
+                tree_labels[key] = _default_tree_label(a["address"])
+
+
 CONFIG_DIR = Path.home() / ".qeth"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -85,11 +134,19 @@ class Store:
         self._io_lock = threading.Lock()
         self._save_seq = 0
         self._last_written_seq = 0
-        self.accounts: list[dict] = []  # {address, path, source, scheme, label}
+        # {address, path, source, scheme, label, tree?} — ``tree`` (grouped
+        # sources only) is the per-device subtree id; see _assign_tree_ids.
+        self.accounts: list[dict] = []
         # Display order of the top-level account branches (source keys, e.g.
         # ["qr", "ledger", …]). Empty = the built-in default order. The tree
         # lets the user drag branches to reorder their priority.
         self.account_source_order: list[str] = []
+        # Per-device subtree labels for grouped sources, keyed "source/tree_id"
+        # (tree_id = the lowercase address of the account that created the tree,
+        # opaque thereafter). Default "0x425d…"; user-renameable. A tree label
+        # is a distinct entity from an account label (set_label), so it needs
+        # its own store rather than riding on a per-address label.
+        self.tree_labels: dict[str, str] = {}
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
         self.default_account: str | None = None
@@ -145,6 +202,16 @@ class Store:
                 return s
             s.accounts = data.get("accounts", [])
             s.account_source_order = list(data.get("account_source_order", []))
+            raw_tree_labels = data.get("tree_labels") or {}
+            if isinstance(raw_tree_labels, dict):
+                s.tree_labels = {
+                    str(k): str(v) for k, v in raw_tree_labels.items()
+                    if isinstance(v, str)
+                }
+            # Stamp tree ids on grouped-source records that predate the
+            # per-device-tree feature, and seed any missing default labels.
+            # Idempotent; persists on the next save (like the chain forward-fill).
+            _assign_tree_ids(s.accounts, s.tree_labels)
             s.current_chain_id = data.get("current_chain_id", 1)
             s.default_account = data.get("default_account")
             s.default_account_path = data.get("default_account_path")
@@ -213,6 +280,7 @@ class Store:
                 # fresh list/dict).
                 "accounts": [dict(a) for a in self.accounts],
                 "account_source_order": list(self.account_source_order),
+                "tree_labels": dict(self.tree_labels),
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
                 "default_account": self.default_account,
@@ -295,6 +363,13 @@ class Store:
                     self.default_account = (
                         self.accounts[0]["address"] if self.accounts else None)
                     self.default_account_path = None
+            # Drop tree labels whose tree no longer has any account (removing a
+            # whole device's last account retires its label); a sibling tree in
+            # the same source keeps its own.
+            live = {f"{a['source']}/{a['tree']}" for a in self.accounts
+                    if a.get("source") and a.get("tree")}
+            self.tree_labels = {k: v for k, v in self.tree_labels.items()
+                                if k in live}
         self.save()
         return True
 
@@ -340,6 +415,82 @@ class Store:
         with self._lock:
             self.account_source_order = list(order)
         self.save()
+
+    # --- per-device tree labels ---------------------------------------------
+
+    def set_tree_label(self, key: str, label: str) -> bool:
+        """Set a device-tree label (key = "source/tree_id"). Returns True when
+        the stored value actually changed (persists then); a no-op change
+        doesn't re-save."""
+        with self._lock:
+            if self.tree_labels.get(key, "") == label:
+                return False
+            self.tree_labels[key] = label
+        self.save()
+        return True
+
+    def _tree_anchor_address(self, source: str, tree_id: str) -> str | None:
+        """The address of the tree's current first account in store order — the
+        anchor a freshly-derived default label is taken from. None if the tree
+        has no accounts (e.g. all removed)."""
+        for a in self.accounts:
+            if a.get("source") == source and a.get("tree") == tree_id:
+                return a["address"]
+        return None
+
+    def default_tree_label(self, key: str) -> str:
+        """The default label for a tree (key = "source/tree_id") — derived from
+        the tree's current first account, or from the id itself (which is an
+        address) when the tree is empty. Used to reset a cleared label."""
+        source, _, tree_id = key.partition("/")
+        anchor = self._tree_anchor_address(source, tree_id)
+        return _default_tree_label(anchor or tree_id)
+
+    def ensure_tree_label(self, source: str, tree_id: str) -> None:
+        """Seed the default label for a newly-created tree if it has none yet.
+        Called by the add flows after a device tree is first created."""
+        key = f"{source}/{tree_id}"
+        with self._lock:
+            if key in self.tree_labels:
+                return
+            self.tree_labels[key] = self.default_tree_label(key)
+        self.save()
+
+    def resolve_tree(self, source: str, scheme: str,
+                     discovered: list[tuple[str, str]],
+                     xfp: str | None = None) -> str | None:
+        """Find the existing device tree a fresh import belongs to, or None to
+        create a new one. Matches within the same ``source`` + ``scheme`` over
+        records already carrying a tree:
+
+        1. by fingerprint — a truthy, non-zero ``xfp`` shared with an existing
+           QR record proves the same device;
+        2. by overlap — any discovered ``(address, path)`` already stored proves
+           the same seed (heals a device whose older exports lacked a
+           fingerprint, and is the only signal Ledger has — callers pass
+           ``xfp=None``).
+
+        ``discovered`` is the FULL scanned list (including already-added rows),
+        since those are the overlap evidence."""
+        want_xfp = (xfp or "").lower()
+        try:
+            xfp_usable = bool(want_xfp) and int(want_xfp, 16) != 0
+        except ValueError:
+            xfp_usable = False
+        disc = {(a.lower(), p) for (a, p) in discovered}
+        with self._lock:
+            candidates = [a for a in self.accounts
+                          if a.get("source") == source
+                          and a.get("scheme", "") == scheme
+                          and a.get("tree")]
+            if xfp_usable:
+                for a in candidates:
+                    if str(a.get("xfp", "")).lower() == want_xfp:
+                        return str(a["tree"])
+            for a in candidates:
+                if (a["address"].lower(), a.get("path", "")) in disc:
+                    return str(a["tree"])
+        return None
 
     def set_label(self, address: str, label: str) -> bool:
         """Update the human-readable label on EVERY account holding

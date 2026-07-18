@@ -798,6 +798,52 @@ class TestFocusAwareDelegate:
         plain = render(1)
         assert plain.pixelColor(285, 11).name() != _STICKY_BG     # no pill
 
+    def test_device_tree_label_paints_distinct_pill(self, qtbot, tmp_qeth):
+        """A device-tree label renders the same pill in the tree colour
+        (blue), distinct from an account label's yellow — so the two read
+        apart at a glance."""
+        from PySide6.QtGui import QImage, QPainter, QColor
+        from PySide6.QtWidgets import (
+            QStyle, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem,
+        )
+        from PySide6.QtCore import QRect, Qt
+        from qeth.ui import (
+            _FocusAwareSelectionDelegate, _STICKY_BG, _TREE_STICKY_BG,
+        )
+        from qeth.plugins.wallets import ACCOUNT_LABEL_ROLE, TREE_LABEL_ROLE
+        tree = QTreeWidget()
+        qtbot.addWidget(tree)
+        tree.setTextElideMode(Qt.ElideMiddle)
+        delegate = _FocusAwareSelectionDelegate(tree)
+        tree.setItemDelegate(delegate)
+        tree.addTopLevelItem(QTreeWidgetItem(["Ledger Live (m/…)"]))   # tree row
+        tree.addTopLevelItem(QTreeWidgetItem([" 0x" + "a" * 40 + " "]))  # account
+        tree.topLevelItem(0).setData(0, TREE_LABEL_ROLE, "Nano")
+        tree.topLevelItem(1).setData(0, ACCOUNT_LABEL_ROLE, "sig")
+
+        def render(row):
+            idx = tree.model().index(row, 0)
+            opt = QStyleOptionViewItem()
+            delegate.initStyleOption(opt, idx)
+            opt.state &= ~QStyle.State_Selected
+            opt.rect = QRect(0, 0, 300, 22)
+            img = QImage(300, 22, QImage.Format_RGB32)
+            img.fill(QColor("#202020"))
+            painter = QPainter(img)
+            try:
+                delegate.paint(painter, opt, idx)
+            finally:
+                painter.end()
+            return img
+
+        tree_row = render(0)
+        # Sample the pill's right padding (x=290), clear of the centered text
+        # glyphs. Tree pill is the blue colour, not the account yellow.
+        assert tree_row.pixelColor(290, 11).name() == _TREE_STICKY_BG
+        assert tree_row.pixelColor(290, 11).name() != _STICKY_BG
+        # An account label still paints the yellow (account wins).
+        assert render(1).pixelColor(290, 11).name() == _STICKY_BG
+
 
 def test_identity_row_loading_placeholder_then_badge(qtbot, tmp_path):
     """The Contract: row shows a muted 'identifying…' while the (multi

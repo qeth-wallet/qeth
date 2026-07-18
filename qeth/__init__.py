@@ -1,6 +1,6 @@
 from typing import Any
 
-__version__ = "0.16.0"
+__version__ = "0.20.0"
 
 # PySide6 accepts C++ type names as strings in ``Signal(...)`` declarations;
 # ``"qulonglong"`` marshals a chain id through unsigned 64-bit (dapp-added

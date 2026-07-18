@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.16.0
+Version:        0.20.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,20 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Jul 19 2026 Michael Egorov <michwill@yieldbasis.com> - 0.20.0-1
+- Air-gapped QR signer (Keystone / Keycard): account import plus transaction,
+  message, and typed-data signing over an animated-QR + camera exchange.
+- ENS tab management: set ETH address / text / IPFS records, add and remove
+  subdomains, set manager, renew and transfer names; resolution via a mainnet
+  light client with a verified badge.
+- On-chain pricing for vault / LP tokens the market APIs miss (ERC-4626, Yearn
+  and Yield Basis shares, Curve and Uniswap-V2 LPs), plus discovery of tokens
+  from your own transaction history, with composed vault / stacked-LP icons.
+- Accounts: Ctrl+F find bar, per-device subtrees with editable labels.
+- Keyless contract / recipient identity on the details, send, and signing rows.
+- Security: dependency bump clearing the Pillow advisories, and an allowlist so
+  non-transferable governance locks stop reading as "suspected scam".
+
 * Thu Jul 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.16.0-1
 - Air-gapped QR signing: large transactions (e.g. a multicall carrying Merkle-
   Patricia proofs) that stalled some hardware wallets now transmit reliably --

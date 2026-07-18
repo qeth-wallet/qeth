@@ -126,6 +126,100 @@ class TestVaultIcon:
         assert abs(max(alphas) - round(255 * _VAULT_BADGE_OPACITY)) <= 15
 
 
+class TestStackedIcon:
+    """An LP token's icon stacks its pooled coins' icons."""
+
+    def _circle(self, color):
+        from PySide6.QtGui import QPixmap, QPainter, QColor
+        b = QPixmap(64, 64)
+        b.fill(Qt.GlobalColor.transparent)
+        p = QPainter(b)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(2, 2, 60, 60)
+        p.end()
+        return b
+
+    def _present(self, img, color, tol=60):
+        from PySide6.QtGui import QColor
+        c = QColor(color)
+        for x in range(0, 64, 2):
+            for y in range(0, 64, 2):
+                px = img.pixelColor(x, y)
+                if px.alpha() > 200 and (abs(px.red() - c.red())
+                        + abs(px.green() - c.green()) + abs(px.blue() - c.blue())) < tol:
+                    return True
+        return False
+
+    def test_two_coins_both_appear(self, qtbot):
+        from qeth.icons import stacked_icon
+        img = stacked_icon([self._circle("#3b5bdb"), self._circle("#f7931a")], 64).toImage()
+        assert self._present(img, "#3b5bdb")   # coin 0 (blue) shows
+        assert self._present(img, "#f7931a")   # coin 1 (orange) shows
+
+    def test_empty_bases_is_blank(self, qtbot):
+        from qeth.icons import stacked_icon
+        img = stacked_icon([], 64).toImage()
+        assert all(img.pixelColor(x, y).alpha() == 0
+                   for x in range(0, 64, 8) for y in range(0, 64, 8))
+
+
+class TestLpRowIcon:
+    """An LP row (source onchain-curve-lp/univ2-lp with pool_tokens) shows its
+    pooled coins' icons stacked."""
+
+    LP = "0x516c3ecfe45f0820653e08dd7c93633d71b93cb5"
+    C0 = "0x" + "c0" * 20
+    C1 = "0x" + "c1" * 20
+
+    def _cached(self):
+        from qeth.wallet_cache import CachedToken, CachedWallet
+        return CachedWallet(
+            chain_id=1, address="0x" + "aa" * 20,
+            tokens=[CachedToken(
+                contract=self.LP, symbol="crvUSD-LP", name="Curve LP",
+                decimals=18, balance_raw=10 ** 18, price_usd="1.29",
+                price_source="onchain-curve-lp", pool_tokens=[self.C0, self.C1])],
+        )
+
+    def _row(self, panel):
+        for r in range(panel.table.rowCount()):
+            it = panel.table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == (1, self.LP):
+                return it
+        return None
+
+    def test_stacks_pooled_coins_when_cached(self, qtbot, tmp_qeth):
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        for c, col in ((self.C0, Qt.GlobalColor.blue), (self.C1, Qt.GlobalColor.red)):
+            pm = QPixmap(20, 20)
+            pm.fill(col)
+            icons._mem[(1, c)] = pm
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached())
+        assert panel._lp_coins.get(self.LP) == (self.C0, self.C1)
+        item = self._row(panel)
+        assert item is not None and not item.icon().isNull()
+
+    def test_coin_arriving_async_repaints_the_lp_row(self, qtbot, tmp_qeth):
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached())     # no coin icons cached yet
+        assert self._row(panel).icon().isNull()
+        pm = QPixmap(20, 20)
+        pm.fill(Qt.GlobalColor.blue)
+        icons._mem[(1, self.C0)] = pm
+        panel._on_icon_ready(1, self.C0)            # a pooled coin's icon lands
+        assert not self._row(panel).icon().isNull()
+
+
 class TestVaultRowIcon:
     """A vault row (price source onchain-yb/4626 with an underlying) shows the
     underlying's icon composited with a sparkle badge."""

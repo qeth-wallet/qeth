@@ -656,7 +656,8 @@ def _compute(st: Structure | None, dyn, resolved: dict[str, Price]) -> Price | N
         if tvl <= 0:
             return None
         usd = tvl / (Decimal(dyn.supply) / (Decimal(10) ** st.lp_decimals))
-        return Price(usd, now, "onchain-curve-lp", 0.9 * (min(confs) if confs else 1.0))
+        return Price(usd, now, "onchain-curve-lp",
+                     0.9 * (min(confs) if confs else 1.0), pool_tokens=st.coins)
     if isinstance(st, UniV2Structure) and isinstance(dyn, _UniV2Dyn):
         if dyn.supply <= 0:
             return None
@@ -673,5 +674,6 @@ def _compute(st: Structure | None, dyn, resolved: dict[str, Price]) -> Price | N
         if len(legs) == 1:
             tvl *= 2   # one priced leg → assume 50/50
         usd = tvl / (Decimal(dyn.supply) / (Decimal(10) ** st.lp_decimals))
-        return Price(usd, now, "onchain-univ2-lp", 0.9 * min(c for _, c in legs))
+        return Price(usd, now, "onchain-univ2-lp", 0.9 * min(c for _, c in legs),
+                     pool_tokens=(st.token0, st.token1))
     return None

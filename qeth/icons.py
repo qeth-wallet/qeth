@@ -370,6 +370,34 @@ def vault_icon(base: "QPixmap | None", size: int = 64) -> QPixmap:
     return canvas
 
 
+def stacked_icon(bases: "list[QPixmap]", size: int = 64) -> QPixmap:
+    """Overlapping circular coin icons for an LP token — the pool's assets
+    stacked left-to-right (up to 3 shown; later ones on top). Each coin gets a
+    thin translucent ring so overlapping edges stay legible against each other."""
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    coins = [b for b in bases if b is not None and not b.isNull()][:3]
+    if not coins:
+        return canvas
+    n = len(coins)
+    p = QPainter(canvas)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    d = size * (0.9 if n == 1 else 0.62 if n == 2 else 0.52)
+    y = (size - d) / 2.0
+    xs = ([(size - d) / 2.0] if n == 1
+          else [i * (size - d) / (n - 1) for i in range(n)])
+    ring = QPen(QColor(255, 255, 255, 150), max(1.0, size * 0.03))
+    for x, base in zip(xs, coins):
+        p.drawPixmap(int(round(x)), int(round(y)), to_circular(base, int(round(d))))
+        if n > 1:
+            p.setPen(ring)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(x, y, d, d))
+    p.end()
+    return canvas
+
+
 def bundled_native_icon(symbol: str) -> QPixmap | None:
     """Return the bundled native-asset icon for a chain symbol (ETH, MATIC,
     …), or None if no file ships for that symbol. Cropped to a circle for

@@ -55,6 +55,21 @@ def test_vault_price_source_and_underlying_round_trip(tmp_qeth):
     assert t.underlying == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
 
+def test_lp_pool_tokens_round_trip(tmp_qeth):
+    wc = WalletCache()
+    coins = ["0x" + "c1" * 20, "0x" + "c2" * 20]
+    wc.save(CachedWallet(
+        chain_id=1, address="0x" + "bb" * 20,
+        tokens=[CachedToken(
+            contract="0x" + "1d" * 20, symbol="LP", name="Curve LP",
+            decimals=18, balance_raw=10 ** 18, price_usd="1.29",
+            price_source="onchain-curve-lp", pool_tokens=coins)],
+    ))
+    t = wc.load(1, "0x" + "bb" * 20).tokens[0]
+    assert t.price_source == "onchain-curve-lp"
+    assert t.pool_tokens == coins
+
+
 def test_missing_vault_fields_default_to_none(tmp_qeth):
     # A cache written before these fields existed loads cleanly.
     wc = WalletCache()

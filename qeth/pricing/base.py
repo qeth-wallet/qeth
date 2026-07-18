@@ -24,6 +24,9 @@ class Price:
     # yb-WBTC). Lets the UI show the underlying's icon with a vault badge.
     # None for market quotes and multi-asset LPs.
     underlying: str | None = None
+    # For an LP token priced on-chain (Curve / UniV2): the lower-case addresses
+    # of the pooled assets, so the UI can stack their icons. None otherwise.
+    pool_tokens: tuple[str, ...] | None = None
 
 
 class PriceSourceError(Exception):

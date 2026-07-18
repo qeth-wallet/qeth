@@ -262,6 +262,7 @@ def test_curve_lp_tvl_over_supply():
     out = pricer.price(Chain(), [A], _BaseLookup({B: ("1.0", 1.0), C: ("1.0", 1.0)}))
     assert out[A].price_usd == Decimal("1")
     assert out[A].source == "onchain-curve-lp"
+    assert out[A].pool_tokens == (B.lower(), C.lower())   # for the stacked icon
 
 
 def test_curve_lp_with_eth_placeholder_coin_uses_native():
@@ -335,6 +336,7 @@ def test_univ2_both_legs():
     out = pricer.price(Chain(), [A], _BaseLookup({B: ("2000", 1.0), C: ("1.0", 1.0)}))
     assert out[A].price_usd == Decimal("4000")
     assert out[A].source == "onchain-univ2-lp"
+    assert out[A].pool_tokens == (B.lower(), C.lower())
 
 
 def test_univ2_one_priced_leg_doubles():

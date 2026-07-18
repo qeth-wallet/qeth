@@ -40,6 +40,9 @@ class CachedToken:
     # the vault icon (underlying + sparkle badge) survives a cold start.
     price_source: str | None = None
     underlying: str | None = None
+    # For an on-chain LP (Curve / UniV2): the pooled coin addresses, so the
+    # stacked-coins icon survives a cold start.
+    pool_tokens: list[str] | None = None
 
 
 @dataclass
@@ -85,6 +88,8 @@ class WalletCache:
                     price_updated=int(t.get("price_updated") or 0),
                     price_source=t.get("price_source"),
                     underlying=t.get("underlying"),
+                    pool_tokens=(list(t["pool_tokens"])
+                                 if isinstance(t.get("pool_tokens"), list) else None),
                 )
                 for t in data.get("tokens", []) if t.get("contract")
             ]

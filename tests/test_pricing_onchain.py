@@ -134,6 +134,7 @@ def test_every_selector_matches_keccak():
         "_SEL_GET_BALANCES": "get_balances(address)",
         "_SEL_COINS_U256": "coins(uint256)", "_SEL_BALANCES_U256": "balances(uint256)",
         "_SEL_COINS_I128": "coins(int128)", "_SEL_BALANCES_I128": "balances(int128)",
+        "_SEL_ASSET_TOKEN": "ASSET_TOKEN()",
     }
     for const, sig in sigs.items():
         assert getattr(M, const) == keccak(sig.encode())[:4], sig
@@ -190,6 +191,22 @@ def test_price_per_share_scales_by_underlying_decimals():
     pricer, _ = _mk(h)
     out = pricer.price(Chain(), [A], _BaseLookup({B: ("1.0", 1.0)}))
     assert out[A].price_usd == Decimal("1.5")
+
+
+def test_yield_basis_vault_pricePerShare_is_1e18_over_asset_token():
+    """A Yield Basis vault (ASSET_TOKEN() + pricePerShare()) scales
+    pricePerShare by 1e18 regardless of the asset's decimals — here an 8-decimal
+    WBTC asset, the case where the generic Yearn-v2 rule would be off by 1e10."""
+    h: dict = {}
+    h[(A, M._SEL_DECIMALS.hex())] = lambda cd: u256(18)               # yb-WBTC: 18 dec
+    h[(A, M._SEL_TOTAL_SUPPLY.hex())] = lambda cd: u256(10 ** 22)
+    h[(A, M._SEL_PRICE_PER_SHARE.hex())] = lambda cd: u256(int(Decimal("1.05") * 10 ** 18))
+    h[(A, M._SEL_ASSET_TOKEN.hex())] = lambda cd: addr32(B)           # WBTC
+    h[(B, M._SEL_DECIMALS.hex())] = lambda cd: u256(8)                # 8-dec asset
+    pricer, _ = _mk(h)
+    out = pricer.price(Chain(), [A], _BaseLookup({B: ("100000", 1.0)}))  # WBTC $100k
+    assert out[A].price_usd == Decimal("105000.00")   # 1.05 WBTC × $100k
+    assert out[A].source == "onchain-yb"
 
 
 # --- 4. guards: zero supply / absurd / empty-returndata EOA ----------------

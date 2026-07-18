@@ -44,6 +44,7 @@ _SEL_GET_SHARES_TO_UNDERLYING = bytes.fromhex("e613deb2")  # getSharesToUnderlyi
 _SEL_EXCHANGE_RATE = bytes.fromhex("3ba0b9a9")             # exchangeRate()
 _SEL_CONVERT_TO_ASSETS = bytes.fromhex("07a2d13a")         # convertToAssets(uint256)
 _SEL_ASSET = bytes.fromhex("38d52e0f")                     # asset()
+_SEL_ASSET_TOKEN = bytes.fromhex("d7062005")               # ASSET_TOKEN() — Yield Basis
 _SEL_TOKEN = bytes.fromhex("fc0c546a")                     # token()
 _SEL_UNDERLYING = bytes.fromhex("6f307dc3")                # underlying()
 _SEL_WANT = bytes.fromhex("1f1fcd51")                      # want()
@@ -339,6 +340,7 @@ class OnChainVaultPrices:
                     "token1": mc.add(a, _SEL_TOKEN1, decoder=_dec_address),
                     "reserves": mc.add(a, _SEL_GET_RESERVES, decoder=_dec_reserves),
                     "minter": mc.add(a, _SEL_MINTER, decoder=_dec_address),
+                    "asset_token": mc.add(a, _SEL_ASSET_TOKEN, decoder=_dec_address),
                 }
                 for name, sel in _NOARG_SHARE_SELECTORS:
                     p[name] = mc.add(a, sel, decoder=_dec_uint256)
@@ -359,8 +361,16 @@ class OnChainVaultPrices:
 
         # --- vault / share token (most specific) ---
         method: str | None = None
+        asset_token = _ok(p.get("asset_token"))
         if _ok(p["convert"]) is not None and _ok(p["u_asset"]):
             method, underlying = "convertToAssets", _ok(p["u_asset"])
+        elif _ok(p["pricePerShare"]) is not None and asset_token:
+            # Yield Basis leveraged vault: pricePerShare() is 1e18-scaled (the
+            # net share value in ASSET_TOKEN terms) regardless of the asset's
+            # own decimals — verified across yb-WETH/WBTC/cbBTC/tBTC. Checked
+            # before generic pricePerShare (which scales by underlying decimals)
+            # and keyed on ASSET_TOKEN(), the getter that tells the two apart.
+            method, underlying = "pricePerShare1e18", asset_token
         elif _ok(p["getPricePerFullShare"]) is not None:
             method = "getPricePerFullShare"
         elif _ok(p["pricePerShare"]) is not None:
@@ -495,6 +505,7 @@ class OnChainVaultPrices:
         sel = {
             "getPricePerFullShare": _SEL_GET_PRICE_PER_FULL_SHARE,
             "pricePerShare": _SEL_PRICE_PER_SHARE,
+            "pricePerShare1e18": _SEL_PRICE_PER_SHARE,   # YB: same call, 1e18 scale
             "getPricePerShare": _SEL_GET_PRICE_PER_SHARE,
             "exchangeRate": _SEL_EXCHANGE_RATE,
         }[st.method]
@@ -591,14 +602,17 @@ def _compute(st: Structure | None, dyn, resolved: dict[str, Price]) -> Price | N
         up = resolved.get(st.underlying)
         if up is None or dyn.share_raw <= 0:
             return None
-        if st.method == "getPricePerFullShare":
+        # 1e18-scaled ratio methods (Yearn-v1 getPricePerFullShare, Yield Basis
+        # pricePerShare) vs underlying-decimals-scaled (Yearn-v2 pricePerShare,
+        # exchangeRate, the arg'd convertToAssets/getSharesToUnderlying).
+        if st.method in ("getPricePerFullShare", "pricePerShare1e18"):
             share_price = Decimal(dyn.share_raw) / (Decimal(10) ** 18)
         else:
             share_price = Decimal(dyn.share_raw) / (Decimal(10) ** st.underlying_decimals)
         if share_price <= 0 or share_price > OnChainVaultPrices.ABSURD_SHARE_PRICE:
             return None
-        return Price(share_price * up.price_usd, now, "onchain-4626",
-                     0.9 * up.confidence)
+        src = "onchain-yb" if st.method == "pricePerShare1e18" else "onchain-4626"
+        return Price(share_price * up.price_usd, now, src, 0.9 * up.confidence)
     if isinstance(st, CurveLPStructure) and isinstance(dyn, _CurveDyn):
         if dyn.supply <= 0 or not st.coin_decimals:
             return None

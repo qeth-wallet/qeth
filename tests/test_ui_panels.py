@@ -78,6 +78,93 @@ class TestNotificationIcon:
         assert isinstance(icon, QIcon) and not icon.isNull()
 
 
+# --- vault_icon (underlying + sparkle badge) -------------------------------
+
+class TestVaultIcon:
+    def _has_color(self, img, color, box, tol=48):
+        from PySide6.QtGui import QColor
+        c = QColor(color)
+        x0, y0, x1, y1 = box
+        for x in range(x0, x1, 2):
+            for y in range(y0, y1, 2):
+                px = img.pixelColor(x, y)
+                if (abs(px.red() - c.red()) + abs(px.green() - c.green())
+                        + abs(px.blue() - c.blue())) < tol:
+                    return True
+        return False
+
+    def test_underlying_shows_with_violet_sparkle_badge(self, qtbot):
+        from PySide6.QtGui import QPixmap
+        from qeth.icons import vault_icon, _VAULT_BADGE_COLOR
+        base = QPixmap(64, 64)
+        base.fill(Qt.GlobalColor.red)          # stand-in underlying icon
+        img = vault_icon(base, 64).toImage()
+        # Underlying (red) shows in the top-left; the violet sparkle badge is in
+        # the bottom-right corner.
+        assert self._has_color(img, Qt.GlobalColor.red, (4, 4, 28, 28))
+        assert self._has_color(img, _VAULT_BADGE_COLOR, (40, 40, 62, 62))
+
+    def test_no_base_still_draws_a_sparkle(self, qtbot):
+        from qeth.icons import vault_icon, _VAULT_BADGE_COLOR
+        img = vault_icon(None, 64).toImage()
+        # Centred sparkle when the underlying icon isn't available yet.
+        assert self._has_color(img, _VAULT_BADGE_COLOR, (20, 20, 44, 44))
+
+
+class TestVaultRowIcon:
+    """A vault row (price source onchain-yb/4626 with an underlying) shows the
+    underlying's icon composited with a sparkle badge."""
+
+    VAULT = "0x931d40dd07b25b91932b481b63631ea86d236e09"
+    UNDER = "0x" + "c0" * 20
+
+    def _cached(self):
+        from qeth.wallet_cache import CachedToken, CachedWallet
+        return CachedWallet(
+            chain_id=1, address="0x" + "aa" * 20, native_price_usd="3000",
+            tokens=[CachedToken(
+                contract=self.VAULT, symbol="yb-WETH", name="Yield Basis WETH",
+                decimals=18, balance_raw=10 ** 18, price_usd="3062",
+                price_source="onchain-yb", underlying=self.UNDER)],
+        )
+
+    def _row(self, panel):
+        for r in range(panel.table.rowCount()):
+            it = panel.table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == (1, self.VAULT):
+                return it
+        return None
+
+    def test_composites_underlying_when_cached(self, qtbot, tmp_qeth):
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        base = QPixmap(20, 20)
+        base.fill(Qt.GlobalColor.red)
+        icons._mem[(1, self.UNDER)] = base        # underlying icon already cached
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached())
+        assert panel._vault_underlying.get(self.VAULT) == self.UNDER
+        item = self._row(panel)
+        assert item is not None and not item.icon().isNull()   # composited icon
+
+    def test_underlying_arriving_async_repaints_the_vault_row(self, qtbot, tmp_qeth):
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached())     # underlying NOT cached yet
+        item = self._row(panel)
+        assert item is not None and item.icon().isNull()   # no icon yet (yb has none)
+        # the underlying's logo lands → _on_icon_ready composites it onto the row
+        icons._mem[(1, self.UNDER)] = QPixmap(20, 20)
+        icons._mem[(1, self.UNDER)].fill(Qt.GlobalColor.red)
+        panel._on_icon_ready(1, self.UNDER)
+        assert not self._row(panel).icon().isNull()
+
+
 # --- tray minimise-to-tray -------------------------------------------------
 
 class TestTrayDehydrate:

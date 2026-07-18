@@ -309,6 +309,61 @@ def notification_icon(
     return QIcon(canvas)
 
 
+# Vault badge: a violet "magical sparkle" — distinct from the green/blue
+# direction badges, and self-coloured so it reads on any underlying icon in
+# either theme. The star is the four-point sparkle, as unit points (outer tips
+# at N/E/S/W radius 1, inner points on the diagonals) scaled at draw time.
+_VAULT_BADGE_COLOR = QColor(124, 58, 237)
+_SPARKLE_POINTS = (
+    (0.0, -1.0), (0.24, -0.24), (1.0, 0.0), (0.24, 0.24),
+    (0.0, 1.0), (-0.24, 0.24), (-1.0, 0.0), (-0.24, -0.24),
+)
+
+
+def _draw_sparkle_badge(
+    painter: QPainter, cx: float, cy: float, r: float,
+) -> None:
+    """A violet disc with a white four-point sparkle, centred at (cx, cy),
+    radius ``r``; a thin white ring sets it off from the icon behind. Vector-
+    drawn (like the direction badge) so it renders identically everywhere."""
+    painter.setPen(QPen(QColor(255, 255, 255), max(1.0, r * 0.12)))
+    painter.setBrush(_VAULT_BADGE_COLOR)
+    painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    star = r * 0.62
+    path = QPainterPath()
+    x0, y0 = _SPARKLE_POINTS[0]
+    path.moveTo(cx + x0 * star, cy + y0 * star)
+    for px, py in _SPARKLE_POINTS[1:]:
+        path.lineTo(cx + px * star, cy + py * star)
+    path.closeSubpath()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawPath(path)
+
+
+def vault_icon(base: "QPixmap | None", size: int = 64) -> QPixmap:
+    """The underlying asset's icon (circular) with a sparkle badge in the
+    lower-right corner — marks a token as a vault whose value derives from that
+    underlying (yb-WBTC → the WBTC icon + a sparkle). ``base`` is the
+    underlying's pixmap; when it's missing the sparkle fills the icon centred,
+    so a vault is always visually flagged. Returns a QPixmap (pass through
+    ``smooth_icon`` for the table)."""
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    p = QPainter(canvas)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    if base is not None and not base.isNull():
+        p.drawPixmap(0, 0, to_circular(base, size))
+        r = size * 0.26
+        off = size - r - size * 0.015
+        _draw_sparkle_badge(p, off, off, r)
+    else:
+        _draw_sparkle_badge(p, size / 2.0, size / 2.0, size * 0.42)
+    p.end()
+    return canvas
+
+
 def bundled_native_icon(symbol: str) -> QPixmap | None:
     """Return the bundled native-asset icon for a chain symbol (ETH, MATIC,
     …), or None if no file ships for that symbol. Cropped to a circle for

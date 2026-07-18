@@ -19,6 +19,11 @@ class Price:
     timestamp: int        # unix seconds — how fresh the quote is
     source: str
     confidence: float = 1.0
+    # For a single-underlying vault priced on-chain (ERC-4626 / Yield Basis):
+    # the lower-case address of the asset the vault holds (e.g. WBTC for
+    # yb-WBTC). Lets the UI show the underlying's icon with a vault badge.
+    # None for market quotes and multi-asset LPs.
+    underlying: str | None = None
 
 
 class PriceSourceError(Exception):

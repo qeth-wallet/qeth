@@ -35,6 +35,11 @@ class CachedToken:
     price_usd: str | None = None
     balance_updated: int = 0
     price_updated: int = 0
+    # The price provenance ("onchain-yb", "onchain-4626", "defillama", …) and,
+    # for a single-underlying on-chain vault, the underlying asset address — so
+    # the vault icon (underlying + sparkle badge) survives a cold start.
+    price_source: str | None = None
+    underlying: str | None = None
 
 
 @dataclass
@@ -78,6 +83,8 @@ class WalletCache:
                     price_usd=t.get("price_usd"),
                     balance_updated=int(t.get("balance_updated") or 0),
                     price_updated=int(t.get("price_updated") or 0),
+                    price_source=t.get("price_source"),
+                    underlying=t.get("underlying"),
                 )
                 for t in data.get("tokens", []) if t.get("contract")
             ]

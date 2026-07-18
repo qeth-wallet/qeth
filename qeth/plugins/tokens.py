@@ -44,7 +44,7 @@ from ..formatting import format_balance as _format_balance
 from ..formatting import format_usd as _format_usd
 from ..formatting import transfer_notice
 from ..icons import (
-    IconCache, bundled_native_icon, notification_icon, smooth_icon,
+    IconCache, bundled_native_icon, notification_icon, smooth_icon, vault_icon,
 )
 from ..plugin import Plugin
 from ..pricing import (
@@ -1986,6 +1986,8 @@ class TokensPlugin(Plugin):
                 price_usd=str(price.price_usd) if price else None,
                 balance_updated=now,
                 price_updated=price.timestamp if price else 0,
+                price_source=price.source if price else None,
+                underlying=price.underlying if price else None,
             ))
         self._wallet_cache.save(cached)
 
@@ -2393,6 +2395,16 @@ class TokenListPanel(QWidget):
         # Same — MainWindow injects so the alarm icon also reflects GoPlus
         # high-risk verdicts (honeypot / hidden owner / >50% sell tax).
         self._risk_cache: RiskCache | None = None
+        # (vault contract_lower -> underlying contract_lower) for rows currently
+        # shown as a vault, so their icon is the underlying's + a sparkle badge
+        # and an underlying icon arriving async can repaint the right row(s).
+        self._vault_underlying: dict[str, str] = {}
+
+    # Vault price sources whose value derives from a SINGLE underlying asset —
+    # those get the "underlying icon + sparkle" treatment. LP tokens
+    # (onchain-curve-lp / onchain-univ2-lp) have several underlyings, so they
+    # keep their own icon.
+    _VAULT_ICON_SOURCES = frozenset({"onchain-yb", "onchain-4626"})
 
     def action_widgets(self) -> list[QWidget]:
         """The button strip, in display order. MainWindow mounts them
@@ -2462,6 +2474,7 @@ class TokenListPanel(QWidget):
         # on_activated re-render) would leave the Value column blank. Reset the
         # baseline so the set_prices that render_full runs next always paints.
         self._prices_state = {}
+        self._vault_underlying = {}   # rebuilt from prices in set_prices
 
         # --- native row ---------------------------------------------------
         native_balance = wei_to_ether(native_wei)
@@ -2602,7 +2615,8 @@ class TokenListPanel(QWidget):
         for t in cached.tokens:
             if t.price_usd:
                 prices[t.contract.lower()] = Price(
-                    Decimal(t.price_usd), t.price_updated, "cache",
+                    Decimal(t.price_usd), t.price_updated,
+                    t.price_source or "cache", underlying=t.underlying,
                 )
         self.render_full(chain, cached.native_balance_wei, tokens, entries, prices)
 
@@ -2761,6 +2775,18 @@ class TokenListPanel(QWidget):
                 if isinstance(cell, _NumericItem):
                     cell.set_value(value)
 
+            # A single-underlying vault (yb-WBTC, an ERC-4626 share): show the
+            # underlying's icon with a sparkle badge. The pricer reports the
+            # underlying on the Price; the icon is composited here (or when the
+            # underlying's logo arrives async, in _on_icon_ready).
+            if not is_native:
+                underlying = self._vault_underlying_of(price)
+                if underlying:
+                    self._vault_underlying[addr] = underlying
+                    self._set_vault_icon(sym, cid, underlying)
+                else:
+                    self._vault_underlying.pop(addr, None)
+
             if apply_dust_filter:
                 # Display-time hiding (doesn't touch the worker data):
                 #   - native always shows;
@@ -2793,6 +2819,38 @@ class TokenListPanel(QWidget):
                 self.table.setRowHidden(row, not show)
         self.table.setSortingEnabled(True)
 
+    # ---- vault icons ----------------------------------------------------
+
+    def _vault_underlying_of(self, price) -> str | None:
+        """The lower-case underlying address if ``price`` is a single-underlying
+        vault quote (yb / 4626), else None."""
+        if price is None:
+            return None
+        underlying = getattr(price, "underlying", None)
+        if underlying and price.source in self._VAULT_ICON_SOURCES:
+            return underlying.lower()
+        return None
+
+    def _underlying_logo_uri(self, chain_id: int, underlying: str) -> str | None:
+        lists = getattr(self, "_token_lists", None)
+        if lists is None:
+            return None
+        entry = lists.get(chain_id, underlying)
+        return entry.logo_uri if entry else None
+
+    def _set_vault_icon(self, item, chain_id: int, underlying: str) -> None:
+        """Set a vault row's icon to the underlying's logo + a sparkle badge.
+        If the underlying's logo isn't cached yet, request it (the compositing
+        happens when it arrives, in _on_icon_ready) — the row keeps its current
+        icon meanwhile."""
+        base = self._icons.get(chain_id, underlying)
+        if base is not None:
+            item.setIcon(smooth_icon(vault_icon(base)))
+            return
+        url = self._underlying_logo_uri(chain_id, underlying)
+        if url:
+            self._icons.request(chain_id, underlying, url)
+
     # ---- icon refresh ---------------------------------------------------
 
     def _on_icon_ready(self, chain_id: int, contract: str) -> None:
@@ -2801,14 +2859,20 @@ class TokenListPanel(QWidget):
         pix = self._icons.get(chain_id, contract)
         if pix is None:
             return
+        contract = contract.lower()
+        # An icon landed for ``contract``. It may be a normal token's own icon,
+        # AND/OR the underlying of one or more displayed vault rows — set both.
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item is None:
                 continue
             cid, addr = item.data(Qt.ItemDataRole.UserRole) or (None, None)
-            if cid == chain_id and addr == contract.lower():
-                item.setIcon(smooth_icon(pix))
-                break
+            if cid != chain_id or not isinstance(addr, str):
+                continue
+            if self._vault_underlying.get(addr) == contract:
+                item.setIcon(smooth_icon(vault_icon(pix)))   # underlying arrived
+            elif addr == contract and addr not in self._vault_underlying:
+                item.setIcon(smooth_icon(pix))               # plain token icon
 
     # ---- action buttons --------------------------------------------------
 

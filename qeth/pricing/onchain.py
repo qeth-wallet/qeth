@@ -612,7 +612,8 @@ def _compute(st: Structure | None, dyn, resolved: dict[str, Price]) -> Price | N
         if share_price <= 0 or share_price > OnChainVaultPrices.ABSURD_SHARE_PRICE:
             return None
         src = "onchain-yb" if st.method == "pricePerShare1e18" else "onchain-4626"
-        return Price(share_price * up.price_usd, now, src, 0.9 * up.confidence)
+        return Price(share_price * up.price_usd, now, src, 0.9 * up.confidence,
+                     underlying=st.underlying)
     if isinstance(st, CurveLPStructure) and isinstance(dyn, _CurveDyn):
         if dyn.supply <= 0 or not st.coin_decimals:
             return None

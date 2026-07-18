@@ -38,6 +38,35 @@ def test_save_load_round_trip(tmp_qeth):
     assert t.decimals == 6
 
 
+def test_vault_price_source_and_underlying_round_trip(tmp_qeth):
+    wc = WalletCache()
+    wc.save(CachedWallet(
+        chain_id=1, address="0x" + "aa" * 20,
+        tokens=[CachedToken(
+            contract="0x931d40dd07b25b91932b481b63631ea86d236e09",
+            symbol="yb-WETH", name="Yield Basis WETH", decimals=18,
+            balance_raw=10 ** 18, price_usd="3062.38",
+            price_source="onchain-yb",
+            underlying="0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        )],
+    ))
+    t = wc.load(1, "0x" + "aa" * 20).tokens[0]
+    assert t.price_source == "onchain-yb"
+    assert t.underlying == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+
+
+def test_missing_vault_fields_default_to_none(tmp_qeth):
+    # A cache written before these fields existed loads cleanly.
+    wc = WalletCache()
+    p = wc._path(1, "0x" + "bb" * 20)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"chain_id":1,"address":"0x'
+                 + "bb" * 20 + '","tokens":[{"contract":"0x'
+                 + "cc" * 20 + '","symbol":"X","decimals":18}]}')
+    t = wc.load(1, "0x" + "bb" * 20).tokens[0]
+    assert t.price_source is None and t.underlying is None
+
+
 def test_load_returns_none_when_no_file(tmp_qeth):
     wc = WalletCache()
     assert wc.load(1, "0x0000000000000000000000000000000000000000") is None

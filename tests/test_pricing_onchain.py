@@ -163,6 +163,7 @@ def test_4626_vault_decimals_differ_from_underlying():
     out = pricer.price(Chain(), [A], base)
     assert out[A].price_usd == Decimal("2.0")   # 2 underlying/share × $1
     assert out[A].source == "onchain-4626"
+    assert out[A].underlying == B               # surfaced for the vault icon
     assert out[A].confidence == 0.9 * 0.99
 
 
@@ -207,6 +208,7 @@ def test_yield_basis_vault_pricePerShare_is_1e18_over_asset_token():
     out = pricer.price(Chain(), [A], _BaseLookup({B: ("100000", 1.0)}))  # WBTC $100k
     assert out[A].price_usd == Decimal("105000.00")   # 1.05 WBTC × $100k
     assert out[A].source == "onchain-yb"
+    assert out[A].underlying == B                     # WBTC, for the vault icon
 
 
 # --- 4. guards: zero supply / absurd / empty-returndata EOA ----------------

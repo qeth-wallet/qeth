@@ -340,7 +340,7 @@ def test_apply_targeted_balances_persists_then_renders_on_view(qtbot, monkeypatc
 
 
 def test_on_activated_rerenders_flag_and_reconciles_balances(qtbot, monkeypatch,
-                                                             tmp_path):
+                                                             tmp_qeth):
     """Switching to the Tokens tab (1) re-renders a flagged background update
     from cache, and (2) ALWAYS reconciles the displayed balances against the
     chain via one multicall — the safety net for a confirmation we never got a
@@ -349,7 +349,7 @@ def test_on_activated_rerenders_flag_and_reconciles_balances(qtbot, monkeypatch,
     from qeth.plugins.tokens import BalanceWorker, TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xabc", native_balance_wei=1,
         tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
@@ -381,7 +381,7 @@ def test_on_activated_rerenders_flag_and_reconciles_balances(qtbot, monkeypatch,
     assert len(workers) == 1                             # and reconciles too
 
 
-def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_path):
+def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_qeth):
     """End-to-end: a real panel + cache. The in-place path updates a held
     token's balance AND recomputes its USD even with a user-hidden token in the
     cache (the case that used to silently no-op), and a re-render keeps USD."""
@@ -401,7 +401,7 @@ def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
 
     cached = CachedWallet(
@@ -434,7 +434,7 @@ def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_path):
     assert cell(tok, 2) == "$50.00"        # USD recomputed, not stale/blank
 
 
-def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_path):
+def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_qeth):
     """On the on-screen view, the live-refresh (≈1.5 s after a ws event) must
     kick a fresh balance reconcile over the displayed set — the later read that
     catches a token the eager 400 ms targeted read missed (RPC a block behind).
@@ -444,7 +444,7 @@ def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_p
     from qeth.plugins.tokens import BalanceWorker, TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xabc", native_balance_wei=1,
         tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
@@ -464,7 +464,7 @@ def test_on_live_refresh_reconciles_displayed_balances(qtbot, monkeypatch, tmp_p
     assert workers[0].contracts == ["0xtok"]              # over the displayed set
 
 
-def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tmp_path):
+def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tmp_qeth):
     """The qeth-send confirm path (_invalidate_view_and_refresh) transiently
     resets _displayed_view to None. A targeted drop landing in that window must
     STILL repaint the on-screen panel — the decision uses the host's selection,
@@ -484,7 +484,7 @@ def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tm
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
     cached = CachedWallet(
         chain_id=1, address=acc, native_balance_wei=10**18,
@@ -512,7 +512,7 @@ def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tm
     assert not tp._wallet_cache.load(1, acc).tokens
 
 
-def test_targeted_read_drops_spent_token_despite_a_lagging_chunk(qtbot, tmp_path):
+def test_targeted_read_drops_spent_token_despite_a_lagging_chunk(qtbot, tmp_qeth):
     """End-to-end guard for the Arbitrum stuck-balance bug: a token spent out
     reads 0 in a FRESH chunk, but an unrelated token's chunk lags and drags the
     batch min below the spent token's floor. Per-token block ordering still drops
@@ -533,7 +533,7 @@ def test_targeted_read_drops_spent_token_despite_a_lagging_chunk(qtbot, tmp_path
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=42161, address=acc, native_balance_wei=10**18, tokens=[
@@ -573,7 +573,7 @@ def test_ws_reconnect_clears_freshness_floors(qtbot):
     assert not tp._ledger.is_token_stale(1, "0xabc", "0xtok", 50)
 
 
-def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_path):
+def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_qeth):
     """A held token the user HID must stay in the disk cache after a discovery
     (so unhiding brings it back) even though the display filters it — discovery's
     replace-save dropped it, contradicting _filter_hidden_from_cache."""
@@ -593,7 +593,7 @@ def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._token_metadata.put_many(
         1, {tok: {"symbol": "HID", "name": "Hidden", "decimals": 18}})
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
@@ -617,7 +617,7 @@ def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_path):
     assert tok in held
 
 
-def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
+def test_discovery_merges_and_is_block_ordered(qtbot, tmp_qeth):
     """The systemic bug: a token claimed on-view was DROPPED when a concurrent
     discovery — whose balance snapshot predated the claim, or whose multicall
     failed — completed and rebuilt the view from its own stale/absent read.
@@ -640,7 +640,7 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._token_metadata.put_many(
         1, {tok: {"symbol": "CUS", "name": "Custom", "decimals": 18}})
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
@@ -681,7 +681,7 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_path):
     assert tok not in held()
 
 
-def test_stale_discovery_native_does_not_regress(qtbot, tmp_path):
+def test_stale_discovery_native_does_not_regress(qtbot, tmp_qeth):
     """2c: discovery's native is block-ordered like every other native write —
     a stale discovery read (older block, behind an LB) must not regress it, and
     a fresh read applies + stamps the block."""
@@ -699,7 +699,7 @@ def test_stale_discovery_native_does_not_regress(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
                               start_worker=lambda w: None)
     tp._wallet_cache.save(CachedWallet(chain_id=1, address=acc,
@@ -762,7 +762,7 @@ def test_reconcile_waits_for_rpc_to_reach_the_event_block(qtbot, monkeypatch):
     assert len(applied) == 1
 
 
-def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_path):
+def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_qeth):
     """The 'qeth send-out never updates' bug: the confirm path's is_new_view
     read fires right after a send and can read the PRE-send balance from a
     lagging backend. Routed through the block-ordered _apply_targeted_balances
@@ -782,7 +782,7 @@ def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
                               start_worker=lambda w: None)
     tp._wallet_cache.save(CachedWallet(
@@ -810,7 +810,7 @@ def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_path):
     assert panel_usdt() == "423"        # NOT regressed to 644
 
 
-def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_path):
+def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_qeth):
     """A fresh read for one token must not be skipped because an UNRELATED read
     (native only, or another token) landed at a higher block. Ordering is
     per-token — the 'partial USDT send didn't update' bug behind a
@@ -829,7 +829,7 @@ def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
                               start_worker=lambda w: None)
     tp._wallet_cache.save(CachedWallet(
@@ -856,7 +856,7 @@ def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_path):
     assert usdt_bal() == 423_000000
 
 
-def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
+def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_qeth):
     """Race guard: a balance worker kicked BEFORE a send (reads the token still
     non-zero) that finishes AFTER the drop must not resurrect it. Reads are
     ordered by block — an older block than one already applied is discarded.
@@ -874,7 +874,12 @@ def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
+    # cbBTC was known from a prior discovery; seed its metadata so the re-receive
+    # can reconstruct the row. (Previously this test silently read the real
+    # ~/.qeth/token_metadata cache — the non-hermeticity the tmp_qeth swap fixed.)
+    tp._token_metadata.put_many(
+        1, {cb: {"symbol": "cbBTC", "name": "cb", "decimals": 8}})
     # re-adding a token with no price kicks a price fetch → needs start_worker
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth,
                               start_worker=lambda w: None)
@@ -904,7 +909,7 @@ def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_path):
     assert cb in held()
 
 
-def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
+def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_qeth):
     """A full send: a live targeted read drops the now-zero token. A DISCOVERY
     whose balance snapshot predates the send then completes — it must NOT bring
     the token back in the panel or the cache (the bug a wallet-switch 'fixed').
@@ -926,7 +931,7 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
 
     cached = CachedWallet(
@@ -972,7 +977,7 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_path):
     assert wbtc not in {t.contract.lower() for t in reloaded.tokens}   # nor cache
 
 
-def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_path):
+def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_qeth):
     """satellite 2: a token carried forward from cache (absent from a read →
     absent from `blocks`) is applied but NOT stamped, so a later CORRECT read at
     a LOWER block isn't discarded against a floor the carry never earned."""
@@ -991,7 +996,7 @@ def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_path):
     qtbot.addWidget(panel)
     tp = TokensPlugin(store)
     tp._panel = panel
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp.host = SimpleNamespace(selected_address=acc, current_chain=lambda: eth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=1, address=acc, native_balance_wei=10**18, tokens=[
@@ -1042,7 +1047,7 @@ def test_reconcile_does_not_spawn_a_worker_while_shutting_down(qtbot):
     assert len(started) == 1
 
 
-def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):
+def test_persist_targeted_balances_writes_absolute(qtbot, tmp_qeth):
     """Persist writes ABSOLUTE native + per-token balances (unlike the receipt
     path's delta): a held token is overwritten in place; an unknown new token
     with no metadata is left for discovery, not invented."""
@@ -1050,7 +1055,7 @@ def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):
     from qeth.plugins.tokens import TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xabc", native_balance_wei=1,
         tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
@@ -1070,7 +1075,7 @@ def test_persist_targeted_balances_writes_absolute(qtbot, tmp_path):
     assert [t.contract for t in reloaded.tokens] == ["0xtok"]
 
 
-def test_apply_native_updates_only_native_and_is_ordered(qtbot, tmp_path):
+def test_apply_native_updates_only_native_and_is_ordered(qtbot, tmp_qeth):
     """The ordered native-only write (ledger.apply_native, driven by the ws
     native poll) persists the new native while leaving cached tokens intact,
     and a stale (older-block) poll can't regress it."""
@@ -1078,7 +1083,7 @@ def test_apply_native_updates_only_native_and_is_ordered(qtbot, tmp_path):
     from qeth.plugins.tokens import TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xabc", native_balance_wei=1,
         tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",
@@ -1103,14 +1108,14 @@ def test_apply_native_updates_only_native_and_is_ordered(qtbot, tmp_path):
 
 
 def test_stale_native_poll_does_not_regress_or_renotify(qtbot, monkeypatch,
-                                                        tmp_path):
+                                                        tmp_qeth):
     """2d: an out-of-order ws native poll (LB jumped back) must not regress the
     shown balance nor re-fire a 'received' notification for ETH seen earlier."""
     from qeth.plugins.tokens import TokensPlugin
     from qeth.wallet_cache import CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
     tp.host = Mock()
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xme", native_balance_wei=10**18))
     tp._displayed_view = (100, "0xme")
@@ -1195,7 +1200,7 @@ def test_tokens_sweep_slows_when_current_chain_ws_live(qtbot):
 
 
 def test_reconcile_tick_reads_displayed_balances_only_while_ws_live(
-        qtbot, tmp_path):
+        qtbot, tmp_qeth):
     """The periodic reconcile is the safety net for a silently-dead Transfer-log
     subscription: while the on-screen chain is ws-live (discovery demoted to the
     5-min slow sweep) it must re-read the displayed balances every tick, so a
@@ -1205,7 +1210,7 @@ def test_reconcile_tick_reads_displayed_balances_only_while_ws_live(
     from qeth.plugins.tokens import BalanceWorker, TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     tp = TokensPlugin(Mock())
-    tp._wallet_cache = WalletCache(cache_dir=tmp_path)
+    tp._wallet_cache = WalletCache(cache_dir=tmp_qeth)
     tp._wallet_cache.save(CachedWallet(
         chain_id=100, address="0xabc", native_balance_wei=1,
         tokens=[CachedToken(contract="0xtok", symbol="T", name="Tok",

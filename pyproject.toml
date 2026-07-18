@@ -230,12 +230,22 @@ module = [
     "hexbytes.*",
     "rlp.*",
     "eth_account.*",
-    "zxingcpp",
     # System QtMultimedia (ships with PySide6, not pip-installable here) — the
     # camera in the QR exchange dialog. Lazily imported; absent on this dev host.
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
 ]
+ignore_missing_imports = true
+
+# zxing-cpp 3.1.0 ships a .pyi whose BarcodeFormat enum has a member literally
+# named `None` (`None = 0`) — a Python syntax error mypy 2.2 rejects. It's a
+# runtime-fine C++ binding, so skip following its (broken) stub rather than let
+# an upstream stub bug fail our gate. follow_imports_for_stubs extends `skip` to
+# the .pyi (otherwise mypy parses stubs even when the module import is skipped).
+[[tool.mypy.overrides]]
+module = "zxingcpp"
+follow_imports = "skip"
+follow_imports_for_stubs = true
 ignore_missing_imports = true
 
 [tool.ruff]

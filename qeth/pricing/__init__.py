@@ -17,9 +17,7 @@ from .native import (
     load_native_coin_ids,
     native_coingecko_id,
 )
-
-# ``onchain`` (ChainedPriceSource, OnChainVaultPrices) is re-exported here once
-# that module lands — see qeth/pricing/onchain.py.
+from .onchain import ChainedPriceSource, OnChainVaultPrices
 
 __all__ = [
     "Price",
@@ -30,4 +28,6 @@ __all__ = [
     "NATIVE_COINGECKO_IDS",
     "load_native_coin_ids",
     "native_coingecko_id",
+    "ChainedPriceSource",
+    "OnChainVaultPrices",
 ]

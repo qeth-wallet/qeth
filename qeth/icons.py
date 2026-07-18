@@ -309,11 +309,13 @@ def notification_icon(
     return QIcon(canvas)
 
 
-# Vault badge: a violet "magical sparkle" — distinct from the green/blue
-# direction badges, and self-coloured so it reads on any underlying icon in
-# either theme. The star is the four-point sparkle, as unit points (outer tips
-# at N/E/S/W radius 1, inner points on the diagonals) scaled at draw time.
-_VAULT_BADGE_COLOR = QColor(124, 58, 237)
+# Vault badge: a "magical sparkle" — a bare four-point star (no disc), gold-
+# yellow with a dark outline. The bright fill carries it on dark backgrounds,
+# the dark outline gives it definition on light ones. Points are unit
+# coordinates (outer tips at N/E/S/W radius 1, inner points on the diagonals)
+# scaled at draw time.
+_VAULT_BADGE_COLOR = QColor(255, 209, 59)      # gold-yellow fill
+_VAULT_BADGE_OUTLINE = QColor(43, 33, 0)       # dark border
 _SPARKLE_POINTS = (
     (0.0, -1.0), (0.24, -0.24), (1.0, 0.0), (0.24, 0.24),
     (0.0, 1.0), (-0.24, 0.24), (-1.0, 0.0), (-0.24, -0.24),
@@ -323,21 +325,19 @@ _SPARKLE_POINTS = (
 def _draw_sparkle_badge(
     painter: QPainter, cx: float, cy: float, r: float,
 ) -> None:
-    """A violet disc with a white four-point sparkle, centred at (cx, cy),
-    radius ``r``; a thin white ring sets it off from the icon behind. Vector-
-    drawn (like the direction badge) so it renders identically everywhere."""
-    painter.setPen(QPen(QColor(255, 255, 255), max(1.0, r * 0.12)))
-    painter.setBrush(_VAULT_BADGE_COLOR)
-    painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
-    star = r * 0.62
+    """A four-point sparkle — gold-yellow fill, dark outline, no disc — centred
+    at (cx, cy) with outer radius ``r``. Vector-drawn (like the direction
+    badge) so it renders identically everywhere."""
     path = QPainterPath()
     x0, y0 = _SPARKLE_POINTS[0]
-    path.moveTo(cx + x0 * star, cy + y0 * star)
+    path.moveTo(cx + x0 * r, cy + y0 * r)
     for px, py in _SPARKLE_POINTS[1:]:
-        path.lineTo(cx + px * star, cy + py * star)
+        path.lineTo(cx + px * r, cy + py * r)
     path.closeSubpath()
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(255, 255, 255))
+    pen = QPen(_VAULT_BADGE_OUTLINE, max(1.0, r * 0.16))
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(_VAULT_BADGE_COLOR)
     painter.drawPath(path)
 
 
@@ -355,11 +355,11 @@ def vault_icon(base: "QPixmap | None", size: int = 64) -> QPixmap:
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     if base is not None and not base.isNull():
         p.drawPixmap(0, 0, to_circular(base, size))
-        r = size * 0.26
-        off = size - r - size * 0.015
+        r = size * 0.36                       # a bigger sparkle than the old disc
+        off = size - r - size * 0.04          # margin so the outline isn't clipped
         _draw_sparkle_badge(p, off, off, r)
     else:
-        _draw_sparkle_badge(p, size / 2.0, size / 2.0, size * 0.42)
+        _draw_sparkle_badge(p, size / 2.0, size / 2.0, size * 0.44)
     p.end()
     return canvas
 

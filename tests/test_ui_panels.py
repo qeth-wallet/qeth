@@ -93,16 +93,16 @@ class TestVaultIcon:
                     return True
         return False
 
-    def test_underlying_shows_with_violet_sparkle_badge(self, qtbot):
+    def test_underlying_shows_with_yellow_sparkle_badge(self, qtbot):
         from PySide6.QtGui import QPixmap
         from qeth.icons import vault_icon, _VAULT_BADGE_COLOR
         base = QPixmap(64, 64)
         base.fill(Qt.GlobalColor.red)          # stand-in underlying icon
         img = vault_icon(base, 64).toImage()
-        # Underlying (red) shows in the top-left; the violet sparkle badge is in
-        # the bottom-right corner.
-        assert self._has_color(img, Qt.GlobalColor.red, (4, 4, 28, 28))
-        assert self._has_color(img, _VAULT_BADGE_COLOR, (40, 40, 62, 62))
+        # Underlying (red) shows in the top-left; the gold-yellow sparkle is in
+        # the bottom-right.
+        assert self._has_color(img, Qt.GlobalColor.red, (4, 4, 24, 24))
+        assert self._has_color(img, _VAULT_BADGE_COLOR, (36, 36, 63, 63))
 
     def test_no_base_still_draws_a_sparkle(self, qtbot):
         from qeth.icons import vault_icon, _VAULT_BADGE_COLOR

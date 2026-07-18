@@ -121,6 +121,16 @@ class UniV2Structure:
 Structure = VaultStructure | CurveLPStructure | UniV2Structure
 PriceLookup = Callable[[Iterable[str], bool], dict[str, Price]]
 
+
+@dataclass(frozen=True)
+class IconMeta:
+    """The immutable, icon-relevant shape of a vault/LP token — separate from
+    its (mutable) USD value, so the UI can give it a derived icon even when the
+    primary source already prices it (and the on-chain valuer never runs)."""
+    underlying: str | None = None                 # single-underlying vault → asset
+    pool_tokens: tuple[str, ...] | None = None    # LP → pooled coin addresses
+
+
 _MISSING = object()   # memo sentinel: address never probed
 
 
@@ -332,6 +342,50 @@ class OnChainVaultPrices:
             else:
                 break
         return cur
+
+    def icon_metadata(self, chain: Chain, tokens: Iterable[str]) -> dict[str, IconMeta]:
+        """The icon-relevant structure (single underlying, or pooled coins) of
+        each vault/LP token, WITHOUT valuing it. Probes each token once and
+        memoizes; later calls serve from the memo with no network. This is how a
+        vault/LP the primary source already prices still gets its derived icon —
+        the on-chain *valuer* would carry the same fields but never runs then."""
+        cid = chain.chain_id
+        addrs = list(dict.fromkeys(
+            a.lower() for a in tokens if _is_addr(a)))[:self.MAX_CANDIDATES]
+        unknown = [a for a in addrs
+                   if self._memo.get((cid, a), _MISSING) is _MISSING]
+        if unknown:
+            client = self._client_factory(chain)
+            self._ensure_registry(client, cid)
+            for a, st in self._probe(client, cid, unknown).items():
+                self._memo[(cid, a)] = st
+            # A Curve structure only knows its coins after a dynamics read
+            # (registry get_coins / per-index fallback); vault + UniV2 metadata
+            # is already complete from the probe. Finalize the Curve ones once —
+            # the memo then holds the coins for every later call.
+            curve_prelim: dict[str, Structure] = {
+                a: st for a in unknown
+                if isinstance(st := self._memo[(cid, a)], CurveLPStructure)}
+            if curve_prelim:
+                fin, _dyn = self._read_dynamics(
+                    client, self._registry.get(cid), curve_prelim)
+                for a, st in fin.items():
+                    self._memo[(cid, a)] = st
+        out: dict[str, IconMeta] = {}
+        for a in addrs:
+            m = self._meta_of(cid, self._memo.get((cid, a)))
+            if m is not None:
+                out[a] = m
+        return out
+
+    def _meta_of(self, cid: int, st: object) -> IconMeta | None:
+        if isinstance(st, VaultStructure):
+            return IconMeta(underlying=self._terminal_underlying(cid, st.underlying))
+        if isinstance(st, CurveLPStructure) and st.coins:
+            return IconMeta(pool_tokens=st.coins)
+        if isinstance(st, UniV2Structure):
+            return IconMeta(pool_tokens=(st.token0, st.token1))
+        return None
 
     # -- registry + probing ----------------------------------------------
 
@@ -584,12 +638,25 @@ class ChainedPriceSource(PriceSource):
     def fetch(self, chain, contracts, include_native=False):
         contracts = list(contracts)
         out = self._primary.fetch(chain, contracts, include_native)
-        missing = [c.lower() for c in contracts
-                   if _is_addr(c) and c.lower() not in out]
+        addrs = [c.lower() for c in contracts if _is_addr(c)]
+        missing = [a for a in addrs if a not in out]
         if missing:
+            # Primary had no quote → value it on-chain (carries icon metadata).
             out.update(self._onchain.price(
                 chain, missing,
-                lambda addrs, incl: self._primary.fetch(chain, addrs, incl)))
+                lambda a, incl: self._primary.fetch(chain, a, incl)))
+        # A vault/LP the primary DID price still needs its derived icon: attach
+        # the immutable structure metadata (underlying / pooled coins) without
+        # re-valuing it. Tokens just valued on-chain already carry it — skip.
+        priced = [a for a in addrs
+                  if (p := out.get(a)) is not None
+                  and not p.underlying and not p.pool_tokens]
+        if priced:
+            for a, meta in self._onchain.icon_metadata(chain, priced).items():
+                p = out.get(a)
+                if p is not None:
+                    out[a] = replace(p, underlying=meta.underlying,
+                                     pool_tokens=meta.pool_tokens)
         return out
 
 

@@ -443,3 +443,55 @@ def test_chained_source_prices_primary_hits_and_onchain_misses():
     out = chained.fetch(Chain(), [A, C])   # C priced by primary; A is the vault
     assert out[C].price_usd == Decimal("5.0") and out[C].source == "primary"
     assert out[A].price_usd == Decimal("1.2") and out[A].source == "onchain-4626"
+
+
+# --- icon metadata (structure without valuation) ---------------------------
+
+def test_icon_metadata_curve_lp_and_plain():
+    h: dict = {}
+    _curve_via_registry(h, A, A, [B, C], [10 ** 24, 10 ** 24], [18, 18], 2 * 10 ** 24)
+    pricer, _ = _mk(h)
+    meta = pricer.icon_metadata(Chain(), [A, C])   # A is the LP; C a plain coin
+    assert meta[A].pool_tokens == (B.lower(), C.lower())
+    assert meta[A].underlying is None
+    assert C.lower() not in meta                    # a pooled coin isn't itself an LP
+
+
+def test_icon_metadata_vault_reports_underlying():
+    h: dict = {}
+    _vault_4626(h, A, vdec=18, underlying=B, udec=18, assets_per_share="1.2")
+    pricer, _ = _mk(h)
+    meta = pricer.icon_metadata(Chain(), [A])
+    assert meta[A].underlying == B.lower() and meta[A].pool_tokens is None
+
+
+def test_icon_metadata_memoized_no_second_probe():
+    h: dict = {}
+    _curve_via_registry(h, A, A, [B, C], [10 ** 24, 10 ** 24], [18, 18], 2 * 10 ** 24)
+    pricer, fake = _mk(h)
+    pricer.icon_metadata(Chain(), [A])
+    n = fake.calls
+    again = pricer.icon_metadata(Chain(), [A])   # served from memo
+    assert fake.calls == n                        # zero further eth_calls
+    assert again[A].pool_tokens == (B.lower(), C.lower())
+
+
+def test_chained_source_enriches_primary_priced_lp():
+    """A Curve LP the primary already prices keeps that price but gains its
+    pool_tokens (for the stacked icon) — the on-chain valuer never runs."""
+    h: dict = {}
+    _curve_via_registry(h, A, A, [B, C], [10 ** 24, 10 ** 24], [18, 18], 2 * 10 ** 24)
+    fake = FakeChain(h)
+    onchain = OnChainVaultPrices(client_factory=lambda ch: fake)
+    primary = _FakePrimary({A: ("1.01", 0.97)})   # primary prices the LP itself
+    out = ChainedPriceSource(primary, onchain).fetch(Chain(), [A])
+    assert out[A].price_usd == Decimal("1.01") and out[A].source == "primary"
+    assert out[A].pool_tokens == (B.lower(), C.lower())
+
+
+def test_chained_source_plain_token_gains_no_metadata():
+    fake = FakeChain({})   # no handlers → nothing classifies
+    onchain = OnChainVaultPrices(client_factory=lambda ch: fake)
+    primary = _FakePrimary({A: ("2.0", 1.0)})
+    out = ChainedPriceSource(primary, onchain).fetch(Chain(), [A])
+    assert out[A].pool_tokens is None and out[A].underlying is None

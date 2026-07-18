@@ -173,14 +173,14 @@ class TestLpRowIcon:
     C0 = "0x" + "c0" * 20
     C1 = "0x" + "c1" * 20
 
-    def _cached(self):
+    def _cached(self, source="onchain-curve-lp"):
         from qeth.wallet_cache import CachedToken, CachedWallet
         return CachedWallet(
             chain_id=1, address="0x" + "aa" * 20,
             tokens=[CachedToken(
                 contract=self.LP, symbol="crvUSD-LP", name="Curve LP",
                 decimals=18, balance_raw=10 ** 18, price_usd="1.29",
-                price_source="onchain-curve-lp", pool_tokens=[self.C0, self.C1])],
+                price_source=source, pool_tokens=[self.C0, self.C1])],
         )
 
     def _row(self, panel):
@@ -219,6 +219,23 @@ class TestLpRowIcon:
         panel._on_icon_ready(1, self.C0)            # a pooled coin's icon lands
         assert not self._row(panel).icon().isNull()
 
+    def test_stacks_even_when_primary_priced_it(self, qtbot, tmp_qeth):
+        # An LP the primary (DefiLlama) priced carries pool_tokens grafted on by
+        # the pricer, so it still gets the stacked icon — the source is
+        # "defillama", not "onchain-curve-lp". Keyed on the field, not the source.
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        for c in (self.C0, self.C1):
+            pm = QPixmap(20, 20)
+            pm.fill(Qt.GlobalColor.blue)
+            icons._mem[(1, c)] = pm
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached(source="defillama"))
+        assert panel._lp_coins.get(self.LP) == (self.C0, self.C1)
+        assert not self._row(panel).icon().isNull()
+
 
 class TestVaultRowIcon:
     """A vault row (price source onchain-yb/4626 with an underlying) shows the
@@ -227,14 +244,14 @@ class TestVaultRowIcon:
     VAULT = "0x931d40dd07b25b91932b481b63631ea86d236e09"
     UNDER = "0x" + "c0" * 20
 
-    def _cached(self):
+    def _cached(self, source="onchain-yb"):
         from qeth.wallet_cache import CachedToken, CachedWallet
         return CachedWallet(
             chain_id=1, address="0x" + "aa" * 20, native_price_usd="3000",
             tokens=[CachedToken(
                 contract=self.VAULT, symbol="yb-WETH", name="Yield Basis WETH",
                 decimals=18, balance_raw=10 ** 18, price_usd="3062",
-                price_source="onchain-yb", underlying=self.UNDER)],
+                price_source=source, underlying=self.UNDER)],
         )
 
     def _row(self, panel):
@@ -271,6 +288,21 @@ class TestVaultRowIcon:
         icons._mem[(1, self.UNDER)] = QPixmap(20, 20)
         icons._mem[(1, self.UNDER)].fill(Qt.GlobalColor.red)
         panel._on_icon_ready(1, self.UNDER)
+        assert not self._row(panel).icon().isNull()
+
+    def test_sparkle_even_when_primary_priced_it(self, qtbot, tmp_qeth):
+        # A vault the primary (DefiLlama) priced still gets the sparkle: the
+        # pricer grafts `underlying` on regardless of which source valued it.
+        from PySide6.QtGui import QPixmap
+        store = Store.load()
+        icons = IconCache()
+        base = QPixmap(20, 20)
+        base.fill(Qt.GlobalColor.red)
+        icons._mem[(1, self.UNDER)] = base
+        panel = TokenListPanel(icons, store)
+        qtbot.addWidget(panel)
+        panel.show_cached(ETH, self._cached(source="defillama"))
+        assert panel._vault_underlying.get(self.VAULT) == self.UNDER
         assert not self._row(panel).icon().isNull()
 
 

@@ -2407,11 +2407,10 @@ class TokenListPanel(QWidget):
         # async can repaint the right row(s).
         self._lp_coins: dict[str, tuple[str, ...]] = {}
 
-    # Vault price sources whose value derives from a SINGLE underlying asset —
-    # those get the "underlying icon + sparkle" treatment.
-    _VAULT_ICON_SOURCES = frozenset({"onchain-yb", "onchain-4626"})
-    # LP sources — their icon is the pooled coins' icons stacked together.
-    _LP_ICON_SOURCES = frozenset({"onchain-curve-lp", "onchain-univ2-lp"})
+    # A derived-icon token carries structure metadata on its Price: a single
+    # ``underlying`` (vault → underlying icon + sparkle) or ``pool_tokens`` (LP →
+    # pooled coins stacked). Only the on-chain pricer sets these, so their mere
+    # presence — not the price source — selects the icon.
     _NATIVE_COIN_PLACEHOLDER = "0x" + "ee" * 20   # Curve's native-coin sentinel
 
     def action_widgets(self) -> list[QWidget]:
@@ -2838,13 +2837,13 @@ class TokenListPanel(QWidget):
 
     def _vault_underlying_of(self, price) -> str | None:
         """The lower-case underlying address if ``price`` is a single-underlying
-        vault quote (yb / 4626), else None."""
+        vault quote (yb / 4626), else None. Keyed on the field, not the source:
+        only the on-chain pricer sets ``underlying``, and it's carried across
+        even when the primary source (DefiLlama) supplied the actual price."""
         if price is None:
             return None
         underlying = getattr(price, "underlying", None)
-        if underlying and price.source in self._VAULT_ICON_SOURCES:
-            return underlying.lower()
-        return None
+        return underlying.lower() if underlying else None
 
     def _underlying_logo_uri(self, chain_id: int, underlying: str) -> str | None:
         lists = getattr(self, "_token_lists", None)
@@ -2867,13 +2866,13 @@ class TokenListPanel(QWidget):
             self._icons.request(chain_id, underlying, url)
 
     def _lp_coins_of(self, price) -> tuple[str, ...] | None:
-        """The lower-case pooled coin addresses if ``price`` is an LP quote."""
+        """The lower-case pooled coin addresses if ``price`` is an LP quote.
+        Keyed on the field, not the source: only the on-chain pricer sets
+        ``pool_tokens``, carried across even when the primary source priced it."""
         if price is None:
             return None
         coins = getattr(price, "pool_tokens", None)
-        if coins and price.source in self._LP_ICON_SOURCES:
-            return tuple(c.lower() for c in coins)
-        return None
+        return tuple(c.lower() for c in coins) if coins else None
 
     def _coin_icon(self, chain_id: int, coin: str):
         """A pooled coin's cached icon (requesting it if absent), mapping the

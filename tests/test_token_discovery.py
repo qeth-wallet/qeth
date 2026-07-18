@@ -85,3 +85,15 @@ def test_default_caches_are_used_when_omitted(tmp_qeth):
     # which tmp_qeth has redirected under tmp_path (the ACTIVITIES_DIR fix).
     _seed(ME, [_tx("0xh1", ME)], {"0xh1": _act([VAULT])})
     assert discover_own_tokens(CID, [ME]) == {VAULT.lower()}
+
+
+def test_viewers_scopes_the_scan_but_origin_spans_all(tmp_qeth):
+    # ME2 originates a tx → ME receives VAULT; ME2 originates → ME2 receives LP.
+    _seed(ME, [_tx("0xh1", ME2)], {"0xh1": _act([VAULT])})
+    _seed(ME2, [_tx("0xh2", ME2)], {"0xh2": _act([LP])})
+    # Scan ONLY ME's cache — but ME2 (the originator) is still one of ours, so
+    # the cross-account receipt is found. ME2's own LP is not (not scanned).
+    assert discover_own_tokens(CID, [ME, ME2], viewers=[ME]) == {VAULT.lower()}
+    assert discover_own_tokens(CID, [ME, ME2], viewers=[ME2]) == {LP.lower()}
+    # Full scan (default viewers) → both.
+    assert discover_own_tokens(CID, [ME, ME2]) == {VAULT.lower(), LP.lower()}

@@ -179,7 +179,11 @@ class RiskWorker(QThread):
 class OwnTokenDiscoveryWorker(QThread):
     """Scan the local tx + activity caches for tokens the user received in
     their OWN transactions (vault/LP tokens curated lists miss). Pure disk I/O —
-    fast, no network. Emits ``discovered(chain_id, set[str] of contracts)``."""
+    fast, no network. Emits ``discovered(chain_id, set[str] of contracts)``.
+
+    ``addresses[0]`` is the on-screen wallet; its tokens are scanned and emitted
+    FIRST (a second emit covers the rest) so they surface + price soonest.
+    Reads already-resolved activities — a tx is never re-parsed."""
 
     discovered = Signal(QULONGLONG, object)   # chain_id can exceed qint32
 
@@ -189,12 +193,19 @@ class OwnTokenDiscoveryWorker(QThread):
         self.addresses = list(addresses)
 
     def run(self) -> None:
-        try:
-            from ..token_discovery import discover_own_tokens
-            found = discover_own_tokens(self.chain_id, self.addresses)
-        except Exception:
-            found = set()
-        self.discovered.emit(self.chain_id, found)
+        from ..token_discovery import discover_own_tokens
+        # (selected-wallet-first, then the rest). The origin check spans ALL
+        # addresses in both passes, so cross-account sends aren't missed.
+        for viewers in (self.addresses[:1], self.addresses[1:]):
+            if not viewers:
+                continue
+            try:
+                found = discover_own_tokens(
+                    self.chain_id, self.addresses, viewers=viewers)
+            except Exception:
+                continue
+            if found:
+                self.discovered.emit(self.chain_id, found)
 
 
 class MetadataWorker(QThread):
@@ -1298,6 +1309,11 @@ class TokensPlugin(Plugin):
         if not addrs:
             self._own_scan_done.discard(chain.chain_id)   # retry when accounts exist
             return
+        # On-screen wallet first, so its vault/LP tokens are discovered, shown,
+        # and priced before the other wallets are scanned.
+        sel = self.host.selected_address
+        if sel:
+            addrs = [sel] + [a for a in addrs if a.lower() != sel.lower()]
         worker = OwnTokenDiscoveryWorker(chain.chain_id, addrs)
         worker.discovered.connect(self._on_own_tokens_discovered)
         self.host.start_worker(worker)

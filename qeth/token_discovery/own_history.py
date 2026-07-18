@@ -28,11 +28,21 @@ if TYPE_CHECKING:
 def discover_own_tokens(
     chain_id: int,
     my_addresses: Iterable[str],
+    *,
+    viewers: Iterable[str] | None = None,
     tx_cache: TransactionCache | None = None,
     activity_cache: ActivityCache | None = None,
 ) -> set[str]:
     """The set of ERC-20 contract addresses (lower-case) the user received in
-    transactions they originated on ``chain_id``. Pure disk I/O."""
+    transactions they originated on ``chain_id``. Pure disk I/O — reads
+    already-resolved activities from the cache; it never re-parses a tx.
+
+    ``viewers`` scopes WHICH wallets' caches are read (defaults to all of
+    ``my_addresses``), scanned in the given order — so a caller can prioritise
+    the on-screen wallet. The ORIGIN check always spans every ``my_addresses``,
+    so a cross-account send (wallet A → wallet B, both ours) is still caught
+    when only B's cache is scanned.
+    """
     # Imported lazily: activity_cache → tx_activity → abi → token_discovery,
     # so a module-level import here would form a cycle when this package is
     # imported via abi/transactions.
@@ -40,9 +50,17 @@ def discover_own_tokens(
     from ..transactions_cache import TransactionCache
     txc = tx_cache if tx_cache is not None else TransactionCache()
     acc = activity_cache if activity_cache is not None else ActivityCache()
-    mine = {a.lower() for a in my_addresses}
+    mine = {a.lower() for a in my_addresses}   # origin test spans ALL our addrs
+    scan = viewers if viewers is not None else my_addresses
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for v in scan:                             # ordered, de-duplicated
+        vl = v.lower()
+        if vl not in seen:
+            seen.add(vl)
+            ordered.append(vl)
     found: set[str] = set()
-    for viewer in mine:
+    for viewer in ordered:
         txs = txc.load(chain_id, viewer) or []
         acts = acc.load(chain_id, viewer) or {}
         for tx in txs:

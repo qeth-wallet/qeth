@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from qeth.prices import DEFILLAMA_CHAIN_SLUGS
+from qeth.pricing import DEFILLAMA_CHAIN_SLUGS
 from qeth.chains import DEFAULT_CHAINS
 
 
@@ -44,27 +44,27 @@ class TestNativeCoingeckoId:
                                coingecko_id=coingecko_id)
 
     def test_symbol_overrides_wrong_config_default(self):
-        from qeth.prices import native_coingecko_id
+        from qeth.pricing import native_coingecko_id
         # Picker-added Avalanche: coingecko_id left at the "ethereum"
         # default, but AVAX must resolve to avalanche-2 (not ETH's price).
         assert native_coingecko_id(self._chain("AVAX", "ethereum")) == "avalanche-2"
 
     def test_eth_chain_resolves_to_ethereum(self):
-        from qeth.prices import native_coingecko_id
+        from qeth.pricing import native_coingecko_id
         assert native_coingecko_id(self._chain("ETH", "ethereum")) == "ethereum"
 
     def test_unknown_symbol_with_ethereum_default_is_none(self):
-        from qeth.prices import native_coingecko_id
+        from qeth.pricing import native_coingecko_id
         # Footgun guard: unknown native + the suspicious "ethereum"
         # default → no native price rather than a wrong one.
         assert native_coingecko_id(self._chain("FOO", "ethereum")) is None
 
     def test_explicit_id_for_unknown_symbol_is_used(self):
-        from qeth.prices import native_coingecko_id
+        from qeth.pricing import native_coingecko_id
         assert native_coingecko_id(self._chain("FOO", "foo-token")) == "foo-token"
 
     def test_default_chains_all_resolve(self):
-        from qeth.prices import native_coingecko_id
+        from qeth.pricing import native_coingecko_id
         from qeth.chains import DEFAULT_CHAINS
         for c in DEFAULT_CHAINS:
             assert native_coingecko_id(c), f"{c.name} has no native id"
@@ -73,13 +73,13 @@ class TestNativeCoingeckoId:
 class TestNativeIdDiscovery:
     @pytest.fixture(autouse=True)
     def _reset(self):
-        import qeth.prices as prices
+        import qeth.pricing.native as prices
         orig = prices._DISCOVERED_NATIVE_IDS
         yield
         prices._DISCOVERED_NATIVE_IDS = orig   # don't leak into other tests
 
     def test_discovered_map_takes_priority(self, monkeypatch):
-        import qeth.prices as prices
+        import qeth.pricing.native as prices
         from types import SimpleNamespace
         monkeypatch.setattr(prices, "_DISCOVERED_NATIVE_IDS", {239: "tac"})
         # TAC: not in the symbol map, config left at the "ethereum" default;
@@ -88,7 +88,7 @@ class TestNativeIdDiscovery:
         assert prices.native_coingecko_id(ch) == "tac"
 
     def test_load_parses_asset_platforms(self, tmp_path, monkeypatch):
-        import qeth.prices as prices
+        import qeth.pricing.native as prices
         payload = json.dumps([
             {"id": "avalanche", "chain_identifier": 43114,
              "native_coin_id": "avalanche-2"},
@@ -106,7 +106,7 @@ class TestNativeIdDiscovery:
         assert m == {43114: "avalanche-2", 239: "tac"}   # null chain_id dropped
 
     def test_load_falls_back_on_error(self, tmp_path, monkeypatch):
-        import qeth.prices as prices
+        import qeth.pricing.native as prices
         def boom(req, timeout=None):
             raise OSError("network down")
         monkeypatch.setattr(prices.urllib.request, "urlopen", boom)
@@ -119,7 +119,7 @@ class TestUrlBatching:
     URL length instead — each request URL must stay under the cap."""
 
     def test_batches_stay_under_the_url_cap_and_preserve_all_keys(self):
-        from qeth.prices import MAX_URL_LEN, _price_url, _url_batches
+        from qeth.pricing.defillama import MAX_URL_LEN, _price_url, _url_batches
         keys = [f"ethereum:0x{i:040x}" for i in range(400)]
         batches = list(_url_batches(keys))
         assert len(batches) > 1                                   # actually split
@@ -128,9 +128,9 @@ class TestUrlBatching:
 
     def test_fetch_splits_large_sets_so_no_url_exceeds_the_cap(self, monkeypatch):
         import urllib.parse
-        import qeth.prices as prices
+        import qeth.pricing.defillama as prices
         from qeth.chains import DEFAULT_CHAINS
-        from qeth.prices import MAX_URL_LEN, DefiLlamaPrices
+        from qeth.pricing.defillama import MAX_URL_LEN, DefiLlamaPrices
 
         seen: list[str] = []
 

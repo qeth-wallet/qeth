@@ -1812,7 +1812,7 @@ class TestTokensPlugin:
         threshold; an ordinary dust token is filtered."""
         from decimal import Decimal
         from qeth.tokens import TokenBalance
-        from qeth.prices import Price
+        from qeth.pricing import Price
         host = _StubHost()
         tokens_plugin.attach(host)
         custom = "0x" + "ca" * 20

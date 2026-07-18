@@ -143,7 +143,7 @@ files = [
     "qeth/tokens.py",
     "qeth/tokenlists.py",
     "qeth/token_metadata.py",
-    "qeth/prices.py",
+    "qeth/pricing",
     "qeth/abi.py",
     "qeth/abi_cache.py",
     "qeth/contract_identity.py",

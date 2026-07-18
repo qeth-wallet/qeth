@@ -47,7 +47,7 @@ from ..icons import (
     IconCache, bundled_native_icon, notification_icon, smooth_icon,
 )
 from ..plugin import Plugin
-from ..prices import DefiLlamaPrices, Price, PriceSource
+from ..pricing import DefiLlamaPrices, Price, PriceSource
 from ..risk import GoPlusRisk, RiskCache
 from ..token_metadata import TokenMetadataCache
 from ..tokenlists import TokenListEntry, TokenLists

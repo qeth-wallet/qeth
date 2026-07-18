@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from qeth.chains import DEFAULT_CHAINS
-from qeth.prices import DefiLlamaPrices, Price
+from qeth.pricing import DefiLlamaPrices, Price
 
 pytestmark = pytest.mark.network
 

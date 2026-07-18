@@ -171,7 +171,7 @@ class TestTokenListPanel:
         ordinary dust token is hidden."""
         from decimal import Decimal
         from qeth.tokens import TokenBalance
-        from qeth.prices import Price
+        from qeth.pricing import Price
         store = Store.load()
         pin0 = "0x" + "a0" * 20      # pinned, zero balance
         pinN = "0x" + "a1" * 20      # pinned, non-zero (sub-dust USD)

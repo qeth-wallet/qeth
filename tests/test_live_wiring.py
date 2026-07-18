@@ -582,7 +582,7 @@ def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_qeth):
     from qeth.plugins.tokens import TokenListPanel, TokensPlugin
     from qeth.wallet_cache import CachedWallet, WalletCache
     from qeth.icons import IconCache
-    from qeth.prices import Price
+    from qeth.pricing import Price
     from qeth.store import Store
     eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
     acc = "0xabc0000000000000000000000000000000000001"
@@ -629,7 +629,7 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_qeth):
     from qeth.plugins.tokens import TokenListPanel, TokensPlugin
     from qeth.wallet_cache import CachedWallet, WalletCache
     from qeth.icons import IconCache
-    from qeth.prices import Price
+    from qeth.pricing import Price
     from qeth.store import Store
     eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
     acc = "0xabc0000000000000000000000000000000000001"
@@ -690,7 +690,7 @@ def test_stale_discovery_native_does_not_regress(qtbot, tmp_qeth):
     from qeth.plugins.tokens import TokenListPanel, TokensPlugin
     from qeth.wallet_cache import CachedWallet, WalletCache
     from qeth.icons import IconCache
-    from qeth.prices import Price
+    from qeth.pricing import Price
     from qeth.store import Store
     eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
     acc = "0xabc0000000000000000000000000000000000001"
@@ -920,7 +920,7 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_qeth):
     from qeth.plugins.tokens import TokenListPanel, TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
-    from qeth.prices import Price
+    from qeth.pricing import Price
     from qeth.store import Store
     eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
     acc = "0xabc0000000000000000000000000000000000001"
@@ -986,7 +986,7 @@ def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_qeth):
     from qeth.plugins.tokens import TokenListPanel, TokensPlugin
     from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
-    from qeth.prices import Price
+    from qeth.pricing import Price
     from qeth.store import Store
     eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
     acc = "0xabc0000000000000000000000000000000000001"

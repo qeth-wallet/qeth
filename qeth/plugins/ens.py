@@ -457,7 +457,7 @@ def _eth_usd_rate(chain) -> Decimal | None:
     """Current USD price of 1 ETH (DefiLlama), to value a renewal in dollars.
     None if the lookup doesn't land — the dialog then shows ETH only."""
     try:
-        from ..prices import DefiLlamaPrices
+        from ..pricing import DefiLlamaPrices
         res = DefiLlamaPrices().fetch(chain, [], include_native=True)
     except Exception:
         log.debug("ETH/USD rate fetch failed", exc_info=True)

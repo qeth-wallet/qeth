@@ -464,6 +464,34 @@ class TestHideShow:
         assert s.is_hidden(1, "0xaabbcc")
 
 
+class TestDiscoveredTokens:
+    def test_add_query_and_round_trip(self, tmp_qeth):
+        s = Store()
+        assert s.add_discovered_tokens(1, ["0xAAAA", "0xBBBB"]) is True
+        assert s.is_discovered_token(1, "0xaaaa")
+        assert not s.is_custom_token(1, "0xaaaa")   # kept separate from custom
+        assert Store.load().discovered_tokens == {(1, "0xaaaa"), (1, "0xbbbb")}
+
+    def test_add_is_noop_when_nothing_new(self, tmp_qeth):
+        s = Store()
+        assert s.add_discovered_tokens(1, ["0xAAAA"]) is True
+        assert s.add_discovered_tokens(1, ["0xaaaa"]) is False   # already known
+
+    def test_add_skips_hidden(self, tmp_qeth):
+        s = Store()
+        s.hide_token(1, "0xAAAA")
+        assert s.add_discovered_tokens(1, ["0xAAAA", "0xBBBB"]) is True
+        assert not s.is_discovered_token(1, "0xaaaa")   # hidden not resurrected
+        assert s.is_discovered_token(1, "0xbbbb")
+
+    def test_hide_evicts_from_discovered(self, tmp_qeth):
+        s = Store()
+        s.add_discovered_tokens(1, ["0xCCCC"])
+        s.hide_token(1, "0xcccc")
+        assert s.is_hidden(1, "0xcccc")
+        assert not s.is_discovered_token(1, "0xcccc")
+
+
 class TestChainMigration:
     def test_old_polygon_config_picks_up_new_field(self, tmp_qeth):
         """A polygon entry stored before the coingecko_id field was added

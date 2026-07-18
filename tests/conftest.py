@@ -87,6 +87,7 @@ if _dotenv.exists():
 def tmp_qeth(tmp_path, monkeypatch) -> Path:
     """Redirect all qeth on-disk locations under ``tmp_path``."""
     import qeth.abi_cache
+    import qeth.activity_cache
     import qeth.ens_app
     import qeth.hot_wallet
     import qeth.store
@@ -105,6 +106,8 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.risk, "CACHE_DIR", tmp_path / "risk")
     monkeypatch.setattr(qeth.transactions_cache, "CACHE_DIR",
                         tmp_path / "transactions")
+    monkeypatch.setattr(qeth.activity_cache, "ACTIVITIES_DIR",
+                        tmp_path / "activities")
     monkeypatch.setattr(qeth.abi_cache, "CACHE_DIR", tmp_path / "abi")
     monkeypatch.setattr(qeth.ens_app, "CACHE_DIR", tmp_path / "ens")
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
@@ -160,6 +163,7 @@ def hermetic_mainwindow(monkeypatch):
         (tokens_plugin, [
             "TokenListsLoader", "TokenListWorker", "BalanceWorker",
             "PricesWorker", "RiskWorker", "MetadataWorker",
+            "OwnTokenDiscoveryWorker",
         ]),
         (transactions_plugin, ["TransactionsWorker"]),
         (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker", "EnsVerifyWorker"]),

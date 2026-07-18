@@ -34,6 +34,9 @@ from .tokenlists import (
     UniswapDefault,
 )
 from .toptokens import COINGECKO_PLATFORMS, TopToken, TopTokens, fetch_top_tokens
+# own_history LAST: it pulls in transactions_cache → transactions, which imports
+# BLOCKSCOUT_INSTANCES back from this package — so `sources` must be bound first.
+from .own_history import discover_own_tokens
 
 __all__ = [
     # sources
@@ -46,6 +49,6 @@ __all__ = [
     "Curve", "OneInch", "UniswapDefault",
     # toptokens
     "TopTokens", "TopToken", "COINGECKO_PLATFORMS", "fetch_top_tokens",
-    # ``own_history.discover_own_tokens`` is re-exported here once that
-    # module lands — see qeth/token_discovery/own_history.py.
+    # own-history discovery
+    "discover_own_tokens",
 ]

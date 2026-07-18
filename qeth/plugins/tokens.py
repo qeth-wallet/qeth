@@ -142,6 +142,7 @@ class TokenListWorker(QThread):
                     known_or_pinned = (
                         self.lists.is_known(cid, b.contract)
                         or self.store.is_force_shown(cid, b.contract)
+                        or self.store.is_discovered_token(cid, b.contract)
                     )
                     if not known_or_pinned:
                         continue
@@ -173,6 +174,27 @@ class RiskWorker(QThread):
             self.fetched.emit(self.chain_id, reports)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class OwnTokenDiscoveryWorker(QThread):
+    """Scan the local tx + activity caches for tokens the user received in
+    their OWN transactions (vault/LP tokens curated lists miss). Pure disk I/O —
+    fast, no network. Emits ``discovered(chain_id, set[str] of contracts)``."""
+
+    discovered = Signal(QULONGLONG, object)   # chain_id can exceed qint32
+
+    def __init__(self, chain_id: int, addresses: list[str], parent=None):
+        super().__init__(parent)
+        self.chain_id = chain_id
+        self.addresses = list(addresses)
+
+    def run(self) -> None:
+        try:
+            from ..token_discovery import discover_own_tokens
+            found = discover_own_tokens(self.chain_id, self.addresses)
+        except Exception:
+            found = set()
+        self.discovered.emit(self.chain_id, found)
 
 
 class MetadataWorker(QThread):
@@ -398,6 +420,10 @@ class TokensPlugin(Plugin):
         # discovery runs (on_discovered unions them into the
         # multicall set, then pop). See note_receipt_logs.
         self._receipt_contracts: dict[tuple[int, str], set[str]] = {}
+        # Chains whose own-tx history has been scanned this session (the scan is
+        # one-shot per chain — the caches don't change without a live event that
+        # already re-runs discovery).
+        self._own_scan_done: set[int] = set()
         # Lifecycle objects (built lazily / in attach).
         self._panel = None
         self._refresh_timer: QTimer | None = None
@@ -1261,6 +1287,31 @@ class TokensPlugin(Plugin):
                 contracts.add(token.contract)
         return contracts
 
+    def _maybe_scan_own_tokens(self, chain) -> None:
+        """Once per chain per session, scan the local tx/activity caches for
+        vault/LP tokens the user obtained via their OWN transactions and record
+        them (so they survive the visibility gates and get on-chain-priced)."""
+        if self.host is None or chain.chain_id in self._own_scan_done:
+            return
+        self._own_scan_done.add(chain.chain_id)
+        addrs = [a["address"] for a in self._store.accounts]
+        if not addrs:
+            self._own_scan_done.discard(chain.chain_id)   # retry when accounts exist
+            return
+        worker = OwnTokenDiscoveryWorker(chain.chain_id, addrs)
+        worker.discovered.connect(self._on_own_tokens_discovered)
+        self.host.start_worker(worker)
+
+    def _on_own_tokens_discovered(self, chain_id: int, contracts) -> None:
+        """Persist discovered contracts; refresh if we're viewing this chain so
+        they get balance-checked, priced, and shown."""
+        if not contracts or not self._store.add_discovered_tokens(chain_id, contracts):
+            return
+        if (self.host is not None
+                and self.host.current_chain().chain_id == chain_id
+                and self.host.selected_address):
+            self._refresh(self.host.selected_address)
+
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
             return
@@ -1268,6 +1319,7 @@ class TokensPlugin(Plugin):
         # mypy doesn't carry the guard's narrowing into inner scopes.
         host, panel = self.host, self._panel
         chain = self.host.current_chain()
+        self._maybe_scan_own_tokens(chain)
         view_key = (chain.chain_id, address.lower())
         is_new_view = self._displayed_view != view_key
 
@@ -1383,6 +1435,10 @@ class TokensPlugin(Plugin):
             # moment they have a balance) even though they're not force-shown.
             custom = {a for (cid, a) in self._store.custom_tokens
                       if cid == chain.chain_id}
+            # Tokens discovered from the user's own tx history (vault/LP) —
+            # balance-checked like custom, so they surface once they resolve.
+            discovered = {a for (cid, a) in self._store.discovered_tokens
+                          if cid == chain.chain_id}
             siblings = self._sibling_held_contracts(chain.chain_id, address)
             # Drain receipt-derived contracts for THIS view — popped
             # so they don't permanently inflate the multicall set
@@ -1401,8 +1457,8 @@ class TokensPlugin(Plugin):
             contracts: list[str] = []
             for c in (
                 [b.contract for b in blockscout_tokens]
-                + sorted(forced) + sorted(custom) + sorted(siblings)
-                + sorted(receipt_extras)
+                + sorted(forced) + sorted(custom) + sorted(discovered)
+                + sorted(siblings) + sorted(receipt_extras)
                 + top
             ):
                 cl = c.lower()
@@ -1748,10 +1804,13 @@ class TokensPlugin(Plugin):
             if self._store.is_force_shown(chain.chain_id, addr):
                 out.append(b)
                 continue
-            # Custom-added token with a non-zero balance: the user added it
-            # explicitly, so show any amount (exempt from the dust filter).
-            # It was already dropped at exactly-zero by the raw==0 filter.
-            if self._store.is_custom_token(chain.chain_id, addr):
+            # Custom-added or own-tx-discovered token with a non-zero balance:
+            # show any amount (exempt from the dust filter + the unknown-unpriced
+            # drop below). A vault/LP position can be legitimately small, and the
+            # user obtained it deliberately. Already dropped at exactly-zero by
+            # the raw==0 filter.
+            if (self._store.is_custom_token(chain.chain_id, addr)
+                    or self._store.is_discovered_token(chain.chain_id, addr)):
                 out.append(b)
                 continue
             price = prices.get(addr)
@@ -2712,6 +2771,7 @@ class TokenListPanel(QWidget):
                 show = is_native or (not is_zero and (
                     self._store.is_force_shown(cid, addr)
                     or self._store.is_custom_token(cid, addr)
+                    or self._store.is_discovered_token(cid, addr)
                     or known_pending
                     or (value is not None and value >= self.DUST_USD_THRESHOLD)))
                 self.table.setRowHidden(row, not show)

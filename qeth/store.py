@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+from collections.abc import Iterable
 from dataclasses import fields
 from pathlib import Path
 
@@ -163,6 +164,12 @@ class Store:
         # only when the balance is non-zero — unlike `shown_tokens` (pin),
         # which force display even at zero. (chain_id, addr_lower).
         self.custom_tokens: set[tuple[int, str]] = set()
+        # Tokens auto-discovered from the user's OWN transaction history (vault
+        # /LP tokens minted to them by txs they originated). Treated like
+        # `custom_tokens` for display (balance-checked, shown when non-zero,
+        # dust-exempt) but kept SEPARATE so machine discovery never muddies the
+        # user-authored `custom_tokens` set. (chain_id, addr_lower).
+        self.discovered_tokens: set[tuple[int, str]] = set()
         # Custom-pinned ENS names (lower-case) for the ENS plugin — shown in
         # addition to whatever the indexer discovers. ENS is mainnet-only.
         self.custom_ens_names: set[str] = set()
@@ -244,6 +251,11 @@ class Store:
                 for t in data.get("custom_tokens", [])
                 if t.get("address") and t.get("chain_id") is not None
             }
+            s.discovered_tokens = {
+                (int(t["chain_id"]), str(t["address"]).lower())
+                for t in data.get("discovered_tokens", [])
+                if t.get("address") and t.get("chain_id") is not None
+            }
             s.window_geometry = data.get("window_geometry")
             s.splitter_state_main = data.get("splitter_state_main")
             s.splitter_state_left = data.get("splitter_state_left")
@@ -296,6 +308,10 @@ class Store:
                 "custom_tokens": [
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.custom_tokens)
+                ],
+                "discovered_tokens": [
+                    {"chain_id": cid, "address": addr}
+                    for (cid, addr) in sorted(self.discovered_tokens)
                 ],
                 "window_geometry": self.window_geometry,
                 "splitter_state_main": self.splitter_state_main,
@@ -595,6 +611,25 @@ class Store:
             self.custom_tokens.discard((int(chain_id), address.lower()))
         self.save()
 
+    def is_discovered_token(self, chain_id: int, address: str) -> bool:
+        return (int(chain_id), address.lower()) in self.discovered_tokens
+
+    def add_discovered_tokens(self, chain_id: int, addresses: Iterable[str]) -> bool:
+        """Record tokens found in the user's own tx history (batch, one save).
+        Skips any that are user-hidden — a scan re-running must never resurrect
+        a token the user hid. No-ops (no save) when nothing is new, so the
+        once-per-session scan doesn't churn the config. Returns True if the set
+        grew."""
+        with self._lock:
+            new = {(int(chain_id), a.lower()) for a in addresses}
+            new = {k for k in new if k not in self.hidden_tokens
+                   and k not in self.discovered_tokens}
+            if not new:
+                return False
+            self.discovered_tokens |= new
+        self.save()
+        return True
+
     def add_custom_ens_name(self, name: str) -> None:
         with self._lock:
             self.custom_ens_names.add(name.strip().lower())
@@ -625,6 +660,9 @@ class Store:
             # Hiding a custom token also stops tracking it (no point checking
             # the balance of something the user explicitly hid).
             self.custom_tokens.discard(key)
+            # Same for an auto-discovered token: drop it so the history scan
+            # can't re-add it (add_discovered_tokens also refuses hidden keys).
+            self.discovered_tokens.discard(key)
         self.save()
 
     def unhide_token(self, chain_id: int, address: str) -> None:

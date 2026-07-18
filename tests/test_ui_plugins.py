@@ -1832,6 +1832,32 @@ class TestTokensPlugin:
         assert "CUS" in visible        # custom: shown despite dust value
         assert "ORD" not in visible    # ordinary dust token: filtered
 
+    def test_discovered_token_survives_gates_priced_and_unpriced(self, tokens_plugin):
+        """An own-tx-discovered vault/LP token is dust-exempt when priced AND
+        survives the unknown-unpriced drop when it has no price yet — unlike an
+        ordinary token, which is dropped in both cases."""
+        from decimal import Decimal
+        from qeth.token_discovery import TokenBalance
+        from qeth.pricing import Price
+        tokens_plugin.attach(_StubHost())
+        disc = "0x" + "d1" * 20
+        ordinary = "0x" + "0d" * 20
+        tokens_plugin._store.add_discovered_tokens(1, [disc])
+        toks = [
+            TokenBalance(contract=disc, symbol="YBWBTC", name="yb-WBTC",
+                         decimals=18, balance_raw=1),
+            TokenBalance(contract=ordinary, symbol="ORD", name="Ordinary",
+                         decimals=18, balance_raw=1),
+        ]
+        tiny = Price(price_usd=Decimal("0.00000001"), timestamp=0, source="test")
+        # (a) priced sub-dust → discovered shown, ordinary filtered
+        vis = {t.symbol for t in tokens_plugin._compute_visible_tokens(
+            ETH, toks, {disc: tiny, ordinary: tiny})}
+        assert "YBWBTC" in vis and "ORD" not in vis
+        # (b) no price at all → discovered still shown (own-tx recognised class)
+        vis2 = {t.symbol for t in tokens_plugin._compute_visible_tokens(ETH, toks, {})}
+        assert "YBWBTC" in vis2 and "ORD" not in vis2
+
     def test_recognised_unpriced_token_hides_after_grace_window(
         self, tokens_plugin, monkeypatch,
     ):

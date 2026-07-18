@@ -696,3 +696,47 @@ def test_partial_send_keeps_token_with_new_balance(anvil, qtbot, tmp_qeth):
     assert USDC.lower() in _visible_tokens(panel)
     cached = tp._wallet_cache.load(1, ACCT.lower())
     assert cached.tokens[0].balance_raw == keep
+
+
+@pytest.mark.network
+def test_onchain_price_sdai_4626_over_dai(anvil):
+    """Real ERC-4626: price sDAI from chain state (convertToAssets → DAI),
+    with DAI stubbed at $1. Validates the 4626 recipe against mainnet."""
+    from decimal import Decimal
+    from qeth.chain import EthClient
+    from qeth.pricing.base import Price
+    from qeth.pricing.onchain import OnChainVaultPrices
+
+    sdai = "0x83F20F44975D03b1b09e64809B757c47f942BEeA"
+    dai = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    pricer = OnChainVaultPrices(client_factory=lambda ch: EthClient(anvil.chain))
+
+    def base(addrs, incl):
+        return {a.lower(): Price(Decimal("1.0"), 0, "stub", 1.0)
+                for a in addrs if a.lower() == dai.lower()}
+
+    out = pricer.price(anvil.chain, [sdai], base)
+    p = out.get(sdai.lower())
+    assert p is not None and p.source == "onchain-4626"
+    assert Decimal("1.0") <= p.price_usd <= Decimal("1.5")   # ~1 DAI + accrued yield
+
+
+@pytest.mark.network
+def test_onchain_price_curve_3pool(anvil):
+    """Real Curve LP: price the 3pool LP as TVL/supply with DAI/USDC/USDT all
+    stubbed at $1. Validates the registry-driven Curve recipe against mainnet."""
+    from decimal import Decimal
+    from qeth.chain import EthClient
+    from qeth.pricing.base import Price
+    from qeth.pricing.onchain import OnChainVaultPrices
+
+    lp = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"   # 3pool (DAI/USDC/USDT) LP
+    pricer = OnChainVaultPrices(client_factory=lambda ch: EthClient(anvil.chain))
+
+    def base(addrs, incl):   # every 3pool coin is a $1 stable
+        return {a.lower(): Price(Decimal("1.0"), 0, "stub", 1.0) for a in addrs}
+
+    out = pricer.price(anvil.chain, [lp], base)
+    p = out.get(lp.lower())
+    assert p is not None and p.source == "onchain-curve-lp"
+    assert Decimal("1.0") <= p.price_usd <= Decimal("1.15")   # LP ≈ virtual price

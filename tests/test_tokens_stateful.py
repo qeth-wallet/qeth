@@ -30,7 +30,7 @@ from types import SimpleNamespace
 
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -39,7 +39,7 @@ from qeth.icons import IconCache
 from qeth.plugins.tokens import TokenListPanel, TokensPlugin
 from qeth.pricing import Price
 from qeth.store import Store
-from qeth.wallet_cache import WalletCache
+from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
 
 CID = 1
 ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH")
@@ -57,7 +57,9 @@ TOKENS = [KP, KU, UP, UU, XX]
 KNOWN = {KP.lower(), KU.lower()}
 PRICED = {KP.lower(), UP.lower()}
 UNIT = 10 ** 18                       # 1.0 of an 18-decimal token
-PRICE = Price(Decimal("2000"), CID, "x")   # $2000 → 1.0 token = $2000 ≫ dust
+PRICE_USD = Decimal("2000")           # $2000 → 1.0 token = $2000 ≫ dust
+PRICE = Price(PRICE_USD, CID, "x")
+SEED_BLOCK = 50                       # cache from a "previous session" is old
 
 
 class TokensTreeMachine(RuleBasedStateMachine):
@@ -101,6 +103,33 @@ class TokensTreeMachine(RuleBasedStateMachine):
             chain_by_id=lambda cid: ETH if cid == CID else None)
         self.plugin.host = self.host
         self.current = A
+
+    @initialize(
+        cache=st.lists(st.integers(0, 2), min_size=len(TOKENS),
+                       max_size=len(TOKENS)),
+        chain=st.lists(st.booleans(), min_size=len(TOKENS),
+                       max_size=len(TOKENS)))
+    def seed(self, cache, chain):
+        """Divergent COLD START: a stale disk cache from a 'previous session'
+        whose holdings/prices differ from the current chain. So the first render
+        paints stale values and the first fresh read must reconcile. Per token,
+        cache[i]: 0=absent, 1=present+priced, 2=present+unpriced (all held at an
+        OLD block); chain[i]: token actually held now (raw>0) or not."""
+        toks = []
+        for tok, cstate in zip(TOKENS, cache):
+            if cstate == 0:
+                continue
+            priced = cstate == 1 and tok.lower() in PRICED
+            toks.append(CachedToken(
+                contract=tok.lower(), symbol="T" + tok[-2:],
+                name="Tok " + tok[-2:], decimals=18, balance_raw=UNIT,
+                price_usd=(str(PRICE_USD) if priced else None),
+                balance_updated=SEED_BLOCK, price_updated=SEED_BLOCK))
+        self.plugin._wallet_cache.save(CachedWallet(
+            chain_id=CID, address=A.lower(), tokens=toks,
+            native_balance_wei=UNIT))
+        for tok, held in zip(TOKENS, chain):
+            self.bal[A][tok.lower()] = UNIT if held else 0
         self.plugin.on_account_changed(A)
 
     def teardown(self):
@@ -158,11 +187,20 @@ class TokensTreeMachine(RuleBasedStateMachine):
         self._next_block()
         self.bal[self.current][tok.lower()] = 0
 
+    def _cache_tokens(self, acct):
+        cw = self.plugin._wallet_cache.load(CID, acct)
+        return cw.tokens if cw is not None else []
+
     @rule(stale=st.booleans())
     def discovery_lands(self, stale):
         acct = self.current
-        block = (self.block - 5) if stale else self.block
-        balances = dict(self.bal[acct])
+        block = (self.block - 5) if stale else self._next_block()
+        # Query the union of held + already-cached tokens, so a token the cache
+        # still shows but the chain no longer holds gets an explicit
+        # authoritative zero (not a carried-forward "absent").
+        universe = set(self.bal[acct]) | {t.contract.lower()
+                                          for t in self._cache_tokens(acct)}
+        balances = {c: self.bal[acct].get(c, 0) for c in universe}
         pv = {
             "chain": ETH, "address": acct, "view_key": (CID, acct.lower()),
             "native_wei": self.native[acct], "block": block,
@@ -172,6 +210,13 @@ class TokensTreeMachine(RuleBasedStateMachine):
                          for c in balances},
         }
         self.plugin._on_combined_ready(pv, CID, self._prices())
+        if not stale and not self.plugin._show_all:
+            # A fresh authoritative read reconciles the display to the chain: no
+            # token the chain no longer holds may remain on screen (the stale
+            # cold-start cache must not linger past the first real read).
+            for addr in self._rendered():
+                assert self.bal[acct].get(addr, 0) > 0, \
+                    f"fresh read left un-held {addr} on screen"
 
     @rule(stale=st.booleans())
     def targeted_read(self, stale):

@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -92,7 +92,42 @@ class TxTreeMachine(RuleBasedStateMachine):
             chain_by_id=lambda cid: ETH if cid == CID else None)
         self.plugin.host = self.host
         self.current = A
-        self.plugin.on_account_changed(A)
+
+    @initialize(n_confirmed=st.integers(0, 4), seed_pending=st.booleans())
+    def seed(self, n_confirmed, seed_pending):
+        """Non-empty COLD START: a 'previous session' disk cache holding some
+        confirmed history plus, optionally, a stuck pending tx the chain may
+        have since confirmed or dropped. So the reconciliation rules (confirm /
+        drop / page-fetch) start against real prior state, not a blank slate."""
+        acct = A
+        rows = []
+        for nonce in range(n_confirmed):
+            blk = self._next_block()
+            h = self._hash()
+            tx = Transaction(
+                chain_id=CID, hash=h, block_number=blk, timestamp=blk,
+                nonce=nonce, from_addr=acct, to_addr=TO, value_wei=1,
+                gas_used=21000, gas_price_wei=1, method_id="", input_data="0x",
+                success=True)
+            self.confirmed[acct][h] = tx
+            self.confirmed_ever.add(h)
+            rows.append(tx)
+        self.nnext[acct] = n_confirmed
+        if seed_pending:
+            nonce = self.nnext[acct]
+            self.nnext[acct] += 1
+            h = self._hash()
+            self.pending[acct][h] = nonce
+            rows.append(Transaction(
+                chain_id=CID, hash=h, block_number=0, timestamp=self.block,
+                nonce=nonce, from_addr=acct, to_addr=TO, value_wei=1,
+                gas_used=0, gas_price_wei=1, method_id="", input_data="0x",
+                success=True, pending=True))
+        rows.sort(key=lambda t: t.nonce, reverse=True)
+        key = (CID, acct.lower())
+        self.plugin._cache[key] = rows
+        self.plugin._disk_cache.save(CID, acct.lower(), rows)
+        self.plugin.on_account_changed(acct)
 
     def teardown(self):
         self.widget.deleteLater()

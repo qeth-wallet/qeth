@@ -18,17 +18,24 @@ from PySide6.QtWidgets import (
     QTableWidget, QTreeView, QWidget,
 )
 
+from typing import TYPE_CHECKING, cast
+
 from .icons import ChainIconCache, smooth_icon
 from .notify import DesktopNotifier
-from .plugin import Slot
-from .plugins.ens import EnsPlugin
-from .plugins.tokens import TokensPlugin
-from .plugins.transactions import (
-    SignTransactionDialog, TransactionsPlugin,
-)
-from .plugins.wallets import (
-    ACCOUNT_LABEL_ROLE, TREE_LABEL_ROLE, WalletsPlugin,
-)
+from .plugin import Plugin, Slot
+from .plugins.registry import PluginManifest, enabled_manifests
+# Required plugins — imported eagerly for their runtime symbols (the sign dialog,
+# the wallet-label roles). Optional plugins (tokens/ens) are imported ONLY by the
+# registry factories when enabled, so a disabled plugin's package never loads;
+# their classes appear here under TYPE_CHECKING purely for the property types.
+from .plugins.transactions import SignTransactionDialog
+from .plugins.wallets import ACCOUNT_LABEL_ROLE, TREE_LABEL_ROLE
+
+if TYPE_CHECKING:
+    from .plugins.ens import EnsPlugin
+    from .plugins.tokens import TokensPlugin
+    from .plugins.transactions import TransactionsPlugin
+    from .plugins.wallets import WalletsPlugin
 
 # Sticky-note colours for the wallet-label pill: a self-consistent (bg, fg)
 # pair (pale yellow / dark brown) that reads on any palette because the pill
@@ -74,11 +81,14 @@ class MainWindow(QMainWindow):
         # ~950x565 even when child widgets only need ~370x500).
         self.setMinimumSize(420, 360)
 
-        # Topic plugins. Each owns its sources/caches/workers/widgets.
-        self.wallets_plugin = WalletsPlugin(self.store)
-        self.tokens_plugin = TokensPlugin(self.store)
-        self.ens_plugin = EnsPlugin(self.store)
-        self.transactions_plugin = TransactionsPlugin(store=self.store)
+        # Topic plugins, built from the registry (restart-to-apply: a disabled
+        # optional plugin is never constructed, and its package never imported).
+        # Each owns its sources/caches/workers/widgets.
+        self.plugins: dict[str, Plugin] = {}
+        self._manifests: dict[str, PluginManifest] = {}
+        for m in enabled_manifests(self.store):
+            self.plugins[m.id] = m.factory(self.store)
+            self._manifests[m.id] = m
 
         # Signing bridge: the RPC server hands incoming signing
         # requests through this object, the slot below opens the
@@ -184,13 +194,11 @@ class MainWindow(QMainWindow):
                 plugin.restore_header_state(saved)
 
     def _header_persisters(self) -> dict:
-        """Plugins whose panel layouts we persist across runs.
-        Wallets uses a tree (not a QTableWidget); Transactions uses
-        auto-sizing modes (no user-drag, nothing to remember). Only
-        the Tokens panel has interactive widths worth persisting."""
-        return {
-            "tokens": self.tokens_plugin,
-        }
+        """Plugins whose panel column layouts we persist across runs (those
+        whose manifest sets ``persists_header`` — today just Tokens). Only
+        mounted plugins appear, so a disabled one persists nothing."""
+        return {m.id: self.plugins[m.id]
+                for m in self._manifests.values() if m.persists_header}
 
     def closeEvent(self, event):
         self.store.set_window_geometry(bytes(self.saveGeometry().toHex().data()).decode())
@@ -394,19 +402,17 @@ class MainWindow(QMainWindow):
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left slot: Wallets only. Show its single "Accounts" tab anyway,
-        # so its top chrome matches the right slot's Tokens/Transactions
-        # tab bar and the two lists start at the same y (the toolbar that
-        # used to sit here was a different height — see WalletsPlugin).
+        # Left slot shows its single "Accounts" tab anyway, so its top chrome
+        # matches the right slot's tab bar and the two lists start at the same y
+        # (the toolbar that used to sit here was a different height).
         self.left_slot = Slot(show_single_tab=True)
-        self.left_slot.add_plugin(self.wallets_plugin, self)
+        self.right_slot = Slot()
+        slots = {"left": self.left_slot, "right": self.right_slot}
+        # Mount each enabled plugin into its slot, in manifest order.
+        for m in sorted(self._manifests.values(), key=lambda m: m.order):
+            slots[m.slot].add_plugin(self.plugins[m.id], self)
         outer.addWidget(self.left_slot)
 
-        # Right slot: Tokens + Transactions. Tab bar visible.
-        self.right_slot = Slot()
-        self.right_slot.add_plugin(self.tokens_plugin, self)
-        self.right_slot.add_plugin(self.transactions_plugin, self)
-        self.right_slot.add_plugin(self.ens_plugin, self)
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
         self.chain_rpc_btn = self._build_chain_rpc_button()
@@ -634,16 +640,31 @@ class MainWindow(QMainWindow):
         return self.wallets_plugin.selected_key
 
     def plugin(self, plugin_id: str):
-        """The mounted plugin with this id, or None if it isn't mounted.
-        The sanctioned way for one plugin to reach an optional sibling — e.g.
-        TransactionsPlugin relaying live-balance events into TokensPlugin —
-        without depending on a concrete MainWindow attribute."""
-        return {
-            "wallets": self.wallets_plugin,
-            "tokens": self.tokens_plugin,
-            "transactions": self.transactions_plugin,
-            "ens": self.ens_plugin,
-        }.get(plugin_id)
+        """The mounted plugin with this id, or None if it isn't mounted (an
+        optional plugin the user disabled). The sanctioned way for one plugin
+        to reach an optional sibling — e.g. TransactionsPlugin relaying
+        live-balance events into TokensPlugin."""
+        return self.plugins.get(plugin_id)
+
+    # Convenience accessors over the plugins dict. Typed non-Optional here
+    # because nothing disables a plugin yet (the toggle UI + optional-off
+    # correctness land next commit, which flips tokens/ens to Optional and
+    # guards their consumers). Reach an optional sibling via plugin(id).
+    @property
+    def wallets_plugin(self) -> "WalletsPlugin":
+        return cast("WalletsPlugin", self.plugins["wallets"])
+
+    @property
+    def transactions_plugin(self) -> "TransactionsPlugin":
+        return cast("TransactionsPlugin", self.plugins["transactions"])
+
+    @property
+    def tokens_plugin(self) -> "TokensPlugin":
+        return cast("TokensPlugin", self.plugins["tokens"])
+
+    @property
+    def ens_plugin(self) -> "EnsPlugin":
+        return cast("EnsPlugin", self.plugins["ens"])
 
     def current_chain(self):
         return self.store.current_chain()
@@ -672,10 +693,10 @@ class MainWindow(QMainWindow):
         still running when Qt destroys its QThread — that aborts (SIGABRT). They
         self-evict via ``finished``, but at quit there's no event loop left to
         run that, so we join explicitly here."""
-        # Silence the plugins' long-lived poll timers / ws watchers first, so
-        # nothing kicks a fresh worker while we're draining the in-flight ones.
-        for plugin in (self.wallets_plugin, self.tokens_plugin,
-                       self.transactions_plugin, self.ens_plugin):
+        # Silence every mounted plugin's long-lived poll timers / ws watchers
+        # first, so nothing kicks a fresh worker while we drain the in-flight
+        # ones. (Iterating self.plugins means a new plugin is covered for free.)
+        for plugin in self.plugins.values():
             try:
                 plugin.shutdown()
             except RuntimeError:
@@ -1405,10 +1426,19 @@ class MainWindow(QMainWindow):
 
     def _on_right_plugin_changed(self, plugin) -> None:
         """Hide the shared chain controls on tabs where a network choice is
-        meaningless — currently the ENS tab (mainnet-only)."""
-        show = plugin is not self.ens_plugin
+        meaningless (manifest ``hides_chain_selector`` — the ENS tab, which is
+        mainnet-only)."""
+        m = self._manifest_for(plugin)
+        show = not (m is not None and m.hides_chain_selector)
         self.chain_combo.setVisible(show)
         self.chain_rpc_btn.setVisible(show)
+
+    def _manifest_for(self, plugin) -> "PluginManifest | None":
+        """The manifest of a mounted plugin instance, or None."""
+        for pid, p in self.plugins.items():
+            if p is plugin:
+                return self._manifests.get(pid)
+        return None
 
     def _on_chain_changed(self, idx: int) -> None:
         cid = self.chain_combo.itemData(idx)

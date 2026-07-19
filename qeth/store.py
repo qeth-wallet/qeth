@@ -198,6 +198,10 @@ class Store:
         # Desktop notifications for sent/received ETH + tokens (tray
         # showMessage). On by default; toggled from the tray menu.
         self.notifications_enabled: bool = True
+        # Plugin ids the user has switched off. Read once at startup
+        # (restart-to-apply): a disabled optional plugin is simply not
+        # instantiated or mounted. Required plugins can't be disabled.
+        self.disabled_plugins: set[str] = set()
 
     @classmethod
     def load(cls) -> "Store":
@@ -270,6 +274,9 @@ class Store:
                 s.etherscan_api_key = etherscan_key.strip()
             if "notifications_enabled" in data:
                 s.notifications_enabled = bool(data["notifications_enabled"])
+            s.disabled_plugins = {
+                str(p) for p in (data.get("disabled_plugins") or [])
+            }
             s.custom_ens_names = {
                 str(n).lower() for n in data.get("custom_ens_names", [])
                 if isinstance(n, str) and n
@@ -319,6 +326,7 @@ class Store:
                 "header_states": dict(self.header_states),
                 "etherscan_api_key": self.etherscan_api_key,
                 "notifications_enabled": self.notifications_enabled,
+                "disabled_plugins": sorted(self.disabled_plugins),
                 "custom_ens_names": sorted(self.custom_ens_names),
                 "custom_text_keys": sorted(self.custom_text_keys),
             }
@@ -680,6 +688,16 @@ class Store:
     def unforce_show_token(self, chain_id: int, address: str) -> None:
         with self._lock:
             self.shown_tokens.discard((int(chain_id), address.lower()))
+        self.save()
+
+    def set_plugin_enabled(self, plugin_id: str, enabled: bool) -> None:
+        """Enable/disable an optional plugin (restart-to-apply). Persisted as
+        the complementary ``disabled_plugins`` set."""
+        with self._lock:
+            if enabled:
+                self.disabled_plugins.discard(plugin_id)
+            else:
+                self.disabled_plugins.add(plugin_id)
         self.save()
 
     def set_window_geometry(self, geometry_hex: str) -> None:

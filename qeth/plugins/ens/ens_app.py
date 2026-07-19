@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from collections.abc import Callable
 
-from . import USER_AGENT
+from ... import USER_AGENT
 
 if TYPE_CHECKING:
-    from .chains import Chain
+    from ...chains import Chain
 
 log = logging.getLogger("qeth.ens_app")
 
@@ -548,7 +548,7 @@ def rent_price(chain, label: str, duration_s: int, *, client=None) -> int | None
     in its post-expiry temporary-premium window). ``label`` is the bare label
     ('vitalik', not 'vitalik.eth'). Returns None if the read doesn't land — the
     caller must not proceed to send value it couldn't price."""
-    from .chain import EthClient
+    from ...chain import EthClient
     from eth_abi import decode as abi_decode, encode as abi_encode
     cl = client if client is not None else EthClient(chain)
     data = "0x" + (_SEL_RENT_PRICE
@@ -621,7 +621,7 @@ def verify_names(
     Offchain (CCIP) resolvers can't be proven on-chain: their ``addr`` reverts
     here, leaving ``resolved_address`` None — those are followed unverified
     elsewhere, never badged."""
-    from .verified import verified_client
+    from ...verified import verified_client
     # fallback=False: ownership/resolution is re-read on-chain ONLY when we can
     # prove it (the indexer already gave us a hint), so no sidecar → nothing.
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
@@ -660,7 +660,7 @@ def read_name_states(
     ``verify_names`` follows with the Helios-proven read that earns the ✓ (and
     decides drops). Returns ``({}, None)`` on any failure (the verified pass is
     still the authority)."""
-    from .chain import EthClient
+    from ...chain import EthClient
     try:
         return _read_name_states(EthClient(chain), names)
     except Exception:
@@ -911,7 +911,7 @@ def read_records(
     ``client`` reuses a warm ``EthClient`` across expands; ``resolver``
     pre-supplies the name's resolver to skip a round-trip — if that (possibly
     stale) resolver lands empty, we re-read without it to self-correct."""
-    from .chain import EthClient
+    from ...chain import EthClient
     cl = client if client is not None else EthClient(chain)
     try:
         rec, ok, extended, res, blk = _read_records_via_client(
@@ -949,7 +949,7 @@ def verified_read_records(
     back: a glitch (``ok`` False), or a resolver that served NOTHING on-chain and
     is extended — i.e. the records exist only offchain, which ``read_records``
     already fetched via the gateway and which can't be proof-checked."""
-    from .verified import verified_client
+    from ...verified import verified_client
     client, verified = verified_client(chain, wait_s=wait_s, fallback=False)
     if client is None or not verified:
         return EnsRecords(), False, None
@@ -986,7 +986,7 @@ def discover_custom_text_keys(
     for tests."""
     from eth_abi import decode as abi_decode
     if source is None:
-        from .transactions import BlockscoutTransactionSource
+        from ...transactions import BlockscoutTransactionSource
         source = BlockscoutTransactionSource()
     try:
         if not source.supports(chain):
@@ -1063,7 +1063,7 @@ class EnsCache:
         return out
 
     def save(self, chain_id: int, address: str, names: list[EnsName]) -> None:
-        from .fsatomic import atomic_write_text
+        from ...fsatomic import atomic_write_text
         p = self._path(chain_id, address)
         p.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -1107,7 +1107,7 @@ class EnsCache:
 
     def save_records(self, chain_id: int, name: str, rec: EnsRecords,
                      block: int, verified: bool) -> None:
-        from .fsatomic import atomic_write_text
+        from ...fsatomic import atomic_write_text
         p = self._records_path(chain_id, name)
         p.parent.mkdir(parents=True, exist_ok=True)
         data = {

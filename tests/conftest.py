@@ -170,7 +170,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     """Redirect all qeth on-disk locations under ``tmp_path``."""
     import qeth.abi_cache
     import qeth.activity_cache
-    import qeth.ens_app
+    import qeth.plugins.ens.ens_app
     import qeth.hot_wallet
     import qeth.store
     import qeth.token_metadata
@@ -194,7 +194,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.activity_cache, "ACTIVITIES_DIR",
                         tmp_path / "activities")
     monkeypatch.setattr(qeth.abi_cache, "CACHE_DIR", tmp_path / "abi")
-    monkeypatch.setattr(qeth.ens_app, "CACHE_DIR", tmp_path / "ens")
+    monkeypatch.setattr(qeth.plugins.ens.ens_app, "CACHE_DIR", tmp_path / "ens")
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
                         tmp_path / "keystores")
     return tmp_path

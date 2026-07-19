@@ -14,7 +14,7 @@ from eth_abi import encode as abi_encode
 from PySide6.QtCore import Qt
 
 from qeth.chains import DEFAULT_CHAINS
-from qeth.ens_app import (
+from qeth.plugins.ens.ens_app import (
     EnsName, EnsRecords, OwnershipCheck, build_tree,
 )
 from qeth.plugins.ens import (
@@ -81,7 +81,7 @@ class TestEnsNamesWorker:
         # BENS gives the controller-owned names; the registrant sweep adds the
         # ones it misses (crv.eth), deduped, with its skip-set excluding the
         # .eth labelhashes BENS already returned.
-        import qeth.ens_app as ea
+        import qeth.plugins.ens.ens_app as ea
         from qeth.plugins.ens import EnsNamesWorker
 
         monkeypatch.setattr(
@@ -206,7 +206,7 @@ class TestEnsPanel:
         # An identical re-emit (fast→verified same value, a no-op refresh) must
         # NOT rebuild the rows — rebuilding mid-interaction can eat the user's
         # expand/collapse. A marker on a child survives only if it's not rebuilt.
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         marker = Qt.ItemDataRole.UserRole + 99
         panel = EnsPanel()
         qtbot.addWidget(panel)
@@ -241,7 +241,7 @@ class TestEnsPanel:
         assert not root.isExpanded()             # still folded
 
     def test_record_reload_does_not_drop_role_rows(self, qtbot):
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         panel = EnsPanel()
         qtbot.addWidget(panel)
         me = "0x" + "11" * 20
@@ -389,7 +389,7 @@ class TestEnsPanel:
         # on-chain nameExpires (90d earlier) and corrects the Expires column.
         from qeth.plugins.ens import (
             _EXPIRES_COL, _EXPIRY_SORT_ROLE, _NAME_ROLE, _fmt_expiry)
-        from qeth.ens_app import GRACE_PERIOD_S
+        from qeth.plugins.ens.ens_app import GRACE_PERIOD_S
         me = "0x" + "11" * 20
         name_expires = 1801533201                       # 2027-02-02
         panel = EnsPanel()
@@ -910,7 +910,7 @@ class TestEnsPanel:
 
     def test_action_bar_edit_disabled_on_role_row_when_not_allowed(self, qtbot):
         # Manager row, but the account can't reclaim → Copy yes, Edit no.
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         panel, root = self._bar_panel(qtbot, writable={"crv.eth"})
         me = "0x" + "11" * 20
         panel.mark_verified({"crv.eth": OwnershipCheck(
@@ -923,7 +923,7 @@ class TestEnsPanel:
 
     def test_edit_on_role_row_launches_the_right_dialog(self, qtbot):
         # Editing the manager row → Set-manager; the owner row → Transfer.
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         panel, root = self._bar_panel(
             qtbot, transferable={"crv.eth"}, reclaimable={"crv.eth"})
         me = "0x" + "11" * 20
@@ -970,7 +970,7 @@ class TestEnsPanel:
 
     def test_ctrl_c_copies_name_record_and_role(self, qtbot):
         from PySide6.QtWidgets import QApplication
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         panel = EnsPanel()
         qtbot.addWidget(panel)
         me = "0x" + "11" * 20
@@ -1025,7 +1025,7 @@ class TestEnsPanel:
     def test_no_records_placeholder_is_gone(self, qtbot):
         # A name with zero resolver records still isn't empty (owner/manager),
         # so we never render a "no records" note.
-        from qeth.ens_app import OwnershipCheck
+        from qeth.plugins.ens.ens_app import OwnershipCheck
         panel = EnsPanel()
         qtbot.addWidget(panel)
         me = "0x" + "11" * 20
@@ -1506,7 +1506,7 @@ class TestEnsWriteActions:
         assert "stranger.eth" not in plugin._names_by_l
 
     def test_cross_account_subdomain_surfaced_from_cache(self, qtbot, tmp_path):
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
         store = _StubStore()
         store.accounts = [{"address": ADDR, "source": "hot"},
@@ -1628,7 +1628,7 @@ class TestEnsWriteActions:
 
     def test_no_resolver_offers_to_set_one_first(self, qtbot, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
-        from qeth.ens_app import ENS_REGISTRY
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY
         plugin, host, store = self._plugin(qtbot)
         plugin._resolver_cache.clear()              # name has no resolver
         monkeypatch.setattr(
@@ -1646,7 +1646,7 @@ class TestEnsWriteActions:
         assert req.data[2:10] == "1896f70a"         # setResolver
 
     def test_add_subdomain_unwrapped_targets_registry(self, qtbot):
-        from qeth.ens_app import ENS_REGISTRY
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY
         plugin, host, store = self._plugin(qtbot)
         plugin._add_subdomain("vitalik.eth")
         _name, op, *_rest = host.ens_ops[0]
@@ -1659,7 +1659,7 @@ class TestEnsWriteActions:
         assert req.data[2:10] == "5ef2c7f0"         # registry.setSubnodeRecord
 
     def test_add_subdomain_wrapped_targets_namewrapper(self, qtbot):
-        from qeth.ens_app import ENS_NAME_WRAPPER
+        from qeth.plugins.ens.ens_app import ENS_NAME_WRAPPER
         plugin, host, store = self._plugin(qtbot)
         plugin._wrapped.add("vitalik.eth")
         plugin._add_subdomain("vitalik.eth")
@@ -1756,7 +1756,7 @@ class TestEnsWriteActions:
     def test_add_subdomain_confirm_injects_new_subnode(self, qtbot, tmp_path):
         # A just-added subnode shows on confirmation — nested under its parent —
         # WITHOUT waiting on the indexer to return it.
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
         plugin, host, store = self._plugin(qtbot, owned=("vitalik.eth",))
         plugin._cache = EnsCache(tmp_path)
@@ -1821,7 +1821,7 @@ class TestEnsWriteActions:
     def test_custom_text_key_is_requeried_on_reread(self, qtbot, tmp_path):
         # A custom key we already show ("lt") must be fed back into the re-read,
         # else the standard-keys-only read drops it.
-        from qeth.ens_app import EnsCache, EnsRecords
+        from qeth.plugins.ens.ens_app import EnsCache, EnsRecords
         from qeth.plugins.ens import EnsRecordsWorker, TEXT_KEYS
         plugin, host, store = self._plugin(qtbot)
         plugin._cache = EnsCache(tmp_path)
@@ -1850,7 +1850,7 @@ class TestEnsWriteActions:
     def test_stored_custom_key_requeried_even_without_cache(self, qtbot, tmp_path):
         # A key the user set before (persisted) is re-queried on ANY name, even
         # one with no cached record — recovering the same key across names.
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import EnsRecordsWorker
         plugin, host, store = self._plugin(qtbot)
         plugin._cache = EnsCache(tmp_path)
@@ -1862,7 +1862,7 @@ class TestEnsWriteActions:
         assert "lt" in started[0]._text_keys
 
     def test_text_keys_ready_stores_and_rereads_expanded(self, qtbot):
-        from qeth.ens_app import EnsRecords
+        from qeth.plugins.ens.ens_app import EnsRecords
         plugin, host, store = self._plugin(qtbot)            # vitalik.eth in tree
         panel = plugin.widget()
         panel.add_records("vitalik.eth", EnsRecords(texts={"url": "x"}))
@@ -1889,7 +1889,7 @@ class TestEnsWriteActions:
     def test_push_records_persists_custom_key_to_disk(self, qtbot, tmp_path):
         # The optimistic value reaches disk immediately, so a custom key survives
         # an account switch even before any re-read persists it.
-        from qeth.ens_app import EnsCache, EnsRecords
+        from qeth.plugins.ens.ens_app import EnsCache, EnsRecords
         from qeth.plugins.ens import ENS_CHAIN_ID
         plugin, host, store = self._plugin(qtbot)
         plugin._cache = EnsCache(tmp_path)
@@ -1901,7 +1901,7 @@ class TestEnsWriteActions:
     def test_add_then_stale_verify_keeps_name_and_manager(self, qtbot, tmp_path):
         # The reported cbbtc case: a just-added subnode must survive a LAGGING
         # verify that reads it disowned (older block than the add tx).
-        from qeth.ens_app import EnsCache, OwnershipCheck
+        from qeth.plugins.ens.ens_app import EnsCache, OwnershipCheck
         from qeth.plugins.ens import ENS_CHAIN_ID
         plugin, host, store = self._plugin(qtbot, owned=("me.eth",))
         plugin._cache = EnsCache(tmp_path)
@@ -1920,9 +1920,9 @@ class TestEnsWriteActions:
     def test_mark_added_owned_makes_subnode_writable_now(self, qtbot, tmp_path):
         # A just-created subnode we OWN is writable at once — record actions
         # enabled + resolver cached — without waiting on the verify pass.
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
-        from qeth.ens_write import PUBLIC_RESOLVER
+        from qeth.plugins.ens.ens_write import PUBLIC_RESOLVER
         plugin, host, store = self._plugin(qtbot, owned=("me.eth",))
         plugin._cache = EnsCache(tmp_path)
         plugin._loaded_for = ADDR
@@ -1941,9 +1941,9 @@ class TestEnsWriteActions:
 
     def test_mark_added_for_other_owner_not_writable(self, qtbot, tmp_path):
         # A subnode created FOR SOMEONE ELSE — we don't control it → no record write.
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
-        from qeth.ens_write import PUBLIC_RESOLVER
+        from qeth.plugins.ens.ens_write import PUBLIC_RESOLVER
         plugin, host, store = self._plugin(qtbot, owned=("me.eth",))
         plugin._cache = EnsCache(tmp_path)
         plugin._loaded_for = ADDR
@@ -1955,7 +1955,7 @@ class TestEnsWriteActions:
         assert "sub.me.eth" not in plugin._controller
 
     def test_subnode_op_records_resolver(self, qtbot):
-        from qeth.ens_write import PUBLIC_RESOLVER
+        from qeth.plugins.ens.ens_write import PUBLIC_RESOLVER
         plugin, host, store = self._plugin(qtbot)
         created: dict = {}
         op = plugin._subnode_op("vitalik.eth", ADDR, created)
@@ -1988,7 +1988,7 @@ class TestEnsWriteActions:
         assert "blog.vitalik.eth" in plugin.widget()._items_by_name
 
     def test_pending_add_is_cached_for_reload(self, qtbot, tmp_path):
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
         plugin, host, store = self._plugin(qtbot)
         plugin._cache = EnsCache(tmp_path)
@@ -2025,7 +2025,7 @@ class TestEnsWriteActions:
 
     def test_remove_record_clears_text(self, qtbot):
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import namehash
+        from qeth.plugins.ens.ens_app import namehash
         plugin, host, store = self._plugin(qtbot)
         plugin._on_remove_record("vitalik.eth", "url", "https://x")
         _name, op, *_rest = host.ens_ops[0]
@@ -2039,7 +2039,7 @@ class TestEnsWriteActions:
 
     def test_remove_record_clears_content(self, qtbot):
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import namehash
+        from qeth.plugins.ens.ens_app import namehash
         plugin, host, store = self._plugin(qtbot)
         plugin._on_remove_record("vitalik.eth", "content", "ipfs://x")
         _name, op, *_rest = host.ens_ops[0]
@@ -2052,8 +2052,8 @@ class TestEnsWriteActions:
 
     def test_remove_record_clears_other_chain_addr(self, qtbot):
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import namehash
-        from qeth import ens_write
+        from qeth.plugins.ens.ens_app import namehash
+        from qeth.plugins.ens import ens_write
         plugin, host, store = self._plugin(qtbot)
         plugin._on_remove_record("vitalik.eth", "address (OP)", "0xdef")
         _name, op, *_rest = host.ens_ops[0]
@@ -2120,7 +2120,7 @@ class TestEnsWriteActions:
         assert rows.get("url") == "https://x"
 
     def test_remove_record_confirm_clears_row_without_async(self, qtbot):
-        from qeth.ens_app import EnsRecords
+        from qeth.plugins.ens.ens_app import EnsRecords
         plugin, host, store = self._plugin(qtbot)
         plugin._rec_cache["vitalik.eth"] = (
             EnsRecords(texts={"url": "https://x"}), 100, True)
@@ -2137,7 +2137,7 @@ class TestEnsWriteActions:
     def test_apply_record_change_keeps_block_for_async_supersede(self, qtbot):
         # The optimistic anchor keeps the prior block (verified→False) so a later
         # async re-read at a newer block still wins and can re-earn the ✓.
-        from qeth.ens_app import EnsRecords
+        from qeth.plugins.ens.ens_app import EnsRecords
         plugin, host, store = self._plugin(qtbot)
         plugin._rec_cache["vitalik.eth"] = (EnsRecords(), 500, True)
         plugin._apply_record_change(
@@ -2215,8 +2215,8 @@ class TestEnsWriteActions:
 
     def test_remove_subdomain_builds_setsubnoderecord(self, qtbot):
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import ENS_REGISTRY, _labelhash, namehash
-        from qeth import ens_write
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY, _labelhash, namehash
+        from qeth.plugins.ens import ens_write
         plugin, host, store = self._plugin(qtbot, owned=("swiss.eth",))
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
         plugin._subnode_manageable = {"ops.swiss.eth"}
@@ -2247,8 +2247,8 @@ class TestEnsWriteActions:
         # Manage the subnode but DON'T own the parent → the self-relinquish
         # setRecord(node, 0, 0, 0), not the parent-side setSubnodeRecord.
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import ENS_REGISTRY, namehash
-        from qeth import ens_write
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY, namehash
+        from qeth.plugins.ens import ens_write
         plugin, host, store = self._plugin(qtbot, owned=("ops.swiss.eth",))
         plugin._render([EnsName("swiss.eth"), EnsName("ops.swiss.eth")])
         plugin._controller = {"ops.swiss.eth"}
@@ -2297,8 +2297,8 @@ class TestEnsWriteActions:
         # Own the WRAPPED parent of a WRAPPED subnode → delete through the
         # NameWrapper: setSubnodeOwner(parent, label, 0, 0, 0) burns it.
         from eth_abi import encode as abi_encode
-        from qeth.ens_app import ENS_NAME_WRAPPER, namehash
-        from qeth import ens_write
+        from qeth.plugins.ens.ens_app import ENS_NAME_WRAPPER, namehash
+        from qeth.plugins.ens import ens_write
         plugin, host, store = self._plugin(qtbot, owned=("yb.eth",))
         plugin._render([EnsName("yb.eth"), EnsName("cbbtc.yb.eth")])
         plugin._controller = {"yb.eth", "cbbtc.yb.eth"}   # own parent + subnode
@@ -2368,7 +2368,7 @@ class TestEnsWriteActions:
 
     def test_remove_subdomain_confirm_drops_denies_purges_rediscovers(
             self, qtbot, tmp_path):
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
         store = _StubStore()
         store.accounts = [{"address": ADDR, "source": "hot"},
@@ -2400,7 +2400,7 @@ class TestEnsWriteActions:
     def test_denied_name_not_re_cached_on_discovery(self, qtbot, tmp_path):
         # A denied (just-deleted) name a lagging indexer still returns must not be
         # written back to the disk cache — else it flashes back on the next load.
-        from qeth.ens_app import EnsCache
+        from qeth.plugins.ens.ens_app import EnsCache
         from qeth.plugins.ens import ENS_CHAIN_ID
         plugin, host, store = self._plugin(qtbot)
         plugin._cache = EnsCache(tmp_path)
@@ -2429,7 +2429,7 @@ class TestEnsWriteActions:
 
     def test_renew_quotes_one_year_with_usd(self, qtbot):
         from qeth.plugins.ens import EnsRenewPriceWorker
-        from qeth import ens_write
+        from qeth.plugins.ens import ens_write
         plugin, host, store = self._plugin(qtbot)
         plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
         plugin._renew("vitalik.eth")
@@ -2477,7 +2477,7 @@ class TestEnsWriteActions:
         assert "ETH" in fields._cost_lbl.text()
 
     def test_renew_builds_payable_tx_to_controller(self, qtbot):
-        from qeth.ens_app import ENS_ETH_CONTROLLER
+        from qeth.plugins.ens.ens_app import ENS_ETH_CONTROLLER
         plugin, host, store = self._plugin(qtbot)
         plugin._names_by_l["vitalik.eth"].expiry_ts = self.OWNED_EXP
         plugin._renew("vitalik.eth")
@@ -2556,7 +2556,7 @@ class TestEnsWriteActions:
         assert "manager.eth" in panel._writable              # but still writable
 
     def test_transfer_unwrapped_targets_registrar(self, qtbot):
-        from qeth.ens_app import ENS_ETH_REGISTRAR
+        from qeth.plugins.ens.ens_app import ENS_ETH_REGISTRAR
         plugin, host, store = self._plugin(qtbot)
         plugin._transfer("vitalik.eth")
         name, op, _chain, _from, _cb = host.ens_ops[0]
@@ -2570,7 +2570,7 @@ class TestEnsWriteActions:
         assert "Transfer" in op.confirm_label
 
     def test_transfer_wrapped_targets_namewrapper(self, qtbot):
-        from qeth.ens_app import ENS_NAME_WRAPPER
+        from qeth.plugins.ens.ens_app import ENS_NAME_WRAPPER
         plugin, host, store = self._plugin(qtbot)
         plugin._wrapped.add("vitalik.eth")
         plugin._transfer("vitalik.eth")
@@ -2663,7 +2663,7 @@ class TestEnsWriteActions:
         assert "vitalik.eth" not in plugin.widget()._reclaimable
 
     def test_set_manager_builds_reclaim_to_registrar(self, qtbot):
-        from qeth.ens_app import ENS_ETH_REGISTRAR, _labelhash
+        from qeth.plugins.ens.ens_app import ENS_ETH_REGISTRAR, _labelhash
         plugin, host, store = self._plugin(qtbot)
         # Registrant of an unwrapped 2LD whose manager is delegated elsewhere
         # (crv.eth-style) → "Set manager" reclaims via the BaseRegistrar.
@@ -2693,7 +2693,7 @@ class TestEnsWriteActions:
         # The general path: we're the CURRENT manager (controller) but not the
         # registrant → "Set manager" hands the role on via registry.setOwner,
         # prefilled with the current manager (us).
-        from qeth.ens_app import ENS_REGISTRY, namehash
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY, namehash
         plugin, host, store = self._plugin(qtbot)
         plugin._on_verified(ADDR, {
             "vitalik.eth": OwnershipCheck(
@@ -2722,7 +2722,7 @@ class TestEnsWriteActions:
         assert host.ens_ops == []
 
     def test_set_manager_on_owned_parent_subdomain_uses_setsubnodeowner(self, qtbot):
-        from qeth.ens_app import ENS_REGISTRY, namehash, _labelhash
+        from qeth.plugins.ens.ens_app import ENS_REGISTRY, namehash, _labelhash
         plugin, host, store = self._plugin(qtbot, owned=("vitalik.eth",))
         # We control vitalik.eth and blog.vitalik.eth is surfaced under it →
         # "Set manager" reassigns the subnode via registry.setSubnodeOwner.
@@ -2743,7 +2743,7 @@ class TestEnsWriteActions:
             [namehash("vitalik.eth"), _labelhash("blog"), self.OTHER]).hex()
 
     def test_set_manager_on_wrapped_subdomain_uses_namewrapper(self, qtbot):
-        from qeth.ens_app import ENS_NAME_WRAPPER, namehash
+        from qeth.plugins.ens.ens_app import ENS_NAME_WRAPPER, namehash
         plugin, host, store = self._plugin(qtbot, owned=("vitalik.eth",))
         # A WRAPPED subdomain whose WRAPPED parent we own → "Set manager"
         # reassigns it through the NameWrapper (setSubnodeOwner, fuses/expiry 0).

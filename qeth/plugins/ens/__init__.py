@@ -33,16 +33,16 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import isValid as _qt_alive   # is a Qt C++ object still alive?
 
-from ..ens_app import (
+from .ens_app import (
     ENS_APP_URL, TEXT_KEYS, VERIFY_WAIT_S, EnsCache, EnsName, EnsNode,
     EnsRecords, OwnershipCheck, build_tree, discover_custom_text_keys,
     expiry_status, fetch_name, lookup_owned_names, name_warning,
     read_name_states, read_records, verified_read_records, verify_names,
 )
-from ..plugin import Plugin
-from ..dialog import Dialog, address_field_min_width, prompt_text
-from ..signing import SignerError, SigningRequest
-from .transactions import _render_decoded, _TxComposerDialog
+from ...plugin import Plugin
+from ...dialog import Dialog, address_field_min_width, prompt_text
+from ...signing import SignerError, SigningRequest
+from ..transactions import _render_decoded, _TxComposerDialog
 
 log = logging.getLogger("qeth.plugins.ens")
 
@@ -298,7 +298,7 @@ class EnsNamesWorker(QThread):
         self._custom = list(custom_names)
 
     def run(self) -> None:
-        from ..ens_app import (
+        from .ens_app import (
             _is_eth_2ld, _labelhash, lookup_registrant_names,
         )
         names = lookup_owned_names(ENS_CHAIN_ID, self._address)
@@ -458,7 +458,7 @@ def _eth_usd_rate(chain) -> Decimal | None:
     """Current USD price of 1 ETH (DefiLlama), to value a renewal in dollars.
     None if the lookup doesn't land — the dialog then shows ETH only."""
     try:
-        from ..pricing import DefiLlamaPrices
+        from ...pricing import DefiLlamaPrices
         res = DefiLlamaPrices().fetch(chain, [], include_native=True)
     except Exception:
         log.debug("ETH/USD rate fetch failed", exc_info=True)
@@ -485,7 +485,7 @@ class EnsRenewPriceWorker(QThread):
         self._with_usd = with_usd
 
     def run(self) -> None:
-        from ..ens_app import rent_price
+        from .ens_app import rent_price
         price = rent_price(self._chain, self._label, self._duration)
         usd = _eth_usd_rate(self._chain) if self._with_usd else None
         self.ready.emit(price, usd)
@@ -1596,7 +1596,7 @@ class _RecordFields(QWidget):
             self.kind.setEnabled(False)
         else:
             form.addRow("Type", self.kind)
-        from .. import ens_write
+        from . import ens_write
         self.key = QComboBox()
         self.key.setEditable(True)
         self.key.addItems(TEXT_KEYS)
@@ -1782,7 +1782,7 @@ class _RenewFields(QWidget):
         price = self.selected_value_wei()
         if price is None:
             return "Fetching price…"
-        from ..chain import wei_to_ether
+        from ...chain import wei_to_ether
         eth = wei_to_ether(price)
         text = f"≈ {eth:.4f} ETH"
         if self._usd is not None:
@@ -1802,7 +1802,7 @@ class _RenewFields(QWidget):
     def selected_value_wei(self) -> int | None:
         """Total renewal price (wei) for the chosen term, or None if unpriced.
         Linear in duration: the one-year quote scaled to the picked seconds."""
-        from .. import ens_write
+        from . import ens_write
         if self._price_1y is None:
             return None
         return self._price_1y * self.duration_seconds() // ens_write.SECONDS_PER_YEAR
@@ -2242,7 +2242,7 @@ class EnsPlugin(Plugin):
             ch = host.chain_by_id(ENS_CHAIN_ID)
             if ch is not None:
                 return ch
-        from ..chains import DEFAULT_CHAINS
+        from ...chains import DEFAULT_CHAINS
         return next((c for c in DEFAULT_CHAINS if c.chain_id == ENS_CHAIN_ID), None)
 
     def _load(self, address: str | None) -> None:
@@ -2275,7 +2275,7 @@ class EnsPlugin(Plugin):
         chain = self._mainnet()
         if chain is not None:
             try:
-                from ..helios import prewarm
+                from ...helios import prewarm
                 prewarm(chain)
             except Exception:
                 log.debug("helios prewarm failed", exc_info=True)
@@ -2799,8 +2799,8 @@ class EnsPlugin(Plugin):
         stamped with the tx's block."""
         if self._panel is None or not changed:
             return
-        from .. import ens_write
-        from ..ens_app import EnsRecords
+        from . import ens_write
+        from .ens_app import EnsRecords
         kind = changed.get("kind", "")
         extra = changed.get("extra", "")
         value = changed.get("value", "")
@@ -2848,7 +2848,7 @@ class EnsPlugin(Plugin):
         a text key), same forms ``_record_rows`` renders."""
         if self._panel is None:
             return
-        from ..ens_app import EnsRecords
+        from .ens_app import EnsRecords
         lab = label.strip()
         cur = self._cur_records(name)
         addresses = dict(cur.addresses) if cur is not None else {}
@@ -2947,7 +2947,7 @@ class EnsPlugin(Plugin):
         return n.expiry_ts if n is not None else None
 
     def _renew(self, name: str) -> None:
-        from ..ens_app import _is_eth_2ld
+        from .ens_app import _is_eth_2ld
         if self._panel is None or not _is_eth_2ld(name):
             return
         chain = self._mainnet()
@@ -2967,7 +2967,7 @@ class EnsPlugin(Plugin):
     # --- transfer ----------------------------------------------------------
 
     def _transfer(self, name: str) -> None:
-        from ..ens_app import _is_eth_2ld
+        from .ens_app import _is_eth_2ld
         if self._panel is None or not _is_eth_2ld(name):
             return
         host = self.host
@@ -2995,7 +2995,7 @@ class EnsPlugin(Plugin):
     # --- set manager (reclaim) --------------------------------------------
 
     def _set_manager(self, name: str) -> None:
-        from ..ens_app import _is_eth_2ld
+        from .ens_app import _is_eth_2ld
         if self._panel is None:
             return
         nl = name.lower()
@@ -3050,7 +3050,7 @@ class EnsPlugin(Plugin):
         composer (validation surfaces as a disabled Confirm, not a popup).
         ``changed`` (when given) captures the confirmed (kind, key/coin, value)
         so the post-confirm hook can reflect it in the tree at once."""
-        from .. import ens_write
+        from . import ens_write
 
         def make_fields(_composer: _EnsWriteComposer) -> QWidget:
             return _RecordFields(name, preset=preset, key=key, coin=coin,
@@ -3108,7 +3108,7 @@ class EnsPlugin(Plugin):
 
     def _subnode_op(self, name: str, self_addr: str,
                     created: dict[str, str] | None = None) -> _EnsOp:
-        from .. import ens_write
+        from . import ens_write
         wrapped = name.lower() in self._wrapped
 
         def make_fields(composer: _EnsWriteComposer) -> QWidget:
@@ -3155,7 +3155,7 @@ class EnsPlugin(Plugin):
 
     def _renew_op(self, name: str, chain,
                   changed: dict[str, str] | None = None) -> _EnsOp:
-        from .. import ens_write
+        from . import ens_write
         label = name.split(".")[0]
         expiry_ts = self._expiry_of(name)
 
@@ -3210,7 +3210,7 @@ class EnsPlugin(Plugin):
                      changed: dict[str, str] | None = None) -> _EnsOp:
         from eth_utils import to_checksum_address
 
-        from .. import ens_write
+        from . import ens_write
         wrapped = name.lower() in self._wrapped
         sender = to_checksum_address(from_addr)
 
@@ -3252,7 +3252,7 @@ class EnsPlugin(Plugin):
         """Change a name's manager via ``registry.setOwner`` — the general path
         for the CURRENT manager (a 2LD or a subdomain) to hand the role to
         another address. Prefilled with the current manager (edit-in-place)."""
-        from .. import ens_write
+        from . import ens_write
 
         def make_fields(composer: _EnsWriteComposer) -> QWidget:
             return _RecipientFields(
@@ -3284,7 +3284,7 @@ class EnsPlugin(Plugin):
 
     def _set_manager_op(self, name: str, initial: str,
                         changed: dict[str, str] | None = None) -> _EnsOp:
-        from .. import ens_write
+        from . import ens_write
 
         def make_fields(composer: _EnsWriteComposer) -> QWidget:
             # Prefilled with the current manager (edit-in-place); the registrant
@@ -3321,7 +3321,7 @@ class EnsPlugin(Plugin):
         """Set the manager of a subdomain you own the PARENT of, via
         registry.setSubnodeOwner — the parent controller's power to reassign a
         subnode. Prefilled with the current manager (edit-in-place)."""
-        from .. import ens_write
+        from . import ens_write
         parent = name.split(".", 1)[1]
         label = name.split(".", 1)[0]
 
@@ -3358,7 +3358,7 @@ class EnsPlugin(Plugin):
         """Set the manager of a WRAPPED subdomain you own the WRAPPED PARENT of,
         via NameWrapper.setSubnodeOwner — the wrapped analogue of
         _set_subnode_manager_op. Prefilled with the current manager."""
-        from .. import ens_write
+        from . import ens_write
         parent = name.split(".", 1)[1]
         label = name.split(".", 1)[0]
 
@@ -3400,7 +3400,7 @@ class EnsPlugin(Plugin):
         ``address (COIN)`` / ``content`` / a text key. Input-less: the value is
         forced empty (0x0 / b"" / ""), so the composer shows the decoded
         clearing call + a note and the user just reviews + signs."""
-        from .. import ens_write
+        from . import ens_write
         lab = label.strip()
 
         def _coin_of(lb: str) -> str | None:
@@ -3452,7 +3452,7 @@ class EnsPlugin(Plugin):
         """Delete a subdomain you own the PARENT of, via
         registry.setSubnodeRecord(parent, label, 0, 0, 0) — clears its owner,
         resolver and records. Input-less + rediscovers (the name disappears)."""
-        from .. import ens_write
+        from . import ens_write
         parent = name.split(".", 1)[1]
         label = name.split(".", 1)[0]
 
@@ -3484,7 +3484,7 @@ class EnsPlugin(Plugin):
         NameWrapper.setSubnodeOwner(parent, label, 0, 0, 0) — burns the wrapper
         token and clears the registry entry. The wrapped analogue of
         _remove_subnode_op."""
-        from .. import ens_write
+        from . import ens_write
         parent = name.split(".", 1)[1]
         label = name.split(".", 1)[0]
 
@@ -3515,7 +3515,7 @@ class EnsPlugin(Plugin):
         """Give up a subdomain you MANAGE (but whose parent you don't own), via
         registry.setRecord(node, 0, 0, 0) — the same owner/resolver/ttl clear as
         the parent-side delete, authorised against the subnode itself."""
-        from .. import ens_write
+        from . import ens_write
         parent = name.split(".", 1)[1]
 
         def build(_nm: str, _fields: Any) -> tuple[str, str]:
@@ -3543,7 +3543,7 @@ class EnsPlugin(Plugin):
 
     def _set_resolver_op(self, name: str) -> _EnsOp:
         """The input-less set-resolver bootstrap (the resolver-gate target)."""
-        from .. import ens_write
+        from . import ens_write
 
         def build(nm: str, _fields: Any) -> tuple[str, str]:
             return ens_write.set_resolver(nm)

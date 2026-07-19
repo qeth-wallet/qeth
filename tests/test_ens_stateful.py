@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
 from qeth.chains import DEFAULT_CHAINS
-from qeth.ens_app import EnsCache, EnsName, OwnershipCheck
+from qeth.plugins.ens.ens_app import EnsCache, EnsName, OwnershipCheck
 from qeth.plugins.ens import _NAME_ROLE, EnsPlugin
 
 ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)

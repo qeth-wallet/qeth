@@ -1,4 +1,4 @@
-"""Tests for qeth.ens_write — the ENS write-calldata builders.
+"""Tests for qeth.plugins.ens.ens_write — the ENS write-calldata builders.
 
 Qt-free and network-free: every builder returns ``(to_addr, data_hex)`` we can
 assert byte-for-byte. Locks in the selectors, the ABI encoding, the contenthash
@@ -8,11 +8,11 @@ routes to the registry (unwrapped) vs the NameWrapper (wrapped).
 
 from eth_abi import encode as abi_encode
 
-from qeth.ens_app import (
+from qeth.plugins.ens.ens_app import (
     ENS_ETH_CONTROLLER, ENS_ETH_REGISTRAR, ENS_NAME_WRAPPER, ENS_REGISTRY,
     _labelhash, decode_contenthash, namehash,
 )
-from qeth import ens_write
+from qeth.plugins.ens import ens_write
 
 
 RESOLVER = ens_write.PUBLIC_RESOLVER

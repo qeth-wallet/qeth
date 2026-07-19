@@ -1,8 +1,8 @@
-"""ENS data layer (qeth.ens_app) — parsing, tree, expiry, contenthash, cache.
+"""ENS data layer (qeth.plugins.ens.ens_app) — parsing, tree, expiry, contenthash, cache.
 No network: the BENS HTTP call is injected."""
 
-from qeth import ens_app as ea
-from qeth.ens_app import EnsName
+from qeth.plugins.ens import ens_app as ea
+from qeth.plugins.ens.ens_app import EnsName
 
 
 # --- EnsName shape ---------------------------------------------------------

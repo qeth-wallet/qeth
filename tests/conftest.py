@@ -294,7 +294,7 @@ def hermetic_mainwindow(monkeypatch):
         (transactions_plugin, ["TransactionsWorker"]),
         (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker", "EnsVerifyWorker",
                       "EnsTextKeysWorker"]),
-        (approvals_plugin, ["ScanWorker"]),
+        (approvals_plugin, ["ScanWorker", "ReconcileWorker"]),
     ):
         for cls_name in cls_names:
             cls = getattr(mod, cls_name, None)

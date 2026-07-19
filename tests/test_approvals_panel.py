@@ -98,3 +98,66 @@ def test_copy_enabled_only_with_leaf_selected(qtbot):
     # selecting the token node (not a leaf) → no copy target
     p.tree.setCurrentItem(p.tree.topLevelItem(0))
     assert not p.btn_copy.isEnabled()
+
+
+# --- commit 2: modify / revoke + optimistic updates -----------------------
+
+def test_modify_revoke_enabled_only_with_leaf(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row()])
+    assert not p.btn_modify.isEnabled() and not p.btn_revoke.isEnabled()
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    assert p.btn_modify.isEnabled() and p.btn_revoke.isEnabled()
+    p.tree.setCurrentItem(p.tree.topLevelItem(0))      # token node
+    assert not p.btn_modify.isEnabled() and not p.btn_revoke.isEnabled()
+
+
+def test_modify_button_emits_selected_row(qtbot):
+    p = _panel(qtbot)
+    row = _row()
+    p.append_rows([row])
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    got = []
+    p.modify_requested.connect(got.append)
+    p.btn_modify.click()
+    assert got == [row]
+
+
+def test_revoke_button_emits_selected_row_as_list(qtbot):
+    p = _panel(qtbot)
+    row = _row()
+    p.append_rows([row])
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    got = []
+    p.revoke_requested.connect(got.append)
+    p.btn_revoke.click()
+    assert got == [[row]]
+
+
+def test_mark_pending_disables_and_relabels(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row()])
+    p.mark_pending(TOKEN, SP1)
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.text(1) == "pending…"
+    assert leaf.isDisabled()
+
+
+def test_update_allowance_rerenders_and_reenables(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(allowance=_MAX)])
+    p.mark_pending(TOKEN, SP1)
+    p.update_allowance(TOKEN, SP1, 5_000_000)
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert "unlimited" not in leaf.text(1).lower()
+    assert not leaf.isDisabled()
+
+
+def test_remove_leaf_drops_empty_token_node(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.remove_leaf(TOKEN, SP1)
+    assert p.tree.topLevelItemCount() == 1
+    assert p.tree.topLevelItem(0).childCount() == 1
+    p.remove_leaf(TOKEN, SP2)                          # last spender gone
+    assert p.tree.topLevelItemCount() == 0

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QProgressBar,
@@ -33,7 +33,7 @@ from ...transactions import (
     BlockscoutTransactionSource, EtherscanV2TransactionSource,
     RoutedTransactionSource,
 )
-from ..transactions import _format_token_amount, _is_full_history
+from ..transactions import _encode_approve, _format_token_amount, _is_full_history
 from .discovery import ApprovalRow, approve_pairs_in, fetch_allowances
 
 if TYPE_CHECKING:
@@ -173,6 +173,36 @@ class ScanWorker(QThread):
         self.rows_ready.emit(cid, addr_l, rows)
 
 
+class ReconcileWorker(QThread):
+    """Re-reads ``allowance(owner, spender)`` for a specific set of pairs after
+    a modify/revoke mines, so the tree reflects the on-chain truth (a reverted
+    revoke keeps its old value; a successful one reads 0). Emits every requested
+    pair — 0 for any that dropped out of ``fetch_allowances`` (which keeps >0
+    only) so the plugin knows to remove the leaf."""
+
+    reconciled = Signal(QULONGLONG, str, object)   # cid, addr_l, {(token, spender): value}
+
+    def __init__(self, chain, owner: str, pairs, *, client_factory=None, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._owner = owner
+        self._pairs = list(pairs)
+        self._client_factory = client_factory or EthClient
+
+    def run(self) -> None:
+        cid = self._chain.chain_id
+        addr_l = self._owner.lower()
+        values: dict[tuple[str, str], int] = dict.fromkeys(self._pairs, 0)
+        try:
+            client = self._client_factory(self._chain)
+            found = fetch_allowances(client, self._owner, self._pairs)
+            values.update(found)
+        except Exception:
+            log.debug("approvals reconcile failed", exc_info=True)
+            return                              # leave leaves as-is; no false removals
+        self.reconciled.emit(cid, addr_l, values)
+
+
 # --- panel ----------------------------------------------------------------
 
 class ApprovalsPanel(QWidget):
@@ -216,6 +246,12 @@ class ApprovalsPanel(QWidget):
         self.progress.setVisible(False)
         v.addWidget(self.progress)
 
+        self.btn_modify = QPushButton("&Modify Approval…")
+        self.btn_modify.setToolTip("Set a new allowance for the selected spender")
+        self.btn_modify.clicked.connect(self._emit_modify)
+        self.btn_revoke = QPushButton("&Revoke")
+        self.btn_revoke.setToolTip("Set the selected allowance to zero")
+        self.btn_revoke.clicked.connect(self._emit_revoke)
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setToolTip("Stop scanning the transaction history")
         self.btn_stop.setVisible(False)
@@ -233,7 +269,8 @@ class ApprovalsPanel(QWidget):
         self._update_buttons()
 
     def action_widgets(self) -> list[QWidget]:
-        return [self.btn_stop, self.btn_copy, self.btn_refresh]
+        return [self.btn_modify, self.btn_revoke, self.btn_stop,
+                self.btn_copy, self.btn_refresh]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
@@ -304,6 +341,52 @@ class ApprovalsPanel(QWidget):
         self.status_lbl.setText(text)
         self.status_lbl.setVisible(bool(text))
 
+    # --- optimistic updates (from broadcast / reconcile) ------------------
+    def _leaf_for(self, token: str, spender: str) -> QTreeWidgetItem | None:
+        node = self._token_items.get(token.lower())
+        if node is None:
+            return None
+        sp = spender.lower()
+        for i in range(node.childCount()):
+            leaf = node.child(i)
+            r = leaf.data(0, _ROW_ROLE)
+            if isinstance(r, ApprovalRow) and r.spender.lower() == sp:
+                return leaf
+        return None
+
+    def mark_pending(self, token: str, spender: str) -> None:
+        """Show the leaf as in-flight while its modify/revoke tx confirms."""
+        leaf = self._leaf_for(token, spender)
+        if leaf is not None:
+            leaf.setText(1, "pending…")
+            leaf.setDisabled(True)
+
+    def update_allowance(self, token: str, spender: str, value: int) -> None:
+        """Re-render a leaf's allowance from an authoritative re-read."""
+        leaf = self._leaf_for(token, spender)
+        if leaf is None:
+            return
+        r = leaf.data(0, _ROW_ROLE)
+        if isinstance(r, ApprovalRow):
+            r.allowance = value
+            leaf.setText(1, _format_token_amount(value, r.decimals, r.symbol))
+        leaf.setDisabled(False)
+
+    def remove_leaf(self, token: str, spender: str) -> None:
+        """Drop a spender leaf (allowance now zero); drop the token node too when
+        it has no spenders left."""
+        node = self._token_items.get(token.lower())
+        leaf = self._leaf_for(token, spender)
+        if node is None or leaf is None:
+            return
+        node.removeChild(leaf)
+        if node.childCount() == 0:
+            idx = self.tree.indexOfTopLevelItem(node)
+            if idx >= 0:
+                self.tree.takeTopLevelItem(idx)
+            self._token_items.pop(token.lower(), None)
+        self._update_buttons()
+
     # --- selection / actions ---------------------------------------------
     def _selected_leaf(self) -> ApprovalRow | None:
         it = self.tree.currentItem()
@@ -313,7 +396,20 @@ class ApprovalsPanel(QWidget):
         return data if isinstance(data, ApprovalRow) else None
 
     def _update_buttons(self) -> None:
-        self.btn_copy.setEnabled(self._selected_leaf() is not None)
+        has_leaf = self._selected_leaf() is not None
+        self.btn_copy.setEnabled(has_leaf)
+        self.btn_modify.setEnabled(has_leaf)
+        self.btn_revoke.setEnabled(has_leaf)
+
+    def _emit_modify(self) -> None:
+        r = self._selected_leaf()
+        if r is not None:
+            self.modify_requested.emit(r)
+
+    def _emit_revoke(self) -> None:
+        r = self._selected_leaf()
+        if r is not None:
+            self.revoke_requested.emit([r])
 
     def _copy_spender(self) -> None:
         r = self._selected_leaf()
@@ -327,6 +423,11 @@ class ApprovalsPanel(QWidget):
         r = r if isinstance(r, ApprovalRow) else None
         token = it.data(0, _TOKEN_ROLE) if it is not None else None
         menu = QMenu(self)
+        act_modify = menu.addAction("Modify Approval…")
+        act_modify.setEnabled(r is not None)
+        act_revoke = menu.addAction("Revoke Approval")
+        act_revoke.setEnabled(r is not None)
+        menu.addSeparator()
         act_copy_sp = menu.addAction("Copy spender address")
         act_copy_sp.setEnabled(r is not None)
         act_copy_tok = menu.addAction("Copy token address")
@@ -336,7 +437,11 @@ class ApprovalsPanel(QWidget):
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
             return
-        if chosen is act_copy_sp and r is not None:
+        if chosen is act_modify and r is not None:
+            self.modify_requested.emit(r)
+        elif chosen is act_revoke and r is not None:
+            self.revoke_requested.emit([r])
+        elif chosen is act_copy_sp and r is not None:
             QApplication.clipboard().setText(r.spender)
             self.copied.emit(r.spender)
         elif chosen is act_copy_tok:
@@ -366,6 +471,11 @@ class ApprovalsPlugin(Plugin):
             BlockscoutTransactionSource())
         self._workers: set[QThread] = set()
         self._scan: ScanWorker | None = None
+        self._reconcile_pending: set[tuple[str, str]] = set()
+        self._reconcile_timer = QTimer(self)
+        self._reconcile_timer.setSingleShot(True)
+        self._reconcile_timer.setInterval(600)     # debounce bursts of confirms
+        self._reconcile_timer.timeout.connect(self._run_reconcile)
         from ...transactions_cache import TransactionCache
         self._disk_cache = TransactionCache()
 
@@ -375,6 +485,8 @@ class ApprovalsPlugin(Plugin):
             self._panel.refresh_requested.connect(lambda: self._kick(force=True))
             self._panel.stop_requested.connect(self._stop_scan)
             self._panel.copied.connect(self._on_copied)
+            self._panel.modify_requested.connect(self._on_modify)
+            self._panel.revoke_requested.connect(self._on_revoke)
         return self._panel
 
     def action_widgets(self) -> list[QWidget]:
@@ -409,10 +521,77 @@ class ApprovalsPlugin(Plugin):
         self._epoch += 1
         self._loaded_for = None
         self._stop_scan()
+        self._reconcile_pending.clear()
+        self._reconcile_timer.stop()
 
     def _stop_scan(self) -> None:
         if self._scan is not None:
             self._scan.requestInterruption()
+
+    # --- modify / revoke --------------------------------------------------
+    def _on_modify(self, row: ApprovalRow) -> None:
+        self._open_approve(row, f"Modify {row.symbol or 'token'} approval")
+
+    def _on_revoke(self, rows) -> None:
+        # Single-leaf revoke in commit 2; the batch queue lands in commit 3.
+        for row in rows:
+            self._open_approve(row, f"Revoke {row.symbol or 'token'}")
+
+    def _open_approve(self, row: ApprovalRow, label: str) -> None:
+        if self.host is None:
+            return
+        owner = self.host.selected_address
+        if not owner:
+            return
+        from eth_utils import to_checksum_address
+
+        from ...signing import SigningRequest
+        chain = self.host.current_chain()
+        spender = to_checksum_address(row.spender)
+        req = SigningRequest(
+            chain_id=chain.chain_id,
+            from_addr=to_checksum_address(owner),
+            to_addr=to_checksum_address(row.token),
+            value_wei=0,
+            data=_encode_approve(spender, 0),
+        )
+        pair = (row.token.lower(), row.spender.lower())
+        self.host.request_transaction(
+            req, chain, label=label,
+            on_broadcast=lambda h, p=pair: self._on_action_broadcast(p),
+            on_confirmed=lambda rc, p=pair: self._schedule_reconcile(p))
+
+    def _on_action_broadcast(self, pair: tuple[str, str]) -> None:
+        if self._panel is not None:
+            self._panel.mark_pending(*pair)
+
+    def _schedule_reconcile(self, pair: tuple[str, str]) -> None:
+        self._reconcile_pending.add(pair)
+        self._reconcile_timer.start()
+
+    def _run_reconcile(self) -> None:
+        pairs = list(self._reconcile_pending)
+        self._reconcile_pending.clear()
+        if not pairs or self.host is None:
+            return
+        owner = self.host.selected_address
+        if not owner:
+            return
+        chain = self.host.current_chain()
+        epoch = self._epoch
+        worker = ReconcileWorker(chain, owner, pairs)
+        worker.reconciled.connect(
+            lambda c, a, vals, e=epoch: self._on_reconciled(c, a, vals, e))
+        self._start(worker)
+
+    def _on_reconciled(self, chain_id, addr_l, values, epoch) -> None:
+        if self._panel is None or not self._fresh(chain_id, addr_l, epoch):
+            return
+        for (token, spender), value in values.items():
+            if value > 0:
+                self._panel.update_allowance(token, spender, int(value))
+            else:
+                self._panel.remove_leaf(token, spender)
 
     def _kick(self, *, force: bool = False) -> None:
         view = self._current_view()

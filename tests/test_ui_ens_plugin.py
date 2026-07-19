@@ -2656,6 +2656,28 @@ class TestEnsWriteActions:
             ["bytes32", "bytes32", "address"],
             [namehash("vitalik.eth"), _labelhash("blog"), self.OTHER]).hex()
 
+    def test_set_manager_on_wrapped_subdomain_uses_namewrapper(self, qtbot):
+        from qeth.ens_app import ENS_NAME_WRAPPER, namehash
+        plugin, host, store = self._plugin(qtbot, owned=("vitalik.eth",))
+        # A WRAPPED subdomain whose WRAPPED parent we own → "Set manager"
+        # reassigns it through the NameWrapper (setSubnodeOwner, fuses/expiry 0).
+        plugin._names_by_l["blog.vitalik.eth"] = EnsName(
+            "blog.vitalik.eth", source="subnode")
+        plugin._wrapped.add("blog.vitalik.eth")
+        plugin._wrapped_subnode_manageable.add("blog.vitalik.eth")
+        plugin._set_manager("blog.vitalik.eth")
+        name, op, *_ = host.ens_ops[0]
+        assert name == "blog.vitalik.eth"
+        dlg = self._composer(op, name="blog.vitalik.eth")
+        qtbot.addWidget(dlg)
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_NAME_WRAPPER.lower()
+        assert req.data[2:10] == "c658e086"              # NameWrapper.setSubnodeOwner
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "string", "address", "uint32", "uint64"],
+            [namehash("vitalik.eth"), "blog", self.OTHER, 0, 0]).hex()
+
 
 # --- EnsPlugin: name-row resolution follows the head address read ----------
 

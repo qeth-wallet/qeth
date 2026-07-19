@@ -257,6 +257,21 @@ def set_subnode_manager(parent_name: str, label: str, manager: str) -> Tx:
     return _tx(ENS_REGISTRY, _SEL_SUBNODE_OWNER, body)
 
 
+def set_wrapped_subnode_manager(parent_name: str, label: str, manager: str) -> Tx:
+    """Reassign a *wrapped* subdomain ``label.parent_name``'s owner (its manager)
+    to ``manager``, via ``NameWrapper.setSubnodeOwner(parentNode, label, owner,
+    0, 0)`` — the wrapped analogue of ``set_subnode_manager``.
+
+    ``fuses=0`` adds nothing (fuses can only be burned, never cleared) and
+    ``expiry=0`` is clamped up to the subnode's current expiry (the NameWrapper
+    never reduces it), so both are preserved. Callable by the wrapped PARENT's
+    token owner; reverts if the subname is emancipated (``PARENT_CANNOT_CONTROL``)
+    — the sign dialog's simulation surfaces that before signing."""
+    body = _abi(["bytes32", "string", "address", "uint32", "uint64"],
+                [namehash(parent_name), label, manager, 0, 0])
+    return _tx(ENS_NAME_WRAPPER, _SEL_WRAPPED_SUBNODE_OWNER, body)
+
+
 def remove_subnode(parent_name: str, label: str) -> Tx:
     """Delete an *unwrapped* subdomain ``label.parent_name`` — clear its owner,
     resolver and TTL in the registry via
@@ -307,9 +322,7 @@ def remove_wrapped_subnode(parent_name: str, label: str) -> Tx:
     subnode has ``CANNOT_UNWRAP`` burned or is emancipated
     (``PARENT_CANNOT_CONTROL``); the sign dialog's simulation surfaces that
     before signing rather than us reading fuses up front."""
-    body = _abi(["bytes32", "string", "address", "uint32", "uint64"],
-                [namehash(parent_name), label, ZERO_ADDRESS, 0, 0])
-    return _tx(ENS_NAME_WRAPPER, _SEL_WRAPPED_SUBNODE_OWNER, body)
+    return set_wrapped_subnode_manager(parent_name, label, ZERO_ADDRESS)
 
 
 def eth_addr_bytes(address: str) -> bytes:

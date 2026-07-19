@@ -531,6 +531,7 @@ class EnsPanel(QWidget):
         self._reclaimable: set[str] = set()    # owner can reclaim manager (unwrapped)
         self._subnode_manageable: set[str] = set()  # subdomains you own the parent of
         self._owner_settable: set[str] = set()  # current manager can setOwner (unwrapped)
+        self._wrapped_subnode_manageable: set[str] = set()  # wrapped sub, own wrapped parent
         self._subnode_removable: set[str] = set()   # subdomains you can delete
         # name_lower → the block its shown ownership/presence is known-as-of. A
         # write stamps the tx's block; each read carries its own — and a read
@@ -1365,12 +1366,21 @@ class EnsPanel(QWidget):
         self._owner_settable = set(names)
         self._update_action_bar()
 
+    def set_wrapped_subnode_manageable(self, names: set[str]) -> None:
+        """WRAPPED subdomains (lower-case) whose WRAPPED parent this account
+        owns — reassign the subnode's manager through the NameWrapper. The
+        wrapped analogue of ``_subnode_manageable``; also gates "Set manager"."""
+        self._wrapped_subnode_manageable = set(names)
+        self._update_action_bar()
+
     def _can_set_manager(self, nl: str) -> bool:
         """Whether the "manager" role row is an editable field for ``nl`` — true
         on any authorised path: current manager (``setOwner``), 2LD registrant
-        (``reclaim``), or parent owner (``setSubnodeOwner``)."""
+        (``reclaim``), parent owner (``setSubnodeOwner``), or the owner of a
+        wrapped parent (``NameWrapper.setSubnodeOwner``)."""
         return (nl in self._owner_settable or nl in self._reclaimable
-                or nl in self._subnode_manageable)
+                or nl in self._subnode_manageable
+                or nl in self._wrapped_subnode_manageable)
 
     def manager_of(self, name: str) -> str | None:
         """The current manager (registry controller) shown for ``name`` — what
@@ -2136,6 +2146,10 @@ class EnsPlugin(Plugin):
         # subnode's manager via setSubnodeOwner (gates the subdomain "Set
         # manager"). Recomputed in _refresh_writable.
         self._subnode_manageable: set[str] = set()
+        # WRAPPED subdomains whose WRAPPED parent this account owns — reassign
+        # the subnode's manager through the NameWrapper (setSubnodeOwner). The
+        # wrapped analogue of _subnode_manageable.
+        self._wrapped_subnode_manageable: set[str] = set()
         # One-shot: the next verify pass should wait for the verified head to
         # catch up (set after a write confirms; see _on_refresh).
         self._verify_catchup = False
@@ -2473,6 +2487,9 @@ class EnsPlugin(Plugin):
         #  • own the WRAPPED parent of a WRAPPED subnode → NameWrapper
         #    setSubnodeOwner(parent, label, 0) (burns it).
         subnode_removable = set(subnode_mgr)
+        # WRAPPED subdomains whose WRAPPED parent this account owns — reassign
+        # their manager through the NameWrapper (the wrapped "Set manager").
+        wrapped_subnode_mgr: set[str] = set()
         for nl, n in self._names_by_l.items():
             if not n.is_subdomain:
                 continue
@@ -2483,6 +2500,8 @@ class EnsPlugin(Plugin):
             elif (nl in self._wrapped and pl
                   and pl in self._controller and pl in self._wrapped):
                 subnode_removable.add(nl)          # NameWrapper (always new registry)
+                wrapped_subnode_mgr.add(nl)        # ...and reassign its manager
+        self._wrapped_subnode_manageable = wrapped_subnode_mgr
         # The third manager-change path: names this account is the CURRENT
         # manager of, changeable via registry.setOwner (a 2LD or a subdomain,
         # unwrapped + in the new registry). The panel unions this with
@@ -2499,6 +2518,8 @@ class EnsPlugin(Plugin):
                 subnode_mgr if can_sign else set())
             self._panel.set_owner_settable(
                 owner_settable if can_sign else set())
+            self._panel.set_wrapped_subnode_manageable(
+                wrapped_subnode_mgr if can_sign else set())
             self._panel.set_subnode_removable(
                 subnode_removable if can_sign else set())
 
@@ -2932,6 +2953,8 @@ class EnsPlugin(Plugin):
             op = self._set_manager_op(name, cur_mgr, changed)          # reclaim
         elif EnsName(name).is_subdomain and nl in self._subnode_manageable:
             op = self._set_subnode_manager_op(name, cur_mgr, changed)  # setSubnodeOwner
+        elif nl in self._wrapped_subnode_manageable:
+            op = self._set_wrapped_subnode_manager_op(name, cur_mgr, changed)  # NameWrapper
         else:
             return
         self._open_composer(
@@ -3259,6 +3282,46 @@ class EnsPlugin(Plugin):
             rediscover=True,
             note=f"You own {parent}, so you can set this subdomain's manager. "
                  "Set it to yourself to then edit its records.")
+
+    def _set_wrapped_subnode_manager_op(self, name: str, initial: str,
+                                        changed: dict[str, str] | None = None) -> _EnsOp:
+        """Set the manager of a WRAPPED subdomain you own the WRAPPED PARENT of,
+        via NameWrapper.setSubnodeOwner — the wrapped analogue of
+        _set_subnode_manager_op. Prefilled with the current manager."""
+        from .. import ens_write
+        parent = name.split(".", 1)[1]
+        label = name.split(".", 1)[0]
+
+        def make_fields(composer: _EnsWriteComposer) -> QWidget:
+            return _RecipientFields(
+                make_address_field=composer._make_address_field,
+                label="Manager", initial=initial,
+                placeholder="0x… manager address")
+
+        def build(_nm: str, fields: Any) -> tuple[str, str]:
+            mgr = _checksum(fields.value())
+            if mgr is None:
+                raise ValueError("The manager must be a valid 0x address.")
+            if changed is not None:
+                changed["manager"] = mgr
+            return ens_write.set_wrapped_subnode_manager(parent, label, mgr)
+
+        def decoded(_nm: str, fields: Any) -> dict:
+            mgr = _checksum(fields.value()) or fields.value() or "0x…"
+            return {"function": "setSubnodeOwner", "args": [
+                {"name": "parentNode", "type": "bytes32", "value": parent},
+                {"name": "label", "type": "string", "value": label},
+                {"name": "owner", "type": "address", "value": mgr},
+                {"name": "fuses", "type": "uint32", "value": "0"},
+                {"name": "expiry", "type": "uint64", "value": "0"}]}
+
+        return _EnsOp(
+            title=f"Set manager · {name}", confirm_label="Set manager",
+            make_fields=make_fields, build=build, decoded=decoded,
+            rediscover=True,
+            note=f"This is a WRAPPED subdomain. You own {parent}, so you reassign "
+                 "its manager through the NameWrapper — its fuses and expiry are "
+                 "preserved. (Reverts if the subname is emancipated.)")
 
     def _remove_record_op(self, name: str, res: str, label: str,
                           value: str) -> _EnsOp:

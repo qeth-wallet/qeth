@@ -198,6 +198,17 @@ class TestSetManager:
         assert _body(data) == abi_encode(
             ["bytes32", "address"], [namehash(NAME), self.MANAGER])
 
+    def test_set_wrapped_subnode_manager_via_namewrapper(self):
+        # A WRAPPED subdomain's manager is reassigned through the NameWrapper:
+        # setSubnodeOwner(parentNode, label, owner, 0, 0). fuses=0 adds nothing,
+        # expiry=0 clamps up to the current expiry → both preserved.
+        to, data = ens_write.set_wrapped_subnode_manager(NAME, "ops", self.MANAGER)
+        assert to == ENS_NAME_WRAPPER
+        assert _selector(data) == "c658e086"
+        assert _body(data) == abi_encode(
+            ["bytes32", "string", "address", "uint32", "uint64"],
+            [namehash(NAME), "ops", self.MANAGER, 0, 0])
+
 
 class TestRemoveSubnode:
     def test_remove_subnode_zeroes_owner_resolver_ttl(self):

@@ -1014,15 +1014,17 @@ class MainWindow(QMainWindow):
         )
 
     def request_transaction(self, req, chain, label: str,
-                            on_broadcast=None, on_confirmed=None) -> None:
+                            on_broadcast=None, on_confirmed=None,
+                            on_cancel=None) -> None:
         """Open the review + sign + broadcast flow for an arbitrary locally-built
-        transaction (used by the ENS plugin's record/subdomain writes). Same
-        pipeline as Send / Speed-up: the dialog estimates gas + fees + nonce and
-        simulates, then the worker signs (Ledger / hot wallet) and broadcasts and
-        the pending watcher tracks it. ``on_broadcast(tx_hash)`` fires after a
-        successful broadcast; ``on_confirmed(receipt)`` fires once when that tx
-        mines (so the caller can refresh against confirmed — not finalized —
-        state)."""
+        transaction (used by the ENS plugin's record/subdomain writes and the
+        approvals plugin's modify/revoke). Same pipeline as Send / Speed-up: the
+        dialog estimates gas + fees + nonce and simulates, then the worker signs
+        (Ledger / hot wallet) and broadcasts and the pending watcher tracks it.
+        ``on_broadcast(tx_hash)`` fires after a successful broadcast;
+        ``on_confirmed(receipt)`` fires once when that tx mines (so the caller
+        can refresh against confirmed — not finalized — state);
+        ``on_cancel()`` fires if the dialog is dismissed without broadcasting."""
         from .plugins.transactions import SignTransactionDialog
         dialog = SignTransactionDialog(
             req, chain,
@@ -1031,7 +1033,8 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._launch_composer(dialog, chain, label=label, signing_key=self.selected_key,
-                              on_broadcast=on_broadcast, on_confirmed=on_confirmed)
+                              on_broadcast=on_broadcast, on_confirmed=on_confirmed,
+                              on_cancel=on_cancel)
 
     def open_ens_composer(self, name: str, op, chain, from_addr: str, *,
                           on_confirmed=None) -> None:
@@ -1053,12 +1056,13 @@ class MainWindow(QMainWindow):
                               signing_key=self.selected_key, on_confirmed=on_confirmed)
 
     def _launch_composer(self, dialog, chain, *, label: str,
-                         on_broadcast=None, on_confirmed=None,
+                         on_broadcast=None, on_confirmed=None, on_cancel=None,
                          signing_key: "tuple[str, str] | None" = None) -> None:
         """Drive a composer / sign-style dialog through the shared
         sign+broadcast pipeline with status-bar feedback. ``on_confirmed`` is
         wired (once) to the tx mining; ``on_broadcast`` fires on a successful
-        broadcast. ``signing_key`` (the selected account row) is forwarded so
+        broadcast; ``on_cancel`` fires if the dialog is dismissed without
+        broadcasting. ``signing_key`` (the selected account row) is forwarded so
         signing resolves to that exact record. Used by ``request_transaction``
         and the ENS composer opener — both build their own dialog, then hand
         it here."""
@@ -1078,7 +1082,7 @@ class MainWindow(QMainWindow):
             dialog, chain,
             signing_key=signing_key,
             on_broadcast=_bcast,
-            on_cancel=lambda: None,
+            on_cancel=on_cancel if on_cancel is not None else (lambda: None),
             on_fail=lambda msg: self.status_message(f"{label} failed: {msg}", 6000),
         )
 

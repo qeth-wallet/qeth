@@ -35,6 +35,7 @@ from ...transactions import (
 )
 from ..transactions import _encode_approve, _format_token_amount, _is_full_history
 from .discovery import ApprovalRow, approve_pairs_in, fetch_allowances
+from .revoke_queue import RevokeQueue
 
 if TYPE_CHECKING:
     from ...transactions import Transaction
@@ -266,6 +267,7 @@ class ApprovalsPanel(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_requested)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
+        self.tree.itemChanged.connect(self._update_buttons)
         self._update_buttons()
 
     def action_widgets(self) -> list[QWidget]:
@@ -306,10 +308,28 @@ class ApprovalsPanel(QWidget):
 
     # --- population -------------------------------------------------------
     def append_rows(self, rows: list[ApprovalRow]) -> None:
+        self.tree.blockSignals(True)                 # populate without churning buttons
         for r in rows:
             self._add_row(r)
         self.tree.expandAll()
+        self.tree.blockSignals(False)
         self._update_buttons()
+
+    def checked_leaves(self) -> list[ApprovalRow]:
+        """Every spender leaf the user has ticked (via its own box or its token
+        node, which auto-checks the subtree)."""
+        out: list[ApprovalRow] = []
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            for ci in range(node.childCount()):
+                leaf = node.child(ci)
+                if leaf.checkState(0) == Qt.CheckState.Checked:
+                    r = leaf.data(0, _ROW_ROLE)
+                    if isinstance(r, ApprovalRow):
+                        out.append(r)
+        return out
 
     def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
         node = self._token_items.get(r.token)
@@ -397,9 +417,11 @@ class ApprovalsPanel(QWidget):
 
     def _update_buttons(self) -> None:
         has_leaf = self._selected_leaf() is not None
+        n_checked = len(self.checked_leaves())
         self.btn_copy.setEnabled(has_leaf)
-        self.btn_modify.setEnabled(has_leaf)
-        self.btn_revoke.setEnabled(has_leaf)
+        self.btn_modify.setEnabled(has_leaf)          # modify is single-leaf only
+        self.btn_revoke.setText(f"&Revoke ({n_checked})" if n_checked else "&Revoke")
+        self.btn_revoke.setEnabled(has_leaf or n_checked > 0)
 
     def _emit_modify(self) -> None:
         r = self._selected_leaf()
@@ -407,9 +429,14 @@ class ApprovalsPanel(QWidget):
             self.modify_requested.emit(r)
 
     def _emit_revoke(self) -> None:
-        r = self._selected_leaf()
-        if r is not None:
-            self.revoke_requested.emit([r])
+        # Checked leaves win (a batch); otherwise fall back to the selected one.
+        rows = self.checked_leaves()
+        if not rows:
+            r = self._selected_leaf()
+            if r is None:
+                return
+            rows = [r]
+        self.revoke_requested.emit(rows)
 
     def _copy_spender(self) -> None:
         r = self._selected_leaf()
@@ -471,6 +498,7 @@ class ApprovalsPlugin(Plugin):
             BlockscoutTransactionSource())
         self._workers: set[QThread] = set()
         self._scan: ScanWorker | None = None
+        self._queue: RevokeQueue | None = None
         self._reconcile_pending: set[tuple[str, str]] = set()
         self._reconcile_timer = QTimer(self)
         self._reconcile_timer.setSingleShot(True)
@@ -521,6 +549,7 @@ class ApprovalsPlugin(Plugin):
         self._epoch += 1
         self._loaded_for = None
         self._stop_scan()
+        self._abort_queue()
         self._reconcile_pending.clear()
         self._reconcile_timer.stop()
 
@@ -528,38 +557,85 @@ class ApprovalsPlugin(Plugin):
         if self._scan is not None:
             self._scan.requestInterruption()
 
+    def _abort_queue(self) -> None:
+        if self._queue is not None:
+            self._queue.abort()
+
     # --- modify / revoke --------------------------------------------------
     def _on_modify(self, row: ApprovalRow) -> None:
         self._open_approve(row, f"Modify {row.symbol or 'token'} approval")
 
     def _on_revoke(self, rows) -> None:
-        # Single-leaf revoke in commit 2; the batch queue lands in commit 3.
-        for row in rows:
-            self._open_approve(row, f"Revoke {row.symbol or 'token'}")
-
-    def _open_approve(self, row: ApprovalRow, label: str) -> None:
-        if self.host is None:
+        rows = [r for r in rows if isinstance(r, ApprovalRow)]
+        if not rows:
             return
+        if len(rows) == 1:
+            self._open_approve(rows[0], f"Revoke {rows[0].symbol or 'token'}")
+            return
+        self._start_revoke_queue(rows)
+
+    def _approve_request(self, row: ApprovalRow):
+        """``(SigningRequest, chain)`` for ``approve(spender, 0)`` from the
+        selected owner, or ``None`` when there's no host/owner."""
+        if self.host is None:
+            return None
         owner = self.host.selected_address
         if not owner:
-            return
+            return None
         from eth_utils import to_checksum_address
 
         from ...signing import SigningRequest
         chain = self.host.current_chain()
-        spender = to_checksum_address(row.spender)
         req = SigningRequest(
             chain_id=chain.chain_id,
             from_addr=to_checksum_address(owner),
             to_addr=to_checksum_address(row.token),
             value_wei=0,
-            data=_encode_approve(spender, 0),
+            data=_encode_approve(to_checksum_address(row.spender), 0),
         )
+        return req, chain
+
+    def _open_approve(self, row: ApprovalRow, label: str) -> None:
+        built = self._approve_request(row)
+        if built is None or self.host is None:
+            return
+        req, chain = built
         pair = (row.token.lower(), row.spender.lower())
         self.host.request_transaction(
             req, chain, label=label,
             on_broadcast=lambda h, p=pair: self._on_action_broadcast(p),
             on_confirmed=lambda rc, p=pair: self._schedule_reconcile(p))
+
+    def _start_revoke_queue(self, rows: list[ApprovalRow]) -> None:
+        self._abort_queue()                            # one batch at a time
+        queue = RevokeQueue(rows, self._open_revoke_dialog, parent=self)
+        queue.row_broadcast.connect(
+            lambda row, h: self._on_action_broadcast(
+                (row.token.lower(), row.spender.lower())))
+        queue.row_confirmed.connect(
+            lambda row, rc: self._schedule_reconcile(
+                (row.token.lower(), row.spender.lower())))
+        queue.finished.connect(self._on_queue_finished)
+        self._queue = queue
+        queue.start()
+
+    def _open_revoke_dialog(self, row, index, total,
+                            on_broadcast, on_confirmed, on_cancel) -> None:
+        built = self._approve_request(row)
+        if built is None or self.host is None:
+            on_cancel()
+            return
+        req, chain = built
+        label = f"Revoke {row.symbol or 'token'} ({index + 1}/{total})"
+        self.host.request_transaction(
+            req, chain, label=label,
+            on_broadcast=on_broadcast, on_confirmed=on_confirmed,
+            on_cancel=on_cancel)
+
+    def _on_queue_finished(self, completed_all: bool) -> None:
+        self._queue = None
+        if self.host is not None and not completed_all:
+            self.host.status_message("Revoke batch cancelled")
 
     def _on_action_broadcast(self, pair: tuple[str, str]) -> None:
         if self._panel is not None:

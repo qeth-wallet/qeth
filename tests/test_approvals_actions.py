@@ -31,10 +31,10 @@ class _FakeHost:
         return CHAIN
 
     def request_transaction(self, req, chain, label, on_broadcast=None,
-                            on_confirmed=None):
+                            on_confirmed=None, on_cancel=None):
         self.requests.append(SimpleNamespace(
-            req=req, chain=chain, label=label,
-            on_broadcast=on_broadcast, on_confirmed=on_confirmed))
+            req=req, chain=chain, label=label, on_broadcast=on_broadcast,
+            on_confirmed=on_confirmed, on_cancel=on_cancel))
 
     def start_worker(self, worker):
         self.started.append(worker)
@@ -139,3 +139,63 @@ def test_invalidate_clears_reconcile_queue(plugin):
     plugin._invalidate()
     assert plugin._reconcile_pending == set()
     assert not plugin._reconcile_timer.isActive()
+
+
+# --- commit 3: batch revoke via RevokeQueue -------------------------------
+
+SP2 = "0x" + "dd" * 20
+
+
+def _two_rows(plugin):
+    r1, r2 = _row(spender=SPENDER), _row(spender=SP2)
+    plugin._panel.append_rows([r1, r2])
+    return r1, r2
+
+
+def test_single_revoke_stays_direct(plugin):
+    plugin._panel.append_rows([_row()])
+    plugin._on_revoke([_row()])
+    assert plugin._queue is None                      # no queue for one row
+    assert "/" not in plugin.host.requests[0].label   # no "(k/N)" counter
+
+
+def test_batch_revoke_opens_first_of_n(plugin):
+    r1, r2 = _two_rows(plugin)
+    plugin._on_revoke([r1, r2])
+    assert plugin._queue is not None
+    assert len(plugin.host.requests) == 1
+    assert "(1/2)" in plugin.host.requests[0].label
+    assert _approve_amount(plugin.host.requests[0].req.data) == 0
+
+
+def test_batch_revoke_auto_advances_on_broadcast(plugin):
+    r1, r2 = _two_rows(plugin)
+    plugin._on_revoke([r1, r2])
+    plugin.host.requests[0].on_broadcast("0xh0")      # advance to row 2
+    assert len(plugin.host.requests) == 2
+    assert "(2/2)" in plugin.host.requests[1].label
+    plugin.host.requests[1].on_broadcast("0xh1")      # last one
+    assert plugin._queue is None                      # finished + cleared
+
+
+def test_batch_broadcast_marks_each_leaf_pending(plugin):
+    r1, r2 = _two_rows(plugin)
+    plugin._on_revoke([r1, r2])
+    plugin.host.requests[0].on_broadcast("0xh0")
+    assert plugin._panel._leaf_for(TOKEN, SPENDER).text(1) == "pending…"
+
+
+def test_batch_revoke_cancel_aborts_chain(plugin):
+    r1, r2 = _two_rows(plugin)
+    plugin._on_revoke([r1, r2])
+    plugin.host.requests[0].on_cancel()               # user dismissed dialog 1
+    assert len(plugin.host.requests) == 1             # no second dialog opened
+    assert plugin._queue is None
+
+
+def test_invalidate_aborts_active_batch(plugin):
+    r1, r2 = _two_rows(plugin)
+    plugin._on_revoke([r1, r2])
+    plugin._invalidate()                              # account/chain change mid-batch
+    assert plugin._queue is None
+    assert len(plugin.host.requests) == 1             # never advanced

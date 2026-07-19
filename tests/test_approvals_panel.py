@@ -161,3 +161,58 @@ def test_remove_leaf_drops_empty_token_node(qtbot):
     assert p.tree.topLevelItem(0).childCount() == 1
     p.remove_leaf(TOKEN, SP2)                          # last spender gone
     assert p.tree.topLevelItemCount() == 0
+
+
+# --- commit 3: checkbox batch selection -----------------------------------
+
+def test_checked_leaves_collects_ticked(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.tree.topLevelItem(0).child(0).setCheckState(0, Qt.CheckState.Checked)
+    checked = p.checked_leaves()
+    assert len(checked) == 1 and checked[0].spender == SP1
+
+
+def test_check_token_selects_whole_subtree(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)   # down-propagates
+    assert len(p.checked_leaves()) == 2
+
+
+def test_revoke_label_adapts_to_checked_count(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    assert p.btn_revoke.text() == "&Revoke"
+    p.tree.topLevelItem(0).child(0).setCheckState(0, Qt.CheckState.Checked)
+    assert p.btn_revoke.text() == "&Revoke (1)"
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+    assert p.btn_revoke.text() == "&Revoke (2)"
+
+
+def test_revoke_button_emits_checked_batch(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)   # both
+    got = []
+    p.revoke_requested.connect(got.append)
+    p.btn_revoke.click()
+    assert len(got) == 1 and len(got[0]) == 2
+
+
+def test_revoke_button_falls_back_to_selection(qtbot):
+    p = _panel(qtbot)
+    row = _row(spender=SP1)
+    p.append_rows([row, _row(spender=SP2)])           # nothing checked
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    got = []
+    p.revoke_requested.connect(got.append)
+    p.btn_revoke.click()
+    assert got == [[row]]
+
+
+def test_append_does_not_leave_boxes_checked(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    assert p.checked_leaves() == []                   # populate starts unchecked
+    assert p.btn_revoke.text() == "&Revoke"

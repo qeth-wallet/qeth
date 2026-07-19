@@ -75,6 +75,31 @@ def test_two_plugins_show_tab_bar(qtbot):
     assert labels == ["Alpha", "Beta"]
 
 
+def test_corner_widget_mounts_and_survives_a_hidden_tab_bar(qtbot):
+    from PySide6.QtWidgets import QToolButton
+    slot = Slot()            # 0 plugins → tab bar hidden
+    qtbot.addWidget(slot)
+    gear = QToolButton()
+    slot.set_corner_widget(gear)
+    assert slot._corner.count() == 1
+    assert slot._corner.itemAt(0).widget() is gear
+    # The corner control isn't tied to tab-bar visibility (a single-plugin slot
+    # still shows it), so it isn't hidden even though the tab bar is.
+    assert slot._tab_bar.isHidden()
+    assert not gear.isHidden()
+
+
+def test_corner_widget_replaces_previous(qtbot):
+    from PySide6.QtWidgets import QToolButton
+    slot = Slot()
+    qtbot.addWidget(slot)
+    first, second = QToolButton(), QToolButton()
+    slot.set_corner_widget(first)
+    slot.set_corner_widget(second)
+    assert slot._corner.count() == 1
+    assert slot._corner.itemAt(0).widget() is second
+
+
 # --- attach / host wiring -------------------------------------------------
 
 def test_attach_passes_host(qtbot):

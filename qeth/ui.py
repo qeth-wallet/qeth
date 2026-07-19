@@ -59,6 +59,29 @@ from .signer_interaction import DialogInteraction
 from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
 
 
+def _apply_gear_icon(btn, tooltip: str) -> None:
+    """Give a QToolButton a gear/settings look for a config-style control. Try
+    the freedesktop gear names (which one renders varies across KDE / GNOME /
+    Adwaita / Breeze), and fall back to the U+2699 glyph rather than a generic
+    placeholder if none resolves."""
+    icon = QIcon()
+    for name in ("configure", "preferences-system", "applications-system",
+                 "emblem-system", "system-run", "preferences-other"):
+        cand = QIcon.fromTheme(name)
+        if not cand.isNull() and cand.availableSizes():
+            icon = cand
+            break
+    if not icon.isNull():
+        btn.setIcon(icon)
+    else:
+        btn.setText("⚙")
+        f = btn.font()
+        f.setPointSizeF(f.pointSizeF() * 1.15)
+        btn.setFont(f)
+    btn.setToolTip(tooltip)
+    btn.setAutoRaise(True)
+
+
 class MainWindow(QMainWindow):
     """Top-level shell. Owns the store + RPC server, instantiates the
     three plugins (Wallets / Tokens / Transactions) into two slots,
@@ -338,33 +361,25 @@ class MainWindow(QMainWindow):
         offers manual paste OR a pick-from-chainlist.org list."""
         from PySide6.QtWidgets import QToolButton
         btn = QToolButton()
-        # Try the freedesktop gear / settings icon names in order
-        # of which I see most consistently rendered as a gear
-        # across KDE / GNOME / Adwaita / Breeze. If none of them
-        # resolves to a real icon, fall back to the U+2699 gear
-        # glyph rather than a generic placeholder — the user
-        # explicitly asked for something that *looks* like a
-        # config control.
-        icon = QIcon()
-        for name in (
-            "configure", "preferences-system",
-            "applications-system", "emblem-system",
-            "system-run", "preferences-other",
-        ):
-            cand = QIcon.fromTheme(name)
-            if not cand.isNull() and cand.availableSizes():
-                icon = cand
-                break
-        if not icon.isNull():
-            btn.setIcon(icon)
-        else:
-            btn.setText("⚙")
-            f = btn.font()
-            f.setPointSizeF(f.pointSizeF() * 1.15)
-            btn.setFont(f)
-        btn.setToolTip("Edit chain RPC")
-        btn.setAutoRaise(True)
+        _apply_gear_icon(btn, "Edit chain RPC")
         btn.clicked.connect(self._on_edit_chain_rpc)
+        return btn
+
+    def _build_plugins_gear(self):
+        """The config gear on the right slot's tab row: opens the plugin on/off
+        menu (the same one the tray offers). Restart-to-apply — toggling just
+        writes the store and nudges the user to relaunch."""
+        from PySide6.QtWidgets import QToolButton
+
+        from .plugin_toggle import build_plugin_toggle_menu
+        btn = QToolButton()
+        _apply_gear_icon(btn, "Enable or disable plugins")
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        btn.setMenu(build_plugin_toggle_menu(
+            self.store, btn,
+            on_toggled=lambda pid, on: self.status_message(
+                "Restart qeth to apply plugin changes", 6000),
+        ))
         return btn
 
     def _on_edit_chain_rpc(self) -> None:
@@ -419,6 +434,9 @@ class MainWindow(QMainWindow):
         # Mount each enabled plugin into its slot, in manifest order.
         for m in sorted(self._manifests.values(), key=lambda m: m.order):
             slots[m.slot].add_plugin(self.plugins[m.id], self)
+        # Config gear on the right slot's tab row (right-aligned) — the
+        # in-window twin of the tray "Plugins" toggle.
+        self.right_slot.set_corner_widget(self._build_plugins_gear())
         outer.addWidget(self.left_slot)
 
         self.chain_combo = self._build_chain_combo()

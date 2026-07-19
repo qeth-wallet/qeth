@@ -114,6 +114,16 @@ def test_host_plugin_accessor_resolves_all_and_unknown(mainwindow):
     assert mainwindow.plugin("nope") is None
 
 
+def test_right_slot_has_a_config_gear_corner(mainwindow):
+    # The plugin on/off gear is mounted right-aligned on the right slot's tab
+    # row, and carries the plugin-toggle menu.
+    corner = mainwindow.right_slot._corner
+    assert corner.count() == 1
+    gear = corner.itemAt(0).widget()
+    assert gear is not None and gear.menu() is not None
+    assert [a.text() for a in gear.menu().actions()] == ["Tokens", "ENS"]
+
+
 def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
     tab_bar = mainwindow.findChild(QTabBar)
     tab_bar.setCurrentIndex(1)

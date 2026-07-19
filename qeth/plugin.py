@@ -203,12 +203,24 @@ class Slot(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Tab row: [ tab_bar | stretch | corner ]. The corner (right-aligned)
+        # holds a slot-level control like the plugin-config gear; it stays
+        # visible even when the tab bar itself is hidden (single-plugin slot),
+        # so the control is always reachable.
         self._tab_bar = QTabBar()
         self._tab_bar.setDocumentMode(True)
         self._tab_bar.setExpanding(False)
         self._tab_bar.setVisible(False)
         self._tab_bar.currentChanged.connect(self._on_tab_changed)
-        layout.addWidget(self._tab_bar)
+        self._tab_row = QHBoxLayout()
+        self._tab_row.setContentsMargins(0, 0, 0, 0)
+        self._tab_row.setSpacing(0)
+        self._tab_row.addWidget(self._tab_bar)
+        self._tab_row.addStretch(1)
+        self._corner = QHBoxLayout()
+        self._corner.setContentsMargins(0, 0, 0, 0)
+        self._tab_row.addLayout(self._corner)
+        layout.addLayout(self._tab_row)
 
         self._stack = QStackedWidget()
         layout.addWidget(self._stack, 1)
@@ -251,6 +263,18 @@ class Slot(QWidget):
         slot-shared widgets (e.g. the chain combo) cluster on the right
         and plugin-specific actions stay on the left."""
         self._bottom.addWidget(widget)
+
+    def set_corner_widget(self, widget: QWidget) -> None:
+        """Mount a widget right-aligned on the TAB row (top), e.g. a config
+        gear. Replaces any previous corner widget. It stays visible even when
+        the tab bar is hidden, so a single-plugin slot still shows it."""
+        while self._corner.count():
+            item = self._corner.takeAt(0)
+            assert item is not None
+            old = item.widget()
+            if old is not None:
+                old.setParent(None)
+        self._corner.addWidget(widget)
 
     # --- queries --------------------------------------------------------
 

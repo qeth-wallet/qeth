@@ -92,6 +92,35 @@ into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.
 
 ## Conventions
 
+### Plugin architecture: registry + manifests, restart-to-apply toggles
+
+The UI is composed of `Plugin`s (`qeth/plugin.py`) mounted in `Slot`s; each
+plugin owns its widget, workers, caches, and lifecycle, and reaches siblings
+only through the typed `Host` protocol (implemented by MainWindow). **Adding a
+plugin = a package under `qeth/plugins/<id>/` + one `PluginManifest` entry in
+`qeth/plugins/registry.py`.** The manifest carries `id, title, factory
+(lazy-imports the package), slot, order, required, requires, hides_chain_selector,
+persists_header, description` — the same shape a setuptools entry-point would
+resolve to, so external/paid "assembly" plugins can be discovered later with no
+change to consumers.
+
+- **On/off**: `Store.disabled_plugins` (a set of ids) is read once at startup by
+  `registry.enabled_manifests(store)`; a disabled optional plugin is never
+  constructed *and* never imported (only the lazy factory imports it).
+  **Restart-to-apply** — toggling only writes the store. Toggles live in two
+  places sharing one builder (`qeth.plugin_toggle.build_plugin_toggle_menu`): the
+  tray "Plugins" submenu and the config **gear** on the right slot's tab row
+  (`Slot.set_corner_widget`). `wallets` + `transactions` are `required=True`
+  (account source / composer+sign+watcher service layer) and can't be disabled.
+- **Reaching an optional sibling**: `host.plugin(id) -> Plugin | None` (never a
+  `host.<name>_plugin` attribute). Callers MUST handle None — e.g. the 7
+  TransactionsPlugin→TokensPlugin live-balance relays. MainWindow's
+  `tokens_plugin`/`ens_plugin` convenience properties are `Optional`; every
+  consumer guards them. App-wide services a disabled plugin would otherwise own
+  live on MainWindow (the token `IconCache`), so siblings keep working.
+- **Not yet done**: per-plugin package moves (helpers still at `qeth/` top level);
+  a multi-select selection broadcast (deferred to the portfolio plugin).
+
 ### On-chain math: always `Decimal`, never `float`
 
 Native amounts (wei → ether) and ERC-20 amounts must go through

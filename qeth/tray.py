@@ -54,6 +54,14 @@ class _TrayController(QObject):
         self._notify_act.setCheckable(True)
         self._notify_act.setChecked(self._notifications_enabled())
         self._notify_act.toggled.connect(self._on_notify_toggled)
+        # Plugin on/off submenu — same builder as the in-window config gear,
+        # so the two entry points never disagree. Restart-to-apply.
+        store = self._store()
+        if store is not None:
+            from .plugin_toggle import build_plugin_toggle_menu
+            self._plugins_menu = build_plugin_toggle_menu(
+                store, None, on_toggled=self._on_plugin_toggled)
+            menu.addMenu(self._plugins_menu)
         menu.addSeparator()
         menu.addAction("Exit", app.quit)
         # Refresh enable/disable just before the menu paints —
@@ -94,6 +102,12 @@ class _TrayController(QObject):
             return
         store.notifications_enabled = on
         store.save()
+
+    def _on_plugin_toggled(self, plugin_id: str, enabled: bool) -> None:
+        # The store write is handled by the shared menu builder; here we just
+        # nudge the user that it's restart-to-apply.
+        self.show_message(
+            "qeth", "Restart qeth to apply plugin changes")
 
     # --- Qt overrides -----------------------------------------
 

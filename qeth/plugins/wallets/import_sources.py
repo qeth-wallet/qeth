@@ -342,7 +342,7 @@ class FrameSource(ImportSource):
                 f"{expected_count} addresses (file is inconsistent)"
             )
         priv = keys[idx]
-        from .hot_wallet import encrypt_keystore
+        from ...hot_wallet import encrypt_keystore
         addr, keystore = encrypt_keystore(priv, target_passphrase)
         # Sanity check: derived address must match what Frame
         # claimed for this index. If it doesn't, the signer file is

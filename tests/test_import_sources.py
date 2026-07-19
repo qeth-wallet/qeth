@@ -1,4 +1,4 @@
-"""Tests for ``qeth.import_sources``.
+"""Tests for ``qeth.plugins.wallets.import_sources``.
 
 Brownie discovery is just JSON parsing — fast.
 
@@ -62,7 +62,7 @@ class TestBrownieSource:
     the dict unchanged so the caller can save it as-is."""
 
     def test_discover_lists_valid_v3_keystores(self, tmp_path):
-        from qeth.import_sources import BrownieSource
+        from qeth.plugins.wallets.import_sources import BrownieSource
         # Write a real keystore (eth_account format) under a few
         # filenames, plus one malformed file that should be skipped.
         ks = Account.encrypt(_TEST_PRIV, PASSPHRASE_SRC)
@@ -82,7 +82,7 @@ class TestBrownieSource:
         assert all(c.address == _TEST_ADDR for c in cands)
 
     def test_import_one_returns_keystore_unchanged(self, tmp_path):
-        from qeth.import_sources import BrownieSource
+        from qeth.plugins.wallets.import_sources import BrownieSource
         ks = Account.encrypt(_TEST_PRIV, PASSPHRASE_SRC)
         (tmp_path / "alice.json").write_text(json.dumps(ks))
         cand = BrownieSource().discover(tmp_path)[0]
@@ -95,7 +95,7 @@ class TestBrownieSource:
         assert Account.decrypt(out_ks, PASSPHRASE_SRC) == _TEST_PRIV
 
     def test_discover_returns_empty_for_missing_dir(self, tmp_path):
-        from qeth.import_sources import BrownieSource
+        from qeth.plugins.wallets.import_sources import BrownieSource
         assert BrownieSource().discover(tmp_path / "does-not-exist") == []
 
 
@@ -119,7 +119,7 @@ class TestFrameSource:
         return data
 
     def test_discover_single_key(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         self._write_signer(tmp_path, [_TEST_PRIV], PASSPHRASE_SRC)
         cands = FrameSource().discover(tmp_path)
         assert len(cands) == 1
@@ -128,7 +128,7 @@ class TestFrameSource:
     def test_discover_multi_key_ring_emits_one_candidate_per_address(
         self, tmp_path,
     ):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         k2 = bytes(
             b ^ 0x42 for b in _TEST_PRIV
         )  # second deterministic key
@@ -142,7 +142,7 @@ class TestFrameSource:
         ])
 
     def test_discover_skips_non_ring_types(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         (tmp_path / "seed.json").write_text(json.dumps({
             "id": "x" * 64, "type": "seed",
             "addresses": ["0x" + "0" * 40],
@@ -151,7 +151,7 @@ class TestFrameSource:
         assert FrameSource().discover(tmp_path) == []
 
     def test_import_one_round_trip(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         self._write_signer(tmp_path, [_TEST_PRIV], PASSPHRASE_SRC)
         cand = FrameSource().discover(tmp_path)[0]
         addr, keystore = FrameSource().import_one(
@@ -167,7 +167,7 @@ class TestFrameSource:
             Account.decrypt(keystore, PASSPHRASE_SRC)
 
     def test_import_wrong_source_passphrase_raises(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         self._write_signer(tmp_path, [_TEST_PRIV], PASSPHRASE_SRC)
         cand = FrameSource().discover(tmp_path)[0]
         with pytest.raises(ValueError):
@@ -178,7 +178,7 @@ class TestFrameSource:
             )
 
     def test_import_missing_passphrases_rejected(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         self._write_signer(tmp_path, [_TEST_PRIV], PASSPHRASE_SRC)
         cand = FrameSource().discover(tmp_path)[0]
         with pytest.raises(ValueError, match="Frame"):
@@ -193,7 +193,7 @@ class TestFrameSource:
             )
 
     def test_import_picks_correct_key_in_multi_ring(self, tmp_path):
-        from qeth.import_sources import FrameSource
+        from qeth.plugins.wallets.import_sources import FrameSource
         k2 = bytes(b ^ 0x42 for b in _TEST_PRIV)
         addr2 = Account.from_key(k2).address
         self._write_signer(tmp_path, [_TEST_PRIV, k2], PASSPHRASE_SRC)
@@ -217,7 +217,7 @@ def test_frame_import_without_cryptography_is_actionable(monkeypatch):
     actionable 'install qeth[frame]' message — not a raw ImportError."""
     import sys
 
-    from qeth import import_sources
+    from qeth.plugins.wallets import import_sources
 
     # Skip the ~150ms scrypt (irrelevant to the guard) and simulate the
     # cryptography submodule being unavailable.

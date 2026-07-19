@@ -43,18 +43,18 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread
 
-from ..alerts import confirm, error, info, warn
-from ..dialog import (
+from ...alerts import confirm, error, info, warn
+from ...dialog import (
     Dialog, address_field_min_width, item_spacing, prompt_text,
 )
-from ..ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
-from ..qr.schemes import (
+from ...ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from ...qr.schemes import (
     QR_ADDRESS_SCHEMES,
     components_to_path,
     display_scheme,
     scheme_origin,
 )
-from ..plugin import Plugin
+from ...plugin import Plugin
 
 # Item data role carrying an account's user label. Present only on labeled
 # account rows; the shared selection delegate (ui.py) reads it to paint
@@ -1556,7 +1556,7 @@ class WalletsPlugin(Plugin):
             return
         # Hot wallets carry an on-disk keystore alongside the config record;
         # remove both. Ledger / watch-only have nothing on disk, only the record.
-        from ..hot_wallet import delete_keystore
+        from ...hot_wallet import delete_keystore
         removed = 0
         hot_removed: list[str] = []
         for address, path, source in rows:
@@ -1637,8 +1637,8 @@ class WalletsPlugin(Plugin):
         picks. No key ever leaves the device — signing is a QR exchange."""
         if self.host is None:
             return
-        from ..qr.account import parse_account_export
-        from ..qr_exchange_dialog import QRScanDialog
+        from ...qr.account import parse_account_export
+        from ...qr_exchange_dialog import QRScanDialog
         scan = QRScanDialog(parent=self._container)
         if scan.exec() != QDialog.DialogCode.Accepted or not scan.scanned_ur():
             return
@@ -1692,7 +1692,7 @@ class WalletsPlugin(Plugin):
         dlg = AddHotWalletDialog(self._container)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        from ..hot_wallet import encrypt_keystore, save_keystore
+        from ...hot_wallet import encrypt_keystore, save_keystore
         try:
             address, keystore = encrypt_keystore(
                 dlg.private_key, dlg.passphrase,
@@ -1734,7 +1734,7 @@ class WalletsPlugin(Plugin):
             # the funds. Surface that explicitly post-creation —
             # users tend to overlook the "keep backups" hint in a
             # generation dialog and only think about it later.
-            from ..hot_wallet import keystore_path
+            from ...hot_wallet import keystore_path
             info(
                 self._container, "Hot wallet created",
                 f"Address: {address}\n\n"
@@ -1755,7 +1755,7 @@ class WalletsPlugin(Plugin):
         """Open a single-source import dialog, persist the results.
         Shared between the Brownie and Frame menu entries — only
         the ImportSource implementation differs."""
-        from ..hot_wallet import save_keystore
+        from ...hot_wallet import save_keystore
         dlg = ImportHotWalletsDialog(
             source,
             # Source-scoped like the Ledger/QR flows: an address already held
@@ -1814,8 +1814,8 @@ class WalletsPlugin(Plugin):
         — same flow either way; the labels we'd otherwise leave
         blank or set to a useless hex blob get filled with a
         verified name when one exists."""
-        from ..chains import DEFAULT_CHAINS
-        from ..ens import EnsReverseWorker
+        from ...chains import DEFAULT_CHAINS
+        from ...ens import EnsReverseWorker
         mainnet = next(
             (c for c in DEFAULT_CHAINS if c.chain_id == 1), None,
         )
@@ -2219,8 +2219,8 @@ class AddLedgerDialog(Dialog):
             self._kick_ens_for_row(item, acct.address)
 
     def _kick_ens_for_row(self, item, address: str) -> None:
-        from ..chains import DEFAULT_CHAINS
-        from ..ens import EnsReverseWorker
+        from ...chains import DEFAULT_CHAINS
+        from ...ens import EnsReverseWorker
         mainnet = next(
             (c for c in DEFAULT_CHAINS if c.chain_id == 1), None,
         )
@@ -2317,7 +2317,7 @@ class AddQRWalletDialog(AddLedgerDialog):
         self.scan_btn.setText("&Scan")
 
     def _scan(self) -> None:
-        from ..qr_discover import QRAccountWorker
+        from ...qr_discover import QRAccountWorker
         self.results.clear()
         self.add_btn.setEnabled(False)
         n = self.count_spin.value()
@@ -2459,8 +2459,8 @@ class AddWatchOnlyDialog(Dialog):
         reverse-resolve for the Label; a name → forward-resolve to an
         address."""
         text = self.address_edit.text().strip()
-        from ..chains import DEFAULT_CHAINS
-        from ..ens import EnsResolveWorker, EnsReverseWorker
+        from ...chains import DEFAULT_CHAINS
+        from ...ens import EnsResolveWorker, EnsReverseWorker
         mainnet = next(
             (c for c in DEFAULT_CHAINS if c.chain_id == 1), None,
         )
@@ -2684,7 +2684,7 @@ class AddHotWalletDialog(Dialog):
         """Fill the private-key field with a fresh 32-byte
         cryptographically-random value. The user can still edit
         afterwards — we use whatever's in the field on accept."""
-        from ..hot_wallet import generate_random_private_key
+        from ...hot_wallet import generate_random_private_key
         self.pk_edit.setText(generate_random_private_key().hex())
 
     def _parsed_private_key(self) -> bytes | None:
@@ -2693,7 +2693,7 @@ class AddHotWalletDialog(Dialog):
         the Add button; ``_on_accept`` re-parses (with the same
         helper) so a single source of truth catches all the edge
         cases."""
-        from ..hot_wallet import parse_private_key_hex
+        from ...hot_wallet import parse_private_key_hex
         try:
             return parse_private_key_hex(self.pk_edit.text())
         except Exception:
@@ -2774,12 +2774,12 @@ class AddHotWalletDialog(Dialog):
 def _brownie_source():
     """Lazy factory — keeps the import-sources module out of the
     eager-load path for users who never open the importer."""
-    from ..import_sources import BrownieSource
+    from .import_sources import BrownieSource
     return BrownieSource()
 
 
 def _frame_source():
-    from ..import_sources import FrameSource
+    from .import_sources import FrameSource
     return FrameSource()
 
 

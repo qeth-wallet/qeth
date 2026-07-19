@@ -160,7 +160,6 @@ files = [
     "qeth/ens_write.py",
     "qeth/risk.py",
     "qeth/hot_wallet.py",
-    "qeth/import_sources.py",
     "qeth/chainlist.py",
     "qeth/rpc.py",
     # --- PySide6 UI layer (fully checked, attr-defined enforced) ---
@@ -170,7 +169,7 @@ files = [
     "qeth/plugin.py",
     "qeth/plugin_toggle.py",
     "qeth/plugins/registry.py",
-    "qeth/plugins/wallets.py",
+    "qeth/plugins/wallets",
     "qeth/plugins/tokens.py",
     "qeth/plugins/ens.py",
     "qeth/plugins/transactions.py",

@@ -53,6 +53,23 @@ def test_unlimited_rendering(qtbot):
     assert "unlimited" in leaf.text(1).lower()
 
 
+def test_spender_label_shown_in_col0_with_tooltip(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([ApprovalRow(token=TOKEN, spender=SP1, allowance=1,
+                               symbol="USDC", decimals=6,
+                               spender_label="Uniswap: Router")])
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.text(0) == "Uniswap: Router"       # WHO, not a bare address
+    assert "Uniswap: Router" in leaf.toolTip(0) and SP1 in leaf.toolTip(0)
+
+
+def test_spender_falls_back_to_short_addr(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1)])             # no label
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.text(0) != "" and leaf.text(0) != SP1   # shortened form
+
+
 def test_leaves_and_token_are_checkable(qtbot):
     p = _panel(qtbot)
     p.append_rows([_row()])

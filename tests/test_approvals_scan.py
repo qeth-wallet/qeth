@@ -119,6 +119,47 @@ def test_interruption_stops_before_fetching(monkeypatch):
     assert got["done"] == [False]                # reported incomplete
 
 
+class _FakeLabels:
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls: list = []
+
+    def fetch_labels(self, cid, addresses):
+        self.calls.append((cid, list(addresses)))
+        return {a.lower(): self.mapping[a.lower()]
+                for a in addresses if a.lower() in self.mapping}
+
+
+def test_spender_labels_populated_and_checksummed(monkeypatch):
+    from eth_utils import to_checksum_address
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: dict.fromkeys(pairs, 7))
+    monkeypatch.setattr(ap, "_is_full_history", lambda txs: True)
+    labels = _FakeLabels({SPENDER.lower(): "Uniswap: Router"})
+    w = ScanWorker(CHAIN, A, _FakeSource([]), [_tx(0, 100, _approve(SPENDER))],
+                   _FakeMeta(), label_source=labels, client_factory=_FakeClient)
+    got = _run(w)
+    row = got["rows"][0][0]
+    assert row.spender_label == "Uniswap: Router"
+    assert row.spender == to_checksum_address(SPENDER)     # checksummed for display
+    assert labels.calls                                    # labels were fetched
+
+
+def test_label_source_failure_is_tolerated(monkeypatch):
+    class _Boom:
+        def fetch_labels(self, cid, addresses):
+            raise RuntimeError("metadata service down")
+
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: dict.fromkeys(pairs, 7))
+    monkeypatch.setattr(ap, "_is_full_history", lambda txs: True)
+    w = ScanWorker(CHAIN, A, _FakeSource([]), [_tx(0, 100, _approve(SPENDER))],
+                   _FakeMeta(), label_source=_Boom(), client_factory=_FakeClient)
+    got = _run(w)
+    assert got["rows"][0][0].spender_label == ""           # bare address, no crash
+    assert got["done"] == [True]
+
+
 def test_discovered_approve_pair_becomes_a_row(monkeypatch):
     seen = {}
 

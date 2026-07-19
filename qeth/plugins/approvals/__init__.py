@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
+from eth_utils import to_checksum_address
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -62,13 +63,14 @@ class ScanWorker(QThread):
     MAX_ATTEMPTS = 3
 
     def __init__(self, chain, address: str, source, snapshot, metadata_cache,
-                 *, client_factory=None, parent=None):
+                 *, label_source=None, client_factory=None, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
         self._source = source
         self._snapshot = list(snapshot)
         self._meta = metadata_cache
+        self._label_source = label_source
         self._client_factory = client_factory or EthClient
 
     def run(self) -> None:
@@ -164,14 +166,28 @@ class ScanWorker(QThread):
                 self._meta.put_many(cid, client.multicall_erc20_metadata(missing))
             except Exception:
                 log.debug("approvals metadata read failed", exc_info=True)
+        labels = self._fetch_labels(cid, sorted({s for (_t, s) in found}))
         rows = []
         for (token, spender), value in found.items():
             m = self._meta.get(cid, token) or {}
             rows.append(ApprovalRow(
-                token=token, spender=spender, allowance=value,
+                token=token, spender=to_checksum_address(spender), allowance=value,
                 symbol=m.get("symbol") or "", name=m.get("name") or "",
-                decimals=int(m.get("decimals") or 18)))
+                decimals=int(m.get("decimals") or 18),
+                spender_label=labels.get(spender, "")))
         self.rows_ready.emit(cid, addr_l, rows)
+
+    def _fetch_labels(self, cid: int, spenders: list[str]) -> dict[str, str]:
+        """Keyless public name-tags for the spender contracts ("Uniswap:
+        Universal Router", …), so a leaf reads as WHO it approved, not a bare
+        address. Resilient — one bad fetch just leaves the addresses bare."""
+        if self._label_source is None or not spenders:
+            return {}
+        try:
+            return self._label_source.fetch_labels(cid, spenders)
+        except Exception:
+            log.debug("approvals label fetch failed", exc_info=True)
+            return {}
 
 
 class ReconcileWorker(QThread):
@@ -270,6 +286,9 @@ class ApprovalsPanel(QWidget):
         self.tree.itemChanged.connect(self._update_buttons)
         self._update_buttons()
 
+        if self._host is not None:
+            self._host.icon_cache().icon_ready.connect(self._on_icon_ready)
+
     def action_widgets(self) -> list[QWidget]:
         return [self.btn_modify, self.btn_revoke, self.btn_stop,
                 self.btn_copy, self.btn_refresh]
@@ -344,6 +363,7 @@ class ApprovalsPanel(QWidget):
                       | Qt.ItemFlag.ItemIsAutoTristate)
         node.setCheckState(0, Qt.CheckState.Unchecked)
         self._token_items[r.token] = node
+        self._apply_token_icon(node, r.token)
         return node
 
     def _add_row(self, r: ApprovalRow) -> None:
@@ -353,9 +373,35 @@ class ApprovalsPanel(QWidget):
         leaf.setText(1, _format_token_amount(r.allowance, r.decimals, r.symbol))
         leaf.setText(2, r.spender)
         leaf.setToolTip(2, r.spender)
+        leaf.setToolTip(0, f"{r.spender_label}\n{r.spender}"
+                        if r.spender_label else r.spender)
         leaf.setData(0, _ROW_ROLE, r)
         leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         leaf.setCheckState(0, Qt.CheckState.Unchecked)
+
+    def _apply_token_icon(self, node: QTreeWidgetItem, token: str) -> None:
+        """Set the token node's coin icon from the shared cache; kick a
+        background fetch (repaints via ``icon_ready``) when it's not cached."""
+        if self._host is None:
+            return
+        cid = self._host.current_chain().chain_id
+        cache = self._host.icon_cache()
+        pix = cache.get(cid, token)
+        if pix is not None:
+            node.setIcon(0, QIcon(pix))
+            return
+        info = self._host.token_info(cid, token)
+        url = getattr(info, "logo_uri", None)
+        if url:
+            cache.request(cid, token, url)
+
+    def _on_icon_ready(self, cid: int, contract: str) -> None:
+        node = self._token_items.get(contract.lower())
+        if node is None or self._host is None:
+            return
+        pix = self._host.icon_cache().get(cid, contract)
+        if pix is not None:
+            node.setIcon(0, QIcon(pix))
 
     def _set_status(self, text: str) -> None:
         self.status_lbl.setText(text)
@@ -496,6 +542,10 @@ class ApprovalsPlugin(Plugin):
             EtherscanV2TransactionSource(
                 lambda: getattr(store, "etherscan_api_key", None)),
             BlockscoutTransactionSource())
+        from ..transactions.contract_identity import ContractIdentitySource
+        # Keyless: spender name-tags come from the free Blockscout metadata
+        # service (fetch_labels needs no Etherscan key).
+        self._label_source = ContractIdentitySource(lambda: None)
         self._workers: set[QThread] = set()
         self._scan: ScanWorker | None = None
         self._queue: RevokeQueue | None = None
@@ -684,7 +734,8 @@ class ApprovalsPlugin(Plugin):
         chain = self.host.current_chain()
         self._panel.begin_scan()
         snapshot = self._disk_cache.load(chain.chain_id, addr) or []
-        worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata)
+        worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata,
+                            label_source=self._label_source)
         worker.batch_fetched.connect(self._on_batch)
         worker.rows_ready.connect(
             lambda c, a, rows, e=epoch: self._on_rows(c, a, rows, e))

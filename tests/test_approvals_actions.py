@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 from eth_utils import to_checksum_address
+from PySide6.QtCore import QObject, Signal
 
+from qeth import QULONGLONG
 from qeth.plugins.approvals import ApprovalsPlugin
 from qeth.plugins.approvals.discovery import ApprovalRow
 from qeth.plugins.transactions import _format_token_amount
@@ -21,11 +23,22 @@ _MAX = (1 << 256) - 1
 PAIR = (TOKEN.lower(), SPENDER.lower())
 
 
+class _FakeIcons(QObject):
+    icon_ready = Signal(QULONGLONG, str)
+
+    def get(self, cid, contract):
+        return None
+
+    def request(self, cid, contract, url):
+        pass
+
+
 class _FakeHost:
     def __init__(self):
         self.selected_address = OWNER
         self.requests: list = []
         self.started: list = []
+        self._icons = _FakeIcons()
 
     def current_chain(self):
         return CHAIN
@@ -38,6 +51,12 @@ class _FakeHost:
 
     def start_worker(self, worker):
         self.started.append(worker)
+
+    def icon_cache(self):
+        return self._icons
+
+    def token_info(self, cid, address):
+        return None
 
     def status_message(self, *a, **k):
         pass

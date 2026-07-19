@@ -18,8 +18,8 @@ import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from eth_utils import to_checksum_address
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QProgressBar,
     QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -27,14 +27,14 @@ from PySide6.QtWidgets import (
 
 from ... import QULONGLONG
 from ...chain import EthClient
-from ...formatting import short_addr
+from ...formatting import format_balance
 from ...plugin import Plugin
 from ...token_metadata import TokenMetadataCache
 from ...transactions import (
     BlockscoutTransactionSource, EtherscanV2TransactionSource,
     RoutedTransactionSource,
 )
-from ..transactions import _encode_approve, _format_token_amount, _is_full_history
+from ..transactions import _encode_approve, _is_full_history
 from .discovery import ApprovalRow, approve_pairs_in, fetch_allowances
 from .revoke_queue import RevokeQueue
 
@@ -45,6 +45,27 @@ log = logging.getLogger(__name__)
 
 _ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
 _TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
+
+# At/above this an allowance reads as "unlimited" — the same threshold the
+# approve dialog's Unlimited toggle uses (2**255 is half the uint256 space,
+# far past any honest cap, so it captures 2**256-1 and its near-max sentinels
+# that would otherwise render as a 70-plus-digit number).
+_UNLIMITED_MIN = 2 ** 255
+
+
+def _format_allowance(raw: int, decimals: int) -> str:
+    """Compact, symbol-free allowance for the tree's Allowance column (the
+    token symbol is already the parent branch). Near-max sentinels collapse to
+    "unlimited"; everything else goes through ``format_balance`` so a large but
+    finite cap shows as ``1.23 × 10¹⁰`` rather than a horizontally-scrolling
+    run of digits."""
+    if raw >= _UNLIMITED_MIN:
+        return "unlimited"
+    from decimal import Decimal
+    scaled = Decimal(raw) / (Decimal(10) ** decimals) if decimals > 0 else Decimal(raw)
+    # normalize() drops trailing zeros so format_balance's 6-sig-fig ``%g`` shows
+    # "9.12 × 10¹⁰", not "9.12000 × 10¹⁰" (a large int Decimal keeps its zeros).
+    return format_balance(scaled.normalize())
 
 
 # --- worker ---------------------------------------------------------------
@@ -229,12 +250,19 @@ class ApprovalsPanel(QWidget):
     stop_requested = Signal()
     copied = Signal(str)
 
-    COLS: ClassVar[list[str]] = ["Token / Spender", "Allowance", "Address"]
+    # Two columns only: the identity (token symbol / spender name-or-address)
+    # and the allowance. The full spender address isn't a column — it lives in
+    # the leaf tooltip + the Copy action — so the tree never needs the width a
+    # 42-char address would force. The identity column middle-elides (the
+    # Accounts-tab trick) and the horizontal scrollbar is switched off, so a
+    # long name or address truncates gracefully instead of scrolling.
+    COLS: ClassVar[list[str]] = ["Token / Spender", "Allowance"]
 
     def __init__(self, host=None, parent=None):
         super().__init__(parent)
         self._host = host
         self._token_items: dict[str, QTreeWidgetItem] = {}
+        self._hovered: QTreeWidgetItem | None = None
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
 
@@ -246,12 +274,19 @@ class ApprovalsPanel(QWidget):
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
+        # Hover / selection reveals a named spender's ACTUAL address (so it can
+        # be eyeballed / checked on the explorer without losing the name label).
+        self.tree.setMouseTracking(True)
+        self.tree.itemEntered.connect(self._on_item_entered)
+        self.tree.viewport().installEventFilter(self)
+        self.tree.itemDoubleClicked.connect(self._on_double_clicked)
         hh = self.tree.header()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         v.addWidget(self.tree, 1)
 
         self.status_lbl = QLabel("")
@@ -277,12 +312,17 @@ class ApprovalsPanel(QWidget):
         self.btn_copy.setIcon(QIcon.fromTheme("edit-copy"))
         self.btn_copy.setToolTip("Copy spender address")
         self.btn_copy.clicked.connect(self._copy_spender)
+        self.btn_explorer = QPushButton()
+        self.btn_explorer.setIcon(QIcon.fromTheme("web-browser"))
+        self.btn_explorer.setToolTip("Open spender in the block explorer")
+        self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
         self.btn_refresh = QPushButton()
         self.btn_refresh.setIcon(QIcon.fromTheme("view-refresh"))
         self.btn_refresh.setToolTip("Rescan history")
         self.btn_refresh.clicked.connect(self.refresh_requested)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
+        self.tree.itemSelectionChanged.connect(self._refresh_reveal)
         self.tree.itemChanged.connect(self._update_buttons)
         self._update_buttons()
 
@@ -291,7 +331,7 @@ class ApprovalsPanel(QWidget):
 
     def action_widgets(self) -> list[QWidget]:
         return [self.btn_modify, self.btn_revoke, self.btn_stop,
-                self.btn_copy, self.btn_refresh]
+                self.btn_copy, self.btn_explorer, self.btn_refresh]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
@@ -333,6 +373,7 @@ class ApprovalsPanel(QWidget):
         self.tree.expandAll()
         self.tree.blockSignals(False)
         self._update_buttons()
+        self._refresh_reveal()
 
     def checked_leaves(self) -> list[ApprovalRow]:
         """Every spender leaf the user has ticked (via its own box or its token
@@ -356,7 +397,6 @@ class ApprovalsPanel(QWidget):
             return node
         node = QTreeWidgetItem(self.tree)
         node.setText(0, r.symbol or (r.token[:10] + "…"))
-        node.setText(2, r.token)
         node.setData(0, _TOKEN_ROLE, r.token)
         node.setToolTip(0, f"{r.name or r.symbol}\n{r.token}")
         node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable
@@ -366,18 +406,58 @@ class ApprovalsPanel(QWidget):
         self._apply_token_icon(node, r.token)
         return node
 
+    @staticmethod
+    def _leaf_text(r: ApprovalRow, reveal: bool) -> str:
+        """Column-0 text for a spender leaf: its name-tag normally, its actual
+        address when ``reveal`` (hover / selection) — or always the address
+        when there's no name-tag. ElideMiddle truncates a long value to fit."""
+        if r.spender_label and not reveal:
+            return r.spender_label
+        return r.spender
+
     def _add_row(self, r: ApprovalRow) -> None:
         parent = self._token_node(r)
         leaf = QTreeWidgetItem(parent)
-        leaf.setText(0, r.spender_label or short_addr(r.spender))
-        leaf.setText(1, _format_token_amount(r.allowance, r.decimals, r.symbol))
-        leaf.setText(2, r.spender)
-        leaf.setToolTip(2, r.spender)
+        leaf.setText(0, self._leaf_text(r, reveal=False))
+        leaf.setText(1, _format_allowance(r.allowance, r.decimals))
         leaf.setToolTip(0, f"{r.spender_label}\n{r.spender}"
                         if r.spender_label else r.spender)
         leaf.setData(0, _ROW_ROLE, r)
         leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         leaf.setCheckState(0, Qt.CheckState.Unchecked)
+
+    # --- hover / selection address reveal ---------------------------------
+    def _on_item_entered(self, item: QTreeWidgetItem, column: int) -> None:
+        self._hovered = item
+        self._refresh_reveal()
+
+    def eventFilter(self, obj, event) -> bool:
+        if (obj is self.tree.viewport()
+                and event.type() == QEvent.Type.Leave and self._hovered is not None):
+            self._hovered = None
+            self._refresh_reveal()
+        return super().eventFilter(obj, event)
+
+    def _refresh_reveal(self) -> None:
+        """Rewrite each named leaf's column-0 text so the hovered / selected one
+        shows its address and the rest show their name-tag."""
+        hovered = self._hovered
+        current = self.tree.currentItem()
+        self.tree.blockSignals(True)
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            for ci in range(node.childCount()):
+                leaf = node.child(ci)
+                r = leaf.data(0, _ROW_ROLE)
+                if not isinstance(r, ApprovalRow) or not r.spender_label:
+                    continue
+                reveal = leaf is hovered or (leaf is current and leaf.isSelected())
+                want = self._leaf_text(r, reveal)
+                if leaf.text(0) != want:
+                    leaf.setText(0, want)
+        self.tree.blockSignals(False)
 
     def _apply_token_icon(self, node: QTreeWidgetItem, token: str) -> None:
         """Set the token node's coin icon from the shared cache; kick a
@@ -435,7 +515,7 @@ class ApprovalsPanel(QWidget):
         r = leaf.data(0, _ROW_ROLE)
         if isinstance(r, ApprovalRow):
             r.allowance = value
-            leaf.setText(1, _format_token_amount(value, r.decimals, r.symbol))
+            leaf.setText(1, _format_allowance(value, r.decimals))
         leaf.setDisabled(False)
 
     def remove_leaf(self, token: str, spender: str) -> None:
@@ -465,6 +545,7 @@ class ApprovalsPanel(QWidget):
         has_leaf = self._selected_leaf() is not None
         n_checked = len(self.checked_leaves())
         self.btn_copy.setEnabled(has_leaf)
+        self.btn_explorer.setEnabled(has_leaf and self._explorer_base() is not None)
         self.btn_modify.setEnabled(has_leaf)          # modify is single-leaf only
         self.btn_revoke.setText(f"&Revoke ({n_checked})" if n_checked else "&Revoke")
         self.btn_revoke.setEnabled(has_leaf or n_checked > 0)
@@ -490,6 +571,27 @@ class ApprovalsPanel(QWidget):
             QApplication.clipboard().setText(r.spender)
             self.copied.emit(r.spender)
 
+    def _explorer_base(self) -> str | None:
+        if self._host is None:
+            return None
+        base = getattr(self._host.current_chain(), "explorer", "") or ""
+        return base.rstrip("/") or None
+
+    def _open_in_explorer(self, address: str) -> None:
+        base = self._explorer_base()
+        if base and address:
+            QDesktopServices.openUrl(QUrl(f"{base}/address/{address}"))
+
+    def _open_selected_in_explorer(self) -> None:
+        r = self._selected_leaf()
+        if r is not None:
+            self._open_in_explorer(r.spender)
+
+    def _on_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        r = item.data(0, _ROW_ROLE) if item is not None else None
+        if isinstance(r, ApprovalRow):
+            self._open_in_explorer(r.spender)
+
     def _on_context_menu(self, pos) -> None:
         it = self.tree.itemAt(pos)
         r = it.data(0, _ROW_ROLE) if it is not None else None
@@ -505,6 +607,8 @@ class ApprovalsPanel(QWidget):
         act_copy_sp.setEnabled(r is not None)
         act_copy_tok = menu.addAction("Copy token address")
         act_copy_tok.setEnabled(r is not None or token is not None)
+        act_explorer = menu.addAction("Open spender in explorer")
+        act_explorer.setEnabled(r is not None and self._explorer_base() is not None)
         menu.addSeparator()
         act_refresh = menu.addAction("Rescan history")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -514,6 +618,8 @@ class ApprovalsPanel(QWidget):
             self.modify_requested.emit(r)
         elif chosen is act_revoke and r is not None:
             self.revoke_requested.emit([r])
+        elif chosen is act_explorer and r is not None:
+            self._open_in_explorer(r.spender)
         elif chosen is act_copy_sp and r is not None:
             QApplication.clipboard().setText(r.spender)
             self.copied.emit(r.spender)

@@ -1,8 +1,11 @@
-"""Approvals tree panel — grouping, rendering, scan lifecycle (commit 1)."""
+"""Approvals tree panel — grouping, rendering, scan lifecycle, address reveal."""
 
-from PySide6.QtCore import Qt
+from types import SimpleNamespace
 
-from qeth.plugins.approvals import ApprovalsPanel
+from PySide6.QtCore import QObject, Qt, Signal
+
+from qeth import QULONGLONG
+from qeth.plugins.approvals import ApprovalsPanel, _format_allowance
 from qeth.plugins.approvals.discovery import ApprovalRow
 
 _MAX = (1 << 256) - 1
@@ -10,10 +13,36 @@ TOKEN = "0x" + "11" * 20
 TOKEN2 = "0x" + "22" * 20
 SP1 = "0x" + "ee" * 20
 SP2 = "0x" + "ff" * 20
+LABEL = "Uniswap: Router"
 
 
-def _panel(qtbot):
-    p = ApprovalsPanel()
+class _FakeIcons(QObject):
+    icon_ready = Signal(QULONGLONG, str)
+
+    def get(self, cid, contract):
+        return None
+
+    def request(self, cid, contract, url):
+        pass
+
+
+class _HostWithExplorer:
+    def __init__(self, explorer):
+        self._chain = SimpleNamespace(chain_id=1, explorer=explorer)
+        self._icons = _FakeIcons()
+
+    def current_chain(self):
+        return self._chain
+
+    def icon_cache(self):
+        return self._icons
+
+    def token_info(self, cid, addr):
+        return None
+
+
+def _panel(qtbot, host=None):
+    p = ApprovalsPanel(host=host)
     qtbot.addWidget(p)
     return p
 
@@ -63,11 +92,98 @@ def test_spender_label_shown_in_col0_with_tooltip(qtbot):
     assert "Uniswap: Router" in leaf.toolTip(0) and SP1 in leaf.toolTip(0)
 
 
-def test_spender_falls_back_to_short_addr(qtbot):
+def test_spender_without_label_shows_full_address(qtbot):
     p = _panel(qtbot)
-    p.append_rows([_row(spender=SP1)])             # no label
+    p.append_rows([_row(spender=SP1)])             # no label → address (elides in view)
     leaf = p.tree.topLevelItem(0).child(0)
-    assert leaf.text(0) != "" and leaf.text(0) != SP1   # shortened form
+    assert leaf.text(0) == SP1
+
+
+# --- allowance formatting -------------------------------------------------
+
+def test_format_allowance_unlimited_threshold():
+    assert _format_allowance(_MAX, 18) == "unlimited"
+    assert _format_allowance(2 ** 255, 18) == "unlimited"        # near-max sentinel
+    assert _format_allowance(2 ** 255 - 1, 0) != "unlimited"     # just below → a number
+
+
+def test_format_allowance_scientific_for_large_finite():
+    # 91.2 billion tokens (below 2**255) → typographic ×10ⁿ, not 11 plain digits
+    assert _format_allowance(91_200_000_000 * 10 ** 18, 18) == "9.12 × 10¹⁰"
+
+
+def test_format_allowance_applies_decimals_without_symbol():
+    assert _format_allowance(5_000_000, 6) == "5"                # 5-unit cap, bare
+    assert _format_allowance(1500, 3) == "1.5"
+
+
+def test_allowance_column_has_no_symbol(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(allowance=5_000_000, symbol="USDC", decimals=6)])
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.text(1) == "5"                                   # symbol lives in the branch
+
+
+# --- hover / selection address reveal -------------------------------------
+
+def _named_row(spender=SP1):
+    return ApprovalRow(token=TOKEN, spender=spender, allowance=1,
+                       symbol="USDC", decimals=6, spender_label=LABEL)
+
+
+def test_hover_reveals_address_then_restores(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_named_row()])
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.text(0) == LABEL                    # name by default
+    p._on_item_entered(leaf, 0)                     # hover
+    assert leaf.text(0) == SP1                       # reveals address
+    p._hovered = None
+    p._refresh_reveal()                              # mouse left the viewport
+    assert leaf.text(0) == LABEL                     # restored
+
+
+def test_selection_reveals_address(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_named_row()])
+    leaf = p.tree.topLevelItem(0).child(0)
+    p.tree.setCurrentItem(leaf)                      # selection → reveal
+    assert leaf.text(0) == SP1
+
+
+def test_unnamed_leaf_unchanged_on_hover(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1)])              # no label
+    leaf = p.tree.topLevelItem(0).child(0)
+    p._on_item_entered(leaf, 0)
+    assert leaf.text(0) == SP1                       # already the address
+
+
+# --- explorer -------------------------------------------------------------
+
+def test_double_click_opens_spender_in_explorer(qtbot, monkeypatch):
+    opened = []
+    monkeypatch.setattr("qeth.plugins.approvals.QDesktopServices.openUrl",
+                        lambda url: opened.append(url.toString()))
+    p = _panel(qtbot, host=_HostWithExplorer("https://etherscan.io"))
+    p.append_rows([_row(spender=SP1)])
+    p._on_double_clicked(p.tree.topLevelItem(0).child(0), 0)
+    assert opened == [f"https://etherscan.io/address/{SP1}"]
+
+
+def test_explorer_button_enabled_with_leaf_and_explorer(qtbot):
+    p = _panel(qtbot, host=_HostWithExplorer("https://etherscan.io"))
+    p.append_rows([_row(spender=SP1)])
+    assert not p.btn_explorer.isEnabled()            # nothing selected
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    assert p.btn_explorer.isEnabled()
+
+
+def test_explorer_button_disabled_when_chain_has_no_explorer(qtbot):
+    p = _panel(qtbot, host=_HostWithExplorer(""))
+    p.append_rows([_row(spender=SP1)])
+    p.tree.setCurrentItem(p.tree.topLevelItem(0).child(0))
+    assert not p.btn_explorer.isEnabled()
 
 
 def test_leaves_and_token_are_checkable(qtbot):

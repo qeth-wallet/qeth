@@ -11,9 +11,8 @@ from eth_utils import to_checksum_address
 from PySide6.QtCore import QObject, Signal
 
 from qeth import QULONGLONG
-from qeth.plugins.approvals import ApprovalsPlugin
+from qeth.plugins.approvals import ApprovalsPlugin, _format_allowance
 from qeth.plugins.approvals.discovery import ApprovalRow
-from qeth.plugins.transactions import _format_token_amount
 
 CHAIN = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
 OWNER = "0x" + "a1" * 20
@@ -141,7 +140,7 @@ def test_reconcile_nonzero_updates_leaf(plugin):
     plugin._on_reconciled(CHAIN.chain_id, OWNER.lower(), {PAIR: 5_000_000},
                           plugin._epoch)
     leaf = plugin._panel.tree.topLevelItem(0).child(0)
-    assert leaf.text(1) == _format_token_amount(5_000_000, 6, "USDC")
+    assert leaf.text(1) == _format_allowance(5_000_000, 6) == "5"    # no symbol
     assert not leaf.isDisabled()
 
 

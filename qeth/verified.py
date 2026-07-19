@@ -8,7 +8,7 @@ unverified. Callers get an ``(EthClient, verified)`` / ``(Chain, verified)``
 pair and never touch the sidecar directly — this is the one place the "prefer
 verified, fall back to direct" rule lives.
 
-Read-side sibling of ``qeth.pyevm_fork`` / ``qeth.simulate``: those verify
+Read-side sibling of ``qeth.pyevm_fork`` / ``qeth.plugins.transactions.simulate``: those verify
 state for a *hypothetical* transaction (a local EVM fork over proven state);
 this verifies the result of *existing* view calls (``eth_call``,
 ``Multicall3.aggregate3``). Both rest on the same ``helios.verified_chain``

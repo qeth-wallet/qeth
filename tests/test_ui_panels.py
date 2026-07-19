@@ -1079,7 +1079,7 @@ def test_identity_row_loading_placeholder_then_badge(qtbot, tmp_path):
     'no info'; a resolved badge replaces it, and a None (transient error /
     unsupported chain) clears it back to blank."""
     from qeth.plugins.transactions import _make_identity_row
-    from qeth.contract_identity import ContractIdentityCache, IdentityBadge
+    from qeth.plugins.transactions.contract_identity import ContractIdentityCache, IdentityBadge
 
     captured = []
     label, kick = _make_identity_row(

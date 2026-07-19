@@ -50,34 +50,34 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .. import QULONGLONG
-from ..abi import (
+from ... import QULONGLONG
+from ...abi import (
     KNOWN_EVENT_NAMES, AnyAbiSource, BlockscoutAbiSource, EtherscanV2AbiSource,
     RoutedAbiSource, decode_call, decode_event,
 )
-from ..abi_cache import AbiCache
-from ..contract_identity import (
+from ...abi_cache import AbiCache
+from .contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
-from ..chain import EthClient, wei_to_ether
-from ..live_watcher import LiveWatcher, PendingTx
-from ..signing import ReplacementFloor, SignerError, SigningRequest
-from ..formatting import format_balance, transfer_notice
-from ..formatting import format_datetime as _format_datetime
-from ..plugin import Plugin
-from ..dialog import Dialog
-from ..transactions import (
+from ...chain import EthClient, wei_to_ether
+from .live_watcher import LiveWatcher, PendingTx
+from ...signing import ReplacementFloor, SignerError, SigningRequest
+from ...formatting import format_balance, transfer_notice
+from ...formatting import format_datetime as _format_datetime
+from ...plugin import Plugin
+from ...dialog import Dialog
+from ...transactions import (
     BlockscoutTransactionSource, EtherscanV2TransactionSource,
     RoutedTransactionSource, Transaction, TransactionSource,
 )
-from ..transactions_cache import TransactionCache, merge_txs
-from ..activity_cache import ActivityCache
-from ..token_metadata import TokenMetadataCache
-from ..tx_activity import (
+from ...transactions_cache import TransactionCache, merge_txs
+from ...activity_cache import ActivityCache
+from ...token_metadata import TokenMetadataCache
+from ...tx_activity import (
     Activity, AssetLeg, fetch_activities, transfer_legs_from_logs,
     transfers_touching,
 )
-from ..icons import (
+from ...icons import (
     IconCache, bundled_native_icon, notification_icon, smooth_scaled,
 )
 from .tx_summary import (
@@ -1898,7 +1898,7 @@ class TransactionsPlugin(Plugin):
         if not todo:
             return
         self._meta_inflight.update(todo)
-        from .tokens import MetadataWorker
+        from ..tokens import MetadataWorker
         worker = MetadataWorker(chain, todo)
         worker.fetched.connect(self._on_token_meta)
         worker.failed.connect(
@@ -3066,7 +3066,7 @@ class SignatureFetchWorker(QThread):
         self._input_data = input_data
 
     def run(self) -> None:
-        from ..abi import decode_via_4byte
+        from ...abi import decode_via_4byte
         try:
             self.ready.emit(decode_via_4byte(self._input_data))
         except Exception as e:
@@ -3130,7 +3130,7 @@ class SimulateWorker(QThread):
         self._floor_block = floor_block
 
     def run(self) -> None:
-        from ..simulate import simulate_logs
+        from .simulate import simulate_logs
         self.ready.emit(simulate_logs(*self._args, floor_block=self._floor_block))
 
 
@@ -3554,7 +3554,7 @@ class _EventPreviewMixin:
         # Drop any stale warning from the previous params while the new run
         # is in flight; _on_sim_ready re-raises it if this tx also reverts.
         self._clear_revert_warning()
-        from ..simulate import simulation_available
+        from .simulate import simulation_available
         if not simulation_available(self.chain):
             self._events.set_placeholder(self._no_simulation_text())
             return
@@ -3608,7 +3608,7 @@ class _EventPreviewMixin:
             return   # superseded by a newer sim, or already timed out
         self._sim_done = True
         self._detach_sim()
-        from ..simulate import (
+        from .simulate import (
             RemoteLogs, RevertNote, SimulationNote, VerifiedLogs)
         if isinstance(logs, RevertNote):
             # Definitive revert — warn in red above Confirm (warn-only, send
@@ -3633,7 +3633,7 @@ class _EventPreviewMixin:
             # endpoint can't simulate (no eth_simulateV1, no py-evm), or a
             # transient failure. Not a revert (that's RevertNote now), so don't
             # claim one.
-            from ..simulate import simulation_available
+            from .simulate import simulation_available
             if not simulation_available(self.chain):
                 self._events.set_placeholder(self._no_simulation_text())
             else:
@@ -6025,8 +6025,8 @@ class SendTokenDialog(_TxComposerDialog):
         self._ens_label.setStyleSheet("")
         self._ens_label.setText(f"resolving {text} …")
         self._ens_form.setRowVisible(self._ens_label, True)
-        from ..chains import DEFAULT_CHAINS
-        from ..ens import EnsResolveWorker
+        from ...chains import DEFAULT_CHAINS
+        from ...ens import EnsResolveWorker
         mainnet = next((c for c in DEFAULT_CHAINS if c.chain_id == 1), None)
         if mainnet is None:
             return

@@ -23,7 +23,7 @@ import urllib.request
 import pytest
 
 from qeth.chains import Chain
-from qeth.live_watcher import LiveWatcher, PendingTx
+from qeth.plugins.transactions.live_watcher import LiveWatcher, PendingTx
 
 FORK_RPC = os.environ.get("QETH_ANVIL_FORK_RPC",
                           "https://ethereum-rpc.publicnode.com")

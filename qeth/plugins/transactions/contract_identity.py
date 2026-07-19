@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
-from .abi import _urllib_transport
-from .fsatomic import atomic_write_text
-from .token_discovery import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
+from ...abi import _urllib_transport
+from ...fsatomic import atomic_write_text
+from ...token_discovery import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
 
 CACHE_DIR = Path.home() / ".qeth" / "contract_id"
 

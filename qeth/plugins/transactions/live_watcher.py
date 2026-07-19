@@ -41,11 +41,11 @@ from collections.abc import Callable
 import aiohttp
 from PySide6.QtCore import QObject, QThread, Signal
 
-from . import USER_AGENT
-from .async_chain import make_async_web3, ws_urls_for
+from ... import USER_AGENT
+from ...async_chain import make_async_web3, ws_urls_for
 
 if TYPE_CHECKING:
-    from .chains import Chain
+    from ...chains import Chain
 
 log = logging.getLogger("qeth.live_watcher")
 

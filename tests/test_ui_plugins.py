@@ -125,7 +125,7 @@ class TestCoinsTooltip:
     names the moved assets so USDC is distinguishable from USDT (issue #17)."""
 
     def _summary(self, out=(), inn=(), show_arrow=True):
-        from qeth.plugins.tx_summary import Coin, TxSummary
+        from qeth.plugins.transactions.tx_summary import Coin, TxSummary
         return TxSummary(
             "verb",
             tuple(Coin(s, None) for s in out),
@@ -4031,7 +4031,7 @@ class TestEventPreviewTab:
         """A SimulationNote outcome (e.g. calldata to a code-less TAC
         system contract) must surface its text — not render as an empty
         events list implying 'this tx does nothing'."""
-        from qeth.simulate import SimulationNote
+        from qeth.plugins.transactions.simulate import SimulationNote
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
@@ -4061,7 +4061,7 @@ class TestEventPreviewTab:
         """VerifiedLogs (Helios-backed simulation) shows the ⚡ verified
         badge; a plain unverified result hides it again; placeholders
         (new sim starting, failures) clear it."""
-        from qeth.simulate import VerifiedLogs
+        from qeth.plugins.transactions.simulate import VerifiedLogs
         _, started = self._started()
         dlg = self._send(qtbot, started)
         ev = dlg._events
@@ -4078,7 +4078,7 @@ class TestEventPreviewTab:
         assert ev.verified_lbl.isHidden()
 
     def test_send_blocked_until_inputs_valid(self, qtbot, tmp_qeth, monkeypatch):
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._send(qtbot, started)
@@ -4088,7 +4088,7 @@ class TestEventPreviewTab:
 
     def test_send_simulates_and_caches_until_inputs_change(
             self, qtbot, tmp_qeth, monkeypatch):
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
@@ -4129,7 +4129,7 @@ class TestEventPreviewTab:
 
     def test_revert_shows_red_banner_and_events_note(
             self, qtbot, tmp_qeth, monkeypatch):
-        from qeth.simulate import RevertNote
+        from qeth.plugins.transactions.simulate import RevertNote
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
@@ -4145,7 +4145,7 @@ class TestEventPreviewTab:
         assert "reverts" in dlg._events.events_view.toPlainText()
 
     def test_verified_revert_is_labelled(self, qtbot, tmp_qeth):
-        from qeth.simulate import RevertNote
+        from qeth.plugins.transactions.simulate import RevertNote
         _, started = self._started()
         dlg = self._send(qtbot, started)
         dlg._sim_key = ("k",)
@@ -4157,7 +4157,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         # None now means 'couldn't tell' (no route / transient), NOT a revert —
         # so no red banner and no revert wording.
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
@@ -4171,7 +4171,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         # No fork engine AND this endpoint already learned to lack simulateV1
         # → neither route can run, so show the 'no simulation' note.
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: False)
         monkeypatch.setitem(sim._SIMV1_SUPPORT, ETH.rpc_url, False)
         workers, started = self._started()
@@ -4187,7 +4187,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         # No fork engine but the endpoint's simulateV1 support is unprobed →
         # still kick the worker (it'll try the fast path).
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         from qeth.plugins.transactions import SimulateWorker
         monkeypatch.setattr(sim, "fork_available", lambda: False)
         sim._SIMV1_SUPPORT.pop(ETH.rpc_url, None)
@@ -4200,7 +4200,7 @@ class TestEventPreviewTab:
 
     def test_sign_simulates_fixed_request_once(
             self, qtbot, tmp_qeth, monkeypatch):
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         workers, started = self._started()
         dlg = self._sign(qtbot, started)
@@ -4219,7 +4219,7 @@ class TestEventPreviewTab:
             self, qtbot, tmp_qeth, monkeypatch):
         # A slow fork (Arbitrum-style) must not spin the tab forever: the
         # timeout resolves it, and a late worker result is ignored.
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)
@@ -4241,7 +4241,7 @@ class TestEventPreviewTab:
         # The dialogs are non-modal; a worker can outlive a closed dialog.
         # Closing must disconnect it so a late `ready` can't reach the
         # (deleted) dialog.
-        import qeth.simulate as sim
+        import qeth.plugins.transactions.simulate as sim
         monkeypatch.setattr(sim, "fork_available", lambda: True)
         _, started = self._started()
         dlg = self._send(qtbot, started)

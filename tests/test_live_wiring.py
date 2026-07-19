@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 
-from qeth.live_watcher import PendingTx
+from qeth.plugins.transactions.live_watcher import PendingTx
 from qeth.plugins.transactions import (TransactionsPlugin,
                                         _build_pending_snapshot)
 

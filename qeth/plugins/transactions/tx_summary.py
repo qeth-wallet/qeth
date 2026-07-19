@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
-from ..icons import smooth_scaled
+from ...icons import smooth_scaled
 
 _ICON = 16        # coin diameter, logical px
 _STEP = 18        # x-advance per coin

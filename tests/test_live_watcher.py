@@ -11,9 +11,9 @@ import asyncio
 
 import pytest
 
-import qeth.live_watcher as lw
+import qeth.plugins.transactions.live_watcher as lw
 from qeth.chains import DEFAULT_CHAINS
-from qeth.live_watcher import LiveWatcher, PendingTx
+from qeth.plugins.transactions.live_watcher import LiveWatcher, PendingTx
 
 
 def _chain(cid: int):
@@ -43,7 +43,7 @@ def test_ws_disconnect_is_quieted_not_dumped(caplog):
     fake_loop = type("L", (), {
         "default_exception_handler": lambda self, ctx: default_called.append(ctx)
     })()
-    with caplog.at_level(logging.WARNING, logger="qeth.live_watcher"):
+    with caplog.at_level(logging.WARNING, logger="qeth.plugins.transactions.live_watcher"):
         w._quiet_ws_disconnects(
             fake_loop, {"exception": ConnectionClosedError("ping timeout")})
     assert not default_called                      # not dumped by default
@@ -98,7 +98,7 @@ def test_to_int_normalises_hex_and_int():
     """newHeads block numbers arrive as a hex str from DRPC but an int from
     publicnode (web3's subscription formatting is provider-inconsistent);
     int(hex_str) raised and flapped the connection every block."""
-    from qeth.live_watcher import _to_int
+    from qeth.plugins.transactions.live_watcher import _to_int
     assert _to_int("0x1819da1") == 0x1819DA1
     assert _to_int("0x0") == 0
     assert _to_int(46588696) == 46588696
@@ -340,7 +340,7 @@ def test_broadcast_pinned_posts_only_to_primary(monkeypatch):
 # --- Transfer-log subscription (Phase 2) ----------------------------------
 
 def test_transfer_filters_topics():
-    from qeth.live_watcher import TRANSFER_TOPIC0
+    from qeth.plugins.transactions.live_watcher import TRANSFER_TOPIC0
     acct = "0x" + "ab" * 20
     padded = "0x" + "00" * 12 + "ab" * 20
     incoming, outgoing = LiveWatcher._transfer_filters(acct)
@@ -407,7 +407,7 @@ def _padded(addr: str) -> str:
 
 
 def test_handle_log_decodes_transfer_seen_both_directions(qapp):
-    from qeth.live_watcher import TRANSFER_TOPIC0
+    from qeth.plugins.transactions.live_watcher import TRANSFER_TOPIC0
     w = _watcher()
     seen: list = []
     w.transfer_seen.connect(

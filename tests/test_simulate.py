@@ -1,4 +1,4 @@
-"""Hermetic tests for qeth.simulate — the log-extraction logic.
+"""Hermetic tests for qeth.plugins.transactions.simulate — the log-extraction logic.
 
 The fork path injects a fake ``StateReader`` and runs the REAL py-evm
 engine against it (pure Python, no network) — hand-rolled bytecodes
@@ -9,7 +9,7 @@ exercised manually (it's slow + networked).
 from types import SimpleNamespace
 
 from qeth.pyevm_fork import StateReader
-from qeth.simulate import simulate_logs
+from qeth.plugins.transactions.simulate import simulate_logs
 
 CHAIN = SimpleNamespace(chain_id=1, rpc_url="https://rpc.example/eth")
 FROM = "0x7a16ff8270133f063aab6c9977183d9e72835428"
@@ -91,7 +91,7 @@ def test_calldata_to_codeless_target_returns_note():
     but on chains with NATIVE system contracts (TAC 0x08xx) the node acts
     on it outside the EVM — an empty events list would falsely read as
     'this tx does nothing'. The fork path must return a SimulationNote."""
-    from qeth.simulate import SimulationNote
+    from qeth.plugins.transactions.simulate import SimulationNote
     world = _WorldReader(code=b"")            # target has no bytecode
     out = simulate_logs(CHAIN, FROM, USDC, "0xb46a8d61ff", 0,
                         fork_reader=world)
@@ -117,7 +117,7 @@ def test_simulation_error_returns_none():
 def test_revert_returns_a_note_without_retrying():
     # A genuine revert must fail fast — no backoff, single attempt — and come
     # back as a RevertNote (definitive; the UI warns) rather than None.
-    from qeth.simulate import RevertNote
+    from qeth.plugins.transactions.simulate import RevertNote
     world = _WorldReader(code=REVERT_CODE)
     delays: list = []
     out = simulate_logs(CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
@@ -306,7 +306,7 @@ def test_rpc_reader_prefetch_failure_is_silent(monkeypatch):
 
 # --- revert-reason decoding ---------------------------------------------------
 
-from qeth.simulate import _decode_revert
+from qeth.plugins.transactions.simulate import _decode_revert
 
 
 def test_decode_revert_error_string():
@@ -336,7 +336,7 @@ def test_decode_revert_no_reason_and_unknown():
 def test_simulation_revert_carries_decodable_output():
     # The engine's revert exception → the decoded reason, end to end.
     from qeth.pyevm_fork import SimulationRevert
-    from qeth.simulate import _decode_revert_output
+    from qeth.plugins.transactions.simulate import _decode_revert_output
     e = SimulationRevert(bytes.fromhex(
         "08c379a0"
         "0000000000000000000000000000000000000000000000000000000000000020"
@@ -387,7 +387,7 @@ def test_rate_limited_gives_up_after_retries():
 def test_fork_deadline_stops_retries():
     # A rate-limited fork past its deadline must not start another attempt.
     import time as _t
-    import qeth.simulate as sim
+    import qeth.plugins.transactions.simulate as sim
     world = _FlakyReader(fail=99)
     out = sim._simulate_via_fork(
         CHAIN, FROM, USDC, "0x", 0, fork_reader=world,
@@ -399,8 +399,8 @@ def test_fork_deadline_stops_retries():
 # --- eth_simulateV1 fast path + orchestrator routing -------------------------
 
 import pytest
-import qeth.simulate as sim
-from qeth.simulate import (
+import qeth.plugins.transactions.simulate as sim
+from qeth.plugins.transactions.simulate import (
     _SimV1Unsupported, _decode_revert_output, _is_method_unsupported,
     _logs_from_simv1, simulation_available,
 )
@@ -415,7 +415,7 @@ def test_logs_from_simv1_success_and_revert():
     assert out[0]["topics"][0] == TRANSFER and out[0]["data"].endswith("05")
     # A reverted call → a RevertNote carrying the reason (definitive; the UI
     # warns in red), not None and not a fall-back trigger.
-    from qeth.simulate import RevertNote
+    from qeth.plugins.transactions.simulate import RevertNote
     reverted = [{"calls": [{"status": "0x0", "error": {"message": "boom"},
                             "logs": []}]}]
     note = _logs_from_simv1(reverted)
@@ -425,7 +425,7 @@ def test_logs_from_simv1_success_and_revert():
 
 def test_simv1_revert_decodes_error_string_into_the_note():
     """The Error(string) envelope in returnData becomes the human reason."""
-    from qeth.simulate import RevertNote
+    from qeth.plugins.transactions.simulate import RevertNote
     err = ("0x08c379a0"
            "0000000000000000000000000000000000000000000000000000000000000020"
            "0000000000000000000000000000000000000000000000000000000000000026"
@@ -488,7 +488,7 @@ def test_orchestrator_revert_is_definitive_no_fork(monkeypatch):
     # simulateV1 ran and the tx reverted — that's the answer; we must NOT
     # then fork (it'd just revert again, wasting requests). The RevertNote
     # is forwarded so the UI can warn.
-    from qeth.simulate import RevertNote
+    from qeth.plugins.transactions.simulate import RevertNote
     sim._SIMV1_SUPPORT.clear()
     monkeypatch.setattr(sim, "_simulate_via_rpc",
                         lambda *a, **k: RevertNote("nope"))
@@ -503,7 +503,7 @@ def test_verified_revert_is_flagged(monkeypatch):
     """A revert proven over Helios state comes back as a RevertNote with
     verified=True so the warning can say the RPC couldn't have faked it."""
     import qeth.helios as helios_mod
-    from qeth.simulate import RevertNote
+    from qeth.plugins.transactions.simulate import RevertNote
     monkeypatch.setattr(sim, "fork_available", lambda: True)
     monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
     monkeypatch.setattr(sim, "_simulate_via_fork",
@@ -519,7 +519,7 @@ def test_verified_proof_window_reroutes_and_retries(monkeypatch):
     retries — the proof-capable second attempt's logs come back tagged verified,
     not blank."""
     import qeth.helios as helios_mod
-    from qeth.simulate import VerifiedLogs, _ProofWindowUnavailable
+    from qeth.plugins.transactions.simulate import VerifiedLogs, _ProofWindowUnavailable
     monkeypatch.setattr(sim, "fork_available", lambda: True)
     monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
     noted = []
@@ -545,7 +545,7 @@ def test_verified_proof_window_falls_through_to_unverified(monkeypatch):
     the user still gets a preview: fall through to the unverified fast path,
     tagged RemoteLogs so the UI badges it rather than showing a blank."""
     import qeth.helios as helios_mod
-    from qeth.simulate import RemoteLogs, _ProofWindowUnavailable
+    from qeth.plugins.transactions.simulate import RemoteLogs, _ProofWindowUnavailable
     monkeypatch.setattr(sim, "fork_available", lambda: True)
     monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: chain)
     monkeypatch.setattr(helios_mod, "note_execution_rpc_incapable",
@@ -564,7 +564,7 @@ def test_floor_ahead_of_head(monkeypatch):
     """The helper that detects when the wallet's just-confirmed tx is at a
     block the (Helios) head hasn't reached yet — the window where a verified
     fork would miss it. The pending-tx sentinel must be excluded."""
-    from qeth.simulate import _REAL_BLOCK_CEILING, _floor_ahead_of_head
+    from qeth.plugins.transactions.simulate import _REAL_BLOCK_CEILING, _floor_ahead_of_head
 
     class _Client:
         def __init__(self, chain): pass
@@ -583,7 +583,7 @@ def test_await_floor_waits_until_head_reaches_the_floor(monkeypatch):
     wallet's latest confirmed tx before forking at 'latest', so an approve fired
     just before its swap isn't missed (false revert). Stops the instant the head
     catches up."""
-    from qeth.simulate import _HEAD_POLL_S, _await_floor
+    from qeth.plugins.transactions.simulate import _HEAD_POLL_S, _await_floor
     heads = iter([98, 99, 100, 101])    # LB node imports our block on the 3rd poll
     polls: list = []
 
@@ -602,7 +602,7 @@ def test_await_floor_waits_until_head_reaches_the_floor(monkeypatch):
 def test_await_floor_is_bounded_when_head_never_catches_up(monkeypatch):
     """A node that never imports our block must not hang the preview — the wait
     gives up at the cap and lets the (possibly stale) sim proceed."""
-    from qeth import simulate
+    from qeth.plugins.transactions import simulate
     monkeypatch.setattr(simulate, "_HEAD_CATCHUP_CAP_S", 0.0)
 
     class _Client:
@@ -617,7 +617,7 @@ def test_await_floor_is_bounded_when_head_never_catches_up(monkeypatch):
 def test_await_floor_noop_for_sentinel_and_unknown(monkeypatch):
     """No floor (None) or the pending-tx sentinel means 'fork at head' already —
     nothing to wait for, and we don't even hit the network."""
-    from qeth.simulate import _REAL_BLOCK_CEILING, _await_floor
+    from qeth.plugins.transactions.simulate import _REAL_BLOCK_CEILING, _await_floor
     called: list = []
 
     class _Client:
@@ -670,7 +670,7 @@ def test_unverified_without_helios_is_not_tagged_remote(monkeypatch):
     the floor). Otherwise every unverified chain would falsely claim to be
     verifying."""
     import qeth.helios as helios_mod
-    from qeth.simulate import RemoteLogs
+    from qeth.plugins.transactions.simulate import RemoteLogs
     monkeypatch.setattr(sim, "_SIMV1_SUPPORT", {})
     monkeypatch.setattr(sim, "fork_available", lambda: True)
     monkeypatch.setattr(helios_mod, "verified_chain", lambda chain: None)
@@ -695,7 +695,7 @@ def test_simv1_empty_logs_to_codeless_target_returns_note(monkeypatch):
     """Same trap through the FAST path: simulateV1 says 'success, no
     logs' for calldata to a code-less address — one follow-up getCode
     turns that into the honest note."""
-    from qeth.simulate import SimulationNote
+    from qeth.plugins.transactions.simulate import SimulationNote
     class _Client:
         def __init__(self, chain): pass
         def rpc(self, method, params):

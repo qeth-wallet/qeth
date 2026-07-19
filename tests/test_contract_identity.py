@@ -1,4 +1,4 @@
-"""Tests for qeth.contract_identity — the cache, the Etherscan-v2 source
+"""Tests for qeth.plugins.transactions.contract_identity — the cache, the Etherscan-v2 source
 (mocked transport), and the describe_identity badge logic."""
 
 from __future__ import annotations
@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 
 
-from qeth.contract_identity import (
+from qeth.plugins.transactions.contract_identity import (
     ContractIdentity,
     ContractIdentityCache,
     ContractIdentitySource,

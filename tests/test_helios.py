@@ -370,7 +370,7 @@ def test_prewarm_is_noop_when_unsupported_or_disabled(monkeypatch):
 # --- orchestrator routing -------------------------------------------------------
 
 def test_simulate_logs_prefers_verified_fork(monkeypatch):
-    import qeth.simulate as sim
+    import qeth.plugins.transactions.simulate as sim
     shadow = Chain("Ethereum (helios)", 1, "http://127.0.0.1:9999",
                    fallback_rpcs=("http://127.0.0.1:9999",))
     monkeypatch.setattr(hl, "verified_chain", lambda chain, **kw: shadow)
@@ -397,7 +397,7 @@ def test_no_fork_engine_skips_verified_mode_entirely(monkeypatch):
     simulate extra): the verified branch must not hijack the flow into a
     None — previews fall through to eth_simulateV1. It must not even
     probe/spawn the sidecar."""
-    import qeth.simulate as sim
+    import qeth.plugins.transactions.simulate as sim
     monkeypatch.setattr(sim, "fork_available", lambda: False)
     monkeypatch.setattr(hl, "verified_chain",
                         lambda chain, **kw: pytest.fail(
@@ -412,7 +412,7 @@ def test_no_fork_engine_skips_verified_mode_entirely(monkeypatch):
 
 
 def test_simulate_logs_falls_back_without_helios(monkeypatch):
-    import qeth.simulate as sim
+    import qeth.plugins.transactions.simulate as sim
     monkeypatch.setattr(hl, "verified_chain", lambda chain, **kw: None)
     monkeypatch.setattr(sim, "_simulate_via_rpc",
                         lambda *a, **k: [{"address": "0xab"}])

@@ -132,7 +132,7 @@ _NO_CODE_NOTE = (
 
 def fork_available() -> bool:
     """True if the optional local-fork engine (py-evm) can be imported."""
-    from .pyevm_fork import fork_available as _avail
+    from ...pyevm_fork import fork_available as _avail
     return _avail()
 
 
@@ -257,7 +257,7 @@ def _simulate_via_rpc(chain, from_addr, to_addr, data, value,
     until ``deadline`` (monotonic seconds), then gives up."""
     import time as _time
     sleep = sleep or _time.sleep
-    from .chain import EthClient
+    from ...chain import EthClient
     call: dict[str, str] = {"from": to_checksum_address(from_addr),
                             "to": to_checksum_address(to_addr)}
     if data and data not in ("0x", "0X"):
@@ -363,7 +363,7 @@ def _await_floor(chain, floor_block, *, deadline, sleep) -> None:
         return
     import time as _time
     _sleep = sleep or _time.sleep
-    from .chain import EthClient
+    from ...chain import EthClient
     try:
         client = EthClient(chain)
     except Exception:
@@ -395,7 +395,7 @@ def _floor_ahead_of_head(chain, floor_block) -> bool:
     sentinel (a huge number that legitimately wants the head)."""
     if floor_block is None or floor_block >= _REAL_BLOCK_CEILING:
         return False
-    from .chain import EthClient
+    from ...chain import EthClient
     try:
         head = _hexint(EthClient(chain).rpc("eth_blockNumber", [])) or 0
     except Exception:
@@ -412,7 +412,7 @@ def _latest_block(chain, lag: int = 0, floor_block=None) -> "dict | None":
     preview never forks before the user's own recent state. Raises on RPC
     failure — the retry loop handles transient rate-limits; other errors
     abort the preview (an env-less fork falsely reverts time-math contracts)."""
-    from .chain import EthClient
+    from ...chain import EthClient
     client = EthClient(chain)
     tag = "latest"
     if lag > 0:
@@ -461,7 +461,7 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
     it *waits* separately (see ``_EventPreviewMixin``)."""
     import time as _time
     sleep = sleep or _time.sleep
-    from .pyevm_fork import (
+    from ...pyevm_fork import (
         RpcStateReader, SimulationRevert, fork_available, run_fork_call,
     )
     if not fork_available():
@@ -508,7 +508,7 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
                 sleep(delay)
                 continue
             if raise_proof_errors:
-                from .helios import is_proof_window_error
+                from ...helios import is_proof_window_error
                 if is_proof_window_error(e):
                     # Helios's execution-rpc can't prove the fork block — let the
                     # orchestrator reroute Helios and retry rather than blank out.
@@ -554,7 +554,7 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         # malicious tx, and the preview is exactly the signing-time
         # defense. Slower (per-slot proof fetches), but the remote
         # node can no longer lie about what this tx does.
-        from .helios import verified_chain
+        from ...helios import verified_chain
         # Verified mode needs the LOCAL engine: without py-evm, entering
         # this branch would return None instead of falling through to
         # eth_simulateV1 — killing previews for anyone with a helios
@@ -605,7 +605,7 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
                 # send-only endpoint like mevblocker.io/fast). Reroute Helios to
                 # the bundled proof-capable default and retry once against the
                 # respawned sidecar — a good user RPC never gets here.
-                from .helios import note_execution_rpc_incapable
+                from ...helios import note_execution_rpc_incapable
                 if note_execution_rpc_incapable(chain):
                     hc2 = verified_chain(chain)
                     if hc2 is not None:

@@ -28,7 +28,7 @@ class Chain:
     # Transfer logs), tried in order. Each is validated to accept
     # eth_subscribe. Empty falls back to deriving wss from the http URLs
     # (works when the host serves ws on the same origin), then to http
-    # polling. See qeth.live_watcher / qeth.async_chain.ws_urls_for.
+    # polling. See qeth.plugins.transactions.live_watcher / qeth.async_chain.ws_urls_for.
     ws_url: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:

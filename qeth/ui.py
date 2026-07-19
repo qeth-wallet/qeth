@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from typing import TYPE_CHECKING, cast
 
-from .icons import ChainIconCache, smooth_icon
+from .icons import ChainIconCache, IconCache, smooth_icon
 from .notify import DesktopNotifier
 from .plugin import Plugin, Slot
 from .plugins.registry import PluginManifest, enabled_manifests
@@ -80,6 +80,12 @@ class MainWindow(QMainWindow):
         # Override QMainWindow's inflated minimumSizeHint (it reports
         # ~950x565 even when child widgets only need ~370x500).
         self.setMinimumSize(420, 360)
+
+        # App-wide token IconCache. Owned here (not by TokensPlugin) so token
+        # icons keep working in sibling dialogs when Tokens is disabled;
+        # TokensPlugin adopts this one in attach(). (ChainIconCache, for chain
+        # logos, is separate and built with the chain combo.)
+        self._icon_cache = IconCache()
 
         # Topic plugins, built from the registry (restart-to-apply: a disabled
         # optional plugin is never constructed, and its package never imported).
@@ -256,8 +262,10 @@ class MainWindow(QMainWindow):
                 self.chain_combo.setItemIcon(i, smooth_icon(pix))
                 break
         # Let the Tokens panel fill the native-asset row's icon (AVAX/BNB/…
-        # use the chain logo, fetched async).
-        self.tokens_plugin.on_chain_icon_ready(chain_id, pix)
+        # use the chain logo, fetched async) — no-op when Tokens is disabled.
+        tokens = self.tokens_plugin
+        if tokens is not None:
+            tokens.on_chain_icon_ready(chain_id, pix)
 
     def _on_chain_added(self, chain_id: int) -> None:
         """A dapp's ``wallet_addEthereumChain`` was approved. Append the
@@ -646,10 +654,11 @@ class MainWindow(QMainWindow):
         live-balance events into TokensPlugin."""
         return self.plugins.get(plugin_id)
 
-    # Convenience accessors over the plugins dict. Typed non-Optional here
-    # because nothing disables a plugin yet (the toggle UI + optional-off
-    # correctness land next commit, which flips tokens/ens to Optional and
-    # guards their consumers). Reach an optional sibling via plugin(id).
+    # Convenience accessors over the plugins dict. Wallets + Transactions are
+    # required, so they're always present. Tokens + ENS are optional — None when
+    # the user disabled them, and every consumer must handle that (as the host
+    # contract says). To reach an optional sibling from another plugin, go
+    # through plugin(id).
     @property
     def wallets_plugin(self) -> "WalletsPlugin":
         return cast("WalletsPlugin", self.plugins["wallets"])
@@ -659,12 +668,12 @@ class MainWindow(QMainWindow):
         return cast("TransactionsPlugin", self.plugins["transactions"])
 
     @property
-    def tokens_plugin(self) -> "TokensPlugin":
-        return cast("TokensPlugin", self.plugins["tokens"])
+    def tokens_plugin(self) -> "TokensPlugin | None":
+        return cast("TokensPlugin | None", self.plugins.get("tokens"))
 
     @property
-    def ens_plugin(self) -> "EnsPlugin":
-        return cast("EnsPlugin", self.plugins["ens"])
+    def ens_plugin(self) -> "EnsPlugin | None":
+        return cast("EnsPlugin | None", self.plugins.get("ens"))
 
     def current_chain(self):
         return self.store.current_chain()
@@ -756,7 +765,12 @@ class MainWindow(QMainWindow):
             self._msg_timer = QTimer(self)
 
     def token_info(self, chain_id: int, address: str):
-        return self.tokens_plugin.token_lists.get(chain_id, address)
+        # None when Tokens is disabled — indistinguishable to callers from a
+        # miss (they treat token_info as "curated entry or None").
+        tokens = self.tokens_plugin
+        if tokens is None:
+            return None
+        return tokens.token_lists.get(chain_id, address)
 
     def account_addresses(self) -> list[str]:
         """Every address the user owns — used to highlight self-sends in
@@ -785,19 +799,13 @@ class MainWindow(QMainWindow):
         return list(book.values())
 
     def icon_cache(self):
-        return self.tokens_plugin.icon_cache
+        return self._icon_cache
 
     def native_price_usd(self, chain_id, address):
-        if not address:
+        tokens = self.tokens_plugin
+        if tokens is None:          # Tokens disabled → no cached prices
             return None
-        try:
-            cached = self.tokens_plugin._wallet_cache.load(chain_id, address)
-        except Exception:
-            return None
-        if cached is None or not cached.native_price_usd:
-            return None
-        from decimal import Decimal
-        return Decimal(cached.native_price_usd)
+        return tokens.native_price_usd(chain_id, address)
 
     # --- signing -------------------------------------------------------
 
@@ -1398,7 +1406,8 @@ class MainWindow(QMainWindow):
 
     @property
     def token_panel(self):
-        return self.tokens_plugin.widget()
+        tokens = self.tokens_plugin
+        return tokens.widget() if tokens is not None else None
 
     @property
     def tx_panel(self):

@@ -461,6 +461,21 @@ class TokensPlugin(Plugin):
     def icon_cache(self) -> IconCache:
         return self._icon_cache
 
+    def native_price_usd(self, chain_id: int, address: str) -> Decimal | None:
+        """Latest cached USD-per-native price for (chain_id, address), or None.
+        The host delegates here so the transactions dialogs can annotate fees
+        with their dollar value without reaching into the wallet cache — and so
+        the whole path returns None cleanly when this plugin is disabled."""
+        if not address:
+            return None
+        try:
+            cached = self._wallet_cache.load(chain_id, address)
+        except Exception:
+            return None
+        if cached is None or not cached.native_price_usd:
+            return None
+        return Decimal(cached.native_price_usd)
+
     def last_balance_block(self, chain_id: int, address: str,
                            token: str) -> int | None:
         """The block at which we last applied a confirmed ``balanceOf`` read
@@ -586,6 +601,15 @@ class TokensPlugin(Plugin):
 
     def attach(self, host) -> None:
         super().attach(host)
+        # Adopt the host's shared IconCache (app-wide, so token icons keep
+        # working in sibling dialogs even if this plugin is later disabled).
+        # attach() runs before widget() builds the panel, so the panel gets the
+        # shared instance. Standalone (no such host) keeps the __init__ default.
+        ic = getattr(host, "icon_cache", None)
+        if callable(ic):
+            got = ic()
+            if got is not None:
+                self._icon_cache = got
         # Stop spawning reconcile workers once the app starts quitting (see
         # _shutting_down / satellite 3). aboutToQuit fires before app.exec()
         # returns, while the event loop can still deliver a pending retry.

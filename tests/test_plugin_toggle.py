@@ -14,14 +14,14 @@ def _fake_store(disabled=()):
 
 def test_only_optional_plugins_are_offered():
     ids = [m.id for m in optional_manifests()]
-    assert ids == ["tokens", "ens"]          # wallets + transactions required
+    assert ids == ["tokens", "ens", "approvals"]   # wallets + transactions required
 
 
 def test_menu_lists_optional_with_enabled_checked(qtbot):
     store, _ = _fake_store()
     menu = build_plugin_toggle_menu(store)
     acts = menu.actions()
-    assert [a.text() for a in acts] == ["Tokens", "ENS"]
+    assert [a.text() for a in acts] == ["Tokens", "ENS", "Approvals"]
     assert all(a.isCheckable() and a.isChecked() for a in acts)
 
 

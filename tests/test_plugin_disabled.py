@@ -30,11 +30,11 @@ def test_tokens_and_ens_off(qtbot, tmp_qeth, fake_rpc):
     win = _window(qtbot, {"tokens", "ens"}, tmp_qeth, fake_rpc)
 
     # Only the required plugins are mounted; the disabled ones are absent.
-    assert set(win.plugins) == {"wallets", "transactions"}
+    assert set(win.plugins) == {"wallets", "transactions", "approvals"}
     assert win.tokens_plugin is None
     assert win.ens_plugin is None
     assert win.plugin("tokens") is None and win.plugin("ens") is None
-    assert _right_tabs(win) == ["Transactions"]
+    assert _right_tabs(win) == ["Transactions", "Approvals"]
 
     # Host methods that used to reach into Tokens degrade to None cleanly.
     addr = "0x" + "ab" * 20
@@ -59,18 +59,27 @@ def test_tokens_and_ens_off(qtbot, tmp_qeth, fake_rpc):
 @pytest.mark.usefixtures("hermetic_mainwindow")
 def test_only_tokens_off_keeps_ens(qtbot, tmp_qeth, fake_rpc):
     win = _window(qtbot, {"tokens"}, tmp_qeth, fake_rpc)
-    assert set(win.plugins) == {"wallets", "transactions", "ens"}
+    assert set(win.plugins) == {"wallets", "transactions", "ens", "approvals"}
     assert win.tokens_plugin is None and win.ens_plugin is not None
-    assert _right_tabs(win) == ["Transactions", "ENS"]
+    assert _right_tabs(win) == ["Transactions", "ENS", "Approvals"]
     win._join_workers()
 
 
 @pytest.mark.usefixtures("hermetic_mainwindow")
 def test_only_ens_off_keeps_tokens(qtbot, tmp_qeth, fake_rpc):
     win = _window(qtbot, {"ens"}, tmp_qeth, fake_rpc)
-    assert set(win.plugins) == {"wallets", "tokens", "transactions"}
+    assert set(win.plugins) == {"wallets", "tokens", "transactions", "approvals"}
     assert win.ens_plugin is None and win.tokens_plugin is not None
-    assert _right_tabs(win) == ["Tokens", "Transactions"]
+    assert _right_tabs(win) == ["Tokens", "Transactions", "Approvals"]
     # Tokens present → its icon cache is the host's shared instance.
     assert win.tokens_plugin.icon_cache is win.icon_cache()
+    win._join_workers()
+
+
+@pytest.mark.usefixtures("hermetic_mainwindow")
+def test_approvals_off(qtbot, tmp_qeth, fake_rpc):
+    win = _window(qtbot, {"approvals"}, tmp_qeth, fake_rpc)
+    assert "approvals" not in win.plugins
+    assert win.plugin("approvals") is None
+    assert _right_tabs(win) == ["Tokens", "Transactions", "ENS"]
     win._join_workers()

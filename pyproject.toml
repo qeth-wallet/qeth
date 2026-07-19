@@ -160,6 +160,7 @@ files = [
     "qeth/ui.py",
     "qeth/plugin.py",
     "qeth/plugin_toggle.py",
+    "qeth/plugins/approvals",
     "qeth/plugins/registry.py",
     "qeth/plugins/wallets",
     "qeth/plugins/tokens",

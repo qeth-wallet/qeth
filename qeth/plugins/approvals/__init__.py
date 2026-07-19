@@ -1,0 +1,476 @@
+"""Approvals plugin — progressive full-history scan → live tree of allowances.
+
+A ScanWorker pages the selected account's WHOLE tx history (explorer, block-
+cursor walk, resumable from the tx cache), emits each fetched batch for the
+plugin to merge into the tx cache on the MAIN thread (TransactionCache has no
+lock), and every few pages checks the newly discovered approve() (token,
+spender) pairs via multicall — so the tree fills in as the scan runs. A bottom
+progress bar tracks it and can be stopped. Side effect: when the scan completes,
+the account's full history is cached (the Transactions tab stops refetching).
+
+Modify/revoke actions land in later commits; this file is the read-only scan +
+tree.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, ClassVar
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QProgressBar,
+    QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from ... import QULONGLONG
+from ...chain import EthClient
+from ...formatting import short_addr
+from ...plugin import Plugin
+from ...token_metadata import TokenMetadataCache
+from ...transactions import (
+    BlockscoutTransactionSource, EtherscanV2TransactionSource,
+    RoutedTransactionSource,
+)
+from ..transactions import _format_token_amount, _is_full_history
+from .discovery import ApprovalRow, approve_pairs_in, fetch_allowances
+
+if TYPE_CHECKING:
+    from ...transactions import Transaction
+
+log = logging.getLogger(__name__)
+
+_ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
+_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
+
+
+# --- worker ---------------------------------------------------------------
+
+class ScanWorker(QThread):
+    """Pages the account's full history newest-first, resuming from the cache
+    snapshot; interruptible between pages (the Stop button)."""
+
+    batch_fetched = Signal(QULONGLONG, str, object)      # cid, addr_l, [Transaction] (NEW rows)
+    rows_ready = Signal(QULONGLONG, str, object)         # cid, addr_l, [ApprovalRow]
+    progress = Signal(QULONGLONG, str, object, object)   # cid, addr_l, sent_seen, nonce_total
+    scan_done = Signal(QULONGLONG, str, bool)            # cid, addr_l, complete
+
+    PAGE = 100
+    PAIR_BATCH_EVERY = 3          # re-check allowances every K pages
+    MAX_ATTEMPTS = 3
+
+    def __init__(self, chain, address: str, source, snapshot, metadata_cache,
+                 *, client_factory=None, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._address = address
+        self._source = source
+        self._snapshot = list(snapshot)
+        self._meta = metadata_cache
+        self._client_factory = client_factory or EthClient
+
+    def run(self) -> None:
+        cid = self._chain.chain_id
+        addr_l = self._address.lower()
+        try:
+            client = self._client_factory(self._chain)
+            seen = {t.hash for t in self._snapshot}
+            all_pairs = set(approve_pairs_in(self._snapshot, self._address))
+            checked: set[tuple[str, str]] = set()
+            self._emit_rows(client, cid, addr_l, all_pairs, checked)
+
+            try:
+                total = client.get_transaction_count(self._address, "latest")
+            except Exception:
+                total = 0
+            sent_seen = sum(1 for t in self._snapshot
+                            if t.from_addr.lower() == addr_l)
+            self.progress.emit(cid, addr_l, sent_seen, total)
+
+            if _is_full_history(self._snapshot):
+                self.scan_done.emit(cid, addr_l, True)   # cache already complete
+                return
+
+            snapshot_oldest = min((t.block_number for t in self._snapshot),
+                                  default=None)
+            cursor: int | None = None
+            jumped = snapshot_oldest is None
+            pages = 0
+            while not self.isInterruptionRequested():
+                raw = self._fetch_page(cursor)
+                if raw is None:                          # persistent explorer failure
+                    self.scan_done.emit(cid, addr_l, False)
+                    return
+                if not raw:
+                    break
+                new = [t for t in raw if t.hash not in seen]
+                if new:
+                    seen.update(t.hash for t in new)
+                    self.batch_fetched.emit(cid, addr_l, new)
+                    sent_seen += sum(1 for t in new if t.from_addr.lower() == addr_l)
+                    all_pairs |= approve_pairs_in(new, self._address)
+                pages += 1
+                self.progress.emit(cid, addr_l, min(sent_seen, total or sent_seen),
+                                   total)
+                raw_oldest = min(t.block_number for t in raw)
+                # A page fully within the cached newest span → skip to below it.
+                if (not new and not jumped and snapshot_oldest is not None
+                        and raw_oldest > snapshot_oldest):
+                    cursor = snapshot_oldest
+                    jumped = True
+                    continue
+                if pages % self.PAIR_BATCH_EVERY == 0:
+                    self._emit_rows(client, cid, addr_l, all_pairs, checked)
+                if len(raw) < self.PAGE:                 # short page = start of history
+                    break
+                if cursor is not None and raw_oldest >= cursor:   # no progress guard
+                    break
+                cursor = raw_oldest
+
+            self._emit_rows(client, cid, addr_l, all_pairs, checked)
+            self.scan_done.emit(cid, addr_l, not self.isInterruptionRequested())
+        except Exception:
+            log.debug("approvals scan failed", exc_info=True)
+            self.scan_done.emit(cid, addr_l, False)
+
+    def _fetch_page(self, cursor: int | None) -> list[Transaction] | None:
+        import time
+        for attempt in range(self.MAX_ATTEMPTS):
+            try:
+                return self._source.list_transactions(
+                    self._chain, self._address, page=1, limit=self.PAGE,
+                    before_block=cursor)
+            except Exception:
+                if attempt < self.MAX_ATTEMPTS - 1:
+                    time.sleep(0.5 * (attempt + 1))
+        return None
+
+    def _emit_rows(self, client, cid: int, addr_l: str,
+                   all_pairs: set[tuple[str, str]],
+                   checked: set[tuple[str, str]]) -> None:
+        todo = all_pairs - checked
+        if not todo:
+            return
+        checked.update(todo)
+        found = fetch_allowances(client, self._address, todo)
+        if not found:
+            return
+        tokens = sorted({t for (t, _s) in found})
+        missing = self._meta.missing(cid, tokens)
+        if missing:
+            try:
+                self._meta.put_many(cid, client.multicall_erc20_metadata(missing))
+            except Exception:
+                log.debug("approvals metadata read failed", exc_info=True)
+        rows = []
+        for (token, spender), value in found.items():
+            m = self._meta.get(cid, token) or {}
+            rows.append(ApprovalRow(
+                token=token, spender=spender, allowance=value,
+                symbol=m.get("symbol") or "", name=m.get("name") or "",
+                decimals=int(m.get("decimals") or 18)))
+        self.rows_ready.emit(cid, addr_l, rows)
+
+
+# --- panel ----------------------------------------------------------------
+
+class ApprovalsPanel(QWidget):
+    modify_requested = Signal(object)      # ApprovalRow   (commit 2)
+    revoke_requested = Signal(object)      # [ApprovalRow] (commit 3)
+    refresh_requested = Signal()
+    stop_requested = Signal()
+    copied = Signal(str)
+
+    COLS: ClassVar[list[str]] = ["Token / Spender", "Allowance", "Address"]
+
+    def __init__(self, host=None, parent=None):
+        super().__init__(parent)
+        self._host = host
+        self._token_items: dict[str, QTreeWidgetItem] = {}
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLS))
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_context_menu)
+        hh = self.tree.header()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        v.addWidget(self.tree, 1)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setVisible(False)
+        v.addWidget(self.status_lbl)
+
+        self.progress = QProgressBar()
+        self.progress.setFormat("Scanning history… %p%")
+        self.progress.setVisible(False)
+        v.addWidget(self.progress)
+
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setToolTip("Stop scanning the transaction history")
+        self.btn_stop.setVisible(False)
+        self.btn_stop.clicked.connect(self.stop_requested)
+        self.btn_copy = QPushButton()
+        self.btn_copy.setIcon(QIcon.fromTheme("edit-copy"))
+        self.btn_copy.setToolTip("Copy spender address")
+        self.btn_copy.clicked.connect(self._copy_spender)
+        self.btn_refresh = QPushButton()
+        self.btn_refresh.setIcon(QIcon.fromTheme("view-refresh"))
+        self.btn_refresh.setToolTip("Rescan history")
+        self.btn_refresh.clicked.connect(self.refresh_requested)
+
+        self.tree.itemSelectionChanged.connect(self._update_buttons)
+        self._update_buttons()
+
+    def action_widgets(self) -> list[QWidget]:
+        return [self.btn_stop, self.btn_copy, self.btn_refresh]
+
+    # --- scan lifecycle ---------------------------------------------------
+    def begin_scan(self) -> None:
+        self.clear()
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)                 # indeterminate until first progress
+        self.btn_stop.setVisible(True)
+        self._set_status("")
+
+    def set_progress(self, seen: int, total: int) -> None:
+        if total and total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(seen, total))
+        else:
+            self.progress.setRange(0, 0)
+
+    def finish_scan(self, complete: bool) -> None:
+        self.progress.setVisible(False)
+        self.btn_stop.setVisible(False)
+        if self.tree.topLevelItemCount() == 0:
+            self._set_status("No active approvals found"
+                             if complete else "Scan stopped — no approvals found so far")
+        elif not complete:
+            self._set_status("Scan stopped — showing what was found so far")
+        else:
+            self._set_status("")
+
+    def clear(self) -> None:
+        self.tree.clear()
+        self._token_items.clear()
+        self._set_status("")
+        self._update_buttons()
+
+    # --- population -------------------------------------------------------
+    def append_rows(self, rows: list[ApprovalRow]) -> None:
+        for r in rows:
+            self._add_row(r)
+        self.tree.expandAll()
+        self._update_buttons()
+
+    def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
+        node = self._token_items.get(r.token)
+        if node is not None:
+            return node
+        node = QTreeWidgetItem(self.tree)
+        node.setText(0, r.symbol or (r.token[:10] + "…"))
+        node.setText(2, r.token)
+        node.setData(0, _TOKEN_ROLE, r.token)
+        node.setToolTip(0, f"{r.name or r.symbol}\n{r.token}")
+        node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                      | Qt.ItemFlag.ItemIsAutoTristate)
+        node.setCheckState(0, Qt.CheckState.Unchecked)
+        self._token_items[r.token] = node
+        return node
+
+    def _add_row(self, r: ApprovalRow) -> None:
+        parent = self._token_node(r)
+        leaf = QTreeWidgetItem(parent)
+        leaf.setText(0, r.spender_label or short_addr(r.spender))
+        leaf.setText(1, _format_token_amount(r.allowance, r.decimals, r.symbol))
+        leaf.setText(2, r.spender)
+        leaf.setToolTip(2, r.spender)
+        leaf.setData(0, _ROW_ROLE, r)
+        leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        leaf.setCheckState(0, Qt.CheckState.Unchecked)
+
+    def _set_status(self, text: str) -> None:
+        self.status_lbl.setText(text)
+        self.status_lbl.setVisible(bool(text))
+
+    # --- selection / actions ---------------------------------------------
+    def _selected_leaf(self) -> ApprovalRow | None:
+        it = self.tree.currentItem()
+        if it is None:
+            return None
+        data = it.data(0, _ROW_ROLE)
+        return data if isinstance(data, ApprovalRow) else None
+
+    def _update_buttons(self) -> None:
+        self.btn_copy.setEnabled(self._selected_leaf() is not None)
+
+    def _copy_spender(self) -> None:
+        r = self._selected_leaf()
+        if r is not None:
+            QApplication.clipboard().setText(r.spender)
+            self.copied.emit(r.spender)
+
+    def _on_context_menu(self, pos) -> None:
+        it = self.tree.itemAt(pos)
+        r = it.data(0, _ROW_ROLE) if it is not None else None
+        r = r if isinstance(r, ApprovalRow) else None
+        token = it.data(0, _TOKEN_ROLE) if it is not None else None
+        menu = QMenu(self)
+        act_copy_sp = menu.addAction("Copy spender address")
+        act_copy_sp.setEnabled(r is not None)
+        act_copy_tok = menu.addAction("Copy token address")
+        act_copy_tok.setEnabled(r is not None or token is not None)
+        menu.addSeparator()
+        act_refresh = menu.addAction("Rescan history")
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_copy_sp and r is not None:
+            QApplication.clipboard().setText(r.spender)
+            self.copied.emit(r.spender)
+        elif chosen is act_copy_tok:
+            addr = r.token if r is not None else token
+            if addr:
+                QApplication.clipboard().setText(addr)
+                self.copied.emit(addr)
+        elif chosen is act_refresh:
+            self.refresh_requested.emit()
+
+
+# --- plugin ---------------------------------------------------------------
+
+class ApprovalsPlugin(Plugin):
+    name = "Approvals"
+
+    def __init__(self, store):
+        super().__init__()
+        self._store = store
+        self._panel: ApprovalsPanel | None = None
+        self._loaded_for: tuple[int, str] | None = None
+        self._epoch = 0
+        self._metadata = TokenMetadataCache()
+        self._source = RoutedTransactionSource(
+            EtherscanV2TransactionSource(
+                lambda: getattr(store, "etherscan_api_key", None)),
+            BlockscoutTransactionSource())
+        self._workers: set[QThread] = set()
+        self._scan: ScanWorker | None = None
+        from ...transactions_cache import TransactionCache
+        self._disk_cache = TransactionCache()
+
+    def widget(self) -> QWidget:
+        if self._panel is None:
+            self._panel = ApprovalsPanel(host=self.host)
+            self._panel.refresh_requested.connect(lambda: self._kick(force=True))
+            self._panel.stop_requested.connect(self._stop_scan)
+            self._panel.copied.connect(self._on_copied)
+        return self._panel
+
+    def action_widgets(self) -> list[QWidget]:
+        return self._panel.action_widgets() if self._panel is not None else []
+
+    def on_account_changed(self, address: str | None) -> None:
+        self._invalidate()
+        if self._panel is not None:
+            self._panel.clear()
+            if self._panel.isVisible():
+                self._kick()
+
+    def on_chain_changed(self) -> None:
+        self.on_account_changed(self.host.selected_address if self.host else None)
+
+    def on_activated(self) -> None:
+        self._kick()
+
+    def shutdown(self) -> None:
+        self._invalidate()
+
+    # --- internals --------------------------------------------------------
+    def _current_view(self) -> tuple[int, str] | None:
+        if self.host is None:
+            return None
+        addr = self.host.selected_address
+        if not addr:
+            return None
+        return (self.host.current_chain().chain_id, addr.lower())
+
+    def _invalidate(self) -> None:
+        self._epoch += 1
+        self._loaded_for = None
+        self._stop_scan()
+
+    def _stop_scan(self) -> None:
+        if self._scan is not None:
+            self._scan.requestInterruption()
+
+    def _kick(self, *, force: bool = False) -> None:
+        view = self._current_view()
+        if view is None or self._panel is None or self.host is None:
+            return
+        if not force and self._loaded_for == view:
+            return
+        addr = self.host.selected_address
+        if not addr:
+            return
+        self._loaded_for = view
+        self._epoch += 1
+        epoch = self._epoch
+        chain = self.host.current_chain()
+        self._panel.begin_scan()
+        snapshot = self._disk_cache.load(chain.chain_id, addr) or []
+        worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata)
+        worker.batch_fetched.connect(self._on_batch)
+        worker.rows_ready.connect(
+            lambda c, a, rows, e=epoch: self._on_rows(c, a, rows, e))
+        worker.progress.connect(
+            lambda c, a, s, t, e=epoch: self._on_progress(c, a, s, t, e))
+        worker.scan_done.connect(
+            lambda c, a, ok, e=epoch: self._on_done(c, a, ok, e))
+        self._scan = worker
+        self._start(worker)
+
+    def _start(self, worker: QThread) -> None:
+        if self.host is not None and hasattr(self.host, "start_worker"):
+            self.host.start_worker(worker)
+            return
+        self._workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        worker.start()
+
+    def _fresh(self, chain_id: int, addr_l: str, epoch: int) -> bool:
+        return epoch == self._epoch and self._current_view() == (chain_id, addr_l)
+
+    def _on_batch(self, chain_id, addr_l, txs) -> None:
+        # MAIN thread: the only writer to the tx cache (no lock on it).
+        from ...transactions_cache import merge_txs
+        existing = self._disk_cache.load(chain_id, addr_l) or []
+        merged = merge_txs(list(txs), existing)
+        if merged != existing:
+            self._disk_cache.save(chain_id, addr_l, merged)
+
+    def _on_rows(self, chain_id, addr_l, rows, epoch) -> None:
+        if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
+            self._panel.append_rows(rows)
+
+    def _on_progress(self, chain_id, addr_l, seen, total, epoch) -> None:
+        if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
+            self._panel.set_progress(int(seen), int(total or 0))
+
+    def _on_done(self, chain_id, addr_l, complete, epoch) -> None:
+        if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
+            self._panel.finish_scan(bool(complete))
+
+    def _on_copied(self, text: str) -> None:
+        if self.host is not None:
+            self.host.status_message(f"Copied {text}")

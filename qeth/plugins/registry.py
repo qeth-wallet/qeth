@@ -59,6 +59,11 @@ def _ens(store: Store) -> Plugin:
     return EnsPlugin(store)
 
 
+def _approvals(store: Store) -> Plugin:
+    from .approvals import ApprovalsPlugin
+    return ApprovalsPlugin(store)
+
+
 # Order across slots is by `order`; wallets alone in the left slot, the rest in
 # the right slot. `transactions` is required in v1: it owns the composer / sign
 # dialogs, the ABI/identity/tx caches every sign flow needs, the tx_confirmed /
@@ -86,6 +91,11 @@ BUILTIN_MANIFESTS: tuple[PluginManifest, ...] = (
         slot="right", order=30, requires=("transactions",),
         hides_chain_selector=True,
         description="ENS names: records, renewals, subdomains (Ethereum only)",
+    ),
+    PluginManifest(
+        id="approvals", title="Approvals", factory=_approvals,
+        slot="right", order=40, requires=("transactions",),
+        description="ERC-20 approvals: review, modify, and revoke allowances",
     ),
 )
 

@@ -88,7 +88,7 @@ def test_tab_bar_has_tokens_and_transactions(mainwindow):
     tab_bar = mainwindow.findChild(QTabBar)
     assert tab_bar is not None
     labels = [tab_bar.tabText(i) for i in range(tab_bar.count())]
-    assert labels == ["Tokens", "Transactions", "ENS"]
+    assert labels == ["Tokens", "Transactions", "ENS", "Approvals"]
 
 
 def test_tab_bar_starts_on_tokens(mainwindow):
@@ -101,11 +101,11 @@ def test_join_workers_shuts_down_every_plugin(mainwindow):
     # Regression: ens_plugin used to be omitted from the shutdown loop, so its
     # timers/workers leaked past quit. Every mounted plugin must be shut down.
     shut: list = []
-    for pid in ("wallets", "tokens", "transactions", "ens"):
+    for pid in ("wallets", "tokens", "transactions", "ens", "approvals"):
         p = mainwindow.plugin(pid)
         p.shutdown = lambda pid=pid: shut.append(pid)
     mainwindow._join_workers()
-    assert set(shut) == {"wallets", "tokens", "transactions", "ens"}
+    assert set(shut) == {"wallets", "tokens", "transactions", "ens", "approvals"}
 
 
 def test_host_plugin_accessor_resolves_all_and_unknown(mainwindow):
@@ -121,7 +121,7 @@ def test_right_slot_has_a_config_gear_corner(mainwindow):
     assert corner.count() == 1
     gear = corner.itemAt(0).widget()
     assert gear is not None and gear.menu() is not None
-    assert [a.text() for a in gear.menu().actions()] == ["Tokens", "ENS"]
+    assert [a.text() for a in gear.menu().actions()] == ["Tokens", "ENS", "Approvals"]
 
 
 def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
@@ -143,7 +143,7 @@ def test_left_right_cycles_through_all_right_tabs_including_ens(qtbot, mainwindo
     mw = mainwindow
     flt = mw._tab_cycle_filter
     mw.right_slot.set_active(mw.tokens_plugin)
-    # Right: Tokens → Transactions → ENS → wrap to Tokens
+    # Right: Tokens → Transactions → ENS → Approvals → wrap to Tokens
     assert flt._handle_left_right(mw.tokens_plugin._panel.table, True) is True
     assert mw.right_slot.active() is mw.transactions_plugin
     assert flt._handle_left_right(mw.transactions_plugin._panel.table, True) is True
@@ -152,7 +152,10 @@ def test_left_right_cycles_through_all_right_tabs_including_ens(qtbot, mainwindo
     ens_tree = mw.ens_plugin._panel.tree
     assert ens_tree in flt._right_tables()
     assert flt._handle_left_right(ens_tree, True) is True
-    assert mw.right_slot.active() is mw.tokens_plugin
+    approvals = mw.plugin("approvals")
+    assert mw.right_slot.active() is approvals               # ENS → Approvals
+    assert flt._handle_left_right(approvals._panel.tree, True) is True
+    assert mw.right_slot.active() is mw.tokens_plugin        # Approvals → wrap
 
 
 def test_tab_reaches_ens_tree_when_ens_active(qtbot, mainwindow):

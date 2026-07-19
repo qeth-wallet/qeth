@@ -277,6 +277,7 @@ def hermetic_mainwindow(monkeypatch):
     they still get ``start()``'d and emit ``finished``, so the
     self-eviction wiring stays exercised.
     """
+    from qeth.plugins import approvals as approvals_plugin
     from qeth.plugins import ens as ens_plugin
     from qeth.plugins import tokens as tokens_plugin
     from qeth.plugins import transactions as transactions_plugin
@@ -293,6 +294,7 @@ def hermetic_mainwindow(monkeypatch):
         (transactions_plugin, ["TransactionsWorker"]),
         (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker", "EnsVerifyWorker",
                       "EnsTextKeysWorker"]),
+        (approvals_plugin, ["ScanWorker"]),
     ):
         for cls_name in cls_names:
             cls = getattr(mod, cls_name, None)

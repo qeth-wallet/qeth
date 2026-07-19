@@ -802,6 +802,21 @@ class TokensPlugin(Plugin):
         """App is quitting — stop spawning reconcile workers (satellite 3)."""
         self._shutting_down = True
 
+    def shutdown(self) -> None:
+        """Stop the long-lived background machinery ``attach`` started: the 60s
+        discovery-refresh and reconcile timers (both parentless QTimers, so
+        nothing else disposes them), plus the lazily-built debounce timers, and
+        latch ``_shutting_down`` so no straggler reconcile-retry singleShot kicks
+        a worker. Idempotent and safe before ``attach``. Same rationale as
+        TransactionsPlugin.shutdown — in the app these die with the process, but
+        a plugin built in a test leaves them ticking on the shared QApplication
+        otherwise."""
+        self._shutting_down = True
+        for t in (self._refresh_timer, self._reconcile_timer,
+                  self._targeted_timer, self._live_refresh_timer):
+            if t is not None:
+                t.stop()
+
     def _reconcile_up_to_block(self, chain, account: str, tokens,
                                min_block, attempts: int = 20) -> None:
         """Re-read ``tokens`` at latest and apply — but only once the RPC's head

@@ -39,7 +39,7 @@ from qeth.icons import IconCache
 from qeth.plugins.tokens import TokenListPanel, TokensPlugin
 from qeth.pricing import Price
 from qeth.store import Store
-from qeth.wallet_cache import CachedToken, CachedWallet, WalletCache
+from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
 
 CID = 1
 ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH")
@@ -143,6 +143,13 @@ class TokensTreeMachine(RuleBasedStateMachine):
         self.plugin.on_account_changed(A)
 
     def teardown(self):
+        # The panel's action buttons are created parentless (a Slot mounts them
+        # via action_widgets() in the app) — with no Slot here they're top-level
+        # and would pile up in the shared QApplication (hundreds across examples),
+        # polluting it enough to flake a LATER Qt test. Dispose them with the
+        # panel. See reference_qt_stateful_test_widget_leak.
+        for w in self.panel.action_widgets():
+            w.deleteLater()
         self.panel.deleteLater()
         self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.app.processEvents()

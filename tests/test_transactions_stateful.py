@@ -92,6 +92,12 @@ class TxTreeMachine(RuleBasedStateMachine):
             plugin=lambda pid: None,           # no sibling tokens plugin here
             chain_by_id=lambda cid: ETH if cid == CID else None)
         self.plugin.host = self.host
+        # In the app the panel is visible, so _is_active() is True and account
+        # switches re-render (clear/paint the new view). The fuzzer never shows
+        # the widget, so without this the panel would stay desynced from
+        # _rendered_for across switches — an unrealistic state. Pin it active so
+        # the render paths run as they do in the app.
+        self.plugin._is_active = lambda: True    # type: ignore[method-assign]
         self.current = A
 
     @initialize(n_confirmed=st.integers(0, 4), seed_pending=st.booleans())
@@ -131,6 +137,11 @@ class TxTreeMachine(RuleBasedStateMachine):
         self.plugin.on_account_changed(acct)
 
     def teardown(self):
+        # Action buttons are parentless (a Slot mounts them in the app); with no
+        # Slot here they'd pile up in the shared QApplication across examples.
+        # Dispose them with the widget. See reference_qt_stateful_test_widget_leak.
+        for w in self.plugin.action_widgets():
+            w.deleteLater()
         self.widget.deleteLater()
         self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.app.processEvents()

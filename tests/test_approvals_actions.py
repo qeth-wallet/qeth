@@ -49,6 +49,9 @@ class _FakeHost:
             on_confirmed=on_confirmed, on_cancel=on_cancel))
 
     def start_worker(self, worker):
+        # Mirror MainWindow.start_worker: a finished worker is deleteLater()'d,
+        # so a stale self._scan wrapper can outlive its C++ object.
+        worker.finished.connect(worker.deleteLater)
         self.started.append(worker)
 
     def icon_cache(self):
@@ -217,3 +220,30 @@ def test_invalidate_aborts_active_batch(plugin):
     plugin._invalidate()                              # account/chain change mid-batch
     assert plugin._queue is None
     assert len(plugin.host.requests) == 1             # never advanced
+
+
+# --- crash: _stop_scan on a host-deleted worker (account switch mid-scan) ---
+
+def test_stop_scan_survives_a_deleted_worker(plugin):
+    """Reproduce 'Internal C++ object (ScanWorker) already deleted': the host
+    deleteLater()s a finished scan worker, then an account switch runs
+    _invalidate → _stop_scan on the stale wrapper. Must not raise."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    from qeth.plugins.approvals import ScanWorker
+    w = ScanWorker(CHAIN, OWNER, object(), [], object())
+    plugin._scan = w                                   # pretend a scan is live
+    w.deleteLater()
+    QApplication.instance().sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    plugin._invalidate()                               # was: RuntimeError, aborting the switch
+    assert plugin._scan is None
+
+
+def test_finished_scan_forgets_worker_before_deletelater(plugin):
+    plugin._loaded_for = None
+    plugin._kick(force=True)                           # spawns + starts a worker
+    w = plugin._scan
+    assert w is not None and w in plugin.host.started
+    w.finished.emit()                                  # host deleteLater()s it here
+    assert plugin._scan is None                        # forgotten synchronously

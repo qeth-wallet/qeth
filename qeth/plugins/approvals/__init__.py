@@ -21,13 +21,14 @@ from eth_utils import to_checksum_address
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QProgressBar,
-    QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
+    QProgressBar, QPushButton, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ... import QULONGLONG
 from ...chain import EthClient
-from ...formatting import format_balance, format_usd, short_addr
+from ...formatting import format_balance, short_addr
 from ...plugin import Plugin
 from ...token_metadata import TokenMetadataCache
 from ...transactions import (
@@ -48,6 +49,35 @@ log = logging.getLogger(__name__)
 _ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
 _TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
 _USD_SORT_ROLE = Qt.ItemDataRole.UserRole + 2  # float: USD exposure (∞ = unlimited)
+_MIN_COL_W = 48                                # neither column shrinks below this
+
+
+def _icon(names: tuple[str, ...], fallback: QStyle.StandardPixmap) -> QIcon:
+    """A themed icon from the first of ``names`` the icon theme provides, with a
+    built-in Qt standard icon as a last resort so something always renders
+    (icon-name coverage is patchy across themes)."""
+    for name in names:
+        ic = QIcon.fromTheme(name)
+        if not ic.isNull():
+            return ic
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        return app.style().standardIcon(fallback)
+    return QIcon()
+
+
+# Action → (theme-name candidates, Qt standard-icon fallback). Shared by the
+# buttons and the context menu so both carry the same glyph (house standard).
+_IC_MODIFY = (("document-edit", "edit-rename", "accessories-text-editor"),
+              QStyle.StandardPixmap.SP_FileDialogDetailedView)
+_IC_REVOKE = (("edit-delete", "list-remove", "user-trash"),
+              QStyle.StandardPixmap.SP_TrashIcon)
+_IC_COPY = (("edit-copy",), QStyle.StandardPixmap.SP_FileDialogContentsView)
+_IC_EXPLORER = (("internet-web-browser", "web-browser", "applications-internet"),
+                QStyle.StandardPixmap.SP_ComputerIcon)
+_IC_REFRESH = (("view-refresh", "reload"), QStyle.StandardPixmap.SP_BrowserReload)
+_IC_STOP = (("media-playback-stop", "process-stop"),
+            QStyle.StandardPixmap.SP_MediaStop)
 
 # At/above this an allowance reads as "unlimited" — the same threshold the
 # approve dialog's Unlimited toggle uses (2**255 is half the uint256 space,
@@ -93,16 +123,32 @@ def _row_sort_value(r: ApprovalRow) -> float:
     return float(usd) if usd is not None else 0.0
 
 
+def _trim2(x: float) -> str:
+    """Up to 2 decimals, trailing zeros dropped: 123.20 → "123.2", 12.00 → "12"."""
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_usd_compact(value) -> str:
+    """Human-scaled USD so the column stays narrow: "$123.2", "$12.2M",
+    "$10.1B", "$1.05T". Values too small or too large for a letter suffix drop
+    to scientific ("$1.23 × 10⁻⁵", "$1.5 × 10¹⁶"). "" for non-positive."""
+    if value is None or value <= 0:
+        return ""
+    v = float(value)
+    if v < 1 or v >= 1e15:                       # sub-dollar / astronomical → sci
+        return "$" + format_balance(v)
+    for base, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if v >= base:
+            return f"${_trim2(v / base)}{suffix}"
+    return f"${_trim2(v)}"
+
+
 def _allowance_cell(r: ApprovalRow) -> str:
-    """Allowance column text: the compact amount, plus the USD value when the
-    cap is finite and priced ("1,000,000 · $1,000,000.00")."""
+    """Allowance column text: the compact amount, plus the compact USD value
+    when the cap is finite and priced ("1,000,000 · $1M")."""
     amount = _format_allowance(r.allowance, r.decimals)
-    usd = _row_usd(r)
-    if usd is not None:
-        u = format_usd(usd)
-        if u:
-            return f"{amount} · {u}"
-    return amount
+    usd = _format_usd_compact(_row_usd(r))
+    return f"{amount} · {usd}" if usd else amount
 
 
 class _ApprovalItem(QTreeWidgetItem):
@@ -342,6 +388,8 @@ class ApprovalsPanel(QWidget):
         self._hovered: QTreeWidgetItem | None = None
         self._sort_col = 0
         self._sort_order = Qt.SortOrder.AscendingOrder    # token A→Z by default
+        self._col0_frac: float | None = None              # user's split ratio
+        self._syncing = False                             # re-entrancy guard
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
 
@@ -366,46 +414,59 @@ class ApprovalsPanel(QWidget):
         hh = self.tree.header()
         # QTreeView defaults stretchLastSection=True, which force-stretched the
         # last (Allowance) column — stranding the amount with dead space no drag
-        # could reclaim. Off: Token/Spender stretches to fill (and absorbs the
-        # squeeze), Allowance fits its content but stays user-resizable.
+        # could reclaim. Off, with BOTH columns Interactive + a manual split
+        # (see _layout_columns / _on_section_resized): the divider drags, the two
+        # columns always sum to the viewport, and Allowance starts content-wide.
         hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        hh.setMinimumSectionSize(_MIN_COL_W)
         hh.setSectionsClickable(True)
         hh.setSortIndicatorShown(True)
         hh.setSortIndicator(self._sort_col, self._sort_order)
         hh.sectionClicked.connect(self._on_header_clicked)
+        hh.sectionResized.connect(self._on_section_resized)
         v.addWidget(self.tree, 1)
 
         self.status_lbl = QLabel("")
         self.status_lbl.setVisible(False)
         v.addWidget(self.status_lbl)
 
+        # Scan progress: a bar with a small media-player-style Stop sign to its
+        # right, shown only while scanning (hidden as one unit).
+        self._scan_bar = QWidget()
+        bar = QHBoxLayout(self._scan_bar)
+        bar.setContentsMargins(0, 0, 0, 0)
         self.progress = QProgressBar()
         self.progress.setFormat("Scanning history… %p%")
-        self.progress.setVisible(False)
-        v.addWidget(self.progress)
+        bar.addWidget(self.progress, 1)
+        self.btn_stop = QToolButton()
+        self.btn_stop.setIcon(_icon(*_IC_STOP))
+        self.btn_stop.setToolTip("Stop scanning")
+        self.btn_stop.setAutoRaise(True)
+        self.btn_stop.clicked.connect(self.stop_requested)
+        bar.addWidget(self.btn_stop)
+        self._scan_bar.setVisible(False)
+        v.addWidget(self._scan_bar)
 
         self.btn_modify = QPushButton("&Modify Approval…")
+        self.btn_modify.setIcon(_icon(*_IC_MODIFY))
         self.btn_modify.setToolTip("Set a new allowance for the selected spender")
         self.btn_modify.clicked.connect(self._emit_modify)
         self.btn_revoke = QPushButton("&Revoke")
+        self.btn_revoke.setIcon(_icon(*_IC_REVOKE))
         self.btn_revoke.setToolTip("Set the selected allowance to zero")
         self.btn_revoke.clicked.connect(self._emit_revoke)
-        self.btn_stop = QPushButton("Stop")
-        self.btn_stop.setToolTip("Stop scanning the transaction history")
-        self.btn_stop.setVisible(False)
-        self.btn_stop.clicked.connect(self.stop_requested)
         self.btn_copy = QPushButton()
-        self.btn_copy.setIcon(QIcon.fromTheme("edit-copy"))
+        self.btn_copy.setIcon(_icon(*_IC_COPY))
         self.btn_copy.setToolTip("Copy spender address")
         self.btn_copy.clicked.connect(self._copy_spender)
         self.btn_explorer = QPushButton()
-        self.btn_explorer.setIcon(QIcon.fromTheme("web-browser"))
+        self.btn_explorer.setIcon(_icon(*_IC_EXPLORER))
         self.btn_explorer.setToolTip("Open spender in the block explorer")
         self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
         self.btn_refresh = QPushButton()
-        self.btn_refresh.setIcon(QIcon.fromTheme("view-refresh"))
+        self.btn_refresh.setIcon(_icon(*_IC_REFRESH))
         self.btn_refresh.setToolTip("Rescan history")
         self.btn_refresh.clicked.connect(self.refresh_requested)
 
@@ -418,15 +479,14 @@ class ApprovalsPanel(QWidget):
             self._host.icon_cache().icon_ready.connect(self._on_icon_ready)
 
     def action_widgets(self) -> list[QWidget]:
-        return [self.btn_modify, self.btn_revoke, self.btn_stop,
+        return [self.btn_modify, self.btn_revoke,
                 self.btn_copy, self.btn_explorer, self.btn_refresh]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
         self.clear()
-        self.progress.setVisible(True)
         self.progress.setRange(0, 0)                 # indeterminate until first progress
-        self.btn_stop.setVisible(True)
+        self._scan_bar.setVisible(True)              # bar + Stop as one unit
         self._set_status("")
 
     def set_progress(self, seen: int, total: int) -> None:
@@ -437,8 +497,7 @@ class ApprovalsPanel(QWidget):
             self.progress.setRange(0, 0)
 
     def finish_scan(self, complete: bool) -> None:
-        self.progress.setVisible(False)
-        self.btn_stop.setVisible(False)
+        self._scan_bar.setVisible(False)
         if self.tree.topLevelItemCount() == 0:
             self._set_status("No active approvals found"
                              if complete else "Scan stopped — no approvals found so far")
@@ -460,7 +519,7 @@ class ApprovalsPanel(QWidget):
             self._add_row(r)
         self.tree.blockSignals(False)
         self._apply_sort()                           # recompute sums, sort, expandAll
-        self.tree.resizeColumnToContents(1)          # allowance fits; identity absorbs
+        self._layout_columns()                       # keep the split filling the width
         self._update_buttons()
         self._refresh_reveal()
 
@@ -557,11 +616,43 @@ class ApprovalsPanel(QWidget):
         self._refresh_reveal()
 
     def eventFilter(self, obj, event) -> bool:
-        if (obj is self.tree.viewport()
-                and event.type() == QEvent.Type.Leave and self._hovered is not None):
-            self._hovered = None
-            self._refresh_reveal()
+        if obj is self.tree.viewport():
+            et = event.type()
+            if et == QEvent.Type.Leave and self._hovered is not None:
+                self._hovered = None
+                self._refresh_reveal()
+            elif et == QEvent.Type.Resize:
+                self._layout_columns()               # keep the split filling the width
         return super().eventFilter(obj, event)
+
+    # --- column split (two Interactive columns that always fill the width) --
+    def _layout_columns(self, *, refit: bool = False) -> None:
+        vp = self.tree.viewport().width()
+        if vp <= 2 * _MIN_COL_W:
+            return
+        if refit or self._col0_frac is None:          # first fill: allowance fits content
+            self.tree.resizeColumnToContents(1)
+            c1 = min(max(self.tree.columnWidth(1), _MIN_COL_W), vp - _MIN_COL_W)
+            self._col0_frac = (vp - c1) / vp
+        c0 = max(_MIN_COL_W, min(int(vp * self._col0_frac), vp - _MIN_COL_W))
+        self._syncing = True
+        self.tree.setColumnWidth(0, c0)
+        self.tree.setColumnWidth(1, vp - c0)
+        self._syncing = False
+
+    def _on_section_resized(self, idx: int, _old: int, new: int) -> None:
+        if self._syncing:
+            return                                    # our own setColumnWidth
+        vp = self.tree.viewport().width()
+        if vp <= 2 * _MIN_COL_W:
+            return
+        c0 = new if idx == 0 else vp - new            # divider drag → both adjust
+        c0 = max(_MIN_COL_W, min(c0, vp - _MIN_COL_W))
+        self._col0_frac = c0 / vp
+        self._syncing = True
+        self.tree.setColumnWidth(0, c0)
+        self.tree.setColumnWidth(1, vp - c0)
+        self._syncing = False
 
     def _refresh_reveal(self) -> None:
         """Rewrite each named leaf's column-0 text so the hovered / selected one
@@ -724,19 +815,19 @@ class ApprovalsPanel(QWidget):
         r = r if isinstance(r, ApprovalRow) else None
         token = it.data(0, _TOKEN_ROLE) if it is not None else None
         menu = QMenu(self)
-        act_modify = menu.addAction("Modify Approval…")
+        act_modify = menu.addAction(_icon(*_IC_MODIFY), "Modify Approval…")
         act_modify.setEnabled(r is not None)
-        act_revoke = menu.addAction("Revoke Approval")
+        act_revoke = menu.addAction(_icon(*_IC_REVOKE), "Revoke Approval")
         act_revoke.setEnabled(r is not None)
         menu.addSeparator()
-        act_copy_sp = menu.addAction("Copy spender address")
+        act_copy_sp = menu.addAction(_icon(*_IC_COPY), "Copy spender address")
         act_copy_sp.setEnabled(r is not None)
-        act_copy_tok = menu.addAction("Copy token address")
+        act_copy_tok = menu.addAction(_icon(*_IC_COPY), "Copy token address")
         act_copy_tok.setEnabled(r is not None or token is not None)
-        act_explorer = menu.addAction("Open spender in explorer")
+        act_explorer = menu.addAction(_icon(*_IC_EXPLORER), "Open spender in explorer")
         act_explorer.setEnabled(r is not None and self._explorer_base() is not None)
         menu.addSeparator()
-        act_refresh = menu.addAction("Rescan history")
+        act_refresh = menu.addAction(_icon(*_IC_REFRESH), "Rescan history")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
             return
@@ -842,8 +933,18 @@ class ApprovalsPlugin(Plugin):
         self._reconcile_timer.stop()
 
     def _stop_scan(self) -> None:
-        if self._scan is not None:
-            self._scan.requestInterruption()
+        # The host deleteLater()s a finished worker (ui.py start_worker), so a
+        # naturally-completed scan leaves self._scan a stale wrapper whose C++
+        # object is gone — requestInterruption() on it raised "already deleted"
+        # and aborted the account switch. Guard with isValid, then forget it.
+        from shiboken6 import isValid
+        scan, self._scan = self._scan, None
+        if scan is not None and isValid(scan):
+            scan.requestInterruption()
+
+    def _forget_scan(self, worker: QThread) -> None:
+        if self._scan is worker:
+            self._scan = None
 
     def _abort_queue(self) -> None:
         if self._queue is not None:
@@ -982,6 +1083,9 @@ class ApprovalsPlugin(Plugin):
             lambda c, a, s, t, e=epoch: self._on_progress(c, a, s, t, e))
         worker.scan_done.connect(
             lambda c, a, ok, e=epoch: self._on_done(c, a, ok, e))
+        # Drop our reference the moment it finishes, before the host's
+        # deleteLater() runs — so _stop_scan never reaches a dead wrapper.
+        worker.finished.connect(lambda w=worker: self._forget_scan(w))
         self._scan = worker
         self._start(worker)
 

@@ -200,11 +200,19 @@ def test_leaves_and_token_are_checkable(qtbot):
 def test_scan_progress_lifecycle(qtbot):
     p = _panel(qtbot)
     p.begin_scan()
-    assert not p.btn_stop.isHidden()
+    assert not p._scan_bar.isHidden()               # bar + stop shown as one unit
     p.set_progress(3, 10)
     assert p.progress.maximum() == 10 and p.progress.value() == 3
     p.finish_scan(True)
-    assert p.progress.isHidden() and p.btn_stop.isHidden()
+    assert p._scan_bar.isHidden()
+
+
+def test_stop_button_is_a_small_toolbutton_next_to_bar(qtbot):
+    from PySide6.QtWidgets import QToolButton
+    p = _panel(qtbot)
+    assert isinstance(p.btn_stop, QToolButton)      # small stop sign, not a big button
+    assert p.btn_stop.parent() is p._scan_bar       # sits in the progress row
+    assert p.btn_stop not in p.action_widgets()     # not in the bottom action row
 
 
 def test_empty_after_complete_scan(qtbot):
@@ -391,7 +399,7 @@ def test_row_sort_value_unpriced_finite_is_zero():
 
 def test_allowance_cell_appends_usd():
     assert _allowance_cell(_row(allowance=5_000_000, decimals=6,
-                                price_usd=Decimal("1"))) == "5 · $5.00"
+                                price_usd=Decimal("1"))) == "5 · $5"
 
 
 def test_allowance_cell_unlimited_has_no_usd():
@@ -412,7 +420,7 @@ def test_token_node_shows_symbol_and_short_address(qtbot):
 def test_allowance_column_shows_usd(qtbot):
     p = _panel(qtbot)
     p.append_rows([_row(allowance=5_000_000, decimals=6, price_usd=Decimal("1"))])
-    assert p.tree.topLevelItem(0).child(0).text(1) == "5 · $5.00"
+    assert p.tree.topLevelItem(0).child(0).text(1) == "5 · $5"
 
 
 def test_stretch_last_section_is_off(qtbot):
@@ -464,3 +472,70 @@ def test_token_total_sums_spender_exposure(qtbot):
     ])
     from qeth.plugins.approvals import _USD_SORT_ROLE
     assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 4.0         # $1 + $3
+
+
+# --- compact USD -----------------------------------------------------------
+
+from qeth.plugins.approvals import _format_usd_compact  # noqa: E402
+
+
+def test_format_usd_compact_abbreviations():
+    assert _format_usd_compact(Decimal("123.2")) == "$123.2"
+    assert _format_usd_compact(Decimal("12200000")) == "$12.2M"
+    assert _format_usd_compact(Decimal("10100000000")) == "$10.1B"
+    assert _format_usd_compact(Decimal("1050000000000")) == "$1.05T"
+    assert _format_usd_compact(Decimal("5")) == "$5"
+    assert _format_usd_compact(Decimal("1234.56")) == "$1.23K"
+
+
+def test_format_usd_compact_extremes_go_scientific():
+    assert _format_usd_compact(Decimal("0.0000123")) == "$1.23 × 10⁻⁵"
+    assert "× 10" in _format_usd_compact(Decimal("1500000000000000"))   # ≥ 1e15
+
+
+def test_format_usd_compact_nonpositive_is_empty():
+    assert _format_usd_compact(Decimal("0")) == ""
+    assert _format_usd_compact(None) == ""
+
+
+# --- resizable two-column split -------------------------------------------
+
+from PySide6.QtWidgets import QHeaderView  # noqa: E402
+
+
+def test_both_columns_interactive_no_last_stretch(qtbot):
+    p = _panel(qtbot)
+    hh = p.tree.header()
+    assert hh.sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
+    assert hh.sectionResizeMode(1) == QHeaderView.ResizeMode.Interactive
+    assert hh.stretchLastSection() is False
+
+
+def _shown_panel(qtbot):
+    p = _panel(qtbot)
+    p.resize(440, 300)
+    p.show()
+    qtbot.waitExposed(p)
+    p.append_rows([_row(spender=SP1)])
+    return p
+
+
+def test_columns_fill_the_viewport(qtbot):
+    p = _shown_panel(qtbot)
+    vp = p.tree.viewport().width()
+    if vp <= 2 * 48:
+        import pytest
+        pytest.skip("viewport too small offscreen")
+    assert p.tree.columnWidth(0) + p.tree.columnWidth(1) == vp
+
+
+def test_divider_drag_reflows_and_stays_filled(qtbot):
+    p = _shown_panel(qtbot)
+    vp = p.tree.viewport().width()
+    if vp <= 2 * 48:
+        import pytest
+        pytest.skip("viewport too small offscreen")
+    target = vp // 3
+    p._on_section_resized(0, p.tree.columnWidth(0), target)   # user drags divider
+    assert p.tree.columnWidth(0) == target
+    assert p.tree.columnWidth(0) + p.tree.columnWidth(1) == vp   # allowance absorbed

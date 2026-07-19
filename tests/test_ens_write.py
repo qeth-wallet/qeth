@@ -189,6 +189,15 @@ class TestSetManager:
             ["bytes32", "bytes32", "address"],
             [namehash(NAME), _labelhash("ops"), self.MANAGER])
 
+    def test_set_owner_via_registry_setowner(self):
+        # The general "change manager" path — registry.setOwner(node, owner),
+        # callable by the node's CURRENT manager, for a 2LD or a subdomain alike.
+        to, data = ens_write.set_owner(NAME, self.MANAGER)
+        assert to == ENS_REGISTRY
+        assert _selector(data) == "5b0fc9c3"
+        assert _body(data) == abi_encode(
+            ["bytes32", "address"], [namehash(NAME), self.MANAGER])
+
 
 class TestRemoveSubnode:
     def test_remove_subnode_zeroes_owner_resolver_ttl(self):

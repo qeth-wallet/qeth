@@ -2080,6 +2080,7 @@ class TestEnsWriteActions:
         from eth_utils import to_checksum_address
         plugin, host, store = self._plugin(qtbot)        # vitalik.eth in tree
         plugin._on_refresh = lambda **k: None            # kill async rediscover/verify
+        plugin._registrant.add("vitalik.eth")            # registrant → reclaim path
         plugin._set_manager("vitalik.eth")
         _name, op, _chain, _from, on_confirmed = host.ens_ops[0]
         dlg = self._composer(op)
@@ -2578,13 +2579,21 @@ class TestEnsWriteActions:
     def test_set_manager_builds_reclaim_to_registrar(self, qtbot):
         from qeth.ens_app import ENS_ETH_REGISTRAR, _labelhash
         plugin, host, store = self._plugin(qtbot)
-        plugin._registrant.add("vitalik.eth")
+        # Registrant of an unwrapped 2LD whose manager is delegated elsewhere
+        # (crv.eth-style) → "Set manager" reclaims via the BaseRegistrar.
+        delegate = "0x" + "cc" * 20
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=delegate, registrant=ADDR, owner_known=True),
+        }, True)
+        assert "vitalik.eth" in plugin._registrant
+        assert "vitalik.eth" not in plugin._controller
         plugin._set_manager("vitalik.eth")
         name, op, *_rest = host.ens_ops[0]
         dlg = self._composer(op)
         qtbot.addWidget(dlg)
-        # Defaults the manager field to the signer (reclaim to self).
-        assert dlg._fields.value().lower() == ADDR.lower()
+        # Prefilled with the CURRENT (delegated) manager — edit-in-place.
+        assert dlg._fields.value().lower() == delegate.lower()
         dlg._fields.recipient.setText(self.OTHER)
         req = dlg._build_request()
         assert req.to_addr.lower() == ENS_ETH_REGISTRAR.lower()
@@ -2593,6 +2602,30 @@ class TestEnsWriteActions:
         assert req.data[10:] == abi_encode(
             ["uint256", "address"], [token_id, self.OTHER]).hex()
         assert "Set manager" in op.confirm_label
+
+    def test_set_manager_via_setowner_when_current_manager(self, qtbot):
+        # The general path: we're the CURRENT manager (controller) but not the
+        # registrant → "Set manager" hands the role on via registry.setOwner,
+        # prefilled with the current manager (us).
+        from qeth.ens_app import ENS_REGISTRY, namehash
+        plugin, host, store = self._plugin(qtbot)
+        plugin._on_verified(ADDR, {
+            "vitalik.eth": OwnershipCheck(
+                controller=ADDR, registrant="0x" + "cc" * 20, owner_known=True),
+        }, True)
+        assert "vitalik.eth" in plugin._controller
+        assert "vitalik.eth" not in plugin._registrant
+        plugin._set_manager("vitalik.eth")
+        name, op, *_rest = host.ens_ops[0]
+        dlg = self._composer(op)
+        qtbot.addWidget(dlg)
+        assert dlg._fields.value().lower() == ADDR.lower()   # current manager = us
+        dlg._fields.recipient.setText(self.OTHER)
+        req = dlg._build_request()
+        assert req.to_addr.lower() == ENS_REGISTRY.lower()
+        assert req.data[2:10] == "5b0fc9c3"              # setOwner(bytes32,address)
+        assert req.data[10:] == abi_encode(
+            ["bytes32", "address"], [namehash("vitalik.eth"), self.OTHER]).hex()
 
     def test_set_manager_rejects_unmanageable_subdomain_and_wrapped(self, qtbot):
         plugin, host, store = self._plugin(qtbot, owned=("blog.vitalik.eth",))

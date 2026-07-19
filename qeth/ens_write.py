@@ -35,6 +35,9 @@ _SEL_SUBNODE_RECORD = bytes.fromhex("5ef2c7f0")
 # registry.setSubnodeOwner(bytes32,bytes32,address) — reassign a subnode's owner
 # (manager) without touching its resolver/records.
 _SEL_SUBNODE_OWNER = bytes.fromhex("06ab5923")
+# registry.setOwner(bytes32,address) — reassign a node's OWN manager (registry
+# owner). Callable by the node's current manager; works for a 2LD or a subdomain.
+_SEL_SET_OWNER = bytes.fromhex("5b0fc9c3")
 # registry.setRecord(bytes32,address,address,uint64) — set a node's own owner,
 # resolver and ttl in one call (used zeroed to relinquish a subnode you manage).
 _SEL_SET_RECORD = bytes.fromhex("cf408823")
@@ -200,6 +203,21 @@ def transfer_name(name: str, from_addr: str, to_addr: str, *,
     body = _abi(["address", "address", "uint256"],
                 [from_addr, to_addr, token_id])
     return _tx(ENS_ETH_REGISTRAR, _SEL_SAFE_TRANSFER_721, body)
+
+
+def set_owner(name: str, manager: str) -> Tx:
+    """Reassign a node's registry *manager* (owner) to ``manager``, via
+    ``registry.setOwner(node, owner)``.
+
+    This is the general "change manager" path: callable by the node's CURRENT
+    manager (registry owner), for a 2LD **or** a subdomain alike. It's how a
+    manager hands the role to another address — the case ``reclaim`` (registrant-
+    only) and ``setSubnodeOwner`` (the parent's power) don't cover. Wrapped names
+    hold their registry owner in the NameWrapper, so this is unwrapped-only; a
+    wrapped node's ``setOwner`` from the caller reverts (the sign dialog's
+    simulation surfaces it)."""
+    body = _abi(["bytes32", "address"], [namehash(name), manager])
+    return _tx(ENS_REGISTRY, _SEL_SET_OWNER, body)
 
 
 def set_manager(name: str, manager: str) -> Tx:

@@ -2256,11 +2256,14 @@ class EnsPlugin(Plugin):
             self._registrant.clear()
             self._controller.clear()
             self._in_new_registry.clear()
+            self._wrapped_subnode_manageable.clear()
             if self._panel is not None:
                 self._panel.set_writable(set())
                 self._panel.set_transferable(set())
                 self._panel.set_reclaimable(set())
                 self._panel.set_subnode_manageable(set())
+                self._panel.set_owner_settable(set())
+                self._panel.set_wrapped_subnode_manageable(set())
                 self._panel.set_subnode_removable(set())
         self._loaded_for = address
         if not address:

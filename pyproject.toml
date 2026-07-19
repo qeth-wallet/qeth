@@ -71,6 +71,7 @@ dev = [
     "ty>=0.0.50",       # type checker (preview); run via scripts/check.sh
     "pytest>=8",
     "pytest-qt>=4.4",
+    "hypothesis>=6",    # stateful/property tests (tests/test_ens_stateful.py)
     # The simulate extra, mirrored here so the fork-engine tests always
     # run the real (pure-Python) EVM rather than skipping.
     "py-evm>=0.10",

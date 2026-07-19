@@ -448,6 +448,32 @@ class TestEnsPanel:
         assert not any(l.startswith("alice.eth") for l in labels)
         assert any(l.startswith("mine.eth") for l in labels)
 
+    def test_unverified_read_shows_manager_for_cross_account_subnode(self, qtbot):
+        # A subnode you DON'T control (shown because you own the parent) must get
+        # its manager row from the FAST unverified read too — else it shows a
+        # blank manager until (if ever) the Helios-proven pass lands for it.
+        from eth_utils import to_checksum_address
+        panel = EnsPanel()
+        qtbot.addWidget(panel)
+        me, deployer = "0x" + "11" * 20, "0x" + "a3" * 20
+        panel.populate(build_tree([
+            EnsName("yieldbasis.eth"),
+            EnsName("oracles-ll.yieldbasis.eth", source="subnode"),
+        ]), NOW)
+        removed = panel.mark_verified({
+            "oracles-ll.yieldbasis.eth": OwnershipCheck(
+                controller=deployer, registrant=deployer, wrapped=True,
+                owner_known=True),
+        }, me, verified=False)
+        assert removed == []                          # a subnode is never dropped
+        sub = panel._items_by_name["oracles-ll.yieldbasis.eth"]
+        mgr = next((sub.child(i) for i in range(sub.childCount())
+                    if sub.child(i).text(0) == "manager"), None)
+        assert mgr is not None and mgr.text(2) == to_checksum_address(deployer)
+        assert mgr.data(0, _STATUS_ROLE) != "ok"      # unverified → no green ✓
+        assert (panel.manager_of("oracles-ll.yieldbasis.eth") or "").lower() \
+            == deployer.lower()                       # prefill for edit-in-place
+
     def test_mark_verified_drops_nonexistent_name(self, qtbot):
         panel = EnsPanel()
         qtbot.addWidget(panel)

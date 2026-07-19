@@ -1219,24 +1219,28 @@ class EnsPanel(QWidget):
             n = item.data(0, _NAME_ROLE)
             src = n.source if isinstance(n, EnsName) else ""
             if st.disowned_by(address):
-                if not verified:
-                    continue          # unverified can't drop or badge a disown
                 if src == "registrant":
                     # A FRESH on-chain NFT read surfaced it but the verified head
                     # still lags (a just-transferred name). Keep it, badge "proof
-                    # catching up", don't paint the stale rows. A later pass
-                    # verifies it green or a refresh drops it.
-                    self._set_status(item, "pending", _PENDING_TIP)
-                    item.setToolTip(0, _PENDING_TIP)
+                    # catching up" (verified pass only), don't paint the stale
+                    # rows. A later pass verifies it green or a refresh drops it.
+                    if verified:
+                        self._set_status(item, "pending", _PENDING_TIP)
+                        item.setToolTip(0, _PENDING_TIP)
                     continue
                 if src not in ("custom", "subnode"):
-                    # A real indexer lie (BENS over-reported). Drop it. Pinned
-                    # (custom) names and parent-owned subdomains (subnode) are
-                    # exempt — showing them even when this account doesn't
-                    # control them is the point (you own the parent).
-                    self._remove_item(item, name_l)
-                    removed.append(name_l)
+                    # A real indexer lie (BENS over-reported). Drop it once PROVEN
+                    # — the unverified read can't be trusted to remove anything,
+                    # so it just waits for the verified pass.
+                    if verified:
+                        self._remove_item(item, name_l)
+                        removed.append(name_l)
                     continue
+                # A pinned (custom) or parent-owned (subnode) name you DON'T
+                # control — shown on purpose (you own an ancestor) and never
+                # dropped. Fall through to freshen its manager/owner rows even on
+                # the fast pass: otherwise a cross-account subname shows a BLANK
+                # manager until (if ever) the Helios-proven pass lands for it.
             # Authoritative on-chain expiry (nameExpires) → correct the Expires
             # column over BENS's grace-inclusive hint. (Same block as the row —
             # already accepted above — so this re-check always passes.)

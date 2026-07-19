@@ -50,6 +50,7 @@ _ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
 _TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
 _USD_SORT_ROLE = Qt.ItemDataRole.UserRole + 2  # float: USD exposure (∞ = unlimited)
 _MIN_COL_W = 48                                # neither column shrinks below this
+_COL_GAP = 16                                  # breathing room left of the (right-aligned) amount
 
 
 def _icon(names: tuple[str, ...], fallback: QStyle.StandardPixmap) -> QIcon:
@@ -123,32 +124,11 @@ def _row_sort_value(r: ApprovalRow) -> float:
     return float(usd) if usd is not None else 0.0
 
 
-def _trim2(x: float) -> str:
-    """Up to 2 decimals, trailing zeros dropped: 123.20 → "123.2", 12.00 → "12"."""
-    return f"{x:.2f}".rstrip("0").rstrip(".")
-
-
-def _format_usd_compact(value) -> str:
-    """Human-scaled USD so the column stays narrow: "$123.2", "$12.2M",
-    "$10.1B", "$1.05T". Values too small or too large for a letter suffix drop
-    to scientific ("$1.23 × 10⁻⁵", "$1.5 × 10¹⁶"). "" for non-positive."""
-    if value is None or value <= 0:
-        return ""
-    v = float(value)
-    if v < 1 or v >= 1e15:                       # sub-dollar / astronomical → sci
-        return "$" + format_balance(v)
-    for base, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if v >= base:
-            return f"${_trim2(v / base)}{suffix}"
-    return f"${_trim2(v)}"
-
-
 def _allowance_cell(r: ApprovalRow) -> str:
-    """Allowance column text: the compact amount, plus the compact USD value
-    when the cap is finite and priced ("1,000,000 · $1M")."""
-    amount = _format_allowance(r.allowance, r.decimals)
-    usd = _format_usd_compact(_row_usd(r))
-    return f"{amount} · {usd}" if usd else amount
+    """Allowance column text: just the compact token amount. (USD is not shown —
+    it read as clutter — but the priced value still drives the by-exposure sort
+    via ``_row_sort_value``.)"""
+    return _format_allowance(r.allowance, r.decimals)
 
 
 class _ApprovalItem(QTreeWidgetItem):
@@ -460,6 +440,7 @@ class ApprovalsPanel(QWidget):
         self.btn_action = QPushButton("&Modify")
         self.btn_action.setIcon(self._ic_modify)
         self.btn_action.clicked.connect(self._on_action_clicked)
+        # Icon-only buttons render frameless (flat), like a toolbar.
         self.btn_copy = QPushButton()
         self.btn_copy.setIcon(_icon(*_IC_COPY))
         self.btn_copy.setToolTip("Copy spender address")
@@ -472,6 +453,8 @@ class ApprovalsPanel(QWidget):
         self.btn_refresh.setIcon(_icon(*_IC_REFRESH))
         self.btn_refresh.setToolTip("Rescan history")
         self.btn_refresh.clicked.connect(self.refresh_requested)
+        for b in (self.btn_copy, self.btn_explorer, self.btn_refresh):
+            b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
         self.tree.itemSelectionChanged.connect(self._refresh_reveal)
@@ -572,6 +555,8 @@ class ApprovalsPanel(QWidget):
         leaf = _ApprovalItem(parent)
         leaf.setText(0, self._leaf_text(r, reveal=False))
         leaf.setText(1, _allowance_cell(r))
+        leaf.setTextAlignment(
+            1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         leaf.setData(1, _USD_SORT_ROLE, _row_sort_value(r))
         leaf.setToolTip(0, f"{r.spender_label}\n{r.spender}"
                         if r.spender_label else r.spender)
@@ -635,7 +620,8 @@ class ApprovalsPanel(QWidget):
             return
         if refit or self._col0_frac is None:          # first fill: allowance fits content
             self.tree.resizeColumnToContents(1)
-            c1 = min(max(self.tree.columnWidth(1), _MIN_COL_W), vp - _MIN_COL_W)
+            c1 = self.tree.columnWidth(1) + _COL_GAP  # + a gap before the amount
+            c1 = min(max(c1, _MIN_COL_W), vp - _MIN_COL_W)
             self._col0_frac = (vp - c1) / vp
         c0 = max(_MIN_COL_W, min(int(vp * self._col0_frac), vp - _MIN_COL_W))
         self._syncing = True

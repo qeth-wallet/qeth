@@ -387,18 +387,11 @@ def test_row_sort_value_unpriced_finite_is_zero():
                                 price_usd=None)) == 0.0
 
 
-def test_allowance_cell_appends_usd():
+def test_allowance_cell_is_amount_only_no_usd():
+    # USD is not shown (it read as clutter), even when priced.
     assert _allowance_cell(_row(allowance=5_000_000, decimals=6,
-                                price_usd=Decimal("1"))) == "5 · $5"
-
-
-def test_allowance_cell_unlimited_has_no_usd():
-    assert _allowance_cell(_row(allowance=_MAX, price_usd=Decimal("1"))) == "unlimited"
-
-
-def test_allowance_cell_unpriced_is_amount_only():
-    assert _allowance_cell(_row(allowance=5_000_000, decimals=6,
-                                price_usd=None)) == "5"
+                                price_usd=Decimal("1"))) == "5"
+    assert "$" not in _allowance_cell(_row(allowance=_MAX, price_usd=Decimal("1")))
 
 
 def test_token_node_shows_symbol_and_short_address(qtbot):
@@ -407,10 +400,10 @@ def test_token_node_shows_symbol_and_short_address(qtbot):
     assert p.tree.topLevelItem(0).text(0) == f"USDC ({short_addr(TOKEN)})"
 
 
-def test_allowance_column_shows_usd(qtbot):
+def test_allowance_column_has_no_usd_text(qtbot):
     p = _panel(qtbot)
     p.append_rows([_row(allowance=5_000_000, decimals=6, price_usd=Decimal("1"))])
-    assert p.tree.topLevelItem(0).child(0).text(1) == "5 · $5"
+    assert p.tree.topLevelItem(0).child(0).text(1) == "5"
 
 
 def test_stretch_last_section_is_off(qtbot):
@@ -464,33 +457,34 @@ def test_token_total_sums_spender_exposure(qtbot):
     assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 4.0         # $1 + $3
 
 
-# --- compact USD -----------------------------------------------------------
-
-from qeth.plugins.approvals import _format_usd_compact  # noqa: E402
-
-
-def test_format_usd_compact_abbreviations():
-    assert _format_usd_compact(Decimal("123.2")) == "$123.2"
-    assert _format_usd_compact(Decimal("12200000")) == "$12.2M"
-    assert _format_usd_compact(Decimal("10100000000")) == "$10.1B"
-    assert _format_usd_compact(Decimal("1050000000000")) == "$1.05T"
-    assert _format_usd_compact(Decimal("5")) == "$5"
-    assert _format_usd_compact(Decimal("1234.56")) == "$1.23K"
-
-
-def test_format_usd_compact_extremes_go_scientific():
-    assert _format_usd_compact(Decimal("0.0000123")) == "$1.23 × 10⁻⁵"
-    assert "× 10" in _format_usd_compact(Decimal("1500000000000000"))   # ≥ 1e15
-
-
-def test_format_usd_compact_nonpositive_is_empty():
-    assert _format_usd_compact(Decimal("0")) == ""
-    assert _format_usd_compact(None) == ""
-
-
 # --- resizable two-column split -------------------------------------------
 
 from PySide6.QtWidgets import QHeaderView  # noqa: E402
+
+
+def test_allowance_column_is_right_aligned(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(allowance=5)])
+    leaf = p.tree.topLevelItem(0).child(0)
+    assert leaf.textAlignment(1) & int(Qt.AlignmentFlag.AlignRight)
+
+
+def test_icon_buttons_are_flat(qtbot):
+    p = _panel(qtbot)
+    assert p.btn_copy.isFlat() and p.btn_explorer.isFlat() and p.btn_refresh.isFlat()
+    assert not p.btn_action.isFlat()               # the text button keeps its frame
+
+
+def test_allowance_column_gets_a_gap_before_amount(qtbot):
+    p = _shown_panel(qtbot)
+    vp = p.tree.viewport().width()
+    if vp <= 2 * 48:
+        import pytest
+        pytest.skip("viewport too small offscreen")
+    # allowance column is content + a fixed gap, so the number isn't jammed
+    # against the identity column
+    from qeth.plugins.approvals import _COL_GAP
+    assert p.tree.columnWidth(1) >= _COL_GAP
 
 
 def test_both_columns_interactive_no_last_stretch(qtbot):

@@ -18,17 +18,17 @@ import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from eth_utils import to_checksum_address
-from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QEvent, QRect, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QProgressBar, QPushButton, QSizePolicy, QStyle, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ... import QULONGLONG
 from ...chain import EthClient
-from ...formatting import format_balance, short_addr
+from ...formatting import format_balance, format_usd, short_addr
 from ...plugin import Plugin
 from ...token_metadata import TokenMetadataCache
 from ...transactions import (
@@ -52,8 +52,42 @@ log = logging.getLogger(__name__)
 _ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
 _TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
 _USD_SORT_ROLE = Qt.ItemDataRole.UserRole + 2  # float: USD exposure (∞ = unlimited)
+_RISK_ROLE = Qt.ItemDataRole.UserRole + 3     # token node: "$X at risk" pill text ("" = none)
 _MIN_COL_W = 48                                # neither column shrinks below this
 _COL_GAP = 16                                  # breathing room left of the (right-aligned) amount
+
+# The "at risk" pill: a self-consistent (bg, fg) pair — like the account-tree
+# label pills — so it reads on any palette. A distinct amber/orange (not the
+# accounts' yellow/blue) marks the USD value the token's approvals could drain.
+_RISK_BG, _RISK_FG = "#ffe0b2", "#7a3d00"
+
+
+class _RiskPillDelegate(QStyledItemDelegate):
+    """Paints a right-aligned "at risk" pill on a token node's Allowance cell
+    (column 1, otherwise empty on token nodes), mirroring the account-tree label
+    pills. Everything else renders normally via the base delegate."""
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        super().paint(painter, option, index)
+        if index.column() != 1:
+            return
+        text = index.data(_RISK_ROLE)
+        if not text:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fm = option.fontMetrics
+        pad = 6
+        w = fm.horizontalAdvance(str(text)) + 2 * pad
+        h = fm.height() + 2
+        r = option.rect
+        pill = QRect(r.right() - w - 4, r.top() + (r.height() - h) // 2, w, h)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(_RISK_BG))
+        painter.drawRoundedRect(pill, 4, 4)
+        painter.setPen(QColor(_RISK_FG))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, str(text))
+        painter.restore()
 
 
 def _icon(names: tuple[str, ...], fallback: QStyle.StandardPixmap) -> QIcon:
@@ -125,6 +159,25 @@ def _row_usd(r: ApprovalRow):
     return scaled * r.price_usd
 
 
+def _token_risk_usd(r: ApprovalRow):
+    """USD value of the holder's WALLET BALANCE of this token — the amount its
+    approvals could actually drain (a spender's transferFrom is bounded by what
+    you hold). None when unpriced, not held, or below a displayable cent."""
+    if r.price_usd is None or r.token_balance <= 0:
+        return None
+    from decimal import Decimal
+    scaled = (Decimal(r.token_balance) / (Decimal(10) ** r.decimals)
+              if r.decimals > 0 else Decimal(r.token_balance))
+    usd = scaled * r.price_usd
+    return usd if usd >= Decimal("0.005") else None
+
+
+def _risk_tag(r: ApprovalRow) -> str:
+    """The token node's pill text, or "" when there's nothing at risk."""
+    usd = _token_risk_usd(r)
+    return f"{format_usd(usd)} at risk" if usd is not None else ""
+
+
 def _row_sort_value(r: ApprovalRow) -> float:
     """Numeric exposure key for sorting: unlimited outranks everything (∞), a
     priced cap sorts by its USD value, an unpriced finite cap sorts as 0."""
@@ -193,6 +246,7 @@ class ScanWorker(QThread):
         self._price_source = price_source
         self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
         self._priced: dict[str, Decimal | None] = {}   # token -> unit price (memo)
+        self._balances: dict[str, int] = {}            # token -> holder balance (memo)
         self._client_factory = client_factory or EthClient
         self._head = 0               # chain head, for block-% progress
 
@@ -364,8 +418,13 @@ class ScanWorker(QThread):
             except Exception:
                 log.debug("approvals metadata read failed", exc_info=True)
         labels = self._fetch_labels(cid, sorted({s for (_t, s) in found}))
-        finite = sorted({t for (t, _s), v in found.items() if v < _UNLIMITED_MIN})
-        prices = self._fetch_prices(finite)
+        self._fetch_balances(client, tokens)
+        # Price finite-allowance tokens (for the cap USD sort) AND every token
+        # actually HELD (for the "at risk" tag — most held tokens have an
+        # unlimited cap, so pricing can't be limited to finite caps).
+        finite = {t for (t, _s), v in found.items() if v < _UNLIMITED_MIN}
+        held = {t for t in tokens if self._balances.get(t, 0) > 0}
+        prices = self._fetch_prices(sorted(finite | held))
         rows = []
         for (token, spender), value in found.items():
             m = self._meta.get(cid, token) or {}
@@ -374,8 +433,22 @@ class ScanWorker(QThread):
                 symbol=m.get("symbol") or "", name=m.get("name") or "",
                 decimals=int(m.get("decimals") or 18),
                 spender_label=labels.get(spender, ""),
-                price_usd=prices.get(token)))
+                price_usd=prices.get(token),
+                token_balance=self._balances.get(token, 0)))
         self.rows_ready.emit(cid, addr_l, rows)
+
+    def _fetch_balances(self, client, tokens: list[str]) -> None:
+        """Read the holder's ``balanceOf`` for tokens not yet seen (memoized).
+        Best-effort — a failure just leaves those tokens without an at-risk tag.
+        Absent = unknown, so a reverted read stays out of the memo (not 0)."""
+        need = [t for t in tokens if t not in self._balances]
+        if not need:
+            return
+        try:
+            self._balances.update(
+                client.multicall_erc20_balances(need, self._address))
+        except Exception:
+            log.debug("approvals balance read failed", exc_info=True)
 
     def _fetch_prices(self, tokens: list[str]) -> dict[str, Decimal | None]:
         """USD unit prices for ``tokens`` (memoized, so streaming batches don't
@@ -479,6 +552,7 @@ class ApprovalsPanel(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tree.setItemDelegate(_RiskPillDelegate(self.tree))   # "$X at risk" pill
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
@@ -710,14 +784,26 @@ class ApprovalsPanel(QWidget):
     def _add_row(self, r: ApprovalRow) -> None:
         # Upsert: a fresh scan re-emits pairs already shown (from the cache) —
         # refresh the existing leaf in place rather than duplicating it.
+        node = self._token_node(r)
+        self._set_token_risk(node, r)                # "$X at risk" pill on the token line
         existing = self._leaf_for(r.token, r.spender)
         if existing is not None:
             self._fill_leaf(existing, r)
             return
-        leaf = _ApprovalItem(self._token_node(r))
+        leaf = _ApprovalItem(node)
         leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         leaf.setCheckState(0, Qt.CheckState.Unchecked)
         self._fill_leaf(leaf, r)
+
+    @staticmethod
+    def _set_token_risk(node: QTreeWidgetItem, r: ApprovalRow) -> None:
+        # All of a token's rows carry the same balance/price, so any refreshes
+        # the pill. Only set when there's a value, so an unpriced/not-held token
+        # (or a cache row lacking a balance) leaves the pill off rather than
+        # clearing a value a sibling row already set.
+        tag = _risk_tag(r)
+        if tag:
+            node.setData(1, _RISK_ROLE, tag)
 
     def _fill_leaf(self, leaf: QTreeWidgetItem, r: ApprovalRow) -> None:
         leaf.setText(0, self._leaf_text(r, reveal=leaf is self._hovered))

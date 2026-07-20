@@ -60,7 +60,8 @@ class ApprovalsCache:
                     symbol=d.get("symbol", ""), name=d.get("name", ""),
                     decimals=int(d.get("decimals", 18)),
                     spender_label=d.get("spender_label", ""),
-                    price_usd=Decimal(price) if price is not None else None))
+                    price_usd=Decimal(price) if price is not None else None,
+                    token_balance=int(d.get("token_balance", 0))))
             except (KeyError, ValueError, TypeError):
                 continue                              # skip a corrupt row, keep the rest
         return rows, int(data.get("last_block", 0))
@@ -79,6 +80,7 @@ class ApprovalsCache:
                     "name": r.name, "decimals": r.decimals,
                     "spender_label": r.spender_label,
                     "price_usd": str(r.price_usd) if r.price_usd is not None else None,
+                    "token_balance": str(r.token_balance),
                 } for r in rows],
             }))
         except OSError:

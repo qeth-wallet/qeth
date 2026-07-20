@@ -48,9 +48,10 @@ def _panel(qtbot, host=None):
 
 
 def _row(token=TOKEN, spender=SP1, allowance=1, symbol="USDC", decimals=6,
-         price_usd=None):
+         price_usd=None, token_balance=0):
     return ApprovalRow(token=token, spender=spender, allowance=allowance,
-                       symbol=symbol, decimals=decimals, price_usd=price_usd)
+                       symbol=symbol, decimals=decimals, price_usd=price_usd,
+                       token_balance=token_balance)
 
 
 def test_spenders_group_under_one_token_node(qtbot):
@@ -634,6 +635,41 @@ def test_select_all_disabled_when_empty(qtbot):
 def test_select_all_is_flat_icon_button(qtbot):
     p = _panel(qtbot)
     assert p.btn_select_all.isFlat() and p.btn_select_all.text() == ""
+
+
+# --- "at risk" token-node pill --------------------------------------------
+
+from qeth.plugins.approvals import _RISK_ROLE, _risk_tag, _token_risk_usd  # noqa: E402
+
+
+def test_risk_usd_is_balance_times_price():
+    # 5.0 USDC (6 decimals) at $1.00 → $5 at risk
+    r = _row(decimals=6, price_usd=Decimal("1"), token_balance=5_000_000)
+    assert _token_risk_usd(r) == Decimal("5")
+    assert _risk_tag(r) == "$5.00 at risk"
+
+
+def test_risk_tag_empty_when_not_held_or_unpriced():
+    assert _risk_tag(_row(price_usd=Decimal("1"), token_balance=0)) == ""  # not held
+    assert _risk_tag(_row(price_usd=None, token_balance=5_000_000)) == ""  # unpriced
+    # dust below a cent → no tag
+    assert _risk_tag(_row(decimals=6, price_usd=Decimal("0.0001"),
+                          token_balance=1)) == ""
+
+
+def test_token_node_shows_risk_pill_when_held_and_priced(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, decimals=6, price_usd=Decimal("2"),
+                        token_balance=10_000_000)])       # 10 tokens × $2 = $20
+    node = p._token_items[TOKEN]
+    assert node.data(1, _RISK_ROLE) == "$20.00 at risk"
+
+
+def test_token_node_no_pill_when_not_held(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, price_usd=Decimal("2"), token_balance=0)])
+    node = p._token_items[TOKEN]
+    assert not node.data(1, _RISK_ROLE)
 
 
 # --- action-button stable width + selection keys --------------------------

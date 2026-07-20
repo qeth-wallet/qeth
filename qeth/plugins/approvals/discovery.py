@@ -118,6 +118,8 @@ class ApprovalRow:
     price_usd: Decimal | None = None   # USD per whole token; None = unpriced
     # (the USD *value* of the cap is derived: allowance/10**decimals * price_usd,
     # so it stays correct after a reconcile changes `allowance` in place)
+    token_balance: int = 0    # holder's raw wallet balance of `token` (0 = none/unknown)
+    #   → the "at risk" USD tag on the token node = token_balance/10**decimals * price_usd
 
 
 def _pad_address(addr: str) -> bytes:

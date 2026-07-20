@@ -59,12 +59,17 @@ class _FakeTxSource:
 
 class _FakeClient:
     HEAD = 1000
+    BALANCES: dict = {}          # token_lower -> balance, for the at-risk tag
 
     def __init__(self, chain):
         pass
 
     def get_block_number(self):
         return self.HEAD
+
+    def multicall_erc20_balances(self, tokens, holder, **k):
+        return {t.lower(): self.BALANCES[t.lower()]
+                for t in tokens if t.lower() in self.BALANCES}
 
 
 class _FakeMeta:
@@ -98,6 +103,36 @@ def _worker(log_src, tx_src=None, snapshot=None, *, from_block=0, **kw):
 def _pairs(got):
     return {(r.token.lower(), r.spender.lower())
             for batch in got["rows"] for r in batch}
+
+
+def test_row_carries_token_balance_for_the_at_risk_tag(monkeypatch):
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 5), set(pairs)))
+
+    class _WithBalance(_FakeClient):
+        BALANCES = {TOKEN.lower(): 7_000_000}
+
+    w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 100)]]),
+                   _FakeTxSource(), [], _FakeMeta(), client_factory=_WithBalance)
+    got = _run(w)
+    row = next(r for b in got["rows"] for r in b)
+    assert row.token_balance == 7_000_000            # wallet balance read + attached
+
+
+def test_balance_read_failure_is_tolerated(monkeypatch):
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 5), set(pairs)))
+
+    class _Boom(_FakeClient):
+        def multicall_erc20_balances(self, tokens, holder, **k):
+            raise RuntimeError("rpc down")
+
+    w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 100)]]),
+                   _FakeTxSource(), [], _FakeMeta(), client_factory=_Boom)
+    got = _run(w)
+    row = next(r for b in got["rows"] for r in b)
+    assert row.token_balance == 0                    # unknown, no crash
+    assert got["done"] == [True]
 
 
 def test_log_window_discovers_a_pair(monkeypatch):

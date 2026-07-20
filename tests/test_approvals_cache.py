@@ -32,6 +32,14 @@ def test_roundtrip_rows_and_last_block(tmp_path):
     assert got[1].price_usd == Decimal("1.5") and got[1].decimals == 6
 
 
+def test_token_balance_round_trips(tmp_path):
+    c = ApprovalsCache(tmp_path)
+    c.save(1, A, [ApprovalRow(token=T1, spender=SP, allowance=1,
+                              token_balance=123_456_789)], 5)
+    got, _ = c.load(1, A)
+    assert got[0].token_balance == 123_456_789         # for the at-risk tag on re-open
+
+
 def test_uint256_max_allowance_survives_json(tmp_path):
     c = ApprovalsCache(tmp_path)
     c.save(1, A, [ApprovalRow(token=T1, spender=SP, allowance=_MAX)], 0)

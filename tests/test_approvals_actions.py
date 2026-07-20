@@ -247,3 +247,49 @@ def test_finished_scan_forgets_worker_before_deletelater(plugin):
     assert w is not None and w in plugin.host.started
     w.finished.emit()                                  # host deleteLater()s it here
     assert plugin._scan is None                        # forgotten synchronously
+
+
+# --- caching: instant re-open + incremental persist/prune -----------------
+
+def test_cached_rows_render_without_cold_scan(plugin):
+    plugin._cache.save(CHAIN.chain_id, OWNER, [_row()], 500)
+    plugin._loaded_for = None
+    plugin._kick(force=True)
+    assert plugin._panel.tree.topLevelItemCount() == 1     # painted from cache
+    assert plugin._panel._scan_bar.isHidden()              # no cold-scan progress bar
+
+
+def test_kick_passes_cached_pairs_to_worker(plugin):
+    plugin._cache.save(CHAIN.chain_id, OWNER, [_row(spender=SPENDER)], 500)
+    plugin._loaded_for = None
+    plugin._kick(force=True)
+    assert plugin._scan is not None
+    assert PAIR in plugin._scan._known_pairs           # worker re-checks cached pairs
+
+
+def test_scan_done_prunes_and_persists(plugin):
+    plugin._cache.save(CHAIN.chain_id, OWNER, [_row(spender=SPENDER)], 100)
+    plugin._loaded_for = None
+    plugin._kick(force=True)                            # renders the cached (old) pair
+    other = "0x" + "cc" * 20
+    plugin._on_rows(CHAIN.chain_id, OWNER.lower(), [_row(spender=other)], plugin._epoch)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)
+    # old pair pruned (not re-confirmed), new one kept + persisted
+    assert {r.spender for r in plugin._panel.all_rows()} == {other}
+    loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
+    assert loaded is not None and {r.spender for r in loaded[0]} == {other}
+
+
+def test_incomplete_scan_does_not_prune_or_persist(plugin):
+    plugin._panel.append_rows([_row()])
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    assert plugin._panel.tree.topLevelItemCount() == 1     # nothing pruned
+    assert plugin._cache.load(CHAIN.chain_id, OWNER) is None   # nothing persisted
+
+
+def test_reconcile_zero_persists_the_removal(plugin):
+    plugin._panel.append_rows([_row()])
+    plugin._scan_pairs = {PAIR}
+    plugin._on_reconciled(CHAIN.chain_id, OWNER.lower(), {PAIR: 0}, plugin._epoch)
+    loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
+    assert loaded is not None and loaded[0] == []      # cache reflects the revoke

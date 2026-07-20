@@ -164,8 +164,8 @@ class ScanWorker(QThread):
     MAX_ATTEMPTS = 3
 
     def __init__(self, chain, address: str, source, snapshot, metadata_cache,
-                 *, label_source=None, price_source=None, client_factory=None,
-                 parent=None):
+                 *, label_source=None, price_source=None, known_pairs=None,
+                 client_factory=None, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
@@ -174,6 +174,7 @@ class ScanWorker(QThread):
         self._meta = metadata_cache
         self._label_source = label_source
         self._price_source = price_source
+        self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
         self._priced: dict[str, Decimal | None] = {}   # token -> unit price (memo)
         self._client_factory = client_factory or EthClient
 
@@ -183,7 +184,8 @@ class ScanWorker(QThread):
         try:
             client = self._client_factory(self._chain)
             seen = {t.hash for t in self._snapshot}
-            all_pairs = set(approve_pairs_in(self._snapshot, self._address))
+            all_pairs = self._known_pairs | set(
+                approve_pairs_in(self._snapshot, self._address))
             checked: set[tuple[str, str]] = set()
             self._emit_rows(client, cid, addr_l, all_pairs, checked)
 
@@ -195,10 +197,10 @@ class ScanWorker(QThread):
                             if t.from_addr.lower() == addr_l)
             self.progress.emit(cid, addr_l, sent_seen, total)
 
-            if _is_full_history(self._snapshot):
-                self.scan_done.emit(cid, addr_l, True)   # cache already complete
-                return
-
+            # A fully-cached account no longer re-pages its whole history — it
+            # only fetches the NEW tail (txs above what's cached) to catch fresh
+            # approvals, then stops the moment it reaches already-seen txs.
+            tail_only = _is_full_history(self._snapshot)
             snapshot_oldest = min((t.block_number for t in self._snapshot),
                                   default=None)
             cursor: int | None = None
@@ -221,12 +223,15 @@ class ScanWorker(QThread):
                 self.progress.emit(cid, addr_l, min(sent_seen, total or sent_seen),
                                    total)
                 raw_oldest = min(t.block_number for t in raw)
-                # A page fully within the cached newest span → skip to below it.
-                if (not new and not jumped and snapshot_oldest is not None
-                        and raw_oldest > snapshot_oldest):
-                    cursor = snapshot_oldest
-                    jumped = True
-                    continue
+                if not new:                              # reached already-cached txs
+                    if tail_only:
+                        break                            # incremental: tail done
+                    # A page fully within the cached newest span → skip below it.
+                    if (not jumped and snapshot_oldest is not None
+                            and raw_oldest > snapshot_oldest):
+                        cursor = snapshot_oldest
+                        jumped = True
+                        continue
                 if pages % self.PAIR_BATCH_EVERY == 0:
                     self._emit_rows(client, cid, addr_l, all_pairs, checked)
                 if len(raw) < self.PAGE:                 # short page = start of history
@@ -452,11 +457,7 @@ class ApprovalsPanel(QWidget):
         self.btn_explorer.setIcon(_icon(*_IC_EXPLORER))
         self.btn_explorer.setToolTip("Open spender in the block explorer")
         self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
-        self.btn_refresh = QPushButton()
-        self.btn_refresh.setIcon(_icon(*_IC_REFRESH))
-        self.btn_refresh.setToolTip("Rescan history")
-        self.btn_refresh.clicked.connect(self.refresh_requested)
-        for b in (self.btn_copy, self.btn_explorer, self.btn_refresh):
+        for b in (self.btn_copy, self.btn_explorer):
             b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
@@ -468,8 +469,7 @@ class ApprovalsPanel(QWidget):
             self._host.icon_cache().icon_ready.connect(self._on_icon_ready)
 
     def action_widgets(self) -> list[QWidget]:
-        return [self.btn_action, self.btn_copy, self.btn_explorer,
-                self.btn_refresh]
+        return [self.btn_action, self.btn_copy, self.btn_explorer]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
@@ -554,9 +554,19 @@ class ApprovalsPanel(QWidget):
         return r.spender
 
     def _add_row(self, r: ApprovalRow) -> None:
-        parent = self._token_node(r)
-        leaf = _ApprovalItem(parent)
-        leaf.setText(0, self._leaf_text(r, reveal=False))
+        # Upsert: a fresh scan re-emits pairs already shown (from the cache) —
+        # refresh the existing leaf in place rather than duplicating it.
+        existing = self._leaf_for(r.token, r.spender)
+        if existing is not None:
+            self._fill_leaf(existing, r)
+            return
+        leaf = _ApprovalItem(self._token_node(r))
+        leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        leaf.setCheckState(0, Qt.CheckState.Unchecked)
+        self._fill_leaf(leaf, r)
+
+    def _fill_leaf(self, leaf: QTreeWidgetItem, r: ApprovalRow) -> None:
+        leaf.setText(0, self._leaf_text(r, reveal=leaf is self._hovered))
         leaf.setText(1, _allowance_cell(r))
         leaf.setTextAlignment(
             1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -564,8 +574,41 @@ class ApprovalsPanel(QWidget):
         leaf.setToolTip(0, f"{r.spender_label}\n{r.spender}"
                         if r.spender_label else r.spender)
         leaf.setData(0, _ROW_ROLE, r)
-        leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        leaf.setCheckState(0, Qt.CheckState.Unchecked)
+
+    def all_rows(self) -> list[ApprovalRow]:
+        """Every displayed ApprovalRow (for persisting the cache)."""
+        out: list[ApprovalRow] = []
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            for ci in range(node.childCount()):
+                r = node.child(ci).data(0, _ROW_ROLE)
+                if isinstance(r, ApprovalRow):
+                    out.append(r)
+        return out
+
+    def prune_to(self, pairs: set[tuple[str, str]]) -> None:
+        """Drop leaves whose (token, spender) a fresh scan didn't re-confirm —
+        i.e. caps revoked outside qeth that now read zero."""
+        self.tree.blockSignals(True)
+        for ti in range(self.tree.topLevelItemCount() - 1, -1, -1):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            for ci in range(node.childCount() - 1, -1, -1):
+                leaf = node.child(ci)
+                r = leaf.data(0, _ROW_ROLE)
+                if (isinstance(r, ApprovalRow)
+                        and (r.token.lower(), r.spender.lower()) not in pairs):
+                    if leaf is self._hovered:
+                        self._hovered = None
+                    node.removeChild(leaf)
+            if node.childCount() == 0:
+                self._token_items.pop(node.data(0, _TOKEN_ROLE), None)
+                self.tree.takeTopLevelItem(ti)
+        self.tree.blockSignals(False)
+        self._update_buttons()
 
     # --- sorting (manual: live setSortingEnabled would re-sort on hover) ---
     def _on_header_clicked(self, col: int) -> None:
@@ -882,6 +925,10 @@ class ApprovalsPlugin(Plugin):
         self._reconcile_timer.timeout.connect(self._run_reconcile)
         from ...transactions_cache import TransactionCache
         self._disk_cache = TransactionCache()
+        from .cache import ApprovalsCache
+        self._cache = ApprovalsCache()               # persisted allowances + last block
+        self._last_block = 0
+        self._scan_pairs: set[tuple[str, str]] = set()   # pairs a live scan re-confirmed
 
     def widget(self) -> QWidget:
         if self._panel is None:
@@ -1054,6 +1101,8 @@ class ApprovalsPlugin(Plugin):
                 self._panel.update_allowance(token, spender, int(value))
             else:
                 self._panel.remove_leaf(token, spender)
+                self._scan_pairs.discard((token.lower(), spender.lower()))
+        self._persist()                              # keep the cache in step with a revoke
 
     def _kick(self, *, force: bool = False) -> None:
         view = self._current_view()
@@ -1068,11 +1117,24 @@ class ApprovalsPlugin(Plugin):
         self._epoch += 1
         epoch = self._epoch
         chain = self.host.current_chain()
-        self._panel.begin_scan()
+        self._scan_pairs = set()
+        # Instant paint from the cache; only show the progress bar on a cold
+        # scan. A warm scan refreshes the tail silently under the shown rows.
+        self._panel.clear()
+        cached = self._cache.load(chain.chain_id, addr)
+        known_pairs: set[tuple[str, str]] = set()
+        if cached and cached[0]:
+            rows, self._last_block = cached
+            self._panel.append_rows(rows)
+            known_pairs = {(r.token.lower(), r.spender.lower()) for r in rows}
+        else:
+            self._last_block = 0
+            self._panel.begin_scan()
         snapshot = self._disk_cache.load(chain.chain_id, addr) or []
         worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata,
                             label_source=self._label_source,
-                            price_source=self._price_source)
+                            price_source=self._price_source,
+                            known_pairs=known_pairs)
         worker.batch_fetched.connect(self._on_batch)
         worker.rows_ready.connect(
             lambda c, a, rows, e=epoch: self._on_rows(c, a, rows, e))
@@ -1108,14 +1170,30 @@ class ApprovalsPlugin(Plugin):
     def _on_rows(self, chain_id, addr_l, rows, epoch) -> None:
         if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
             self._panel.append_rows(rows)
+            self._scan_pairs |= {(r.token.lower(), r.spender.lower()) for r in rows}
 
     def _on_progress(self, chain_id, addr_l, seen, total, epoch) -> None:
         if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
             self._panel.set_progress(int(seen), int(total or 0))
 
     def _on_done(self, chain_id, addr_l, complete, epoch) -> None:
-        if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
-            self._panel.finish_scan(bool(complete))
+        if self._panel is None or not self._fresh(chain_id, addr_l, epoch):
+            return
+        if complete:
+            # Drop cached caps the fresh scan didn't re-confirm (revoked
+            # elsewhere), then persist the reconciled state + how far we scanned.
+            self._panel.prune_to(self._scan_pairs)
+            self._persist()
+        self._panel.finish_scan(bool(complete))
+
+    def _persist(self) -> None:
+        view = self._current_view()
+        if view is None or self._panel is None:
+            return
+        cid, addr = view
+        blocks = [t.block_number for t in (self._disk_cache.load(cid, addr) or [])]
+        self._last_block = max(blocks, default=self._last_block)
+        self._cache.save(cid, addr, self._panel.all_rows(), self._last_block)
 
     def _on_copied(self, text: str) -> None:
         if self.host is not None:

@@ -28,6 +28,7 @@ from shiboken6 import isValid
 from qeth import QULONGLONG
 from qeth.chains import DEFAULT_CHAINS
 from qeth.plugins.approvals import ApprovalsPlugin
+from qeth.plugins.approvals.cache import ApprovalsCache
 from qeth.plugins.approvals.discovery import ApprovalRow
 from qeth.token_metadata import TokenMetadataCache
 from qeth.transactions_cache import TransactionCache
@@ -89,6 +90,7 @@ class ApprovalsMachine(RuleBasedStateMachine):
         self.plugin = ApprovalsPlugin(SimpleNamespace(etherscan_api_key=None))
         self.plugin._disk_cache = TransactionCache(Path(self.tmp) / "tx")
         self.plugin._metadata = TokenMetadataCache(Path(self.tmp) / "meta")
+        self.plugin._cache = ApprovalsCache(Path(self.tmp) / "appr")
         self.host = _Host(A, CHAINS[1])
         self.plugin.attach(self.host)
         panel = self.plugin.widget()

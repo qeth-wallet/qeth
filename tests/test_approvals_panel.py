@@ -471,8 +471,14 @@ def test_allowance_column_is_right_aligned(qtbot):
 
 def test_icon_buttons_are_flat(qtbot):
     p = _panel(qtbot)
-    assert p.btn_copy.isFlat() and p.btn_explorer.isFlat() and p.btn_refresh.isFlat()
+    assert p.btn_copy.isFlat() and p.btn_explorer.isFlat()
     assert not p.btn_action.isFlat()               # the text button keeps its frame
+
+
+def test_no_rescan_button_in_action_row(qtbot):
+    p = _panel(qtbot)
+    assert not hasattr(p, "btn_refresh")
+    assert len(p.action_widgets()) == 3            # action, copy, explorer
 
 
 def test_allowance_column_gets_a_gap_before_amount(qtbot):
@@ -523,3 +529,43 @@ def test_divider_drag_reflows_and_stays_filled(qtbot):
     p._on_section_resized(0, p.tree.columnWidth(0), target)   # user drags divider
     assert p.tree.columnWidth(0) == target
     assert p.tree.columnWidth(0) + p.tree.columnWidth(1) == vp   # allowance absorbed
+
+
+# --- upsert / all_rows / prune (cache support) ----------------------------
+
+def test_append_upserts_existing_pair(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, allowance=5, decimals=0)])
+    p.append_rows([_row(spender=SP1, allowance=9, decimals=0)])   # same pair, new value
+    tok = p.tree.topLevelItem(0)
+    assert tok.childCount() == 1                                  # not duplicated
+    assert tok.child(0).text(1) == "9"                            # refreshed in place
+
+
+def test_upsert_preserves_check_state(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, allowance=5, decimals=0)])
+    p.tree.topLevelItem(0).child(0).setCheckState(0, Qt.CheckState.Checked)
+    p.append_rows([_row(spender=SP1, allowance=9, decimals=0)])   # re-scan
+    assert p.tree.topLevelItem(0).child(0).checkState(0) == Qt.CheckState.Checked
+
+
+def test_all_rows_returns_displayed(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    assert {r.spender for r in p.all_rows()} == {SP1, SP2}
+
+
+def test_prune_to_drops_unconfirmed_leaves(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.prune_to({(TOKEN.lower(), SP1.lower())})
+    assert p.tree.topLevelItem(0).childCount() == 1
+    assert p.all_rows()[0].spender == SP1
+
+
+def test_prune_to_empty_removes_token_node(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1)])
+    p.prune_to(set())
+    assert p.tree.topLevelItemCount() == 0

@@ -72,16 +72,32 @@ def _worker(src, snapshot):
                       client_factory=_FakeClient)
 
 
-def test_full_history_snapshot_skips_all_fetching(monkeypatch):
+def test_full_history_fetches_only_the_new_tail(monkeypatch):
+    # A fully-cached account still checks the head for NEW txs, but stops the
+    # moment it reaches already-cached ones (here: an empty tail → one fetch).
     monkeypatch.setattr(ap, "fetch_allowances",
                         lambda client, owner, pairs, **k: dict.fromkeys(pairs, 999))
     monkeypatch.setattr(ap, "_is_full_history", lambda txs: True)
     src = _FakeSource([])
     snap = [_tx(0, 100, _approve(SPENDER))]
     got = _run(_worker(src, snap))
-    assert src.cursors == []                     # never hit the network
+    assert src.cursors == [None]                 # one head check, no deep re-paging
     assert got["done"] == [True]
     assert got["rows"] and got["rows"][0][0].spender.lower() == SPENDER.lower()
+
+
+def test_full_history_tail_discovers_a_new_approval(monkeypatch):
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: dict.fromkeys(pairs, 5))
+    monkeypatch.setattr(ap, "_is_full_history", lambda txs: True)
+    new_spender = "0x" + "bb" * 20
+    # snapshot already cached; a new approve to new_spender sits above it
+    snap = [_tx(0, 100, _approve(SPENDER), h="0xcached")]
+    page = [_tx(1, 101, _approve(new_spender), h="0xnew")]      # short → history start
+    got = _run(_worker(_FakeSource([page]), snap))
+    pairs = {(r.token.lower(), r.spender.lower()) for batch in got["rows"] for r in batch}
+    assert (TOKEN.lower(), new_spender.lower()) in pairs        # tail caught it
+    assert (TOKEN.lower(), SPENDER.lower()) in pairs            # cached still checked
 
 
 def test_pages_walk_the_before_block_cursor(monkeypatch):

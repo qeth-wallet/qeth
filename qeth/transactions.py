@@ -574,43 +574,93 @@ def _fetch_transfer_logs_one(transport, timeout, chain, endpoint, key,
     return result if isinstance(result, list) else []
 
 
-# A bare proxy shell's ContractName ("BeaconProxy", "TransparentUpgradeableProxy",
-# "ERC1967Proxy") identifies the pattern, not the contract — useless as a "who is
-# this" label, so it's dropped in favour of the implementation's name.
-_PROXY_NAME_RE = re.compile(r"proxy", re.IGNORECASE)
+# Explorer names that identify a PATTERN or the COMPILER, not the contract, and
+# so are useless as a "who is this" label: a bare proxy shell ("BeaconProxy",
+# "TransparentUpgradeableProxy", "ERC1967Proxy") and the generic Vyper/Solidity
+# placeholder a contract gets when it has no NatSpec @title. Dropped in favour of
+# a proxy's implementation name, else the leaf falls back to the address.
+_MEANINGLESS_NAME_RE = re.compile(
+    r"proxy|^(?:vyper|solidity)_contract$", re.IGNORECASE)
+
+
+def _is_named(nm: str) -> bool:
+    return bool(nm) and not _MEANINGLESS_NAME_RE.search(nm)
+
+
+_TITLE_RE = re.compile(r"@title\b\s*:?\s*(.+)")
+
+
+def _natspec_title(source: object) -> str:
+    """The NatSpec ``@title`` from verified source — the human name a Vyper /
+    Solidity contract still carries when the explorer's ``ContractName`` is only
+    the generic ``Vyper_contract`` placeholder (a Curve LLAMMA reads as
+    "LLAMMA - crvUSD AMM"). ``@title`` is devdoc, living in the source COMMENTS,
+    not the ABI — so it comes from the ``SourceCode`` we already fetch, no extra
+    request. Handles Vyper ``# @title`` and Solidity ``/// @title`` / ``/** @title
+    */``. ``""`` when absent."""
+    if not isinstance(source, str) or "@title" not in source:
+        return ""
+    m = _TITLE_RE.search(source)
+    if not m:
+        return ""
+    # One line only: a standard-json ``{{…}}`` blob escapes newlines, so cut at
+    # the first (literal-or-real) newline, then strip comment / JSON artifacts.
+    title = re.split(r"\\n|\\r|[\n\r]", m.group(1), maxsplit=1)[0]
+    title = re.sub(r'(\*/|\*+|"""|",?)\s*$', "", title).strip().strip('"').strip()
+    return title[:80]
 
 
 def meaningful_contract_name(name: str | None, implementations) -> str:
-    """A human contract name from a Blockscout v2 smart-contract payload: the
-    implementation's name for a proxy (so a ``BeaconProxy`` reads as its logic
-    contract, e.g. ``VToken``), else the contract's own name — either way
-    dropping bare proxy-shell names. ``""`` when nothing meaningful remains."""
+    """A human contract name from a smart-contract payload: the implementation's
+    name for a proxy (so a ``BeaconProxy`` reads as its logic contract, e.g.
+    ``VToken``), else the contract's own name — dropping proxy shells and generic
+    ``Vyper_contract``/``Solidity_contract`` placeholders. ``""`` when nothing
+    meaningful remains."""
     for impl in implementations or []:
         nm = (impl.get("name") or "").strip() if isinstance(impl, dict) else ""
-        if nm and not _PROXY_NAME_RE.search(nm):
+        if _is_named(nm):
             return nm
     own = (name or "").strip()
-    if own and not _PROXY_NAME_RE.search(own):
+    if _is_named(own):
         return own
     return ""
 
 
 def fetch_contract_display_name(
     chain_id: int, address: str, *,
+    get_api_key: "Callable[[], str | None] | None" = None,
     instances: dict[int, str] | None = None,
+    etherscan_chains: frozenset[int] | None = None,
     timeout: float = 15.0,
     transport: "Transport | None" = None,
 ) -> str:
-    """The verified contract's human name from the chain's Blockscout instance
-    (v2 ``/api/v2/smart-contracts/{address}``, keyless), proxy-resolved to its
-    implementation and stripped of bare proxy-shell names. ``""`` on an
-    unverified contract, an unsupported chain, or any error — a best-effort
+    """A verified contract's human name — the chain's Blockscout instance first
+    (v2 ``/api/v2/smart-contracts``, keyless, and it exposes proxy IMPLEMENTATION
+    names), then Etherscan v2 ``getsourcecode`` when a key is supplied (broader
+    verified-source coverage than any single Blockscout). Proxy-resolved (a
+    ``BeaconProxy`` reads as its implementation) and stripped of bare proxy-shell
+    names. ``""`` on an unverified/unknown contract or any error — a best-effort
     *soft* label (self-reported, forgeable), never a definitive name-tag."""
+    transport = transport or _urllib_transport
+    name = _blockscout_contract_name(chain_id, address, instances, timeout, transport)
+    if name:
+        return name
+    if get_api_key is not None:
+        etherscan_chains = (
+            etherscan_chains if etherscan_chains is not None else ETHERSCAN_V2_CHAINS)
+        key = get_api_key()
+        if key and chain_id in etherscan_chains:
+            return _etherscan_contract_name(
+                chain_id, address, key, timeout, transport)
+    return ""
+
+
+def _blockscout_contract_name(chain_id, address, instances, timeout,
+                              transport) -> str:
     instances = instances if instances is not None else BLOCKSCOUT_INSTANCES
     base = instances.get(chain_id)
     if not base:
         return ""
-    transport = transport or _urllib_transport
     url = (f"{base.rstrip('/')}/api/v2/smart-contracts/"
            f"{urllib.parse.quote(address)}")
     try:
@@ -621,4 +671,39 @@ def fetch_contract_display_name(
     # contract has no is_verified flag (mirrors BlockscoutAbiSource._fetch_v2).
     if not isinstance(data, dict) or not data.get("is_verified"):
         return ""
-    return meaningful_contract_name(data.get("name"), data.get("implementations"))
+    name = meaningful_contract_name(data.get("name"), data.get("implementations"))
+    return name or _natspec_title(data.get("source_code"))
+
+
+def _etherscan_contract_name(chain_id, address, key, timeout, transport) -> str:
+    """Verified ContractName from Etherscan v2 ``getsourcecode``. It returns a
+    ``Proxy`` flag + an ``Implementation`` *address* (not a name), so a proxy is
+    resolved with a second lookup on the implementation; bare proxy-shell names
+    are dropped either way."""
+    src = _etherscan_source(chain_id, address, key, timeout, transport)
+    if src is None:
+        return ""
+    name = meaningful_contract_name(src.get("ContractName"), [])
+    if name:
+        return name
+    impl = (src.get("Implementation") or "").strip()
+    if src.get("Proxy") == "1" and len(impl) == 42 and int(impl, 16) != 0:
+        isrc = _etherscan_source(chain_id, impl, key, timeout, transport)
+        if isrc is not None:
+            return (meaningful_contract_name(isrc.get("ContractName"), [])
+                    or _natspec_title(isrc.get("SourceCode")))
+    return _natspec_title(src.get("SourceCode"))   # generic ContractName → @title
+
+
+def _etherscan_source(chain_id, address, key, timeout, transport):
+    params = [("chainid", str(chain_id)), ("module", "contract"),
+              ("action", "getsourcecode"), ("address", address), ("apikey", key)]
+    url = f"{ETHERSCAN_V2_BASE}?" + urllib.parse.urlencode(params)
+    try:
+        data = json.loads(transport(url, timeout))
+    except Exception:
+        return None
+    res = data.get("result")
+    if isinstance(res, list) and res and isinstance(res[0], dict):
+        return res[0]
+    return None

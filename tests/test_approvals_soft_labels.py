@@ -11,7 +11,7 @@ from qeth.plugins.approvals import ApprovalsPanel, ScanWorker
 from qeth.plugins.approvals.cache import ApprovalsCache
 from qeth.plugins.approvals.discovery import ApprovalRow
 from qeth.transactions import (
-    fetch_contract_display_name, meaningful_contract_name,
+    _natspec_title, fetch_contract_display_name, meaningful_contract_name,
 )
 
 CHAIN = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
@@ -43,6 +43,14 @@ def test_meaningful_name_skips_proxy_impl_too():
     assert meaningful_contract_name("BeaconProxy", [{"name": "BeaconProxy"}]) == ""
 
 
+def test_meaningful_name_drops_generic_compiler_placeholder():
+    # the name a Vyper/Solidity contract gets when it has no NatSpec @title
+    assert meaningful_contract_name("Vyper_contract", []) == ""
+    assert meaningful_contract_name("Solidity_contract", None) == ""
+    # …but a real name that merely starts with "Vyper" is kept
+    assert meaningful_contract_name("VyperSwapRouter", []) == "VyperSwapRouter"
+
+
 # --- fetch_contract_display_name (keyless Blockscout v2, fake transport) ------
 
 def _v2(payload):
@@ -70,6 +78,132 @@ def test_fetch_name_unsupported_chain_no_network():
     tr = lambda url, timeout: calls.append(url) or b"{}"
     assert fetch_contract_display_name(99999, BARE_SPENDER, transport=tr) == ""
     assert calls == []                         # no Blockscout instance → never fetched
+
+
+# --- fetch_contract_display_name: Etherscan getsourcecode fallback ------------
+
+def test_falls_back_to_etherscan_when_blockscout_blank():
+    # Blockscout has nothing verified; Etherscan does (broader coverage).
+    def tr(url, timeout):
+        if "smart-contracts" in url:
+            return json.dumps({"is_verified": False}).encode()
+        return json.dumps({"result": [{"ContractName": "LayerZeroBridge(EthereumVersion)",
+                                       "Proxy": "0", "Implementation": ""}]}).encode()
+    got = fetch_contract_display_name(1, BARE_SPENDER, get_api_key=lambda: "K",
+                                      transport=tr)
+    assert got == "LayerZeroBridge(EthereumVersion)"
+
+
+def test_blockscout_hit_skips_etherscan():
+    calls = []
+    def tr(url, timeout):
+        calls.append(url)
+        if "smart-contracts" in url:
+            return json.dumps({"is_verified": True, "name": "VToken",
+                               "implementations": []}).encode()
+        return json.dumps({"result": []}).encode()
+    assert fetch_contract_display_name(1, PROXY_SPENDER, get_api_key=lambda: "K",
+                                       transport=tr) == "VToken"
+    assert all("smart-contracts" in u for u in calls)   # Etherscan never queried
+
+
+def test_no_key_never_queries_etherscan():
+    calls = []
+    def tr(url, timeout):
+        calls.append(url)
+        return json.dumps({"is_verified": False}).encode()
+    assert fetch_contract_display_name(1, BARE_SPENDER, transport=tr) == ""
+    assert all("smart-contracts" in u for u in calls)   # only Blockscout, no key → no Etherscan
+
+
+# --- NatSpec @title recovery (generic ContractName → source title) -----------
+
+def test_natspec_title_vyper():
+    assert _natspec_title("# @title LLAMMA - crvUSD AMM\n# @author Curve") \
+        == "LLAMMA - crvUSD AMM"
+
+
+def test_natspec_title_solidity_line_and_block():
+    assert _natspec_title("/// @title My Vault\ncontract V {}") == "My Vault"
+    assert _natspec_title("/** @title My Vault */") == "My Vault"
+
+
+def test_natspec_title_colon_form_and_absent():
+    assert _natspec_title("# @title: A Bot") == "A Bot"
+    assert _natspec_title("contract Foo {}  // no natspec") == ""
+    assert _natspec_title(None) == ""
+
+
+def test_natspec_title_escaped_standard_json_blob():
+    # multi-file verifications escape the source; cut at the escaped newline
+    assert _natspec_title('{{"content":"# @title Odos Zap\\n# @author X"}}') \
+        == "Odos Zap"
+
+
+def test_generic_contractname_falls_back_to_blockscout_source_title():
+    tr = _v2({"is_verified": True, "name": "Vyper_contract",
+              "implementations": [],
+              "source_code": "# @title LLAMMA - crvUSD AMM\n# @author Curve.Fi"})
+    assert fetch_contract_display_name(1, PROXY_SPENDER, transport=tr) \
+        == "LLAMMA - crvUSD AMM"
+
+
+def test_generic_contractname_falls_back_to_etherscan_source_title():
+    def tr(url, timeout):
+        if "smart-contracts" in url:
+            return json.dumps({"is_verified": False}).encode()      # not on Blockscout
+        return json.dumps({"result": [{"ContractName": "Vyper_contract", "Proxy": "0",
+                                       "Implementation": "",
+                                       "SourceCode": "# @title Offramp TWAP Bot on ETH"}]}).encode()
+    assert fetch_contract_display_name(1, BARE_SPENDER, get_api_key=lambda: "K",
+                                       transport=tr) == "Offramp TWAP Bot on ETH"
+
+
+def test_etherscan_resolves_proxy_via_implementation():
+    impl = "0x" + "ab" * 20
+    def tr(url, timeout):
+        if "smart-contracts" in url:
+            return json.dumps({"is_verified": False}).encode()          # not on Blockscout
+        if impl[2:].lower() in url.lower():                             # impl lookup
+            return json.dumps({"result": [{"ContractName": "VToken",
+                                           "Proxy": "0", "Implementation": ""}]}).encode()
+        return json.dumps({"result": [{"ContractName": "BeaconProxy",   # proxy shell
+                                       "Proxy": "1", "Implementation": impl}]}).encode()
+    assert fetch_contract_display_name(1, PROXY_SPENDER, get_api_key=lambda: "K",
+                                       transport=tr) == "VToken"
+
+
+# --- worker: seeding from cache (progressive coverage, no name churn) ----------
+
+def _seeded_worker(known_soft):
+    return ScanWorker(CHAIN, OWNER, object(), object(), [],
+                      SimpleNamespace(missing=lambda c, t: [], get=lambda c, t: {},
+                                      put_many=lambda c, i: None),
+                      known_soft_labels=known_soft,
+                      client_factory=lambda c: _Client())
+
+
+def test_seeded_soft_label_is_not_refetched_and_preserved(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ap, "fetch_contract_display_name",
+                        lambda cid, addr, **k: calls.append(addr) or "WRONG")
+    w = _seeded_worker({BARE_SPENDER: "LayerZeroBridge(EthereumVersion)"})
+    out = w._fetch_soft_labels(w._client_factory(CHAIN), 1, [BARE_SPENDER])
+    assert out[BARE_SPENDER] == "LayerZeroBridge(EthereumVersion)"   # kept, not overwritten
+    assert calls == []                                              # never re-fetched
+    assert w._softname_budget == ScanWorker.SOFT_NAME_HTTP_CAP       # budget untouched
+
+
+def test_seeding_spends_budget_only_on_still_unnamed(monkeypatch):
+    named = "0x" + "a5" * 20
+    unnamed = "0x" + "b6" * 20
+    calls = []
+    monkeypatch.setattr(ap, "fetch_contract_display_name",
+                        lambda cid, addr, **k: calls.append(addr) or "Fresh")
+    w = _seeded_worker({named: "Known"})
+    out = w._fetch_soft_labels(w._client_factory(CHAIN), 1, [named, unnamed])
+    assert out[named] == "Known" and out[unnamed] == "Fresh"
+    assert calls == [unnamed]                                       # only the backlog costs a lookup
 
 
 # --- ScanWorker._fetch_soft_labels: ERC-20 name, residual, budget, memo -------

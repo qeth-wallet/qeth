@@ -15,6 +15,7 @@ tree.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, ClassVar
 
 from eth_utils import to_checksum_address
@@ -56,6 +57,7 @@ _USD_SORT_ROLE = Qt.ItemDataRole.UserRole + 2  # float: USD exposure (∞ = unli
 _RISK_ROLE = Qt.ItemDataRole.UserRole + 3     # token node: "$X at risk" pill text ("" = none)
 _MIN_COL_W = 48                                # neither column shrinks below this
 _COL_GAP = 16                                  # breathing room left of the (right-aligned) amount
+_SOFT_NAME_WORKERS = 8                          # concurrent spender contract-name lookups
 
 # The "at risk" pill: a self-consistent (bg, fg) pair — like the account-tree
 # label pills — so it reads on any palette. A distinct amber/orange (not the
@@ -230,15 +232,17 @@ class ScanWorker(QThread):
     LOG_PAGE = 1000               # explorer logs-API row cap per window
     RECENT_TX_PAGES = 5           # cap on the lag-patch tail (never the full history)
     MAX_ATTEMPTS = 3
-    # Per-scan budget for the per-address Blockscout contract-name lookups (the
-    # ERC-20-name multicall is batched/free and never capped) — bounds cold-scan
-    # fan-out on a huge account; the residual just shows the bare address.
-    SOFT_NAME_HTTP_CAP = 60
+    # Per-scan budget for the per-address contract-name lookups (the ERC-20-name
+    # multicall is batched/free and never capped) — bounds cold-scan fan-out on a
+    # huge account; the residual shows the bare address and is retried next scan
+    # (seeding carries the wins forward). Lookups run concurrently, so this many
+    # is seconds, not minutes.
+    SOFT_NAME_HTTP_CAP = 120
 
     def __init__(self, chain, address: str, log_source, tx_source, snapshot,
                  metadata_cache, *, from_block=0, label_source=None,
-                 price_source=None, known_pairs=None, client_factory=None,
-                 parent=None):
+                 price_source=None, known_pairs=None, known_soft_labels=None,
+                 get_api_key=None, client_factory=None, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
@@ -249,10 +253,14 @@ class ScanWorker(QThread):
         self._from_block = int(from_block or 0)   # incremental cursor (cache last_block)
         self._label_source = label_source
         self._price_source = price_source
+        self._get_api_key = get_api_key           # Etherscan key for the ABI-name fallback
         self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
         self._priced: dict[str, Decimal | None] = {}   # token -> unit price (memo)
         self._balances: dict[str, int] = {}            # token -> holder balance (memo)
-        self._soft_labels: dict[str, str] = {}         # spender -> soft name (memo; "" = none)
+        # Seeded from the cache's already-resolved names, so the per-scan budget
+        # is spent only on STILL-UNNAMED spenders (progressive coverage across
+        # scans) and a resolved name is never re-fetched or overwritten with "".
+        self._soft_labels: dict[str, str] = dict(known_soft_labels or {})
         self._softname_budget = self.SOFT_NAME_HTTP_CAP
         self._client_factory = client_factory or EthClient
         self._head = 0               # chain head, for block-% progress
@@ -495,10 +503,12 @@ class ScanWorker(QThread):
                            spenders: list[str]) -> dict[str, str]:
         """Best-effort SELF-REPORTED names for spenders with no public name-tag:
         the spender's own ERC-20 name (keyless multicall), then — for the
-        residual — its verified ABI contract name (keyless Blockscout, proxy-
-        resolved). Memoized so streaming batches don't refetch; the per-address
-        contract-name lookups are budgeted (``SOFT_NAME_HTTP_CAP``) so a huge
-        account doesn't fan out unboundedly. Rendered in italic (lower-trust)."""
+        residual — its verified ABI contract name (Blockscout, then Etherscan,
+        proxy-resolved). Memoized so streaming batches don't refetch; the
+        per-address contract-name lookups are budgeted (``SOFT_NAME_HTTP_CAP``)
+        so a huge account doesn't fan out unboundedly, and run CONCURRENTLY —
+        they're independent explorer round-trips, and serialising them is what
+        made a big account's names crawl in over minutes. Italic (lower-trust)."""
         need = [s for s in spenders if s not in self._soft_labels]
         if need:
             try:
@@ -513,21 +523,28 @@ class ScanWorker(QThread):
                     self._soft_labels[s] = m.get("name") or m.get("symbol") or ""
                 else:
                     residual.append(s)
-            skipped = 0
-            for s in residual:
-                if self._softname_budget <= 0:
-                    self._soft_labels[s] = ""            # over budget → bare address
-                    skipped += 1
-                    continue
-                self._softname_budget -= 1
+            # Spend the per-scan budget, resolve those concurrently; the rest are
+            # left bare this scan and retried next (seeding carries the wins).
+            take = residual[:max(0, self._softname_budget)]
+            self._softname_budget -= len(take)
+            for s in residual[len(take):]:
+                self._soft_labels[s] = ""
+
+            def _one(s: str) -> str:
                 try:
-                    self._soft_labels[s] = fetch_contract_display_name(cid, s)
+                    return fetch_contract_display_name(
+                        cid, s, get_api_key=self._get_api_key)
                 except Exception:
-                    self._soft_labels[s] = ""
                     log.debug("approvals contract-name fetch failed", exc_info=True)
-            if skipped:
+                    return ""
+
+            if take:
+                with ThreadPoolExecutor(max_workers=_SOFT_NAME_WORKERS) as ex:
+                    for s, name in zip(take, ex.map(_one, take)):
+                        self._soft_labels[s] = name
+            if len(residual) > len(take):
                 log.debug("approvals: %d spender contract-name lookups skipped "
-                          "(per-scan budget)", skipped)
+                          "(per-scan budget)", len(residual) - len(take))
         return {s: self._soft_labels.get(s, "") for s in spenders}
 
 
@@ -1516,10 +1533,15 @@ class ApprovalsPlugin(Plugin):
         self._panel.clear()
         cached = self._cache.load(chain.chain_id, addr)
         known_pairs: set[tuple[str, str]] = set()
+        known_soft: dict[str, str] = {}
         if cached and cached[0]:
             rows, self._last_block = cached
             self._panel.append_rows(rows)
             known_pairs = {(r.token.lower(), r.spender.lower()) for r in rows}
+            # Carry already-resolved soft names forward so the worker doesn't
+            # re-fetch them (or lose them when a later scan's budget runs out).
+            known_soft = {r.spender.lower(): r.spender_soft_label
+                          for r in rows if r.spender_soft_label}
         else:
             self._last_block = 0
             self._panel.begin_scan()
@@ -1529,7 +1551,9 @@ class ApprovalsPlugin(Plugin):
                             from_block=self._last_block,
                             label_source=self._label_source,
                             price_source=self._price_source,
-                            known_pairs=known_pairs)
+                            known_pairs=known_pairs, known_soft_labels=known_soft,
+                            get_api_key=lambda: getattr(
+                                self._store, "etherscan_api_key", None))
         worker.batch_fetched.connect(self._on_batch)
         worker.rows_ready.connect(
             lambda c, a, rows, e=epoch: self._on_rows(c, a, rows, e))

@@ -122,3 +122,37 @@ class TestWorldHygiene:
         src = (WEBEXT / "provider.js").read_text()
         assert '"qeth-provider"' in src
         assert '"qeth-relay"' in src
+
+
+class TestTransportFiles:
+    def test_files_exist(self):
+        assert (WEBEXT / "relay.js").is_file()
+        assert (WEBEXT / "background.js").is_file()
+
+    def test_relay_initiates_a_port_not_the_socket(self):
+        src = (WEBEXT / "relay.js").read_text()
+        assert "chrome.runtime.connect" in src        # per-frame Port
+        assert "window.ethereum" not in src           # relay never sets it
+        assert "WebSocket" not in src                 # the socket lives in bg
+        assert '"qeth-provider"' in src and '"qeth-relay"' in src
+
+    def test_background_holds_the_loopback_socket(self):
+        src = (WEBEXT / "background.js").read_text()
+        assert "ws://127.0.0.1:1248" in src
+        assert "onConnect" in src                     # receives relay Ports
+        assert "window.ethereum" not in _strip_js_comments(src)
+
+    def test_background_demuxes_pushes_and_stamps_origin(self):
+        src = (WEBEXT / "background.js").read_text()
+        assert "eth_subscription" in src              # push demux
+        assert "__frameOrigin" in src                 # per-frame origin stamp
+        assert "sender" in src                        # from the unforgeable port
+
+    def test_background_keepalive_is_local_and_periodic(self):
+        src = (WEBEXT / "background.js").read_text()
+        assert "periodInMinutes" in src               # alarms keepalive
+        # eth_chainId is locally answered; web3_clientVersion would be proxied
+        # upstream and hit the chain RPC every tick (checked against code, not
+        # the comment that explains the choice).
+        assert "eth_chainId" in src
+        assert "web3_clientVersion" not in _strip_js_comments(src)

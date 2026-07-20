@@ -626,3 +626,50 @@ def test_select_all_disabled_when_empty(qtbot):
 def test_select_all_is_flat_icon_button(qtbot):
     p = _panel(qtbot)
     assert p.btn_select_all.isFlat() and p.btn_select_all.text() == ""
+
+
+# --- action-button stable width + selection keys --------------------------
+
+def test_action_button_width_locked_to_max(qtbot):
+    p = _panel(qtbot)
+    assert p.btn_action.minimumWidth() > 0
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)      # → Revoke (2)
+    assert p.btn_action.text() == "&Revoke (2)"
+    # neither label exceeds the locked minimum, so the row never reflows
+    assert p.btn_action.sizeHint().width() <= p.btn_action.minimumWidth()
+
+
+def _key(p, key):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    ev = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+    return p.eventFilter(p.tree, ev)
+
+
+def test_plus_key_selects_all(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    assert _key(p, Qt.Key.Key_Plus) is True            # consumed
+    assert len(p.checked_leaves()) == 2
+
+
+def test_minus_key_deselects_all(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p._select_all()
+    assert _key(p, Qt.Key.Key_Minus) is True
+    assert len(p.checked_leaves()) == 0
+
+
+def test_asterisk_key_inverts_selection(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.tree.topLevelItem(0).child(0).setCheckState(0, Qt.CheckState.Checked)  # SP1
+    assert _key(p, Qt.Key.Key_Asterisk) is True
+    assert {r.spender for r in p.checked_leaves()} == {SP2}   # flipped
+
+
+def test_select_keys_ignored_when_empty(qtbot):
+    p = _panel(qtbot)
+    assert _key(p, Qt.Key.Key_Plus) is not True         # nothing to select → not consumed

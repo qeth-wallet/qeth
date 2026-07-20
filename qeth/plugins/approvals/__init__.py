@@ -397,6 +397,7 @@ class ApprovalsPanel(QWidget):
         self.tree.setMouseTracking(True)
         self.tree.itemEntered.connect(self._on_item_entered)
         self.tree.viewport().installEventFilter(self)
+        self.tree.installEventFilter(self)           # +/−/* selection keys
         self.tree.itemDoubleClicked.connect(self._on_double_clicked)
         hh = self.tree.header()
         # QTreeView defaults stretchLastSection=True, which force-stretched the
@@ -455,10 +456,18 @@ class ApprovalsPanel(QWidget):
         self.btn_action = QPushButton("&Modify")
         self.btn_action.setIcon(self._ic_modify)
         self.btn_action.clicked.connect(self._on_action_clicked)
+        # Lock the width to max(Modify, Revoke) so the icon buttons to its right
+        # don't jump under the cursor when it flips Modify ↔ Revoke (N).
+        self.btn_action.setText("&Revoke (000)")
+        self.btn_action.setIcon(self._ic_revoke)
+        w_revoke = self.btn_action.sizeHint().width()
+        self.btn_action.setText("&Modify")
+        self.btn_action.setIcon(self._ic_modify)
+        self.btn_action.setMinimumWidth(max(w_revoke, self.btn_action.sizeHint().width()))
         # Icon-only buttons render frameless (flat), like a toolbar.
         self.btn_select_all = QPushButton()
         self.btn_select_all.setIcon(_icon(*_IC_SELECT_ALL))
-        self.btn_select_all.setToolTip("Check / uncheck all")
+        self.btn_select_all.setToolTip("Check / uncheck all  ( +  −  ∗ )")
         self.btn_select_all.clicked.connect(self._toggle_select_all)
         self.btn_copy = QPushButton()
         self.btn_copy.setIcon(_icon(*_IC_COPY))
@@ -544,21 +553,40 @@ class ApprovalsPanel(QWidget):
                     out.append(r)
         return out
 
-    def _toggle_select_all(self) -> None:
-        """Check every leaf, or uncheck them all if they're already checked —
-        so a whole account's caps can be batch-revoked in one go."""
-        leaves = self._all_leaves()
-        if not leaves:
-            return
-        all_on = all(le.checkState(0) == Qt.CheckState.Checked for le in leaves)
-        target = Qt.CheckState.Unchecked if all_on else Qt.CheckState.Checked
+    def _set_all_checked(self, state: Qt.CheckState) -> None:
         self.tree.blockSignals(True)
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
             if node is not None:                      # setting the token node
-                node.setCheckState(0, target)         # auto-propagates to its leaves
+                node.setCheckState(0, state)          # auto-propagates to its leaves
         self.tree.blockSignals(False)
         self._update_buttons()
+
+    def _select_all(self) -> None:                    # + key
+        self._set_all_checked(Qt.CheckState.Checked)
+
+    def _deselect_all(self) -> None:                  # − key
+        self._set_all_checked(Qt.CheckState.Unchecked)
+
+    def _invert_selection(self) -> None:              # * key
+        self.tree.blockSignals(True)
+        for leaf in self._all_leaves():
+            leaf.setCheckState(0, Qt.CheckState.Unchecked
+                               if leaf.checkState(0) == Qt.CheckState.Checked
+                               else Qt.CheckState.Checked)
+        self.tree.blockSignals(False)
+        self._update_buttons()
+
+    def _toggle_select_all(self) -> None:
+        """The button: check every leaf, or uncheck them all if already checked
+        — so a whole account's caps can be batch-revoked in one go."""
+        leaves = self._all_leaves()
+        if not leaves:
+            return
+        if all(le.checkState(0) == Qt.CheckState.Checked for le in leaves):
+            self._deselect_all()
+        else:
+            self._select_all()
 
     def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
         node = self._token_items.get(r.token)
@@ -682,6 +710,8 @@ class ApprovalsPanel(QWidget):
         self._refresh_reveal()
 
     def eventFilter(self, obj, event) -> bool:
+        # + / − / * = select-all / none / invert (both main-row and keypad — the
+        # key code is the same, only a KeypadModifier differs, which we ignore).
         if obj is self.tree.viewport():
             et = event.type()
             if et == QEvent.Type.Leave and self._hovered is not None:
@@ -689,6 +719,15 @@ class ApprovalsPanel(QWidget):
                 self._refresh_reveal()
             elif et == QEvent.Type.Resize:
                 self._layout_columns()               # keep the split filling the width
+        elif obj is self.tree and event.type() == QEvent.Type.KeyPress:
+            handler = {
+                Qt.Key.Key_Plus: self._select_all,
+                Qt.Key.Key_Minus: self._deselect_all,
+                Qt.Key.Key_Asterisk: self._invert_selection,
+            }.get(event.key())
+            if handler is not None and self._all_leaves():
+                handler()
+                return True                          # consume, don't let the tree see it
         return super().eventFilter(obj, event)
 
     # --- column split (two Interactive columns that always fill the width) --

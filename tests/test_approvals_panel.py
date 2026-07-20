@@ -422,40 +422,59 @@ def test_sort_by_token_is_alphabetical_by_default(qtbot):
     assert p.tree.topLevelItem(1).text(0).startswith("ZRX")
 
 
-def test_sort_by_allowance_ranks_by_usd_exposure(qtbot):
+def test_sort_by_allowance_ranks_by_value_at_risk(qtbot):
+    # Both unlimited (so the OLD summed-cap sort tied them at ∞) — the sort now
+    # ranks by the value actually HELD, so BIG ($5000) beats SMALL ($5).
     p = _panel(qtbot)
     p.append_rows([
-        _row(token=TOKEN, symbol="LOW", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),        # $1
-        _row(token=TOKEN2, symbol="HIGH", spender=SP1,
-             allowance=1_000_000_000, decimals=6, price_usd=Decimal("1")),    # $1000
+        _row(token=TOKEN, symbol="SMALL", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("1"), token_balance=5_000_000),        # $5
+        _row(token=TOKEN2, symbol="BIG", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("1"), token_balance=5_000_000_000),    # $5000
     ])
-    p._on_header_clicked(1)                    # sort by Allowance → highest first
-    assert p.tree.topLevelItem(0).text(0).startswith("HIGH")
-    assert p.tree.topLevelItem(1).text(0).startswith("LOW")
+    p._on_header_clicked(1)                    # sort by Allowance → highest at-risk first
+    assert p.tree.topLevelItem(0).text(0).startswith("BIG")
+    assert p.tree.topLevelItem(1).text(0).startswith("SMALL")
 
 
-def test_unlimited_sorts_to_top_by_allowance(qtbot):
+def test_held_token_outranks_a_bigger_unheld_allowance(qtbot):
+    # A huge unlimited cap on a token you DON'T hold is $0 at risk → sorts below
+    # a modest holding of a token you do hold.
     p = _panel(qtbot)
     p.append_rows([
-        _row(token=TOKEN, symbol="FIN", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),
-        _row(token=TOKEN2, symbol="INF", spender=SP1, allowance=_MAX),   # unlimited
+        _row(token=TOKEN2, symbol="UNHELD", spender=SP1, allowance=_MAX,
+             price_usd=Decimal("1"), token_balance=0),                # nothing held
+        _row(token=TOKEN, symbol="HELD", spender=SP1, allowance=1_000_000,
+             decimals=6, price_usd=Decimal("1"), token_balance=10_000_000),   # $10
     ])
-    p._on_header_clicked(1)                    # by allowance, descending exposure
-    assert p.tree.topLevelItem(0).text(0).startswith("INF")   # ∞ exposure first
+    p._on_header_clicked(1)
+    assert p.tree.topLevelItem(0).text(0).startswith("HELD")     # real risk first
+    assert p.tree.topLevelItem(1).text(0).startswith("UNHELD")   # $0 at risk → bottom
 
 
-def test_token_total_sums_spender_exposure(qtbot):
-    p = _panel(qtbot)
-    p.append_rows([
-        _row(token=TOKEN, symbol="T", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),   # $1
-        _row(token=TOKEN, symbol="T", spender=SP2,
-             allowance=3_000_000, decimals=6, price_usd=Decimal("1")),   # $3
-    ])
+def test_token_sort_key_is_value_at_risk(qtbot):
     from qeth.plugins.approvals import _USD_SORT_ROLE
-    assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 4.0         # $1 + $3
+    p = _panel(qtbot)
+    p.append_rows([
+        _row(token=TOKEN, symbol="T", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("2"), token_balance=3_000_000),   # 3 × $2
+    ])
+    assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 6.0         # value at risk
+
+
+def test_leaves_still_sort_by_their_own_cap(qtbot):
+    # Within a token, spender leaves keep ranking by allowance exposure — an
+    # unlimited cap leaf above a finite one.
+    p = _panel(qtbot)
+    p.append_rows([
+        _row(token=TOKEN, symbol="T", spender=SP1, allowance=1_000_000,
+             decimals=6, price_usd=Decimal("1")),                    # $1 finite
+        _row(token=TOKEN, symbol="T", spender=SP2, allowance=_MAX),  # unlimited
+    ])
+    p._on_header_clicked(1)
+    node = p.tree.topLevelItem(0)
+    assert node.child(0).text(0) == SP2       # unlimited spender first
+    assert node.child(1).text(0) == SP1
 
 
 # --- resizable two-column split -------------------------------------------

@@ -875,18 +875,24 @@ class ApprovalsPanel(QWidget):
         self.tree.expandAll()
 
     def _recompute_token_totals(self) -> None:
-        """Each token node's Allowance-sort key = the summed USD exposure of its
-        spenders (∞ if any is unlimited), so sorting by allowance ranks tokens by
-        total exposure."""
+        """Each token node's Allowance-sort key = its USD VALUE AT RISK (wallet
+        balance × price) — the amount its approvals could actually drain — so
+        sorting by allowance ranks the tokens holding real money to the top.
+        A summed allowance cap would just be ∞ for every token with any unlimited
+        approval (nearly all), tying them uselessly. Not-held / unpriced tokens
+        sort as 0 (bottom). Spender leaves keep sorting by their own cap."""
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
             if node is None:
                 continue
-            total = 0.0
+            risk = 0.0
             for ci in range(node.childCount()):
-                v = node.child(ci).data(1, _USD_SORT_ROLE)
-                total += float(v) if v is not None else 0.0
-            node.setData(1, _USD_SORT_ROLE, total)
+                r = node.child(ci).data(0, _ROW_ROLE)      # all children share the token
+                if isinstance(r, ApprovalRow):
+                    usd = _token_risk_usd(r)
+                    risk = float(usd) if usd is not None else 0.0
+                    break
+            node.setData(1, _USD_SORT_ROLE, risk)
 
     # --- hover / selection address reveal ---------------------------------
     def _on_item_entered(self, item: QTreeWidgetItem, column: int) -> None:

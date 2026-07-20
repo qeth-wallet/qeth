@@ -483,3 +483,91 @@ class ApprovalLogSource:
             )
         result = data.get("result")
         return result if isinstance(result, list) else []
+
+
+# keccak256("Transfer(address,address,uint256)") — the ERC-20 Transfer event.
+_TRANSFER_TOPIC0 = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+)
+
+
+def fetch_incoming_transfer_logs(
+    chain: Chain, token: str, owner: str, *, get_api_key,
+    instances: dict[int, str] | None = None,
+    etherscan_chains: frozenset[int] | None = None,
+    timeout: float = 20.0,
+    transport: "Transport | None" = None,
+) -> list[dict]:
+    """Explorer ``Transfer(*, to=owner)`` logs for a SPECIFIC ``token`` contract,
+    via the logs API (Etherscan v2 when keyed, else the chain's Blockscout
+    instance, with failover). Being address-filtered, the result set is small
+    (how many times ``owner`` received ``token``) and needs no windowing — used
+    to establish provenance (did the owner's own tx acquire the token). Returns
+    raw log rows; empty on none.
+
+    (Deliberately NOT node ``eth_getLogs`` — public RPCs cap the block range and
+    reject a full-history query; the explorer logs API has no such cap.)
+    """
+    instances = instances if instances is not None else BLOCKSCOUT_INSTANCES
+    etherscan_chains = (
+        etherscan_chains if etherscan_chains is not None else ETHERSCAN_V2_CHAINS
+    )
+    transport = transport or _urllib_transport
+    key = get_api_key()
+    h = owner[2:] if owner.startswith("0x") else owner
+    to_topic = "0x" + "0" * 24 + h.lower()
+
+    endpoints: list[tuple[str, str | None]] = []
+    if chain.chain_id in etherscan_chains and key:
+        endpoints.append((ETHERSCAN_V2_BASE, key))
+    base = instances.get(chain.chain_id)
+    if base:
+        endpoints.append((base.rstrip("/") + "/api", None))
+    if not endpoints:
+        raise UnsupportedChain(
+            f"No transfer-log source supports chain {chain.chain_id}"
+        )
+
+    last_err: Exception | None = None
+    for i, (endpoint, ep_key) in enumerate(endpoints):
+        is_last = i == len(endpoints) - 1
+        try:
+            rows = _fetch_transfer_logs_one(
+                transport, timeout, chain, endpoint, ep_key, token, to_topic)
+        except Exception as e:      # noqa: BLE001 — try the next endpoint
+            last_err = e
+            if is_last:
+                raise
+            continue
+        if rows or is_last:
+            return rows
+    raise last_err or TransactionSourceError("getLogs error")
+
+
+def _fetch_transfer_logs_one(transport, timeout, chain, endpoint, key,
+                             token, to_topic) -> list[dict]:
+    params = [
+        ("module", "logs"),
+        ("action", "getLogs"),
+        ("fromBlock", "0"),
+        ("toBlock", "latest"),
+        ("address", token),
+        ("topic0", _TRANSFER_TOPIC0),
+        ("topic2", to_topic),
+        ("topic0_2_opr", "and"),
+    ]
+    if key:
+        params = [("chainid", str(chain.chain_id)), *params, ("apikey", key)]
+    url = f"{endpoint}?" + urllib.parse.urlencode(params)
+    data = json.loads(transport(url, timeout))
+    if data.get("status") != "1":
+        detail = (str(data.get("message") or "") + " "
+                  + str(data.get("result") or "")).lower()
+        if ("no logs" in detail or "no records" in detail
+                or "not found" in detail or "no transactions" in detail):
+            return []
+        raise TransactionSourceError(
+            data.get("result") or data.get("message") or "getLogs error"
+        )
+    result = data.get("result")
+    return result if isinstance(result, list) else []

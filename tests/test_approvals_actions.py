@@ -243,7 +243,7 @@ def test_stop_scan_survives_a_deleted_worker(plugin):
     from PySide6.QtWidgets import QApplication
 
     from qeth.plugins.approvals import ScanWorker
-    w = ScanWorker(CHAIN, OWNER, object(), [], object())
+    w = ScanWorker(CHAIN, OWNER, object(), object(), [], object())
     plugin._scan = w                                   # pretend a scan is live
     w.deleteLater()
     QApplication.instance().sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -284,16 +284,17 @@ def test_scan_done_prunes_and_persists(plugin):
     plugin._kick(force=True)                            # renders the cached (old) pair
     other = "0x" + "cc" * 20
     plugin._on_rows(CHAIN.chain_id, OWNER.lower(), [_row(spender=other)], plugin._epoch)
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 12345, plugin._epoch)
     # old pair pruned (not re-confirmed), new one kept + persisted
     assert {r.spender for r in plugin._panel.all_rows()} == {other}
     loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
     assert loaded is not None and {r.spender for r in loaded[0]} == {other}
+    assert loaded[1] == 12345                          # logs_head persisted as the cursor
 
 
 def test_incomplete_scan_does_not_prune_or_persist(plugin):
     plugin._panel.append_rows([_row()])
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, 0, plugin._epoch)  # stopped
     assert plugin._panel.tree.topLevelItemCount() == 1     # nothing pruned
     assert plugin._cache.load(CHAIN.chain_id, OWNER) is None   # nothing persisted
 
@@ -308,13 +309,13 @@ def test_reconcile_zero_persists_the_removal(plugin):
 
 def test_stopped_scan_clears_loaded_for_to_resume(plugin):
     plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, 0, plugin._epoch)  # stopped
     assert plugin._loaded_for is None      # next activation resumes the un-scanned tail
 
 
 def test_completed_scan_keeps_loaded_for(plugin):
     plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)    # completed
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 0, plugin._epoch)   # completed
     assert plugin._loaded_for == (CHAIN.chain_id, OWNER.lower())           # settled
 
 

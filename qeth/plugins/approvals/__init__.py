@@ -32,12 +32,13 @@ from ...formatting import format_balance, short_addr
 from ...plugin import Plugin
 from ...token_metadata import TokenMetadataCache
 from ...transactions import (
-    BlockscoutTransactionSource, EtherscanV2TransactionSource,
-    RoutedTransactionSource,
+    ApprovalLogSource, BlockscoutTransactionSource,
+    EtherscanV2TransactionSource, RoutedTransactionSource,
 )
-from ..transactions import _encode_approve, _is_full_history
+from ..transactions import _encode_approve
 from .discovery import (
-    ApprovalRow, approval_pairs_from_logs, approve_pairs_in, fetch_allowances,
+    ApprovalRow, approval_pairs_from_log_rows, approval_pairs_from_logs,
+    approve_pairs_in, fetch_allowances,
 )
 from .revoke_queue import RevokeQueue
 
@@ -160,27 +161,34 @@ class _ApprovalItem(QTreeWidgetItem):
 # --- worker ---------------------------------------------------------------
 
 class ScanWorker(QThread):
-    """Pages the account's full history newest-first, resuming from the cache
-    snapshot; interruptible between pages (the Stop button)."""
+    """Discovers approvals from the account's ERC-20 ``Approval`` event logs
+    (``ApprovalLogSource``, windowed by block), then patches the recent tail a
+    logs indexer may lag behind by reading only the account's newest txs.
+    Interruptible between windows (the Stop button)."""
 
     batch_fetched = Signal(QULONGLONG, str, object)      # cid, addr_l, [Transaction] (NEW rows)
     rows_ready = Signal(QULONGLONG, str, object)         # cid, addr_l, [ApprovalRow]
-    progress = Signal(QULONGLONG, str, object, object)   # cid, addr_l, sent_seen, nonce_total
-    scan_done = Signal(QULONGLONG, str, bool)            # cid, addr_l, complete
+    progress = Signal(QULONGLONG, str, object, object)   # cid, addr_l, pairs_seen, total(0=busy)
+    scan_done = Signal(QULONGLONG, str, bool, object)    # cid, addr_l, complete, logs_head
 
-    PAGE = 100
-    PAIR_BATCH_EVERY = 3          # re-check allowances every K pages
+    PAGE = 100                    # tx-tail page size
+    LOG_PAGE = 1000               # explorer logs-API row cap per window
+    PAIR_BATCH_EVERY = 3          # re-check allowances every K windows
+    RECENT_TX_PAGES = 5           # cap on the lag-patch tail (never the full history)
     MAX_ATTEMPTS = 3
 
-    def __init__(self, chain, address: str, source, snapshot, metadata_cache,
-                 *, label_source=None, price_source=None, known_pairs=None,
-                 client_factory=None, parent=None):
+    def __init__(self, chain, address: str, log_source, tx_source, snapshot,
+                 metadata_cache, *, from_block=0, label_source=None,
+                 price_source=None, known_pairs=None, client_factory=None,
+                 parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
-        self._source = source
+        self._log_source = log_source          # ApprovalLogSource (bulk discovery)
+        self._tx_source = tx_source            # RoutedTransactionSource (recent-tail patch)
         self._snapshot = list(snapshot)
         self._meta = metadata_cache
+        self._from_block = int(from_block or 0)   # incremental cursor (cache last_block)
         self._label_source = label_source
         self._price_source = price_source
         self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
@@ -192,80 +200,104 @@ class ScanWorker(QThread):
         addr_l = self._address.lower()
         try:
             client = self._client_factory(self._chain)
-            seen = {t.hash for t in self._snapshot}
+            # 1. Instant re-check: cached pairs + any approve pairs already in the
+            #    tx snapshot, read live before any network so the cache repaints.
             all_pairs = self._known_pairs | set(
                 approve_pairs_in(self._snapshot, self._address))
             checked: set[tuple[str, str]] = set()
             self._emit_rows(client, cid, addr_l, all_pairs, checked)
+            self.progress.emit(cid, addr_l, len(all_pairs), 0)
 
-            try:
-                total = client.get_transaction_count(self._address, "latest")
-            except Exception:
-                total = 0
-            sent_seen = sum(1 for t in self._snapshot
-                            if t.from_addr.lower() == addr_l)
-            self.progress.emit(cid, addr_l, sent_seen, total)
-
-            # A fully-cached account no longer re-pages its whole history — it
-            # only fetches the NEW tail (txs above what's cached) to catch fresh
-            # approvals, then stops the moment it reaches already-seen txs.
-            tail_only = _is_full_history(self._snapshot)
-            snapshot_oldest = min((t.block_number for t in self._snapshot),
-                                  default=None)
-            cursor: int | None = None
-            jumped = snapshot_oldest is None
-            pages = 0
+            # 2. Bulk discovery: window the account's Approval logs from the
+            #    incremental cursor. logs_head tracks how far the indexer has
+            #    served, and becomes the cache's next resume point.
+            logs_head = self._from_block
+            window_from = self._from_block
+            windows = 0
             while not self.isInterruptionRequested():
-                raw = self._fetch_page(cursor)
-                if raw is None:                          # persistent explorer failure
-                    self.scan_done.emit(cid, addr_l, False)
+                rows = self._fetch_logs(window_from)
+                if rows is None:                         # persistent log-source failure
+                    self.scan_done.emit(cid, addr_l, False, logs_head)
                     return
-                if not raw:
+                if not rows:
                     break
-                new = [t for t in raw if t.hash not in seen]
-                if new:
-                    seen.update(t.hash for t in new)
-                    self.batch_fetched.emit(cid, addr_l, new)
-                    sent_seen += sum(1 for t in new if t.from_addr.lower() == addr_l)
-                    all_pairs |= approve_pairs_in(new, self._address)
-                pages += 1
-                self.progress.emit(cid, addr_l, min(sent_seen, total or sent_seen),
-                                   total)
-                raw_oldest = min(t.block_number for t in raw)
-                if not new:                              # reached already-cached txs
-                    if tail_only:
-                        break                            # incremental: tail done
-                    # A page fully within the cached newest span → skip below it.
-                    if (not jumped and snapshot_oldest is not None
-                            and raw_oldest > snapshot_oldest):
-                        cursor = snapshot_oldest
-                        jumped = True
-                        continue
-                if pages % self.PAIR_BATCH_EVERY == 0:
+                pairs, max_block = approval_pairs_from_log_rows(rows, self._address)
+                all_pairs |= pairs
+                if max_block > logs_head:
+                    logs_head = max_block
+                windows += 1
+                self.progress.emit(cid, addr_l, len(all_pairs), 0)
+                if windows % self.PAIR_BATCH_EVERY == 0:
                     self._emit_rows(client, cid, addr_l, all_pairs, checked)
-                if len(raw) < self.PAGE:                 # short page = start of history
+                if len(rows) < self.LOG_PAGE:            # short window = end of range
                     break
-                if cursor is not None and raw_oldest >= cursor:   # no progress guard
+                # Advance past the window's highest block. +1 skips re-fetching
+                # the boundary block; a single block holding a full window still
+                # makes progress via window_from+1.
+                nxt = max_block + 1 if max_block > window_from else window_from + 1
+                if nxt <= window_from:                   # no-progress guard
                     break
-                cursor = raw_oldest
+                window_from = nxt
+
+            # 3. Lag patch: a logs indexer can trail chain head. Read only the
+            #    account's txs NEWER than logs_head (a bounded recent window, not
+            #    the full history) and union their approve pairs — catching a
+            #    fresh approval the indexer hasn't surfaced yet.
+            self._patch_recent_tail(cid, addr_l, logs_head, all_pairs)
 
             self._emit_rows(client, cid, addr_l, all_pairs, checked)
-            self.scan_done.emit(cid, addr_l, not self.isInterruptionRequested())
+            self.scan_done.emit(
+                cid, addr_l, not self.isInterruptionRequested(), logs_head)
         except Exception:
             log.debug("approvals scan failed", exc_info=True)
-            self.scan_done.emit(cid, addr_l, False)
+            self.scan_done.emit(cid, addr_l, False, self._from_block)
 
-    def _fetch_page(self, cursor: int | None) -> list[Transaction] | None:
+    def _fetch_logs(self, from_block: int) -> list[dict] | None:
         import time
         for attempt in range(self.MAX_ATTEMPTS):
             try:
-                return self._source.list_transactions(
-                    self._chain, self._address, page=1, limit=self.PAGE,
-                    before_block=cursor)
+                return self._log_source.fetch(
+                    self._chain, self._address, from_block=from_block)
             except Exception:
                 if attempt < self.MAX_ATTEMPTS - 1:
                     time.sleep(0.5 * (attempt + 1))
         return None
+
+    def _patch_recent_tail(self, cid: int, addr_l: str, logs_head: int,
+                           all_pairs: set[tuple[str, str]]) -> None:
+        """Walk the account's txs newest-first only down to ``logs_head`` (the
+        gap the logs indexer may lag), bounded by ``RECENT_TX_PAGES``. Best
+        effort: a source failure just skips the patch — the log walk already has
+        the bulk. New txs are merged into the tx cache via ``batch_fetched``."""
+        seen = {t.hash for t in self._snapshot}
+        cursor: int | None = None
+        for _ in range(self.RECENT_TX_PAGES):
+            if self.isInterruptionRequested():
+                return
+            raw = self._fetch_tx_page(cursor)
+            if not raw:
+                return
+            new = [t for t in raw if t.hash not in seen]
+            if new:
+                seen.update(t.hash for t in new)
+                self.batch_fetched.emit(cid, addr_l, new)
+                all_pairs |= approve_pairs_in(new, self._address)
+            raw_oldest = min(t.block_number for t in raw)
+            if raw_oldest <= logs_head:                  # covered the indexer gap
+                return
+            if len(raw) < self.PAGE:                     # start of history
+                return
+            if cursor is not None and raw_oldest >= cursor:   # no-progress guard
+                return
+            cursor = raw_oldest
+
+    def _fetch_tx_page(self, cursor: int | None) -> list[Transaction] | None:
+        try:
+            return self._tx_source.list_transactions(
+                self._chain, self._address, page=1, limit=self.PAGE,
+                before_block=cursor)
+        except Exception:
+            return None
 
     def _emit_rows(self, client, cid: int, addr_l: str,
                    all_pairs: set[tuple[str, str]],
@@ -980,6 +1012,12 @@ class ApprovalsPlugin(Plugin):
         self._loaded_for: tuple[int, str] | None = None
         self._epoch = 0
         self._metadata = TokenMetadataCache()
+        # Approval-event logs are the discovery source of record (catches
+        # permit/internal-call approvals, and costs a few windowed requests on a
+        # >10k-tx account instead of paging its whole history). The tx source
+        # only patches the recent tail a logs indexer may lag behind.
+        self._log_source = ApprovalLogSource(
+            lambda: getattr(store, "etherscan_api_key", None))
         self._source = RoutedTransactionSource(
             EtherscanV2TransactionSource(
                 lambda: getattr(store, "etherscan_api_key", None)),
@@ -1255,7 +1293,9 @@ class ApprovalsPlugin(Plugin):
             self._last_block = 0
             self._panel.begin_scan()
         snapshot = self._disk_cache.load(chain.chain_id, addr) or []
-        worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata,
+        worker = ScanWorker(chain, addr, self._log_source, self._source,
+                            snapshot, self._metadata,
+                            from_block=self._last_block,
                             label_source=self._label_source,
                             price_source=self._price_source,
                             known_pairs=known_pairs)
@@ -1265,7 +1305,7 @@ class ApprovalsPlugin(Plugin):
         worker.progress.connect(
             lambda c, a, s, t, e=epoch: self._on_progress(c, a, s, t, e))
         worker.scan_done.connect(
-            lambda c, a, ok, e=epoch: self._on_done(c, a, ok, e))
+            lambda c, a, ok, head, e=epoch: self._on_done(c, a, ok, head, e))
         # Drop our reference the moment it finishes, before the host's
         # deleteLater() runs — so _stop_scan never reaches a dead wrapper.
         worker.finished.connect(lambda w=worker: self._forget_scan(w))
@@ -1301,29 +1341,34 @@ class ApprovalsPlugin(Plugin):
         if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
             self._panel.set_progress(int(seen), int(total or 0))
 
-    def _on_done(self, chain_id, addr_l, complete, epoch) -> None:
+    def _on_done(self, chain_id, addr_l, complete, logs_head, epoch) -> None:
         if self._panel is None or not self._fresh(chain_id, addr_l, epoch):
             return
         if complete:
             # Drop cached caps the fresh scan didn't re-confirm (revoked
-            # elsewhere), then persist the reconciled state + how far we scanned.
+            # elsewhere), then persist the reconciled state + how far the logs
+            # indexer served (the incremental resume point).
             self._panel.prune_to(self._scan_pairs)
-            self._persist()
+            self._persist(logs_head)
         else:
-            # Stopped before reaching the account's oldest txs — don't treat the
-            # view as loaded, so the next activation resumes and finishes the
-            # un-scanned older tail (the tx cache remembers where we stopped, so
-            # the resume skips re-paging what's already cached).
+            # Stopped/failed before finishing — don't treat the view as loaded,
+            # so the next activation resumes. Still advance the cursor to how far
+            # the logs got, so the resume doesn't re-window from 0.
+            if logs_head and int(logs_head) > self._last_block:
+                self._last_block = int(logs_head)
             self._loaded_for = None
         self._panel.finish_scan(bool(complete))
 
-    def _persist(self) -> None:
+    def _persist(self, logs_head=None) -> None:
         view = self._current_view()
         if view is None or self._panel is None:
             return
         cid, addr = view
-        blocks = [t.block_number for t in (self._disk_cache.load(cid, addr) or [])]
-        self._last_block = max(blocks, default=self._last_block)
+        # last_block is the Approval-log cursor (highest block the indexer
+        # served this scan), NOT the tx cache head. A reconcile/revoke persist
+        # passes no head → keep the existing cursor.
+        if logs_head is not None and int(logs_head) > self._last_block:
+            self._last_block = int(logs_head)
         self._cache.save(cid, addr, self._panel.all_rows(), self._last_block)
 
     def _on_copied(self, text: str) -> None:

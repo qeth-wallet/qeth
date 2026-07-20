@@ -224,7 +224,7 @@ class ApprovalsMachine(RuleBasedStateMachine):
         if w is None or not isValid(w):
             return
         cid, addr = self._view()
-        w.scan_done.emit(cid, addr, complete)
+        w.scan_done.emit(cid, addr, complete, 0)        # cid, addr, complete, logs_head
         w.finished.emit()                               # host deleteLater()s it
         self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)  # C++ gone
 

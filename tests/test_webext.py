@@ -181,3 +181,54 @@ class TestPopup:
         src = (WEBEXT / "background.js").read_text()
         assert "onMessage" in src
         assert '"status"' in src
+
+
+class TestBuild:
+    def _build_mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "wxbuild", WEBEXT / "build.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_packages_exactly_the_shipping_files(self, tmp_path):
+        import zipfile
+        mod = self._build_mod()
+        zip_path = mod.build(tmp_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            members = set(zf.namelist())
+        # Exactly the package set — no README/.gitignore/build.py/out/svg.
+        assert members == set(mod.PACKAGE_FILES)
+        assert "README.md" not in members
+        assert "build.py" not in members
+        # Version-stamped from the manifest.
+        assert zip_path.name == f"qeth-webext-{MANIFEST['version']}.zip"
+
+    def test_build_rejects_a_drifted_provider(self, tmp_path, monkeypatch):
+        import pytest
+        mod = self._build_mod()
+        # Make only the webext provider read as different from the Falkon copy.
+        orig = mod.Path.read_bytes
+
+        def fake_read_bytes(self):
+            if self.name == "provider.js" and "webext" in str(self):
+                return b"// drifted"
+            return orig(self)
+
+        monkeypatch.setattr(mod.Path, "read_bytes", fake_read_bytes)
+        with pytest.raises(SystemExit):
+            mod.build(tmp_path)
+
+    def test_jwt_is_valid_hs256(self):
+        import base64
+        import hashlib
+        import hmac
+        mod = self._build_mod()
+        tok = mod._jwt("user:1:2", "s3cr3t")
+        head_b64, body_b64, sig_b64 = tok.split(".")
+        signing_input = (head_b64 + "." + body_b64).encode()
+        want = base64.urlsafe_b64encode(
+            hmac.new(b"s3cr3t", signing_input, hashlib.sha256).digest()
+        ).rstrip(b"=").decode()
+        assert want == sig_b64

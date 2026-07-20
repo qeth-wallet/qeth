@@ -203,6 +203,8 @@ files = [
     # The Falkon browser-connector plugin (out-of-tree package; uses the
     # root Falkon.pyi stub). Same scoped-Qt-enum rules apply.
     "integrations/falkon/qeth_connector",
+    # The browser-extension build/sign script (stdlib only).
+    "integrations/webext/build.py",
 ]
 warn_redundant_casts = true
 warn_unused_ignores = true

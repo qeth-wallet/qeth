@@ -42,8 +42,21 @@
   // the frame — which is why Frame shows the multisig and we didn't.
   var IN_SUBFRAME = (window.top !== window.self);
 
+  // Transport configuration. This file is shared BYTE-FOR-BYTE between the
+  // Falkon plugin and the browser extension; the loader selects behaviour by
+  // setting window.__QETH_PROVIDER_CONFIG__ before this script runs. Defaults
+  // reproduce the Falkon connector exactly — poll for state over a
+  // request/response bridge, keep a direct-fetch fallback, no push. The
+  // extension flips these: a WebSocket-backed relay that PUSHES wallet events,
+  // so no polling and no direct fallback.
+  var CFG = window.__QETH_PROVIDER_CONFIG__ || {};
+  try { delete window.__QETH_PROVIDER_CONFIG__; } catch (e) {}
+  var DIRECT_FALLBACK = CFG.directFallback !== false;   // Falkon default: true
+  var POLL = CFG.poll !== false;                        // Falkon default: true
+  var PUSH = CFG.push === true;                         // Falkon default: false
+
   var HTTP_URL = "http://127.0.0.1:1248/";
-  var LOGO = "__QETH_LOGO_DATA_URI__";
+  var LOGO = CFG.logo || "__QETH_LOGO_DATA_URI__";
   var PROVIDER_SRC = "qeth-provider";
   var RELAY_SRC = "qeth-relay";
   var POLL_MS = 4000;
@@ -109,6 +122,7 @@
     this._outQueue = [];         // requests waiting for transport readiness
     this._connectedEmitted = false;
     this._pollTimer = null;
+    this._subIds = {};           // push mode: sub_id -> sub_type (our subs)
 
     this._listenRelay();
   }
@@ -168,6 +182,9 @@
 
   // Resolve/reject the matching request from a JSON-RPC response.
   QethProvider.prototype._onResponse = function (env) {
+    // Server-pushed eth_subscription notification (push mode) — it carries no
+    // id, so it must be handled before the id guard below drops it.
+    if (env && env.method === "eth_subscription") { this._onSubPush(env.params); return; }
     if (!env || env.id == null) return;
     var p = this._pending[env.id];
     if (!p) return;
@@ -184,6 +201,10 @@
       try {
         if (this._setChainId(params[0].chainId)) this.emit("chainChanged", this.chainId);
       } catch (e) {}
+    } else if (method === "eth_subscribe" && result && params && params[0]) {
+      // Remember our own wallet-event subscriptions so _onSubPush can map a
+      // pushed notification's id back to its type (push mode only).
+      this._subIds[result] = params[0];
     }
     this._markConnected();
   };
@@ -206,6 +227,12 @@
       else if (d.kind === "data") {
         var env; try { env = JSON.parse(d.data); } catch (e2) { return; }
         self._onResponse(env);
+      }
+      else if (d.kind === "event") {
+        // Push transport (extension): the background reports the WebSocket to
+        // the wallet coming up / going down. Falkon's relay never sends this.
+        if (d.event === "connect") self._onTransportUp();
+        else if (d.event === "close") self._onTransportDown();
       }
     });
   };
@@ -239,31 +266,43 @@
     this._postToRelay("hello");           // ask the relay to announce itself
     var self = this;
     // If no relay answers shortly, commit to the direct fetch fallback.
-    setTimeout(function () {
-      if (self._mode == null) { self._mode = "direct"; self._flushQueue(); self._startPolling(); }
-    }, RELAY_WAIT_MS);
+    // Disabled in push mode (the extension): its relay is always present, so
+    // the queue simply waits for "ready" rather than racing a fetch fallback.
+    if (DIRECT_FALLBACK) {
+      setTimeout(function () {
+        if (self._mode == null) { self._mode = "direct"; self._flushQueue(); self._startPolling(); }
+      }, RELAY_WAIT_MS);
+    }
+  };
+
+  // Re-read chain + account and emit on change. Shared by the poll tick and
+  // by the push transport's reconnect (_onTransportUp).
+  QethProvider.prototype._refreshState = function () {
+    var self = this;
+    // Snapshot BEFORE the request: request() runs _absorb() in its own
+    // .then, which updates self.chainId / self.selectedAddress before
+    // the callbacks below — so comparing against self.* here would
+    // always see "no change" and never emit. Compare against the
+    // captured previous value instead.
+    var prevChain = this.chainId;
+    this.request({ method: "eth_chainId" }).then(function (cid) {
+      if (cid !== prevChain) self.emit("chainChanged", cid);
+    }).catch(function () { self._onPollError(); });
+    var prevAccount = this.selectedAddress;
+    this.request({ method: "eth_accounts" }).then(function (accs) {
+      var next = (accs && accs[0]) || null;
+      if (next !== prevAccount) self.emit("accountsChanged", accs || []);
+    }).catch(function () {});
   };
 
   // --- event polling (no push subscription over this transport) --------
   QethProvider.prototype._startPolling = function () {
+    if (!POLL) return;               // push mode gets events over the socket
     if (this._pollTimer) return;
     var self = this;
     var tick = function () {
       if (typeof document !== "undefined" && document.hidden) return;  // idle when tab hidden
-      // Snapshot BEFORE the request: request() runs _absorb() in its own
-      // .then, which updates self.chainId / self.selectedAddress before
-      // the callbacks below — so comparing against self.* here would
-      // always see "no change" and never emit. Compare against the
-      // captured previous value instead.
-      var prevChain = self.chainId;
-      self.request({ method: "eth_chainId" }).then(function (cid) {
-        if (cid !== prevChain) self.emit("chainChanged", cid);
-      }).catch(function () { self._onPollError(); });
-      var prevAccount = self.selectedAddress;
-      self.request({ method: "eth_accounts" }).then(function (accs) {
-        var next = (accs && accs[0]) || null;
-        if (next !== prevAccount) self.emit("accountsChanged", accs || []);
-      }).catch(function () {});
+      self._refreshState();
     };
     this._pollTimer = setInterval(tick, POLL_MS);
   };
@@ -271,6 +310,60 @@
     if (this._connectedEmitted) {
       this._connectedEmitted = false;
       this.emit("disconnect", rpcError(4900, "qeth unreachable"));
+    }
+  };
+
+  // --- push transport (WebSocket-backed relay: the extension) ----------
+  // The background reports the wallet socket going up/down via relay "event"
+  // messages. On up we (re)subscribe to wallet events — each subscribe
+  // carries this frame's origin, so the server scopes pushes per dapp — and
+  // refresh state. On down we fail everything in flight with 4900.
+  QethProvider.prototype._onTransportUp = function () {
+    var noop = function () {};
+    if (PUSH) {
+      this._subIds = {};
+      this.request({ method: "eth_subscribe", params: ["chainChanged"] }).catch(noop);
+      this.request({ method: "eth_subscribe", params: ["accountsChanged"] }).catch(noop);
+      this.request({ method: "eth_subscribe", params: ["networkChanged"] }).catch(noop);
+    }
+    this._refreshState();
+    this._markConnected();
+  };
+  QethProvider.prototype._onTransportDown = function () {
+    this._subIds = {};
+    var pend = this._pending; this._pending = {};
+    for (var id in pend) {
+      if (Object.prototype.hasOwnProperty.call(pend, id)) {
+        try { pend[id].reject(rpcError(4900, "qeth disconnected")); } catch (e) {}
+      }
+    }
+    this._onPollError();             // reset connected flag + emit disconnect
+  };
+  // A pushed eth_subscription notification: map its id back to the type we
+  // subscribed to and emit the matching EIP-1193 event (deduped on value).
+  QethProvider.prototype._onSubPush = function (params) {
+    if (!params) return;
+    var sub = this._subIds[params.subscription];
+    var result = params.result;
+    if (sub === "chainChanged") {
+      if (this._setChainId(result)) this.emit("chainChanged", this.chainId);
+    } else if (sub === "accountsChanged") {
+      var next = (result && result[0]) || null;
+      if (next !== this.selectedAddress) {
+        this.selectedAddress = next;
+        this.emit("accountsChanged", result || []);
+      }
+    } else if (sub === "networkChanged") {
+      var nv = String(result);
+      if (nv !== this.networkVersion) {
+        this.networkVersion = nv;
+        this.emit("networkChanged", result);
+      }
+    } else {
+      // A subscription the dapp created itself (e.g. newHeads). Surface it as
+      // the EIP-1193 `message` event. Dormant today — the server doesn't
+      // forward proxied-node subscriptions — but spec-correct.
+      this.emit("message", { type: "eth_subscription", data: params });
     }
   };
 

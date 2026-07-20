@@ -47,6 +47,34 @@ _SCHEMA_VERSION = 2
 # Wallet") for any address, free + keyless, where Etherscan paywalls them.
 LABELS_BASE = "https://metadata.services.blockscout.com/api/v1/metadata"
 
+
+def _tag_project(tag: dict) -> str:
+    """The OLI tag's ``projectName`` (carried in its JSON-string ``meta``), or
+    "" — the owning project ("Curve Finance") when the ``name`` itself doesn't
+    include it."""
+    meta = tag.get("meta")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return ""
+    return (meta.get("projectName") or "").strip() if isinstance(meta, dict) else ""
+
+
+def _tag_label(tag: dict) -> str:
+    """A name-tag rendered as "Project: Name". OLI sometimes bakes the project
+    into ``name`` ("Binance: Hot Wallet") and sometimes only into
+    ``projectName`` (Curve's "Router v1.2" + project "Curve Finance"); fold the
+    latter in so every label reads consistently, without double-prefixing an
+    already-``Project: Label`` name."""
+    name = tag["name"]
+    if ":" in name:                              # already "Project: Label"
+        return name
+    project = _tag_project(tag)
+    if project and project.lower() not in name.lower():
+        return f"{project}: {name}"
+    return name
+
 # A contract younger than this reads as "new" — a soft caution flag.
 NEW_CONTRACT_DAYS = 30
 
@@ -214,8 +242,8 @@ class ContractIdentitySource:
             tags = [t for t in (info.get("tags") or [])
                     if t.get("tagType") == "name" and t.get("name")]
             if tags:
-                out[addr.lower()] = max(
-                    tags, key=lambda t: t.get("ordinal") or 0)["name"]
+                out[addr.lower()] = _tag_label(
+                    max(tags, key=lambda t: t.get("ordinal") or 0))
         return out
 
     def fetch(self, chain_id: int, address: str) -> ContractIdentity | None:

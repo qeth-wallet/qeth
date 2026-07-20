@@ -355,6 +355,35 @@ def test_fetch_labels_parses_name_tag():
     assert labels[checksummed.lower()] == "AladdinDAO: Deployer"
 
 
+def _labels_for(tags):
+    payload = {"addresses": {ADDR: {"tags": tags}}}
+    src = ContractIdentitySource(
+        lambda: "KEY", transport=lambda u, t: json.dumps(payload).encode())
+    return src.fetch_labels(1, [ADDR.lower()]).get(ADDR.lower())
+
+
+def test_fetch_labels_folds_in_project_name():
+    # a bare OLI name gets its meta.projectName folded in (Curve's "Router v1.2")
+    assert _labels_for([
+        {"tagType": "name", "name": "Router v1.2", "ordinal": 10,
+         "meta": json.dumps({"projectName": "Curve Finance"})},
+    ]) == "Curve Finance: Router v1.2"
+
+
+def test_fetch_labels_does_not_double_prefix_project():
+    # a name that already reads "Project: Label" is left alone
+    assert _labels_for([
+        {"tagType": "name", "name": "Binance: Hot Wallet", "ordinal": 5,
+         "meta": json.dumps({"projectName": "Binance"})},
+    ]) == "Binance: Hot Wallet"
+
+
+def test_fetch_labels_no_project_meta_stays_bare():
+    assert _labels_for([
+        {"tagType": "name", "name": "Some Contract", "ordinal": 5},
+    ]) == "Some Contract"
+
+
 def test_describe_uses_deployer_label():
     idy = ContractIdentity(ADDR, True, name="RewardClaimHelper", verified=True,
                            deployer=DEPLOYER, deployed_at=OLD,

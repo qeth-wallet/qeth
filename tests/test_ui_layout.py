@@ -139,6 +139,25 @@ def test_ens_tree_is_a_keyboard_tab_stop(mainwindow):
     assert mainwindow.ens_plugin._panel.tree in stops
 
 
+def test_approvals_tree_is_a_keyboard_tab_stop(mainwindow):
+    # Regression: the Approvals tree must be a tab-stop so the _TabCycleFilter
+    # is installed on it — otherwise ←/→ don't switch tabs while it's focused
+    # (the tree eats the arrow keys for expand/collapse instead).
+    stops = mainwindow._collect_tab_stops()
+    approvals = mainwindow.plugin("approvals")
+    assert approvals._panel.tree in stops
+
+
+def test_every_right_plugin_tree_is_a_tab_stop(mainwindow):
+    # General: a plugin's focus_widget() (not a hardcoded list) drives the
+    # tab-stops, so any right-slot plugin exposing one joins the navigation.
+    stops = set(mainwindow._collect_tab_stops())
+    for plugin in mainwindow.right_slot.plugins():
+        fw = plugin.focus_widget()
+        if fw is not None:
+            assert fw in stops
+
+
 def test_left_right_cycles_through_all_right_tabs_including_ens(qtbot, mainwindow):
     mw = mainwindow
     flt = mw._tab_cycle_filter

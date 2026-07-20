@@ -151,6 +151,15 @@ class Plugin(QObject):
         plugin is active. Empty list = no actions for this plugin."""
         return []
 
+    def focus_widget(self) -> QWidget | None:
+        """The plugin's primary keyboard-focusable list/tree, or None. The main
+        window registers these as Tab / ←→ navigation stops, so returning it
+        gets a plugin tab-cycling for free — AND means the plugin can't break
+        that navigation by consuming arrow keys, because the nav event filter
+        sees them first. Return the actual list widget (a `QTreeWidget` /
+        `QTableWidget`), not a container."""
+        return None
+
     def attach(self, host: Host) -> None:
         """Called by ``Slot.add_plugin``. Subclasses can override to do
         first-time setup that depends on the host; remember to call

@@ -1412,6 +1412,9 @@ class TransactionsPlugin(Plugin):
     def action_widgets(self):
         return self._panel.action_widgets() if self._panel is not None else []
 
+    def focus_widget(self):
+        return getattr(self._panel, "table", None)
+
     # --- pending-tx integration ---------------------------------------------
 
     def add_pending(self, tx_hash: str, req: SigningRequest, chain,

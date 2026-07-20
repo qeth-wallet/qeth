@@ -36,7 +36,9 @@ from ...transactions import (
     RoutedTransactionSource,
 )
 from ..transactions import _encode_approve, _is_full_history
-from .discovery import ApprovalRow, approve_pairs_in, fetch_allowances
+from .discovery import (
+    ApprovalRow, approval_pairs_from_logs, approve_pairs_in, fetch_allowances,
+)
 from .revoke_queue import RevokeQueue
 
 if TYPE_CHECKING:
@@ -1017,6 +1019,37 @@ class ApprovalsPlugin(Plugin):
 
     def action_widgets(self) -> list[QWidget]:
         return self._panel.action_widgets() if self._panel is not None else []
+
+    def focus_widget(self) -> QWidget | None:
+        return self._panel.tree if self._panel is not None else None
+
+    def attach(self, host) -> None:
+        super().attach(host)
+        # Refresh when ANY approve confirms (Send, a dapp, our own dialog) — not
+        # just approvals-initiated modify/revoke — so a cap changed elsewhere
+        # doesn't sit stale in the list.
+        tx = host.plugin("transactions")
+        if tx is not None and hasattr(tx, "tx_confirmed"):
+            tx.tx_confirmed.connect(self._on_tx_confirmed)
+
+    def _on_tx_confirmed(self, chain, tx_hash, receipt) -> None:
+        if self.host is None or self._panel is None:
+            return
+        view = self._current_view()
+        if view is None or view[0] != getattr(chain, "chain_id", None):
+            return
+        owner = self.host.selected_address
+        logs = receipt.get("logs") if hasattr(receipt, "get") else None
+        pairs = approval_pairs_from_logs(logs, owner) if owner else set()
+        if not pairs:
+            return
+        # An already-shown cap just needs a targeted re-read; a brand-new one
+        # needs a scan to discover it (build the row with metadata/labels/price).
+        if any(self._panel._leaf_for(t, s) is None for (t, s) in pairs):
+            self._kick(force=True)
+        else:
+            for pair in pairs:
+                self._schedule_reconcile(pair)
 
     def on_account_changed(self, address: str | None) -> None:
         self._invalidate()

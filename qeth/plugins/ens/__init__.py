@@ -2209,6 +2209,9 @@ class EnsPlugin(Plugin):
         if self.host is not None:
             self.host.status_message(f"Copied {text} to clipboard", 3000)
 
+    def focus_widget(self) -> QWidget | None:
+        return self._panel.tree if self._panel is not None else None
+
     def action_widgets(self) -> list[QWidget]:
         # The ENS write/copy/add buttons mount on the slot's shared bottom row
         # (one line with the chain selector), exactly like the Tokens panel —

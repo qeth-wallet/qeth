@@ -29,7 +29,7 @@ from qeth import QULONGLONG
 from qeth.chains import DEFAULT_CHAINS
 from qeth.plugins.approvals import ApprovalsPlugin
 from qeth.plugins.approvals.cache import ApprovalsCache
-from qeth.plugins.approvals.discovery import ApprovalRow
+from qeth.plugins.approvals.discovery import _APPROVAL_TOPIC0, ApprovalRow
 from qeth.token_metadata import TokenMetadataCache
 from qeth.transactions_cache import TransactionCache
 
@@ -51,13 +51,21 @@ class _FakeIcons(QObject):
         pass
 
 
+class _FakeTx(QObject):
+    tx_confirmed = Signal(object, str, object)          # chain, hash, receipt
+
+
 class _Host:
     def __init__(self, address, chain):
         self.selected_address = address
         self._chain = chain
         self._icons = _FakeIcons()
+        self._tx = _FakeTx()
         self.started: list = []
         self.requests: list = []
+
+    def plugin(self, plugin_id):
+        return self._tx if plugin_id == "transactions" else None
 
     def current_chain(self):
         return self._chain
@@ -133,6 +141,30 @@ class ApprovalsMachine(RuleBasedStateMachine):
     @rule()
     def activate(self):
         self.plugin.on_activated()
+
+    @rule(same_acct=st.booleans())
+    def approve_confirms(self, same_acct):
+        # A confirmed approve tx (via ANY path) must refresh the list — whether
+        # the approvals tab is active or the sign flow already switched away.
+        cid, addr = self._view()
+        owner = addr if same_acct else ("0x" + "cc" * 20)   # our account or another's
+        receipt = {"logs": [{
+            "address": "0x" + "cc" * 20,
+            "topics": [_APPROVAL_TOPIC0,
+                       "0x" + "00" * 12 + owner[2:],         # owner (padded)
+                       "0x" + "00" * 12 + SPENDER[2:]],      # spender (padded)
+        }]}
+        before_epoch = self.plugin._epoch
+        before_pending = set(self.plugin._reconcile_pending)
+        self.host._tx.tx_confirmed.emit(self.host.current_chain(), "0xapprove", receipt)
+        if same_acct:
+            # our own cap changed → a refresh fired (a full re-scan for a new
+            # pair, or a targeted reconcile for one already shown)
+            assert (self.plugin._epoch > before_epoch
+                    or self.plugin._reconcile_pending != before_pending)
+        else:
+            assert self.plugin._epoch == before_epoch    # another account → nothing
+            assert self.plugin._reconcile_pending == before_pending
 
     @rule(n=st.integers(min_value=0, max_value=3))
     def scan_emits_rows(self, n):

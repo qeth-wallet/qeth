@@ -396,6 +396,9 @@ class WalletsPlugin(Plugin):
         assert self._container is not None  # _build() sets it
         return self._container
 
+    def focus_widget(self):
+        return self._tree
+
     def action_widgets(self):
         # Add / Copy / Remove mount on the slot's bottom row (like the
         # Tokens panel's +/-/star/eye), so this panel is structurally

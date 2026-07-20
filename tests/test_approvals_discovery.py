@@ -56,3 +56,36 @@ def test_dedupes_repeated_pair():
     txs = [_tx(A, TOKEN, _approve_data(SPENDER), nonce=1),
            _tx(A, TOKEN, _approve_data(SPENDER), nonce=2)]
     assert approve_pairs_in(txs, A) == {(TOKEN.lower(), SPENDER.lower())}
+
+
+# --- approval_pairs_from_logs (refresh on confirmed approve) ---------------
+
+from qeth.plugins.approvals.discovery import (  # noqa: E402
+    _APPROVAL_TOPIC0, approval_pairs_from_logs,
+)
+
+
+def _approval_log(token, owner, spender, topic0=_APPROVAL_TOPIC0):
+    return {"address": token,
+            "topics": [topic0, "0x" + "00" * 12 + owner[2:],
+                       "0x" + "00" * 12 + spender[2:]]}
+
+
+def test_approval_pairs_from_own_approval():
+    logs = [_approval_log(TOKEN, A, SPENDER)]
+    assert approval_pairs_from_logs(logs, A) == {(TOKEN.lower(), SPENDER.lower())}
+
+
+def test_approval_pairs_ignores_other_owner():
+    logs = [_approval_log(TOKEN, B, SPENDER)]           # someone else's approval
+    assert approval_pairs_from_logs(logs, A) == set()
+
+
+def test_approval_pairs_ignores_non_approval_topic():
+    logs = [_approval_log(TOKEN, A, SPENDER, topic0="0x" + "de" * 32)]
+    assert approval_pairs_from_logs(logs, A) == set()
+
+
+def test_approval_pairs_empty_logs():
+    assert approval_pairs_from_logs([], A) == set()
+    assert approval_pairs_from_logs(None, A) == set()

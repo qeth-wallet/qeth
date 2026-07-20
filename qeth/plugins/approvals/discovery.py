@@ -30,6 +30,34 @@ _SEL_APPROVE = "0x095ea7b3"              # approve(address,uint256)
 _SEL_INCREASE_ALLOWANCE = "0x39509351"   # increaseAllowance(address,uint256)
 _APPROVE_SELECTORS = {_SEL_APPROVE, _SEL_INCREASE_ALLOWANCE}
 _SEL_ALLOWANCE = bytes.fromhex("dd62ed3e")   # allowance(address,address)
+# keccak256("Approval(address,address,uint256)") — the ERC-20 Approval event.
+_APPROVAL_TOPIC0 = (
+    "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+)
+
+
+def approval_pairs_from_logs(logs, owner: str) -> set[tuple[str, str]]:
+    """(token_lower, spender_lower) for every ERC-20 ``Approval(owner, spender,
+    …)`` the ``owner`` emitted in these receipt/sim logs — i.e. allowances the
+    account just changed, from ANY path (Send, a dapp, the approve dialog).
+    Works on a confirmed receipt's logs and on ``eth_simulate`` logs alike (both
+    Mappings carrying ``topics`` / ``data`` / ``address``)."""
+    from ...tx_activity import _hexstr
+    acct = owner.lower()
+    out: set[tuple[str, str]] = set()
+    for log in logs or []:
+        if not hasattr(log, "get"):
+            continue
+        topics = log.get("topics") or []
+        if len(topics) != 3 or _hexstr(topics[0]).lower() != _APPROVAL_TOPIC0:
+            continue
+        raw = log.get("address") or ""
+        token = raw.lower() if isinstance(raw, str) else _hexstr(raw).lower()
+        log_owner = ("0x" + _hexstr(topics[1])[-40:]).lower()
+        spender = ("0x" + _hexstr(topics[2])[-40:]).lower()
+        if token and token != "0x" and log_owner == acct:
+            out.add((token, spender))
+    return out
 
 
 @dataclass

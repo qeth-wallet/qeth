@@ -526,13 +526,16 @@ class MainWindow(QMainWindow):
         # outline-only. Delegate handles the cell-by-cell paint;
         # the table stylesheets no longer carry a ``:selected``
         # rule so they don't beat us.
-        # The ENS tree paints its own focus-aware selection (custom
-        # delegate + multi-column status icons), so don't overlay the
-        # generic one — just give it the FocusIn repaint + selection.
-        ens_tree = getattr(
-            getattr(self.ens_plugin, "_panel", None), "tree", None)
+        # The ENS tree paints its own focus-aware selection (custom delegate +
+        # multi-column status icons); the Approvals tree has checkboxes +
+        # hover-reveal it manages itself. Don't overlay the generic selection
+        # delegate on either — just give them the FocusIn repaint + selection.
+        ens_tree = getattr(getattr(self.ens_plugin, "_panel", None), "tree", None)
+        approvals = self.plugin("approvals")
+        approvals_tree = getattr(getattr(approvals, "_panel", None), "tree", None)
+        no_delegate = {ens_tree, approvals_tree}
         for w in tab_stops:
-            _apply_focus_aware_selection(w, with_delegate=(w is not ens_tree))
+            _apply_focus_aware_selection(w, with_delegate=(w not in no_delegate))
         # Initial focus on the wallet tree so arrow keys work
         # immediately.
         tab_stops[0].setFocus(Qt.FocusReason.OtherFocusReason)
@@ -549,22 +552,19 @@ class MainWindow(QMainWindow):
                 _repaint_view(w)
 
     def _collect_tab_stops(self) -> list:
-        """Resolve the three list widgets safely (each may be None
-        in tests where the plugins were stubbed). Returns the list
-        in tab-cycle order."""
+        """Tab / ←→ navigation stops, in cycle order: the wallets list, then
+        every right-slot plugin's focus widget in tab-bar order. Plugin-declared
+        (``Plugin.focus_widget``) so a NEW plugin joins the navigation
+        automatically instead of silently breaking it by grabbing arrow keys."""
         out = []
-        tree = getattr(self.wallets_plugin, "_tree", None)
-        if tree is not None:
-            out.append(tree)
-        tpanel = getattr(self.tokens_plugin, "_panel", None)
-        if tpanel is not None and hasattr(tpanel, "table"):
-            out.append(tpanel.table)
-        xpanel = getattr(self.transactions_plugin, "_panel", None)
-        if xpanel is not None and hasattr(xpanel, "table"):
-            out.append(xpanel.table)
-        epanel = getattr(self.ens_plugin, "_panel", None)
-        if epanel is not None and hasattr(epanel, "tree"):
-            out.append(epanel.tree)
+        wallets = getattr(self, "wallets_plugin", None)
+        wt = wallets.focus_widget() if wallets is not None else None
+        if wt is not None:
+            out.append(wt)
+        for plugin in self.right_slot.plugins():
+            fw = plugin.focus_widget()
+            if fw is not None:
+                out.append(fw)
         return out
 
     # Idle hints rotated through the status bar — keyboard / navigation
@@ -1597,7 +1597,8 @@ class _TabCycleFilter(QObject):
     # --- helpers ---------------------------------------------------------
 
     def _wallet_tree(self):
-        return getattr(self._mw.wallets_plugin, "_tree", None)
+        wallets = getattr(self._mw, "wallets_plugin", None)
+        return wallets.focus_widget() if wallets is not None else None
 
     def _right_tables(self) -> list:
         out = []
@@ -1608,12 +1609,8 @@ class _TabCycleFilter(QObject):
         return out
 
     def _table_for_plugin(self, plugin):
-        # A right-slot plugin's focusable list: Tokens/Transactions expose a
-        # QTableWidget as ``.table``, ENS a QTreeWidget as ``.tree``.
-        panel = getattr(plugin, "_panel", None)
-        if panel is None:
-            return None
-        return getattr(panel, "table", None) or getattr(panel, "tree", None)
+        # A right-slot plugin's focusable list — plugin-declared.
+        return plugin.focus_widget() if plugin is not None else None
 
     def _active_right_table(self):
         active = self._mw.right_slot.active()

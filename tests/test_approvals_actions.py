@@ -305,3 +305,43 @@ def test_completed_scan_keeps_loaded_for(plugin):
     plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
     plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)    # completed
     assert plugin._loaded_for == (CHAIN.chain_id, OWNER.lower())           # settled
+
+
+# --- refresh when an approve confirms (any path) --------------------------
+
+from qeth.plugins.approvals.discovery import _APPROVAL_TOPIC0  # noqa: E402
+
+
+def _approval_receipt(owner, spender=SPENDER, token=TOKEN):
+    return {"logs": [{"address": token, "topics": [
+        _APPROVAL_TOPIC0, "0x" + "00" * 12 + owner[2:],
+        "0x" + "00" * 12 + spender[2:]]}]}
+
+
+def test_confirmed_new_approve_forces_scan(plugin):
+    before = plugin._epoch                              # pair not shown yet
+    plugin._on_tx_confirmed(CHAIN, "0xapprove", _approval_receipt(OWNER))
+    assert plugin._epoch > before                       # full re-scan to discover it
+    assert plugin._loaded_for == (CHAIN.chain_id, OWNER.lower())
+
+
+def test_confirmed_approve_of_shown_pair_reconciles(plugin):
+    plugin._panel.append_rows([_row(spender=SPENDER)])  # pair already on screen
+    before = plugin._epoch
+    plugin._on_tx_confirmed(CHAIN, "0xapprove", _approval_receipt(OWNER))
+    assert plugin._epoch == before                      # no full scan
+    assert PAIR in plugin._reconcile_pending            # targeted re-read scheduled
+
+
+def test_confirmed_approve_for_other_account_ignored(plugin):
+    plugin._panel.append_rows([_row(spender=SPENDER)])
+    before = plugin._epoch
+    plugin._on_tx_confirmed(CHAIN, "0xapprove", _approval_receipt("0x" + "99" * 20))
+    assert plugin._epoch == before and plugin._reconcile_pending == set()
+
+
+def test_confirmed_non_approve_does_not_refresh(plugin):
+    plugin._panel.append_rows([_row(spender=SPENDER)])
+    before = plugin._epoch
+    plugin._on_tx_confirmed(CHAIN, "0xtransfer", {"logs": []})
+    assert plugin._epoch == before and plugin._reconcile_pending == set()

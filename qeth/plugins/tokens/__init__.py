@@ -583,6 +583,9 @@ class TokensPlugin(Plugin):
         url = f"{base}/token/{contract}?a={addr}"
         QDesktopServices.openUrl(QUrl(url))
 
+    def focus_widget(self):
+        return getattr(self._panel, "table", None)
+
     def action_widgets(self):
         if self._panel is None:
             return []

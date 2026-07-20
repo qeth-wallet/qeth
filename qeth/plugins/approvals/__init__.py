@@ -89,14 +89,17 @@ _IC_SELECT_ALL = (("edit-select-all", "select-all", "checkbox"),
 _UNLIMITED_MIN = 2 ** 255
 
 
+_UNLIMITED = "∞"                               # near-max sentinel → infinity sign
+
+
 def _format_allowance(raw: int, decimals: int) -> str:
     """Compact, symbol-free allowance for the tree's Allowance column (the
     token symbol is already the parent branch). Near-max sentinels collapse to
-    "unlimited"; everything else goes through ``format_balance`` so a large but
-    finite cap shows as ``1.23 × 10¹⁰`` rather than a horizontally-scrolling
-    run of digits."""
+    the infinity sign; everything else goes through ``format_balance`` so a
+    large but finite cap shows as ``1.23 × 10¹⁰`` rather than a
+    horizontally-scrolling run of digits."""
     if raw >= _UNLIMITED_MIN:
-        return "unlimited"
+        return _UNLIMITED
     from decimal import Decimal
     scaled = Decimal(raw) / (Decimal(10) ** decimals) if decimals > 0 else Decimal(raw)
     # Format via float so %g is clean in BOTH directions — a Decimal keeps its

@@ -80,7 +80,7 @@ def test_unlimited_rendering(qtbot):
     p = _panel(qtbot)
     p.append_rows([_row(allowance=_MAX)])
     leaf = p.tree.topLevelItem(0).child(0)
-    assert "unlimited" in leaf.text(1).lower()
+    assert leaf.text(1) == "∞"                     # infinity sign, not a number
 
 
 def test_spender_label_shown_in_col0_with_tooltip(qtbot):
@@ -103,9 +103,9 @@ def test_spender_without_label_shows_full_address(qtbot):
 # --- allowance formatting -------------------------------------------------
 
 def test_format_allowance_unlimited_threshold():
-    assert _format_allowance(_MAX, 18) == "unlimited"
-    assert _format_allowance(2 ** 255, 18) == "unlimited"        # near-max sentinel
-    assert _format_allowance(2 ** 255 - 1, 0) != "unlimited"     # just below → a number
+    assert _format_allowance(_MAX, 18) == "∞"
+    assert _format_allowance(2 ** 255, 18) == "∞"                # near-max sentinel
+    assert _format_allowance(2 ** 255 - 1, 0) != "∞"             # just below → a number
 
 
 def test_format_allowance_scientific_for_large_finite():
@@ -279,7 +279,7 @@ def test_update_allowance_rerenders_and_reenables(qtbot):
     p.mark_pending(TOKEN, SP1)
     p.update_allowance(TOKEN, SP1, 5_000_000)
     leaf = p.tree.topLevelItem(0).child(0)
-    assert "unlimited" not in leaf.text(1).lower()
+    assert leaf.text(1) == "5"                     # was ∞, now the finite value
     assert not leaf.isDisabled()
 
 

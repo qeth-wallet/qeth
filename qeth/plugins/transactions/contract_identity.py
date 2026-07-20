@@ -351,18 +351,31 @@ class IdentityBadge:
 def describe_identity(identity: ContractIdentity, *,
                       my_addresses, deployer_count: int = 0,
                       interaction_count: int | None = None,
+                      approval_count: int | None = None,
                       context: str = "interact",
                       now_ts: float) -> IdentityBadge:
     """Render a contract identity as a human badge. ``deployer_count`` is
     how many of *your* cached contracts share this deployer (including
     this one); ``interaction_count`` is your prior usage of this address in
     the cached history (None = don't show it); ``context`` picks the verb —
-    ``"interact"`` ("you've interacted N×", for a contract you call) vs
-    ``"send"`` ("sent here N×", for a transfer destination). ``now_ts`` is
-    the current unix time (passed in for testability)."""
+    ``"interact"`` ("you've interacted N×", for a contract you call),
+    ``"send"`` ("sent here N×", for a transfer destination), or ``"approve"``
+    (the SPENDER of an approve: "approved to this spender N× before", from
+    ``approval_count``). ``now_ts`` is the current unix time (for testability)."""
     mine = {a.lower() for a in my_addresses}
     if not identity.is_contract:
         who = identity.name_tag or "Regular account (not a contract)"
+        if context == "approve":
+            # Granting an ERC-20 allowance to an EOA is unusual — spenders are
+            # normally contracts — so flag it even when it's a known one.
+            tag = f"{who} — an EOA (unusual for a spender)"
+            if approval_count:
+                return IdentityBadge(
+                    f"{tag}\napproved to this spender {approval_count:,}× before",
+                    "ok" if identity.name_tag else "caution")
+            return IdentityBadge(
+                f"{tag}\n⚠ first approval to this spender"
+                if approval_count == 0 else tag, "caution")
         if interaction_count == 0:
             return IdentityBadge(f"{who}\n⚠ first time sending here", "caution")
         text = who
@@ -420,7 +433,21 @@ def describe_identity(identity: ContractIdentity, *,
     # Familiarity: how often you've used it. A never-before-seen contract
     # is a soft caution (pairs with "(new)" / unverified); a heavily-used
     # one is reassuring.
-    if interaction_count is not None:
+    if context == "approve":
+        # The SPENDER of an approve: have I granted THIS spender an allowance
+        # before (the primary signal), and/or ever called it directly?
+        parts = []
+        if approval_count:
+            parts.append(f"approved to this spender {approval_count:,}× before")
+        if interaction_count:
+            parts.append(f"called it {interaction_count:,}×")
+        if parts:
+            lines.append(" · ".join(parts))
+        elif approval_count is not None:      # history loaded, and it's empty
+            lines.append("⚠ first approval to this spender")
+            if level == "ok":
+                level = "caution"
+    elif interaction_count is not None:
         if interaction_count >= 1:
             lines.append(f"sent here {interaction_count:,}× before"
                          if context == "send"

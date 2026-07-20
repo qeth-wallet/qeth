@@ -3723,6 +3723,20 @@ class TestEventPreviewTab:
         assert dlg._allow_edit.text() == ""                # empty…
         assert dlg._allow_edit.placeholderText() == "∞"    # …with a grey ∞
 
+    def test_approve_dialog_shows_a_spender_identity_row(self, qtbot):
+        # The Contract: row identifies the TOKEN; an approve also gets a
+        # distinct Spender: row for the party the allowance empowers.
+        from PySide6.QtWidgets import QLabel
+        dlg, _, _ = self._approve_dlg(qtbot, amount=(1 << 256) - 1)
+        labels = {lbl.text() for lbl in dlg.findChildren(QLabel)}
+        assert "Spender:" in labels and "Contract:" in labels
+
+    def test_non_approve_sign_has_no_spender_row(self, qtbot):
+        from PySide6.QtWidgets import QLabel
+        dlg = self._sign(qtbot, lambda w: None, data="0x")     # plain call, not approve
+        labels = {lbl.text() for lbl in dlg.findChildren(QLabel)}
+        assert "Spender:" not in labels
+
     def test_approve_typing_unticks_unlimited(self, qtbot):
         import qeth.plugins.transactions as txmod
         dlg, req, _ = self._approve_dlg(qtbot, amount=(1 << 256) - 1)

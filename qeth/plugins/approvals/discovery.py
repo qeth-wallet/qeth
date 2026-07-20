@@ -1,11 +1,13 @@
 """Approvals discovery — pure, Qt-free approval-pair extraction + allowance reads.
 
-The candidate (token, spender) pairs come straight from the account's own
-``approve()`` / ``increaseAllowance()`` transactions — no cross-product, no
-held-token guessing. We then read ``allowance(account, spender)`` live for each
-pair and keep the nonzero ones. Cache-only source (the scan worker feeds it the
-account's full history), so an approval whose tx isn't in the history — granted
-pre-qeth, from another wallet, via Permit2 — won't appear (documented v1 limit).
+Candidate (token, spender) pairs come primarily from the account's ERC-20
+``Approval(owner, …)`` event logs (``approval_pairs_from_log_rows`` over the
+``ApprovalLogSource`` walk) — every allowance grant emits one, so this catches
+approvals set via ``permit`` / an internal router call, not just the account's
+own top-level ``approve`` transactions (``approve_pairs_in``, kept as a
+recent-tail patch for the window a logs indexer may lag behind head). We then
+read ``allowance(account, spender)`` live for each candidate and keep the
+nonzero ones — that multicall is the source of truth for the displayed cap.
 
 Free of Qt / network side effects at import, so it unit-tests standalone.
 """
@@ -58,6 +60,50 @@ def approval_pairs_from_logs(logs, owner: str) -> set[tuple[str, str]]:
         if token and token != "0x" and log_owner == acct:
             out.add((token, spender))
     return out
+
+
+def approval_pairs_from_log_rows(
+    rows, owner: str,
+) -> tuple[set[tuple[str, str]], int]:
+    """``(pairs, max_block)`` from explorer ``module=logs`` Approval rows (each a
+    dict with ``topics`` = list of hex strings, ``address``, ``blockNumber`` in
+    hex). Keeps only 3-topic ERC-20 ``Approval(owner, spender, value)`` logs
+    whose owner (topic1) matches — a 4-topic Approval is an ERC-721 NFT approval
+    (its "spender" isn't an allowance), excluded here (and ``allowance()`` would
+    revert on it anyway). ``max_block`` is the highest block seen (0 if none) —
+    the windowing cursor for the next ``fetch(from_block=…)``."""
+    acct = owner.lower()
+    pairs: set[tuple[str, str]] = set()
+    max_block = 0
+    for r in rows or []:
+        # Advance the cursor over EVERY row the explorer returned in this
+        # window — they've all been scanned, so resuming above max_block can't
+        # skip anything. (An ERC-721 4-topic Approval or a topic we don't keep
+        # still counts as scanned; only the pair-keep below is selective.)
+        try:
+            b = int(r.get("blockNumber"), 16)
+        except (TypeError, ValueError):
+            b = 0
+        if b > max_block:
+            max_block = b
+        # Blockscout pads the topics array to 4 slots with trailing None for a
+        # 3-topic event ([topic0, owner, spender, None]); Etherscan/node return
+        # exactly the emitted topics. Drop the empties, then a real ERC-721
+        # Approval (4 genuine topics incl. tokenId) still reads as len 4 and is
+        # skipped — only the ERC-20 3-topic allowance is kept.
+        topics = [t for t in (r.get("topics") or []) if t]
+        if len(topics) != 3:
+            continue
+        if (topics[0] or "").lower() != _APPROVAL_TOPIC0:
+            continue
+        log_owner = ("0x" + topics[1][-40:]).lower()
+        if log_owner != acct:
+            continue
+        token = (r.get("address") or "").lower()
+        spender = ("0x" + topics[2][-40:]).lower()
+        if token and token != "0x":
+            pairs.add((token, spender))
+    return pairs, max_block
 
 
 @dataclass

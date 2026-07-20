@@ -358,3 +358,100 @@ class BlockscoutTransactionSource(TransactionSource):
             if tx is not None:
                 out.append(tx)
         return out
+
+
+# keccak256("Approval(address,address,uint256)") — the ERC-20 Approval event.
+_APPROVAL_TOPIC0 = (
+    "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+)
+
+
+class ApprovalLogSource:
+    """ERC-20 ``Approval(owner, spender, value)`` event logs via the explorer
+    logs API (``module=logs&action=getLogs``), filtering ``topic0=Approval AND
+    topic1=owner`` across every token contract at once — Etherscan v2 when a key
+    covers the chain, else the chain's Blockscout instance (both expose the same
+    Etherscan-compatible logs endpoint).
+
+    This is the approvals discovery source of record: an Approval log is emitted
+    by EVERY path that grants an allowance — a plain ``approve`` tx, an EIP-2612
+    ``permit``, an approval set via an internal router/aggregator call — so it
+    catches allowances the account's own top-level ``approve`` calldata misses.
+    And filtering on the indexed ``owner`` topic returns only this account's
+    logs across all tokens in one query, so a >10k-tx account costs a handful of
+    windowed requests instead of paging its whole transaction history.
+
+    Returns raw log rows (Etherscan JSON: ``address`` / ``topics`` /
+    ``blockNumber``), ascending, capped at the explorer's ~1000-row limit per
+    call. The caller windows by advancing ``from_block`` to the highest block
+    seen; an empty list means the end of the range.
+    """
+
+    def __init__(
+        self,
+        get_api_key,
+        instances: dict[int, str] | None = None,
+        etherscan_chains: frozenset[int] | None = None,
+        timeout: float = 20.0,
+        transport: Transport | None = None,
+    ):
+        self._get_api_key = get_api_key
+        self.instances = instances if instances is not None else BLOCKSCOUT_INSTANCES
+        self._etherscan_chains = (
+            etherscan_chains if etherscan_chains is not None else ETHERSCAN_V2_CHAINS
+        )
+        self.timeout = timeout
+        self._transport: Transport = transport or _urllib_transport
+
+    def supports(self, chain: Chain) -> bool:
+        if chain.chain_id in self._etherscan_chains and self._get_api_key():
+            return True
+        return chain.chain_id in self.instances
+
+    @staticmethod
+    def _owner_topic(owner: str) -> str:
+        h = owner[2:] if owner.startswith("0x") else owner
+        return "0x" + "0" * 24 + h.lower()
+
+    def fetch(self, chain: Chain, owner: str, from_block: int = 0) -> list[dict]:
+        params = [
+            ("module", "logs"),
+            ("action", "getLogs"),
+            ("fromBlock", str(max(0, int(from_block)))),
+            ("toBlock", "latest"),
+            ("topic0", _APPROVAL_TOPIC0),
+            ("topic1", self._owner_topic(owner)),
+            ("topic0_1_opr", "and"),
+        ]
+        key = self._get_api_key()
+        if chain.chain_id in self._etherscan_chains and key:
+            all_params = [("chainid", str(chain.chain_id)), *params, ("apikey", key)]
+            url = f"{ETHERSCAN_V2_BASE}?" + urllib.parse.urlencode(all_params)
+        else:
+            base = self.instances.get(chain.chain_id)
+            if not base:
+                raise UnsupportedChain(
+                    f"No Approval-log source supports chain {chain.chain_id}"
+                )
+            url = f"{base.rstrip('/')}/api?" + urllib.parse.urlencode(params)
+
+        raw = self._transport(url, self.timeout)
+        data = json.loads(raw)
+        if data.get("status") != "1":
+            detail = (str(data.get("message") or "") + " "
+                      + str(data.get("result") or "")).lower()
+            # Empty result is a valid "no logs in range", not an error. The
+            # explorers phrase it variously ("No logs found", "No records
+            # found", "not found").
+            if ("no logs" in detail or "no records" in detail
+                    or "not found" in detail or "no transactions" in detail):
+                return []
+            # Some instances cap a single logs response window; treat as end.
+            if ("result window is too large" in detail
+                    or "pageno x offset" in detail):
+                return []
+            raise TransactionSourceError(
+                data.get("result") or data.get("message") or "getLogs error"
+            )
+        result = data.get("result")
+        return result if isinstance(result, list) else []

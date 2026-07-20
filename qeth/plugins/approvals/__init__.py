@@ -79,6 +79,8 @@ _IC_EXPLORER = (("internet-web-browser", "web-browser", "applications-internet")
 _IC_REFRESH = (("view-refresh", "reload"), QStyle.StandardPixmap.SP_BrowserReload)
 _IC_STOP = (("media-playback-stop", "process-stop"),
             QStyle.StandardPixmap.SP_MediaStop)
+_IC_SELECT_ALL = (("edit-select-all", "select-all", "checkbox"),
+                  QStyle.StandardPixmap.SP_FileDialogListView)
 
 # At/above this an allowance reads as "unlimited" — the same threshold the
 # approve dialog's Unlimited toggle uses (2**255 is half the uint256 space,
@@ -423,21 +425,21 @@ class ApprovalsPanel(QWidget):
         bar = QHBoxLayout(self._scan_bar)
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(4)
-        # Theme-independent alignment: give BOTH the progress bar and the Stop
-        # button MinimumExpanding vertical policy, so in the row they stretch to
-        # the SAME (tallest-natural) height — same top/bottom under ANY style,
-        # with no fixed pixel height and no centered short button.
+        # No "%p%" text (it inflated the bar's box and threw the button off);
+        # just the bar. The bar keeps its natural height and the Stop button
+        # fills to exactly that (Ignored vertical), so they line up under any
+        # theme without a per-theme fixed pixel height.
         self.progress = QProgressBar()
-        self.progress.setFormat("Scanning history… %p%")
+        self.progress.setTextVisible(False)
         self.progress.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                    QSizePolicy.Policy.MinimumExpanding)
+                                    QSizePolicy.Policy.Fixed)
         bar.addWidget(self.progress, 1)
         self.btn_stop = QToolButton()
         self.btn_stop.setIcon(_icon(*_IC_STOP))
         self.btn_stop.setToolTip("Stop scanning")
         self.btn_stop.setAutoRaise(True)
         self.btn_stop.setSizePolicy(QSizePolicy.Policy.Fixed,
-                                    QSizePolicy.Policy.MinimumExpanding)
+                                    QSizePolicy.Policy.Ignored)
         bar.addWidget(self.btn_stop)
         self._scan_bar.setVisible(False)
         v.addWidget(self._scan_bar)
@@ -454,6 +456,10 @@ class ApprovalsPanel(QWidget):
         self.btn_action.setIcon(self._ic_modify)
         self.btn_action.clicked.connect(self._on_action_clicked)
         # Icon-only buttons render frameless (flat), like a toolbar.
+        self.btn_select_all = QPushButton()
+        self.btn_select_all.setIcon(_icon(*_IC_SELECT_ALL))
+        self.btn_select_all.setToolTip("Check / uncheck all")
+        self.btn_select_all.clicked.connect(self._toggle_select_all)
         self.btn_copy = QPushButton()
         self.btn_copy.setIcon(_icon(*_IC_COPY))
         self.btn_copy.setToolTip("Copy spender address")
@@ -462,7 +468,7 @@ class ApprovalsPanel(QWidget):
         self.btn_explorer.setIcon(_icon(*_IC_EXPLORER))
         self.btn_explorer.setToolTip("Open spender in the block explorer")
         self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
-        for b in (self.btn_copy, self.btn_explorer):
+        for b in (self.btn_select_all, self.btn_copy, self.btn_explorer):
             b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
@@ -474,7 +480,8 @@ class ApprovalsPanel(QWidget):
             self._host.icon_cache().icon_ready.connect(self._on_icon_ready)
 
     def action_widgets(self) -> list[QWidget]:
-        return [self.btn_action, self.btn_copy, self.btn_explorer]
+        return [self.btn_action, self.btn_select_all, self.btn_copy,
+                self.btn_explorer]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
@@ -517,21 +524,41 @@ class ApprovalsPanel(QWidget):
         self._update_buttons()
         self._refresh_reveal()
 
-    def checked_leaves(self) -> list[ApprovalRow]:
-        """Every spender leaf the user has ticked (via its own box or its token
-        node, which auto-checks the subtree)."""
-        out: list[ApprovalRow] = []
+    def _all_leaves(self) -> list[QTreeWidgetItem]:
+        out: list[QTreeWidgetItem] = []
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
             if node is None:
                 continue
-            for ci in range(node.childCount()):
-                leaf = node.child(ci)
-                if leaf.checkState(0) == Qt.CheckState.Checked:
-                    r = leaf.data(0, _ROW_ROLE)
-                    if isinstance(r, ApprovalRow):
-                        out.append(r)
+            out.extend(node.child(ci) for ci in range(node.childCount()))
         return out
+
+    def checked_leaves(self) -> list[ApprovalRow]:
+        """Every spender leaf the user has ticked (via its own box or its token
+        node, which auto-checks the subtree)."""
+        out: list[ApprovalRow] = []
+        for leaf in self._all_leaves():
+            if leaf.checkState(0) == Qt.CheckState.Checked:
+                r = leaf.data(0, _ROW_ROLE)
+                if isinstance(r, ApprovalRow):
+                    out.append(r)
+        return out
+
+    def _toggle_select_all(self) -> None:
+        """Check every leaf, or uncheck them all if they're already checked —
+        so a whole account's caps can be batch-revoked in one go."""
+        leaves = self._all_leaves()
+        if not leaves:
+            return
+        all_on = all(le.checkState(0) == Qt.CheckState.Checked for le in leaves)
+        target = Qt.CheckState.Unchecked if all_on else Qt.CheckState.Checked
+        self.tree.blockSignals(True)
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is not None:                      # setting the token node
+                node.setCheckState(0, target)         # auto-propagates to its leaves
+        self.tree.blockSignals(False)
+        self._update_buttons()
 
     def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
         node = self._token_items.get(r.token)
@@ -803,6 +830,7 @@ class ApprovalsPanel(QWidget):
         n_checked = len(self.checked_leaves())
         self.btn_copy.setEnabled(has_leaf)
         self.btn_explorer.setEnabled(has_leaf and self._explorer_base() is not None)
+        self.btn_select_all.setEnabled(bool(self._all_leaves()))
         # Checked boxes → batch Revoke; else a selected row → Modify; else off.
         if n_checked > 0:
             self._action_mode = "revoke"

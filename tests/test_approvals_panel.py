@@ -478,7 +478,9 @@ def test_icon_buttons_are_flat(qtbot):
 def test_no_rescan_button_in_action_row(qtbot):
     p = _panel(qtbot)
     assert not hasattr(p, "btn_refresh")
-    assert len(p.action_widgets()) == 3            # action, copy, explorer
+    # action, select-all, copy, explorer (no rescan)
+    assert p.action_widgets() == [p.btn_action, p.btn_select_all, p.btn_copy,
+                                   p.btn_explorer]
 
 
 def test_allowance_column_gets_a_gap_before_amount(qtbot):
@@ -571,15 +573,18 @@ def test_prune_to_empty_removes_token_node(qtbot):
     assert p.tree.topLevelItemCount() == 0
 
 
-def test_stop_button_and_progress_stretch_to_same_height(qtbot):
-    # theme-independent alignment: both get MinimumExpanding vertical so the
-    # layout stretches them to the same (tallest-natural) row height
+def test_progress_bar_has_no_text(qtbot):
+    p = _panel(qtbot)
+    assert not p.progress.isTextVisible()          # just the bar, no "%p%"
+
+
+def test_stop_button_fills_to_progress_bar_height(qtbot):
+    # theme-independent alignment: the bar keeps its natural height (Fixed) and
+    # the button fills to it (Ignored vertical)
     from PySide6.QtWidgets import QSizePolicy
     p = _panel(qtbot)
-    assert (p.progress.sizePolicy().verticalPolicy()
-            == QSizePolicy.Policy.MinimumExpanding)
-    assert (p.btn_stop.sizePolicy().verticalPolicy()
-            == QSizePolicy.Policy.MinimumExpanding)
+    assert p.progress.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    assert p.btn_stop.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Ignored
 
 
 def test_stop_button_aligns_with_progress_bar_when_shown(qtbot):
@@ -590,3 +595,34 @@ def test_stop_button_aligns_with_progress_bar_when_shown(qtbot):
     qtbot.waitExposed(p)
     assert p.btn_stop.height() == p.progress.height()          # same height
     assert p.btn_stop.geometry().top() == p.progress.geometry().top()   # same y
+
+
+# --- select-all toggle ----------------------------------------------------
+
+def test_select_all_checks_every_leaf(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    assert len(p.checked_leaves()) == 0
+    p.btn_select_all.click()
+    assert len(p.checked_leaves()) == 2                # all checked
+    assert p.btn_action.text() == "&Revoke (2)"       # morphs to batch revoke
+
+
+def test_select_all_toggles_off_when_all_checked(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1), _row(spender=SP2)])
+    p.btn_select_all.click()                          # all on
+    p.btn_select_all.click()                          # toggle off
+    assert len(p.checked_leaves()) == 0
+
+
+def test_select_all_disabled_when_empty(qtbot):
+    p = _panel(qtbot)
+    assert not p.btn_select_all.isEnabled()
+    p.append_rows([_row()])
+    assert p.btn_select_all.isEnabled()
+
+
+def test_select_all_is_flat_icon_button(qtbot):
+    p = _panel(qtbot)
+    assert p.btn_select_all.isFlat() and p.btn_select_all.text() == ""

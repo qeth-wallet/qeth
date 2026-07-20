@@ -156,3 +156,28 @@ class TestTransportFiles:
         # the comment that explains the choice).
         assert "eth_chainId" in src
         assert "web3_clientVersion" not in _strip_js_comments(src)
+
+
+class TestPopup:
+    def test_popup_files_exist_and_are_referenced(self):
+        assert (WEBEXT / "popup.html").is_file()
+        assert (WEBEXT / "popup.js").is_file()
+        assert MANIFEST["action"]["default_popup"] == "popup.html"
+
+    def test_popup_has_no_inline_script(self):
+        # MV3 CSP forbids inline scripts; every <script> must be external.
+        html = (WEBEXT / "popup.html").read_text()
+        for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", html, re.S):
+            assert "src=" in attrs, "inline <script> block in popup.html"
+            assert body.strip() == "", "popup <script> has an inline body"
+
+    def test_popup_drives_status_and_firefox_grant(self):
+        js = (WEBEXT / "popup.js").read_text()
+        assert '{ type: "status" }' in js or '"status"' in js
+        assert "chrome.permissions.request" in js     # Firefox host-access grant
+        assert "chrome.permissions.contains" in js
+
+    def test_background_answers_the_status_query(self):
+        src = (WEBEXT / "background.js").read_text()
+        assert "onMessage" in src
+        assert '"status"' in src

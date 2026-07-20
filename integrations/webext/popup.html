@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      width: 260px; margin: 0; padding: 14px;
+      font: 13px/1.45 system-ui, sans-serif;
+    }
+    .head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .head img { width: 24px; height: 24px; }
+    .head b { font-size: 14px; }
+    .status { font-weight: 600; margin-bottom: 4px; }
+    .status.ok::before { content: "\25CF"; color: #2e9e4b; margin-right: 6px; }
+    .status.off::before { content: "\25CF"; color: #b0b0b0; margin-right: 6px; }
+    .detail { color: inherit; opacity: 0.85; }
+    .detail .addr { font-family: ui-monospace, monospace; word-break: break-all; }
+    .detail code { font-family: ui-monospace, monospace; }
+    #grant { display: none; margin-top: 10px; padding: 8px;
+             border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; }
+    #grant p { margin: 0 0 8px; }
+    .foot { display: flex; align-items: center; justify-content: space-between;
+            margin-top: 12px; }
+    .foot .ver { opacity: 0.55; font-size: 11px; }
+    button { font: inherit; padding: 4px 10px; border-radius: 6px;
+             border: 1px solid rgba(128,128,128,0.5); background: transparent;
+             color: inherit; cursor: pointer; }
+    button:hover { background: rgba(128,128,128,0.12); }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="icons/icon48.png" alt="">
+    <b>qeth</b>
+  </div>
+
+  <div id="status" class="status off">Checking…</div>
+  <div id="detail" class="detail"></div>
+
+  <div id="grant">
+    <p>This browser hasn't granted site access, so dapps can't see qeth yet.</p>
+    <button id="grant-btn">Grant site access</button>
+  </div>
+
+  <div class="foot">
+    <span class="ver" id="version"></span>
+    <button id="recheck">Recheck</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

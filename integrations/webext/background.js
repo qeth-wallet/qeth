@@ -181,6 +181,7 @@ function routeOne(msg) {
   } else if (rec.method === "eth_unsubscribe" && rec.subArg) {
     delete subs[rec.subArg];
   }
+  if (rec.cb) { rec.cb(msg); return; }   // internal query (popup status)
   if (!rec.port) return;            // keepalive request — nothing to deliver
   var reply = { jsonrpc: "2.0", id: rec.originalId };
   if ("error" in msg) reply.error = msg.error; else reply.result = msg.result;
@@ -232,6 +233,45 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
     // socket is wedged — force a reconnect.
     if (pending[wsId] === rec) { delete pending[wsId]; try { ws.close(); } catch (e) {} }
   }, KEEPALIVE_TIMEOUT_MS);
+});
+
+// --- popup status query ---------------------------------------------
+// The popup asks "is qeth reachable, on which chain, as which account?".
+// eth_chainId / eth_accounts are sent origin-less (no __frameOrigin), so the
+// server answers for the wallet's default chain — the Falkon StatusDialog
+// semantics. Opening the popup also nudges a reconnect.
+function askLocal(method, cb) {
+  if (!wsOpen || !ws) { cb(null); return; }
+  var wsId = nextId++;
+  pending[wsId] = { port: null, originalId: null, method: method, cb: cb };
+  try { ws.send(JSON.stringify({ jsonrpc: "2.0", id: wsId, method: method })); }
+  catch (e) { delete pending[wsId]; cb(null); }
+}
+
+function queryStatus(sendResponse) {
+  var res = { connected: true, chainId: null, account: null };
+  var left = 2, done = false;
+  function finish() { if (!done) { done = true; sendResponse(res); } }
+  var t = setTimeout(finish, 2000);
+  function got() { if (--left <= 0) { clearTimeout(t); finish(); } }
+  askLocal("eth_chainId", function (m) {
+    if (m && "result" in m) res.chainId = m.result; got();
+  });
+  askLocal("eth_accounts", function (m) {
+    if (m && m.result && m.result[0]) res.account = m.result[0]; got();
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== "status") return false;
+  connect();
+  var deadline = Date.now() + 1500;         // give a just-started socket a moment
+  (function attempt() {
+    if (wsOpen) { queryStatus(sendResponse); return; }
+    if (Date.now() >= deadline) { sendResponse({ connected: false }); return; }
+    setTimeout(attempt, 150);
+  })();
+  return true;                              // async sendResponse
 });
 
 chrome.runtime.onStartup.addListener(connect);

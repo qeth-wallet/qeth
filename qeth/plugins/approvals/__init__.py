@@ -22,8 +22,8 @@ from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QProgressBar, QPushButton, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSizePolicy, QStyle, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ... import QULONGLONG
@@ -417,6 +417,7 @@ class ApprovalsPanel(QWidget):
         self._scan_bar = QWidget()
         bar = QHBoxLayout(self._scan_bar)
         bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(4)
         self.progress = QProgressBar()
         self.progress.setFormat("Scanning history… %p%")
         bar.addWidget(self.progress, 1)
@@ -424,7 +425,9 @@ class ApprovalsPanel(QWidget):
         self.btn_stop.setIcon(_icon(*_IC_STOP))
         self.btn_stop.setToolTip("Stop scanning")
         self.btn_stop.setAutoRaise(True)
-        self.btn_stop.clicked.connect(self.stop_requested)
+        # Match the progress bar's exact box: fill the row's height so the two
+        # share the same top/bottom (a centered QToolButton sat 3px short).
+        self.btn_stop.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         bar.addWidget(self.btn_stop)
         self._scan_bar.setVisible(False)
         v.addWidget(self._scan_bar)

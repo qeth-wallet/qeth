@@ -174,21 +174,28 @@ def test_recent_tail_stops_at_logs_head(monkeypatch):
     assert got["done"] == [True]
 
 
-def test_progress_is_block_range_percentage(monkeypatch):
-    # Progress = % of [from_block, head] the log cursor covered. head=1000;
-    # a window whose highest block is 500 → ~50%, then a short window at 900.
-    monkeypatch.setattr(ap, "fetch_allowances", lambda *a, **k: ({}, set()))
+def test_progress_two_phase_discovery_then_verification(monkeypatch):
+    # Discovery (log windows) fills 0.._DISCOVERY_FRAC via block-%; verification
+    # fills the rest via checked/total. head=1000; a full window at block 500
+    # then a short one at 900 discover 2 pairs, then both verify.
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 1), set(pairs)))
+    D = int(100 * ScanWorker._DISCOVERY_FRAC)
     full = [_log(TOKEN, A, "0x" + "%040x" % i, 500) for i in range(ScanWorker.LOG_PAGE)]
     tail = [_log(TOKEN, A, SPENDER, 900)]
     got = _run(_worker(_FakeLogSource([full, tail])))
     pcts = [s for (s, t) in got["progress"] if t == 100]
-    assert 50 in pcts                              # cursor at block 500 of 1000
-    assert 90 in pcts                              # cursor at block 900 of 1000
-    assert all(0 <= p <= 100 for p in pcts)
+    assert pcts == sorted(pcts)                    # monotonic
+    # discovery block-% is scaled under D: block 500/1000 → D*0.5, 900 → D*0.9
+    assert int(D * 0.5) in pcts
+    assert max(pcts) == 100                         # verification reaches 100%
+    assert all(p <= 100 for p in pcts)
+    assert any(D <= p < 100 for p in pcts)          # a mid-verification step
 
 
-def test_progress_indeterminate_when_head_unknown(monkeypatch):
-    monkeypatch.setattr(ap, "fetch_allowances", lambda *a, **k: ({}, set()))
+def test_progress_indeterminate_during_discovery_when_head_unknown(monkeypatch):
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 1), set(pairs)))
 
     class _NoHead(_FakeClient):
         def get_block_number(self):
@@ -197,7 +204,10 @@ def test_progress_indeterminate_when_head_unknown(monkeypatch):
     w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 500)]]),
                    _FakeTxSource(), [], _FakeMeta(), client_factory=_NoHead)
     got = _run(w)
-    assert all(t == 0 for (_s, t) in got["progress"])   # busy bar (total 0)
+    # Discovery emits busy (total 0) with head unknown; verification is
+    # count-based so it still shows determinate progress up to 100%.
+    assert any(t == 0 for (_s, t) in got["progress"])          # busy during discovery
+    assert max(s for (s, t) in got["progress"] if t == 100) == 100
     assert got["done"] == [True]
 
 

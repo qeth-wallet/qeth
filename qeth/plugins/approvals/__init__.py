@@ -174,7 +174,6 @@ class ScanWorker(QThread):
 
     PAGE = 100                    # tx-tail page size
     LOG_PAGE = 1000               # explorer logs-API row cap per window
-    PAIR_BATCH_EVERY = 3          # re-check allowances every K windows
     RECENT_TX_PAGES = 5           # cap on the lag-patch tail (never the full history)
     MAX_ATTEMPTS = 3
 
@@ -195,32 +194,35 @@ class ScanWorker(QThread):
         self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
         self._priced: dict[str, Decimal | None] = {}   # token -> unit price (memo)
         self._client_factory = client_factory or EthClient
+        self._head = 0               # chain head, for block-% progress
+
+    # Progress is split across the scan's two real cost centres (measured
+    # ~equal on a heavy account): DISCOVERY (the log-window walk) fills the
+    # first _DISCOVERY_FRAC of the bar; VERIFICATION (the allowance multicalls)
+    # fills the rest, batched, so the bar keeps moving through the part that
+    # used to sit at ~99%.
+    _DISCOVERY_FRAC = 0.4
+    VERIFY_CHUNK = 150
 
     def run(self) -> None:
         cid = self._chain.chain_id
         addr_l = self._address.lower()
         try:
             client = self._client_factory(self._chain)
-            # 1. Instant re-check: cached pairs + any approve pairs already in the
-            #    tx snapshot, read live before any network so the cache repaints.
+            try:
+                self._head = client.get_block_number()
+            except Exception:
+                self._head = 0                           # unknown → block-% is busy
+            self._progress(cid, addr_l, 0.0)
+
+            # 1. Discovery: window the account's Approval logs from the
+            #    incremental cursor. logs_head tracks how far the indexer has
+            #    served (the cache's next resume point); progress rides the
+            #    block range covered, scaled into [0, _DISCOVERY_FRAC].
             all_pairs = self._known_pairs | set(
                 approve_pairs_in(self._snapshot, self._address))
-            checked: set[tuple[str, str]] = set()
-            self._emit_rows(client, cid, addr_l, all_pairs, checked)
-            # Progress is % of the block range scanned: the log cursor advances
-            # from from_block to the chain head, so head is the denominator.
-            try:
-                head = client.get_block_number()
-            except Exception:
-                head = 0                                 # unknown → indeterminate bar
             logs_head = self._from_block
-            self._emit_progress(cid, addr_l, logs_head, head)
-
-            # 2. Bulk discovery: window the account's Approval logs from the
-            #    incremental cursor. logs_head tracks how far the indexer has
-            #    served, and becomes the cache's next resume point.
             window_from = self._from_block
-            windows = 0
             while not self.isInterruptionRequested():
                 rows = self._fetch_logs(window_from)
                 if rows is None:                         # persistent log-source failure
@@ -232,10 +234,8 @@ class ScanWorker(QThread):
                 all_pairs |= pairs
                 if max_block > logs_head:
                     logs_head = max_block
-                windows += 1
-                self._emit_progress(cid, addr_l, logs_head, head)
-                if windows % self.PAIR_BATCH_EVERY == 0:
-                    self._emit_rows(client, cid, addr_l, all_pairs, checked)
+                self._progress(
+                    cid, addr_l, self._DISCOVERY_FRAC * self._block_frac(logs_head))
                 if len(rows) < self.LOG_PAGE:            # short window = end of range
                     break
                 # Advance past the window's highest block. +1 skips re-fetching
@@ -246,26 +246,49 @@ class ScanWorker(QThread):
                     break
                 window_from = nxt
 
-            # 3. Lag patch: a logs indexer can trail chain head. Read only the
+            # 2. Lag patch: a logs indexer can trail chain head. Read only the
             #    account's txs NEWER than logs_head (a bounded recent window, not
             #    the full history) and union their approve pairs — catching a
             #    fresh approval the indexer hasn't surfaced yet.
             self._patch_recent_tail(cid, addr_l, logs_head, all_pairs)
+            self._progress(cid, addr_l, self._DISCOVERY_FRAC)
 
-            self._emit_rows(client, cid, addr_l, all_pairs, checked)
+            # 3. Verification: read allowance() for every candidate in batches,
+            #    emitting rows + progress per batch so the bar climbs smoothly
+            #    from _DISCOVERY_FRAC to 1.0 through the multicall reads.
+            todo = sorted(all_pairs)
+            total = len(todo) or 1
+            checked: set[tuple[str, str]] = set()
+            for i in range(0, len(todo), self.VERIFY_CHUNK):
+                if self.isInterruptionRequested():
+                    break
+                self._emit_rows(client, cid, addr_l,
+                                set(todo[i:i + self.VERIFY_CHUNK]), checked)
+                done = min(i + self.VERIFY_CHUNK, len(todo))
+                self._progress(cid, addr_l, self._DISCOVERY_FRAC
+                               + (1.0 - self._DISCOVERY_FRAC) * done / total)
+
             self.scan_done.emit(
                 cid, addr_l, not self.isInterruptionRequested(), logs_head)
         except Exception:
             log.debug("approvals scan failed", exc_info=True)
             self.scan_done.emit(cid, addr_l, False, self._from_block)
 
-    def _emit_progress(self, cid: int, addr_l: str, cursor: int, head: int) -> None:
-        # % of the [from_block, head] block range the log cursor has covered.
-        # head unknown (0) or a non-advancing range → indeterminate (total 0).
+    def _block_frac(self, cursor: int) -> float:
+        """Fraction of the [from_block, head] block range the log cursor has
+        covered (0.0 when the head is unknown)."""
+        head = getattr(self, "_head", 0)
         if head and head > self._from_block:
             span = head - self._from_block
-            done = max(0, min(int(cursor), head) - self._from_block)
-            self.progress.emit(cid, addr_l, int(100 * done / span), 100)
+            return max(0.0, min(1.0, (min(int(cursor), head) - self._from_block) / span))
+        return 0.0
+
+    def _progress(self, cid: int, addr_l: str, frac: float) -> None:
+        # Determinate 0-100 once the head is known (verification is always
+        # count-based, so it's determinate regardless); indeterminate only while
+        # the head is unknown AND we're still in discovery.
+        if getattr(self, "_head", 0) or frac > self._DISCOVERY_FRAC:
+            self.progress.emit(cid, addr_l, int(100 * frac), 100)
         else:
             self.progress.emit(cid, addr_l, 0, 0)
 
@@ -562,7 +585,11 @@ class ApprovalsPanel(QWidget):
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
         self.clear()
-        self.progress.setRange(0, 0)                 # indeterminate until first progress
+        # Start determinate at 0% (not the busy animation) so the bar reads as
+        # "started, nothing yet" rather than "undefined"; the worker switches it
+        # to indeterminate only if the chain head is unavailable.
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         self._scan_bar.setVisible(True)              # bar + Stop as one unit
         self._set_status("")
 

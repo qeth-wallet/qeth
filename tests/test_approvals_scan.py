@@ -58,8 +58,13 @@ class _FakeTxSource:
 
 
 class _FakeClient:
+    HEAD = 1000
+
     def __init__(self, chain):
         pass
+
+    def get_block_number(self):
+        return self.HEAD
 
 
 class _FakeMeta:
@@ -166,6 +171,33 @@ def test_recent_tail_stops_at_logs_head(monkeypatch):
     tx_src = _FakeTxSource([page, [_tx(1, 100, h="0xdeep")]])  # a 2nd page must not be read
     got = _run(_worker(log_src, tx_src))
     assert tx_src.cursors == [None]              # exactly one tail page, then stop
+    assert got["done"] == [True]
+
+
+def test_progress_is_block_range_percentage(monkeypatch):
+    # Progress = % of [from_block, head] the log cursor covered. head=1000;
+    # a window whose highest block is 500 → ~50%, then a short window at 900.
+    monkeypatch.setattr(ap, "fetch_allowances", lambda *a, **k: ({}, set()))
+    full = [_log(TOKEN, A, "0x" + "%040x" % i, 500) for i in range(ScanWorker.LOG_PAGE)]
+    tail = [_log(TOKEN, A, SPENDER, 900)]
+    got = _run(_worker(_FakeLogSource([full, tail])))
+    pcts = [s for (s, t) in got["progress"] if t == 100]
+    assert 50 in pcts                              # cursor at block 500 of 1000
+    assert 90 in pcts                              # cursor at block 900 of 1000
+    assert all(0 <= p <= 100 for p in pcts)
+
+
+def test_progress_indeterminate_when_head_unknown(monkeypatch):
+    monkeypatch.setattr(ap, "fetch_allowances", lambda *a, **k: ({}, set()))
+
+    class _NoHead(_FakeClient):
+        def get_block_number(self):
+            raise RuntimeError("rpc down")
+
+    w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 500)]]),
+                   _FakeTxSource(), [], _FakeMeta(), client_factory=_NoHead)
+    got = _run(w)
+    assert all(t == 0 for (_s, t) in got["progress"])   # busy bar (total 0)
     assert got["done"] == [True]
 
 

@@ -207,12 +207,18 @@ class ScanWorker(QThread):
                 approve_pairs_in(self._snapshot, self._address))
             checked: set[tuple[str, str]] = set()
             self._emit_rows(client, cid, addr_l, all_pairs, checked)
-            self.progress.emit(cid, addr_l, len(all_pairs), 0)
+            # Progress is % of the block range scanned: the log cursor advances
+            # from from_block to the chain head, so head is the denominator.
+            try:
+                head = client.get_block_number()
+            except Exception:
+                head = 0                                 # unknown → indeterminate bar
+            logs_head = self._from_block
+            self._emit_progress(cid, addr_l, logs_head, head)
 
             # 2. Bulk discovery: window the account's Approval logs from the
             #    incremental cursor. logs_head tracks how far the indexer has
             #    served, and becomes the cache's next resume point.
-            logs_head = self._from_block
             window_from = self._from_block
             windows = 0
             while not self.isInterruptionRequested():
@@ -227,7 +233,7 @@ class ScanWorker(QThread):
                 if max_block > logs_head:
                     logs_head = max_block
                 windows += 1
-                self.progress.emit(cid, addr_l, len(all_pairs), 0)
+                self._emit_progress(cid, addr_l, logs_head, head)
                 if windows % self.PAIR_BATCH_EVERY == 0:
                     self._emit_rows(client, cid, addr_l, all_pairs, checked)
                 if len(rows) < self.LOG_PAGE:            # short window = end of range
@@ -252,6 +258,16 @@ class ScanWorker(QThread):
         except Exception:
             log.debug("approvals scan failed", exc_info=True)
             self.scan_done.emit(cid, addr_l, False, self._from_block)
+
+    def _emit_progress(self, cid: int, addr_l: str, cursor: int, head: int) -> None:
+        # % of the [from_block, head] block range the log cursor has covered.
+        # head unknown (0) or a non-advancing range → indeterminate (total 0).
+        if head and head > self._from_block:
+            span = head - self._from_block
+            done = max(0, min(int(cursor), head) - self._from_block)
+            self.progress.emit(cid, addr_l, int(100 * done / span), 100)
+        else:
+            self.progress.emit(cid, addr_l, 0, 0)
 
     def _fetch_logs(self, from_block: int) -> list[dict] | None:
         import time

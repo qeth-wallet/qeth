@@ -37,10 +37,12 @@ from ...token_discovery import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
 
 CACHE_DIR = Path.home() / ".qeth" / "contract_id"
 
-# Bump when the cached shape changes so older entries are re-fetched
-# rather than served stale. v2 added public name-tags (name_tag /
-# deployer_label).
-_SCHEMA_VERSION = 2
+# Bump when the cached shape — or the way a cached field is DERIVED — changes,
+# so older entries are re-fetched rather than served stale. v2 added public
+# name-tags (name_tag / deployer_label); v3 folds the OLI projectName into a
+# bare name_tag ("Router v1.2" → "Curve Finance: Router v1.2"), and the final
+# label is what's cached, so pre-v3 entries must re-fetch to pick it up.
+_SCHEMA_VERSION = 3
 
 # Blockscout's public metadata service — the Open Labels Initiative
 # dataset. Returns name-tags ("AladdinDAO: Deployer", "Binance: Hot

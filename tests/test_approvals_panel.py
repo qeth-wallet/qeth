@@ -569,3 +569,24 @@ def test_prune_to_empty_removes_token_node(qtbot):
     p.append_rows([_row(spender=SP1)])
     p.prune_to(set())
     assert p.tree.topLevelItemCount() == 0
+
+
+def test_stop_button_and_progress_stretch_to_same_height(qtbot):
+    # theme-independent alignment: both get MinimumExpanding vertical so the
+    # layout stretches them to the same (tallest-natural) row height
+    from PySide6.QtWidgets import QSizePolicy
+    p = _panel(qtbot)
+    assert (p.progress.sizePolicy().verticalPolicy()
+            == QSizePolicy.Policy.MinimumExpanding)
+    assert (p.btn_stop.sizePolicy().verticalPolicy()
+            == QSizePolicy.Policy.MinimumExpanding)
+
+
+def test_stop_button_aligns_with_progress_bar_when_shown(qtbot):
+    p = _panel(qtbot)
+    p.resize(400, 300)
+    p.begin_scan()
+    p.show()
+    qtbot.waitExposed(p)
+    assert p.btn_stop.height() == p.progress.height()          # same height
+    assert p.btn_stop.geometry().top() == p.progress.geometry().top()   # same y

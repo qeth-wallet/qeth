@@ -243,3 +243,20 @@ def test_price_source_failure_leaves_rows_unpriced(monkeypatch):
     got = _run(w)
     assert got["rows"][0][0].price_usd is None
     assert got["done"] == [True]
+
+
+def test_resume_jumps_past_cached_span(monkeypatch):
+    # A partial cache (a stopped scan): the head is cached, so a resume must
+    # jump BELOW it and scan the older, un-scanned txs — not stop at the cache.
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: dict.fromkeys(pairs, 3))
+    monkeypatch.setattr(ap, "_is_full_history", lambda txs: False)      # partial
+    snap = [_tx(9, 700, h="0x700"), _tx(8, 500, h="0x500")]            # cached [700..500]
+    head_page = [_tx(9, 700, h="0x700")]                               # all cached
+    old_page = [_tx(1, 499, _approve(SPENDER), h="0xold")]             # below the cache
+    src = _FakeSource([head_page, old_page])
+    got = _run(ScanWorker(CHAIN, A, src, snap, _FakeMeta(), client_factory=_FakeClient))
+    assert src.cursors == [None, 500]                                # jumped past cache
+    pairs = {(r.token.lower(), r.spender.lower()) for b in got["rows"] for r in b}
+    assert (TOKEN.lower(), SPENDER.lower()) in pairs                   # older region scanned
+    assert got["done"] == [True]

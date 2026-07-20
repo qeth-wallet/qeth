@@ -423,16 +423,21 @@ class ApprovalsPanel(QWidget):
         bar = QHBoxLayout(self._scan_bar)
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(4)
+        # Theme-independent alignment: give BOTH the progress bar and the Stop
+        # button MinimumExpanding vertical policy, so in the row they stretch to
+        # the SAME (tallest-natural) height — same top/bottom under ANY style,
+        # with no fixed pixel height and no centered short button.
         self.progress = QProgressBar()
         self.progress.setFormat("Scanning history… %p%")
+        self.progress.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                    QSizePolicy.Policy.MinimumExpanding)
         bar.addWidget(self.progress, 1)
         self.btn_stop = QToolButton()
         self.btn_stop.setIcon(_icon(*_IC_STOP))
         self.btn_stop.setToolTip("Stop scanning")
         self.btn_stop.setAutoRaise(True)
-        # Match the progress bar's exact box: fill the row's height so the two
-        # share the same top/bottom (a centered QToolButton sat 3px short).
-        self.btn_stop.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.btn_stop.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                    QSizePolicy.Policy.MinimumExpanding)
         bar.addWidget(self.btn_stop)
         self._scan_bar.setVisible(False)
         v.addWidget(self._scan_bar)
@@ -1184,6 +1189,12 @@ class ApprovalsPlugin(Plugin):
             # elsewhere), then persist the reconciled state + how far we scanned.
             self._panel.prune_to(self._scan_pairs)
             self._persist()
+        else:
+            # Stopped before reaching the account's oldest txs — don't treat the
+            # view as loaded, so the next activation resumes and finishes the
+            # un-scanned older tail (the tx cache remembers where we stopped, so
+            # the resume skips re-paging what's already cached).
+            self._loaded_for = None
         self._panel.finish_scan(bool(complete))
 
     def _persist(self) -> None:

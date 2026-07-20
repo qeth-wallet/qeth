@@ -293,3 +293,15 @@ def test_reconcile_zero_persists_the_removal(plugin):
     plugin._on_reconciled(CHAIN.chain_id, OWNER.lower(), {PAIR: 0}, plugin._epoch)
     loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
     assert loaded is not None and loaded[0] == []      # cache reflects the revoke
+
+
+def test_stopped_scan_clears_loaded_for_to_resume(plugin):
+    plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    assert plugin._loaded_for is None      # next activation resumes the un-scanned tail
+
+
+def test_completed_scan_keeps_loaded_for(plugin):
+    plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)    # completed
+    assert plugin._loaded_for == (CHAIN.chain_id, OWNER.lower())           # settled

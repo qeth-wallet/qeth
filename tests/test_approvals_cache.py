@@ -1,8 +1,9 @@
 """ApprovalsCache — persisted allowances + last block (round-trip, robustness)."""
 
+import json
 from decimal import Decimal
 
-from qeth.plugins.approvals.cache import ApprovalsCache
+from qeth.plugins.approvals.cache import _SCHEMA_VERSION, ApprovalsCache
 from qeth.plugins.approvals.discovery import ApprovalRow
 
 A = "0x" + "a1" * 20
@@ -31,6 +32,14 @@ def test_roundtrip_rows_and_last_block(tmp_path):
     assert got[1].price_usd == Decimal("1.5") and got[1].decimals == 6
 
 
+def test_token_balance_round_trips(tmp_path):
+    c = ApprovalsCache(tmp_path)
+    c.save(1, A, [ApprovalRow(token=T1, spender=SP, allowance=1,
+                              token_balance=123_456_789)], 5)
+    got, _ = c.load(1, A)
+    assert got[0].token_balance == 123_456_789         # for the at-risk tag on re-open
+
+
 def test_uint256_max_allowance_survives_json(tmp_path):
     c = ApprovalsCache(tmp_path)
     c.save(1, A, [ApprovalRow(token=T1, spender=SP, allowance=_MAX)], 0)
@@ -55,3 +64,33 @@ def test_address_is_case_insensitive(tmp_path):
     c.save(1, A.upper(), [ApprovalRow(token=T1, spender=SP, allowance=1)], 7)
     loaded = c.load(1, A.lower())
     assert loaded is not None and loaded[1] == 7
+
+
+def test_save_stamps_the_schema_version(tmp_path):
+    c = ApprovalsCache(tmp_path)
+    c.save(1, A, [ApprovalRow(token=T1, spender=SP, allowance=1)], 7)
+    data = json.loads(c._path(1, A).read_text())
+    assert data["v"] == _SCHEMA_VERSION
+
+
+def test_v1_unversioned_cache_is_rejected_as_a_miss(tmp_path):
+    # A pre-event-log cache (no "v", last_block = old tx-head meaning) must read
+    # as a MISS so the plugin cold-scans from block 0 instead of trusting a
+    # poisoned incremental cursor — the "no rescan on 0x7a" bug.
+    c = ApprovalsCache(tmp_path)
+    p = c._path(1, A)
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({
+        "last_block": 25574518,       # a recent block, old semantics
+        "rows": [{"token": T1, "spender": SP, "allowance": "1",
+                  "symbol": "X", "decimals": 18}],
+    }))
+    assert c.load(1, A) is None       # rejected → cold scan
+
+
+def test_wrong_version_cache_is_rejected(tmp_path):
+    c = ApprovalsCache(tmp_path)
+    p = c._path(1, A)
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"v": _SCHEMA_VERSION + 99, "last_block": 1, "rows": []}))
+    assert c.load(1, A) is None

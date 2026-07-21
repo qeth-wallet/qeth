@@ -292,7 +292,7 @@ def hermetic_mainwindow(monkeypatch):
         (tokens_plugin, [
             "TokenListsLoader", "TopTokensLoader", "TokenListWorker",
             "BalanceWorker", "PricesWorker", "RiskWorker", "MetadataWorker",
-            "OwnTokenDiscoveryWorker",
+            "OwnTokenDiscoveryWorker", "VaultProvenanceWorker",
         ]),
         (transactions_plugin, ["TransactionsWorker"]),
         (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker", "EnsVerifyWorker",

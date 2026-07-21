@@ -269,8 +269,19 @@ class RoutedTokenSource(TokenSource):
             self._mark_primary()
             try:
                 return self._primary.list_balances(chain, address)
-            except RateLimited:
+            except Exception as e:      # noqa: BLE001 — any primary failure → fall back
+                # Fall back to the secondary on ANY primary failure, not just a
+                # rate limit: Etherscan's per-holder `addresstokenbalance` is a
+                # PRO-only endpoint that errors (TokenSourceError) on a free key,
+                # and a transport hiccup shouldn't collapse discovery either.
+                # Without this, the keyed path propagated the error → the Tokens
+                # tab fell back to the top-N-only pass and dropped real holdings.
                 if secondary_ok:
+                    if not isinstance(e, RateLimited):
+                        log.warning(
+                            "primary token source failed (%s); falling back to "
+                            "the secondary for %s on chain %d",
+                            e, address, chain.chain_id)
                     return self._secondary.list_balances(chain, address)
                 raise
         if secondary_ok:

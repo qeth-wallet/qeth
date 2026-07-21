@@ -3044,16 +3044,25 @@ class ContractIdentityWorker(QThread):
                  if idy.deployer else 0)
         # Familiarity count from the local tx-history cache (no network).
         interactions = None
+        approvals = None
         if self._tx_cache is not None:
             if self._mode == "send":
                 interactions = self._tx_cache.sent_to_count(
+                    self._chain_id, self._address, self._my)
+            elif self._mode == "approve":
+                # The spender of an approve: prior grants to it (primary) plus
+                # any direct calls — "have I dealt with this spender before".
+                approvals = self._tx_cache.approvals_to_count(
+                    self._chain_id, self._address, self._my)
+                interactions = self._tx_cache.interaction_count(
                     self._chain_id, self._address, self._my)
             else:
                 interactions = self._tx_cache.interaction_count(
                     self._chain_id, self._address, self._my)
         badge = describe_identity(
             idy, my_addresses=self._my, deployer_count=count,
-            interaction_count=interactions, context=self._mode, now_ts=time.time())
+            interaction_count=interactions, approval_count=approvals,
+            context=self._mode, now_ts=time.time())
         self.ready.emit(badge)
 
 
@@ -3675,10 +3684,12 @@ def _make_identity_row(*, to_addr: str | None, chain,
                        identity_source: ContractIdentitySource | None,
                        identity_cache: ContractIdentityCache,
                        my_addresses, start_worker,
-                       tx_cache: TransactionCache | None = None):
-    """Build the Contract:-row label and a ``kick()`` that fills it via a
-    background ContractIdentityWorker. Returns ``(None, None)`` when there's
-    no recipient to identify."""
+                       tx_cache: TransactionCache | None = None,
+                       mode: str = "interact"):
+    """Build an identity-row label and a ``kick()`` that fills it via a
+    background ContractIdentityWorker. ``mode`` picks the familiarity verb
+    ("interact" / "send" / "approve" — see ContractIdentityWorker). Returns
+    ``(None, None)`` when there's no address to identify."""
     if not to_addr:
         return None, None
     label = QLabel("")
@@ -3713,7 +3724,7 @@ def _make_identity_row(*, to_addr: str | None, chain,
         label.setEnabled(False)
         worker = ContractIdentityWorker(
             identity_source, identity_cache, chain.chain_id, to_addr,
-            my_addresses, tx_cache=tx_cache)
+            my_addresses, tx_cache=tx_cache, mode=mode)
         worker.ready.connect(_apply)
         start_worker(worker)
 
@@ -3861,6 +3872,20 @@ class TransactionDetailsDialog(Dialog):
         if _id_label is not None and _id_kick is not None:
             form.addRow("Contract:", _id_label)
             _id_kick()
+        # If this tx is an approve, also identify its SPENDER (arg0) — the party
+        # the allowance empowers, which the token Contract: row above doesn't show.
+        parsed = _parse_approve(tx.input_data)
+        if parsed is not None:
+            sp_label, sp_kick = _make_identity_row(
+                to_addr=parsed[0], chain=chain,
+                identity_source=self._identity_source,
+                identity_cache=self._identity_cache,
+                my_addresses=known_addresses or [],
+                start_worker=self._start_worker, tx_cache=self._tx_cache,
+                mode="approve")
+            if sp_label is not None and sp_kick is not None:
+                form.addRow("Spender:", sp_label)
+                sp_kick()
         # Value rendered through wei_to_ether (Decimal) — never float. USD
         # estimate matches the fee row below (at the current native price).
         if tx.value_wei:
@@ -5404,6 +5429,21 @@ class SignTransactionDialog(_TxComposerDialog):
         if _id_label is not None and _id_kick is not None:
             header.addRow("Contract:", _id_label)
             _id_kick()
+        # For an approve, the Contract: above is the TOKEN — the party that
+        # actually gains power is the SPENDER (arg0). Identify it too, with an
+        # "approve" familiarity ("approved to this spender N× before" / ⚠ first).
+        parsed = _parse_approve(req.data)
+        if parsed is not None:
+            sp_label, sp_kick = _make_identity_row(
+                to_addr=parsed[0], chain=self.chain,
+                identity_source=self._identity_source,
+                identity_cache=self._identity_cache,
+                my_addresses=self._known_addresses_list,
+                start_worker=self._start_worker, tx_cache=self._tx_cache,
+                mode="approve")
+            if sp_label is not None and sp_kick is not None:
+                header.addRow("Spender:", sp_label)
+                sp_kick()
         # Value (+ Total) live in the fee summary now, next to Expected fee —
         # see the base _build_extra_summary_rows / _update_extra_totals, which
         # also hide them for a value-0 call.

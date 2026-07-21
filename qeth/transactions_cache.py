@@ -25,6 +25,8 @@ CACHE_DIR = Path.home() / ".qeth" / "transactions"
 # ERC-20 selectors whose recipient we can read straight from calldata.
 _TRANSFER = "0xa9059cbb"      # transfer(address,uint256)         → arg0
 _TRANSFER_FROM = "0x23b872dd"  # transferFrom(address,address,uint256) → arg1
+# approve(address,uint256) / increaseAllowance(address,uint256): arg0 = spender.
+_APPROVE_SELECTORS = ("0x095ea7b3", "0x39509351")
 
 
 def _erc20_transfer_recipient(data: str) -> str | None:
@@ -147,5 +149,29 @@ class TransactionCache:
             for t in self.load(chain_id, addr) or []:
                 if ((t.to_addr or "").lower() == target
                         and t.from_addr.lower() in mine):
+                    seen.add(t.hash)
+        return len(seen)
+
+    def approvals_to_count(self, chain_id: int, spender: str,
+                           addresses) -> int:
+        """How many distinct ``approve``/``increaseAllowance`` txs ``addresses``
+        sent that granted an allowance to ``spender`` (arg0 of the call) — the
+        "have I approved to this spender before" familiarity on an approve's
+        Spender: row. An approve's ``to`` is the TOKEN, so this reads the spender
+        out of the calldata, not ``to``. Cache-only lower bound, deduped by
+        hash."""
+        target = (spender or "").lower()
+        if not target.startswith("0x") or len(target) != 42:
+            return 0
+        arg0 = target[2:]                                   # 40 hex, low 20 bytes
+        mine = {a.lower() for a in addresses}
+        seen: set[str] = set()
+        for addr in mine:
+            for t in self.load(chain_id, addr) or []:
+                data = (t.input_data or "").lower()
+                if (t.from_addr.lower() in mine
+                        and data[:10] in _APPROVE_SELECTORS
+                        and len(data) >= 74
+                        and data[34:74] == arg0):
                     seen.add(t.hash)
         return len(seen)

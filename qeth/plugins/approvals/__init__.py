@@ -15,29 +15,35 @@ tree.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, ClassVar
 
 from eth_utils import to_checksum_address
-from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QEvent, QRect, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QProgressBar, QPushButton, QSizePolicy, QStyle, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMenu, QProgressBar, QPushButton, QSizePolicy, QStyle,
+    QStyledItemDelegate, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ... import QULONGLONG
 from ...chain import EthClient
-from ...formatting import format_balance, short_addr
+from ...formatting import format_balance, format_usd, short_addr
 from ...plugin import Plugin
 from ...token_metadata import TokenMetadataCache
 from ...transactions import (
-    BlockscoutTransactionSource, EtherscanV2TransactionSource,
-    RoutedTransactionSource,
+    ApprovalLogSource, BlockscoutTransactionSource,
+    EtherscanV2TransactionSource, RoutedTransactionSource,
+    fetch_contract_display_name,
 )
-from ..transactions import _encode_approve, _is_full_history
+from ..transactions import _encode_approve
 from .discovery import (
-    ApprovalRow, approval_pairs_from_logs, approve_pairs_in, fetch_allowances,
+    ApprovalRow, approval_pairs_from_log_rows, approval_pairs_from_logs,
+    approve_pairs_in, fetch_allowances,
 )
 from .revoke_queue import RevokeQueue
 
@@ -51,8 +57,43 @@ log = logging.getLogger(__name__)
 _ROW_ROLE = Qt.ItemDataRole.UserRole          # leaf: ApprovalRow
 _TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1    # token node: token address (lower)
 _USD_SORT_ROLE = Qt.ItemDataRole.UserRole + 2  # float: USD exposure (∞ = unlimited)
+_RISK_ROLE = Qt.ItemDataRole.UserRole + 3     # token node: "$X at risk" pill text ("" = none)
 _MIN_COL_W = 48                                # neither column shrinks below this
 _COL_GAP = 16                                  # breathing room left of the (right-aligned) amount
+_SOFT_NAME_WORKERS = 8                          # concurrent spender contract-name lookups
+
+# The "at risk" pill: a self-consistent (bg, fg) pair — like the account-tree
+# label pills — so it reads on any palette. A distinct amber/orange (not the
+# accounts' yellow/blue) marks the USD value the token's approvals could drain.
+_RISK_BG, _RISK_FG = "#ffe0b2", "#7a3d00"
+
+
+class _RiskPillDelegate(QStyledItemDelegate):
+    """Paints a right-aligned "at risk" pill on a token node's Allowance cell
+    (column 1, otherwise empty on token nodes), mirroring the account-tree label
+    pills. Everything else renders normally via the base delegate."""
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        super().paint(painter, option, index)
+        if index.column() != 1:
+            return
+        text = index.data(_RISK_ROLE)
+        if not text:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fm = option.fontMetrics
+        pad = 6
+        w = fm.horizontalAdvance(str(text)) + 2 * pad
+        h = fm.height() + 2
+        r = option.rect
+        pill = QRect(r.right() - w - 4, r.top() + (r.height() - h) // 2, w, h)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(_RISK_BG))
+        painter.drawRoundedRect(pill, 4, 4)
+        painter.setPen(QColor(_RISK_FG))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, str(text))
+        painter.restore()
 
 
 def _icon(names: tuple[str, ...], fallback: QStyle.StandardPixmap) -> QIcon:
@@ -85,6 +126,8 @@ _IC_STOP = (("media-playback-stop", "process-stop"),
             QStyle.StandardPixmap.SP_MediaStop)
 _IC_SELECT_ALL = (("edit-select-all", "select-all", "checkbox"),
                   QStyle.StandardPixmap.SP_FileDialogListView)
+_IC_SEARCH = (("edit-find", "system-search", "search"),
+              QStyle.StandardPixmap.SP_FileDialogInfoView)
 
 # At/above this an allowance reads as "unlimited" — the same threshold the
 # approve dialog's Unlimited toggle uses (2**255 is half the uint256 space,
@@ -124,6 +167,25 @@ def _row_usd(r: ApprovalRow):
     return scaled * r.price_usd
 
 
+def _token_risk_usd(r: ApprovalRow):
+    """USD value of the holder's WALLET BALANCE of this token — the amount its
+    approvals could actually drain (a spender's transferFrom is bounded by what
+    you hold). None when unpriced, not held, or below a displayable cent."""
+    if r.price_usd is None or r.token_balance <= 0:
+        return None
+    from decimal import Decimal
+    scaled = (Decimal(r.token_balance) / (Decimal(10) ** r.decimals)
+              if r.decimals > 0 else Decimal(r.token_balance))
+    usd = scaled * r.price_usd
+    return usd if usd >= Decimal("0.005") else None
+
+
+def _risk_tag(r: ApprovalRow) -> str:
+    """The token node's pill text, or "" when there's nothing at risk."""
+    usd = _token_risk_usd(r)
+    return f"{format_usd(usd)} at risk" if usd is not None else ""
+
+
 def _row_sort_value(r: ApprovalRow) -> float:
     """Numeric exposure key for sorting: unlimited outranks everything (∞), a
     priced cap sorts by its USD value, an unpriced finite cap sorts as 0."""
@@ -160,112 +222,196 @@ class _ApprovalItem(QTreeWidgetItem):
 # --- worker ---------------------------------------------------------------
 
 class ScanWorker(QThread):
-    """Pages the account's full history newest-first, resuming from the cache
-    snapshot; interruptible between pages (the Stop button)."""
+    """Discovers approvals from the account's ERC-20 ``Approval`` event logs
+    (``ApprovalLogSource``, windowed by block), then patches the recent tail a
+    logs indexer may lag behind by reading only the account's newest txs.
+    Interruptible between windows (the Stop button)."""
 
     batch_fetched = Signal(QULONGLONG, str, object)      # cid, addr_l, [Transaction] (NEW rows)
     rows_ready = Signal(QULONGLONG, str, object)         # cid, addr_l, [ApprovalRow]
-    progress = Signal(QULONGLONG, str, object, object)   # cid, addr_l, sent_seen, nonce_total
-    scan_done = Signal(QULONGLONG, str, bool)            # cid, addr_l, complete
+    pairs_zeroed = Signal(QULONGLONG, str, object)       # cid, addr_l, {(token, spender)} read==0
+    progress = Signal(QULONGLONG, str, object, object)   # cid, addr_l, pairs_seen, total(0=busy)
+    scan_done = Signal(QULONGLONG, str, bool, object)    # cid, addr_l, complete, logs_head
 
-    PAGE = 100
-    PAIR_BATCH_EVERY = 3          # re-check allowances every K pages
+    PAGE = 100                    # tx-tail page size
+    LOG_PAGE = 1000               # explorer logs-API row cap per window
+    RECENT_TX_PAGES = 5           # cap on the lag-patch tail (never the full history)
     MAX_ATTEMPTS = 3
+    # Per-scan budget for the per-address contract-name lookups (the ERC-20-name
+    # multicall is batched/free and never capped) — bounds cold-scan fan-out on a
+    # huge account; the residual shows the bare address and is retried next scan
+    # (seeding carries the wins forward). Lookups run concurrently, so this many
+    # is seconds, not minutes.
+    SOFT_NAME_HTTP_CAP = 120
 
-    def __init__(self, chain, address: str, source, snapshot, metadata_cache,
-                 *, label_source=None, price_source=None, known_pairs=None,
-                 client_factory=None, parent=None):
+    def __init__(self, chain, address: str, log_source, tx_source, snapshot,
+                 metadata_cache, *, from_block=0, label_source=None,
+                 price_source=None, known_pairs=None, known_soft_labels=None,
+                 get_api_key=None, client_factory=None, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._address = address
-        self._source = source
+        self._log_source = log_source          # ApprovalLogSource (bulk discovery)
+        self._tx_source = tx_source            # RoutedTransactionSource (recent-tail patch)
         self._snapshot = list(snapshot)
         self._meta = metadata_cache
+        self._from_block = int(from_block or 0)   # incremental cursor (cache last_block)
         self._label_source = label_source
         self._price_source = price_source
+        self._get_api_key = get_api_key           # Etherscan key for the ABI-name fallback
         self._known_pairs = set(known_pairs or ())   # cached pairs to re-check
         self._priced: dict[str, Decimal | None] = {}   # token -> unit price (memo)
+        self._balances: dict[str, int] = {}            # token -> holder balance (memo)
+        # Seeded from the cache's already-resolved names, so the per-scan budget
+        # is spent only on STILL-UNNAMED spenders (progressive coverage across
+        # scans) and a resolved name is never re-fetched or overwritten with "".
+        self._soft_labels: dict[str, str] = dict(known_soft_labels or {})
+        self._softname_budget = self.SOFT_NAME_HTTP_CAP
         self._client_factory = client_factory or EthClient
+        self._head = 0               # chain head, for block-% progress
+
+    # Progress is split across the scan's two real cost centres (measured
+    # ~equal on a heavy account): DISCOVERY (the log-window walk) fills the
+    # first _DISCOVERY_FRAC of the bar; VERIFICATION (the allowance multicalls)
+    # fills the rest, batched, so the bar keeps moving through the part that
+    # used to sit at ~99%.
+    _DISCOVERY_FRAC = 0.4
+    VERIFY_CHUNK = 150
 
     def run(self) -> None:
         cid = self._chain.chain_id
         addr_l = self._address.lower()
         try:
             client = self._client_factory(self._chain)
-            seen = {t.hash for t in self._snapshot}
+            try:
+                self._head = client.get_block_number()
+            except Exception:
+                self._head = 0                           # unknown → block-% is busy
+            self._progress(cid, addr_l, 0.0)
+
+            # 1. Discovery: window the account's Approval logs from the
+            #    incremental cursor. logs_head tracks how far the indexer has
+            #    served (the cache's next resume point); progress rides the
+            #    block range covered, scaled into [0, _DISCOVERY_FRAC].
             all_pairs = self._known_pairs | set(
                 approve_pairs_in(self._snapshot, self._address))
-            checked: set[tuple[str, str]] = set()
-            self._emit_rows(client, cid, addr_l, all_pairs, checked)
-
-            try:
-                total = client.get_transaction_count(self._address, "latest")
-            except Exception:
-                total = 0
-            sent_seen = sum(1 for t in self._snapshot
-                            if t.from_addr.lower() == addr_l)
-            self.progress.emit(cid, addr_l, sent_seen, total)
-
-            # A fully-cached account no longer re-pages its whole history — it
-            # only fetches the NEW tail (txs above what's cached) to catch fresh
-            # approvals, then stops the moment it reaches already-seen txs.
-            tail_only = _is_full_history(self._snapshot)
-            snapshot_oldest = min((t.block_number for t in self._snapshot),
-                                  default=None)
-            cursor: int | None = None
-            jumped = snapshot_oldest is None
-            pages = 0
+            logs_head = self._from_block
+            window_from = self._from_block
             while not self.isInterruptionRequested():
-                raw = self._fetch_page(cursor)
-                if raw is None:                          # persistent explorer failure
-                    self.scan_done.emit(cid, addr_l, False)
+                rows = self._fetch_logs(window_from)
+                if rows is None:                         # persistent log-source failure
+                    self.scan_done.emit(cid, addr_l, False, logs_head)
                     return
-                if not raw:
+                if not rows:
                     break
-                new = [t for t in raw if t.hash not in seen]
-                if new:
-                    seen.update(t.hash for t in new)
-                    self.batch_fetched.emit(cid, addr_l, new)
-                    sent_seen += sum(1 for t in new if t.from_addr.lower() == addr_l)
-                    all_pairs |= approve_pairs_in(new, self._address)
-                pages += 1
-                self.progress.emit(cid, addr_l, min(sent_seen, total or sent_seen),
-                                   total)
-                raw_oldest = min(t.block_number for t in raw)
-                if not new:                              # reached already-cached txs
-                    if tail_only:
-                        break                            # incremental: tail done
-                    # A page fully within the cached newest span → skip below it.
-                    if (not jumped and snapshot_oldest is not None
-                            and raw_oldest > snapshot_oldest):
-                        cursor = snapshot_oldest
-                        jumped = True
-                        continue
-                if pages % self.PAIR_BATCH_EVERY == 0:
-                    self._emit_rows(client, cid, addr_l, all_pairs, checked)
-                if len(raw) < self.PAGE:                 # short page = start of history
+                pairs, max_block = approval_pairs_from_log_rows(rows, self._address)
+                all_pairs |= pairs
+                if max_block > logs_head:
+                    logs_head = max_block
+                self._progress(
+                    cid, addr_l, self._DISCOVERY_FRAC * self._block_frac(logs_head))
+                if len(rows) < self.LOG_PAGE:            # short window = end of range
                     break
-                if cursor is not None and raw_oldest >= cursor:   # no progress guard
+                # Advance past the window's highest block. +1 skips re-fetching
+                # the boundary block; a single block holding a full window still
+                # makes progress via window_from+1.
+                nxt = max_block + 1 if max_block > window_from else window_from + 1
+                if nxt <= window_from:                   # no-progress guard
                     break
-                cursor = raw_oldest
+                window_from = nxt
 
-            self._emit_rows(client, cid, addr_l, all_pairs, checked)
-            self.scan_done.emit(cid, addr_l, not self.isInterruptionRequested())
+            # 2. Lag patch: a logs indexer can trail chain head. Read only the
+            #    account's txs NEWER than logs_head (a bounded recent window, not
+            #    the full history) and union their approve pairs — catching a
+            #    fresh approval the indexer hasn't surfaced yet.
+            self._patch_recent_tail(cid, addr_l, logs_head, all_pairs)
+            self._progress(cid, addr_l, self._DISCOVERY_FRAC)
+
+            # 3. Verification: read allowance() for every candidate in batches,
+            #    emitting rows + progress per batch so the bar climbs smoothly
+            #    from _DISCOVERY_FRAC to 1.0 through the multicall reads.
+            todo = sorted(all_pairs)
+            total = len(todo) or 1
+            checked: set[tuple[str, str]] = set()
+            for i in range(0, len(todo), self.VERIFY_CHUNK):
+                if self.isInterruptionRequested():
+                    break
+                self._emit_rows(client, cid, addr_l,
+                                set(todo[i:i + self.VERIFY_CHUNK]), checked)
+                done = min(i + self.VERIFY_CHUNK, len(todo))
+                self._progress(cid, addr_l, self._DISCOVERY_FRAC
+                               + (1.0 - self._DISCOVERY_FRAC) * done / total)
+
+            self.scan_done.emit(
+                cid, addr_l, not self.isInterruptionRequested(), logs_head)
         except Exception:
             log.debug("approvals scan failed", exc_info=True)
-            self.scan_done.emit(cid, addr_l, False)
+            self.scan_done.emit(cid, addr_l, False, self._from_block)
 
-    def _fetch_page(self, cursor: int | None) -> list[Transaction] | None:
+    def _block_frac(self, cursor: int) -> float:
+        """Fraction of the [from_block, head] block range the log cursor has
+        covered (0.0 when the head is unknown)."""
+        head = getattr(self, "_head", 0)
+        if head and head > self._from_block:
+            span = head - self._from_block
+            return max(0.0, min(1.0, (min(int(cursor), head) - self._from_block) / span))
+        return 0.0
+
+    def _progress(self, cid: int, addr_l: str, frac: float) -> None:
+        # Determinate 0-100 once the head is known (verification is always
+        # count-based, so it's determinate regardless); indeterminate only while
+        # the head is unknown AND we're still in discovery.
+        if getattr(self, "_head", 0) or frac > self._DISCOVERY_FRAC:
+            self.progress.emit(cid, addr_l, int(100 * frac), 100)
+        else:
+            self.progress.emit(cid, addr_l, 0, 0)
+
+    def _fetch_logs(self, from_block: int) -> list[dict] | None:
         import time
         for attempt in range(self.MAX_ATTEMPTS):
             try:
-                return self._source.list_transactions(
-                    self._chain, self._address, page=1, limit=self.PAGE,
-                    before_block=cursor)
+                return self._log_source.fetch(
+                    self._chain, self._address, from_block=from_block)
             except Exception:
                 if attempt < self.MAX_ATTEMPTS - 1:
                     time.sleep(0.5 * (attempt + 1))
         return None
+
+    def _patch_recent_tail(self, cid: int, addr_l: str, logs_head: int,
+                           all_pairs: set[tuple[str, str]]) -> None:
+        """Walk the account's txs newest-first only down to ``logs_head`` (the
+        gap the logs indexer may lag), bounded by ``RECENT_TX_PAGES``. Best
+        effort: a source failure just skips the patch — the log walk already has
+        the bulk. New txs are merged into the tx cache via ``batch_fetched``."""
+        seen = {t.hash for t in self._snapshot}
+        cursor: int | None = None
+        for _ in range(self.RECENT_TX_PAGES):
+            if self.isInterruptionRequested():
+                return
+            raw = self._fetch_tx_page(cursor)
+            if not raw:
+                return
+            new = [t for t in raw if t.hash not in seen]
+            if new:
+                seen.update(t.hash for t in new)
+                self.batch_fetched.emit(cid, addr_l, new)
+                all_pairs |= approve_pairs_in(new, self._address)
+            raw_oldest = min(t.block_number for t in raw)
+            if raw_oldest <= logs_head:                  # covered the indexer gap
+                return
+            if len(raw) < self.PAGE:                     # start of history
+                return
+            if cursor is not None and raw_oldest >= cursor:   # no-progress guard
+                return
+            cursor = raw_oldest
+
+    def _fetch_tx_page(self, cursor: int | None) -> list[Transaction] | None:
+        try:
+            return self._tx_source.list_transactions(
+                self._chain, self._address, page=1, limit=self.PAGE,
+                before_block=cursor)
+        except Exception:
+            return None
 
     def _emit_rows(self, client, cid: int, addr_l: str,
                    all_pairs: set[tuple[str, str]],
@@ -273,8 +419,15 @@ class ScanWorker(QThread):
         todo = all_pairs - checked
         if not todo:
             return
-        checked.update(todo)
-        found = fetch_allowances(client, self._address, todo)
+        found, read = fetch_allowances(client, self._address, todo)
+        # Mark only DEFINITIVELY-read pairs as checked, so a pair whose call
+        # failed this pass is retried in a later batch rather than silently
+        # dropped. Pairs read as exactly zero are reported as zeroed so the
+        # plugin can prune them — but a failed read never prunes a real cap.
+        checked.update(read)
+        zeroed = read - set(found)
+        if zeroed:
+            self.pairs_zeroed.emit(cid, addr_l, zeroed)
         if not found:
             return
         tokens = sorted({t for (t, _s) in found})
@@ -284,9 +437,17 @@ class ScanWorker(QThread):
                 self._meta.put_many(cid, client.multicall_erc20_metadata(missing))
             except Exception:
                 log.debug("approvals metadata read failed", exc_info=True)
-        labels = self._fetch_labels(cid, sorted({s for (_t, s) in found}))
-        finite = sorted({t for (t, _s), v in found.items() if v < _UNLIMITED_MIN})
-        prices = self._fetch_prices(finite)
+        spenders = sorted({s for (_t, s) in found})
+        labels = self._fetch_labels(cid, spenders)
+        soft = self._fetch_soft_labels(
+            client, cid, [s for s in spenders if not labels.get(s)])
+        self._fetch_balances(client, tokens)
+        # Price finite-allowance tokens (for the cap USD sort) AND every token
+        # actually HELD (for the "at risk" tag — most held tokens have an
+        # unlimited cap, so pricing can't be limited to finite caps).
+        finite = {t for (t, _s), v in found.items() if v < _UNLIMITED_MIN}
+        held = {t for t in tokens if self._balances.get(t, 0) > 0}
+        prices = self._fetch_prices(sorted(finite | held))
         rows = []
         for (token, spender), value in found.items():
             m = self._meta.get(cid, token) or {}
@@ -295,8 +456,24 @@ class ScanWorker(QThread):
                 symbol=m.get("symbol") or "", name=m.get("name") or "",
                 decimals=int(m.get("decimals") or 18),
                 spender_label=labels.get(spender, ""),
-                price_usd=prices.get(token)))
+                spender_soft_label=(
+                    "" if labels.get(spender) else soft.get(spender, "")),
+                price_usd=prices.get(token),
+                token_balance=self._balances.get(token, 0)))
         self.rows_ready.emit(cid, addr_l, rows)
+
+    def _fetch_balances(self, client, tokens: list[str]) -> None:
+        """Read the holder's ``balanceOf`` for tokens not yet seen (memoized).
+        Best-effort — a failure just leaves those tokens without an at-risk tag.
+        Absent = unknown, so a reverted read stays out of the memo (not 0)."""
+        need = [t for t in tokens if t not in self._balances]
+        if not need:
+            return
+        try:
+            self._balances.update(
+                client.multicall_erc20_balances(need, self._address))
+        except Exception:
+            log.debug("approvals balance read failed", exc_info=True)
 
     def _fetch_prices(self, tokens: list[str]) -> dict[str, Decimal | None]:
         """USD unit prices for ``tokens`` (memoized, so streaming batches don't
@@ -327,13 +504,62 @@ class ScanWorker(QThread):
             log.debug("approvals label fetch failed", exc_info=True)
             return {}
 
+    def _fetch_soft_labels(self, client, cid: int,
+                           spenders: list[str]) -> dict[str, str]:
+        """Best-effort SELF-REPORTED names for spenders with no public name-tag:
+        the spender's own ERC-20 name (keyless multicall), then — for the
+        residual — its verified ABI contract name (Blockscout, then Etherscan,
+        proxy-resolved). Memoized so streaming batches don't refetch; the
+        per-address contract-name lookups are budgeted (``SOFT_NAME_HTTP_CAP``)
+        so a huge account doesn't fan out unboundedly, and run CONCURRENTLY —
+        they're independent explorer round-trips, and serialising them is what
+        made a big account's names crawl in over minutes. Italic (lower-trust)."""
+        need = [s for s in spenders if s not in self._soft_labels]
+        if need:
+            try:
+                meta = client.multicall_erc20_metadata(need)
+            except Exception:
+                meta = {}
+                log.debug("approvals soft-name metadata read failed", exc_info=True)
+            residual = []
+            for s in need:
+                m = meta.get(s)
+                if m:                                    # the spender IS an ERC-20
+                    self._soft_labels[s] = m.get("name") or m.get("symbol") or ""
+                else:
+                    residual.append(s)
+            # Spend the per-scan budget, resolve those concurrently; the rest are
+            # left bare this scan and retried next (seeding carries the wins).
+            take = residual[:max(0, self._softname_budget)]
+            self._softname_budget -= len(take)
+            for s in residual[len(take):]:
+                self._soft_labels[s] = ""
+
+            def _one(s: str) -> str:
+                try:
+                    return fetch_contract_display_name(
+                        cid, s, get_api_key=self._get_api_key)
+                except Exception:
+                    log.debug("approvals contract-name fetch failed", exc_info=True)
+                    return ""
+
+            if take:
+                with ThreadPoolExecutor(max_workers=_SOFT_NAME_WORKERS) as ex:
+                    for s, name in zip(take, ex.map(_one, take)):
+                        self._soft_labels[s] = name
+            if len(residual) > len(take):
+                log.debug("approvals: %d spender contract-name lookups skipped "
+                          "(per-scan budget)", len(residual) - len(take))
+        return {s: self._soft_labels.get(s, "") for s in spenders}
+
 
 class ReconcileWorker(QThread):
     """Re-reads ``allowance(owner, spender)`` for a specific set of pairs after
     a modify/revoke mines, so the tree reflects the on-chain truth (a reverted
-    revoke keeps its old value; a successful one reads 0). Emits every requested
-    pair — 0 for any that dropped out of ``fetch_allowances`` (which keeps >0
-    only) so the plugin knows to remove the leaf."""
+    revoke keeps its old value; a successful one reads 0). Reports a pair's value
+    only when its call SUCCEEDED — a pair whose read reverted/failed is OMITTED,
+    so ``_on_reconciled`` leaves that leaf as-is rather than falsely removing a
+    real cap on a transient glitch."""
 
     reconciled = Signal(QULONGLONG, str, object)   # cid, addr_l, {(token, spender): value}
 
@@ -347,18 +573,36 @@ class ReconcileWorker(QThread):
     def run(self) -> None:
         cid = self._chain.chain_id
         addr_l = self._owner.lower()
-        values: dict[tuple[str, str], int] = dict.fromkeys(self._pairs, 0)
         try:
             client = self._client_factory(self._chain)
-            found = fetch_allowances(client, self._owner, self._pairs)
-            values.update(found)
+            found, read = fetch_allowances(client, self._owner, self._pairs)
         except Exception:
             log.debug("approvals reconcile failed", exc_info=True)
             return                              # leave leaves as-is; no false removals
+        # Only pairs actually read carry a value: found>0 as read, the rest of
+        # `read` as 0 (definitively revoked). Pairs whose call failed are absent
+        # → the plugin leaves them untouched.
+        values: dict[tuple[str, str], int] = {p: 0 for p in read}
+        values.update(found)
         self.reconciled.emit(cid, addr_l, values)
 
 
 # --- panel ----------------------------------------------------------------
+
+class _SearchEdit(QLineEdit):
+    """The Approvals find-bar field. Emits ``escape_pressed`` on Escape so the
+    bar closes + clears (browser-style). A subclass rather than a QShortcut:
+    keyPressEvent delivery is deterministic under headless QTest, and Escape
+    only dismisses when the field is focused."""
+
+    escape_pressed = Signal()
+
+    def keyPressEvent(self, event):  # noqa: N802 — Qt method name
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape_pressed.emit()
+            return
+        super().keyPressEvent(event)
+
 
 class ApprovalsPanel(QWidget):
     modify_requested = Signal(object)      # ApprovalRow   (commit 2)
@@ -380,10 +624,19 @@ class ApprovalsPanel(QWidget):
         self._host = host
         self._token_items: dict[str, QTreeWidgetItem] = {}
         self._hovered: QTreeWidgetItem | None = None
-        self._sort_col = 0
-        self._sort_order = Qt.SortOrder.AscendingOrder    # token A→Z by default
+        # Value-at-risk first by default: the tokens whose approvals could drain
+        # the most real money bubble to the top (Allowance column, descending) —
+        # the most useful thing to review first. (Header click still switches to
+        # token A→Z; see _on_header_clicked.)
+        self._sort_col = 1
+        self._sort_order = Qt.SortOrder.DescendingOrder
         self._col0_frac: float | None = None              # user's split ratio
         self._syncing = False                             # re-entrancy guard
+        # Browser-style find bar (Ctrl+F / the search icon button): filters the
+        # token→spender tree by token (address/symbol) or spender (address/name).
+        # btn_search / act_find are built in _build (like the other buttons).
+        self._filter_text = ""
+        self._search_edit: QLineEdit | None = None
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
 
@@ -396,11 +649,13 @@ class ApprovalsPanel(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tree.setItemDelegate(_RiskPillDelegate(self.tree))   # "$X at risk" pill
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
-        # Hover / selection reveals a named spender's ACTUAL address (so it can
-        # be eyeballed / checked on the explorer without losing the name label).
+        # Hovering a named spender reveals its ACTUAL address (so it can be
+        # eyeballed / checked on the explorer). Hover-only — the SELECTED row
+        # keeps its name, so a selection isn't a second address-only row.
         self.tree.setMouseTracking(True)
         self.tree.itemEntered.connect(self._on_item_entered)
         self.tree.viewport().installEventFilter(self)
@@ -422,6 +677,24 @@ class ApprovalsPanel(QWidget):
         hh.sectionClicked.connect(self._on_header_clicked)
         hh.sectionResized.connect(self._on_section_resized)
         v.addWidget(self.tree, 1)
+
+        # Find bar under the tree — hidden until Ctrl+F or the search button.
+        self._search_edit = _SearchEdit()
+        self._search_edit.setPlaceholderText(
+            "Filter by token or spender — address or name")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setVisible(False)
+        self._search_edit.textChanged.connect(self._on_search_text)
+        self._search_edit.escape_pressed.connect(self._hide_search)
+        v.addWidget(self._search_edit)
+        # Ctrl+F: show + focus the bar (browser find — a second press re-focuses
+        # rather than toggling shut). Scoped to the panel + its children.
+        self.act_find = QAction("Find", self)
+        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.act_find.setShortcutContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.act_find.triggered.connect(self._show_search)
+        self.addAction(self.act_find)
 
         self.status_lbl = QLabel("")
         self.status_lbl.setVisible(False)
@@ -484,12 +757,17 @@ class ApprovalsPanel(QWidget):
         self.btn_explorer.setIcon(_icon(*_IC_EXPLORER))
         self.btn_explorer.setToolTip("Open spender in the block explorer")
         self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
-        for b in (self.btn_select_all, self.btn_copy, self.btn_explorer):
+        self.btn_search = QPushButton()
+        self.btn_search.setIcon(_icon(*_IC_SEARCH))
+        self.btn_search.setToolTip("Filter approvals (Ctrl+F)")
+        self.btn_search.setCheckable(True)
+        self.btn_search.toggled.connect(self._on_search_toggled)
+        for b in (self.btn_select_all, self.btn_copy, self.btn_explorer,
+                  self.btn_search):
             b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
-        self.tree.itemSelectionChanged.connect(self._refresh_reveal)
-        self.tree.itemChanged.connect(self._update_buttons)
+        self.tree.itemChanged.connect(self._on_item_changed)
         self._update_buttons()
 
         if self._host is not None:
@@ -497,12 +775,16 @@ class ApprovalsPanel(QWidget):
 
     def action_widgets(self) -> list[QWidget]:
         return [self.btn_action, self.btn_select_all, self.btn_copy,
-                self.btn_explorer]
+                self.btn_explorer, self.btn_search]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
         self.clear()
-        self.progress.setRange(0, 0)                 # indeterminate until first progress
+        # Start determinate at 0% (not the busy animation) so the bar reads as
+        # "started, nothing yet" rather than "undefined"; the worker switches it
+        # to indeterminate only if the chain head is unavailable.
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         self._scan_bar.setVisible(True)              # bar + Stop as one unit
         self._set_status("")
 
@@ -528,6 +810,7 @@ class ApprovalsPanel(QWidget):
         self._token_items.clear()
         self._set_status("")
         self._update_buttons()
+        self._hide_search()                          # a fresh account starts unfiltered
 
     # --- population -------------------------------------------------------
     def append_rows(self, rows: list[ApprovalRow]) -> None:
@@ -536,6 +819,8 @@ class ApprovalsPanel(QWidget):
             self._add_row(r)
         self.tree.blockSignals(False)
         self._apply_sort()                           # recompute sums, sort, expandAll
+        if self._filter_text.strip():
+            self._apply_filter()                     # re-hide non-matches in a live scan
         self._layout_columns()                       # keep the split filling the width
         self._update_buttons()
         self._refresh_reveal()
@@ -549,6 +834,15 @@ class ApprovalsPanel(QWidget):
             out.extend(node.child(ci) for ci in range(node.childCount()))
         return out
 
+    def _selectable_leaves(self) -> list[QTreeWidgetItem]:
+        """Leaves a bulk select/revoke should act on: only the ones ON SCREEN
+        when a filter is active (a leaf hidden by the find bar keeps its state,
+        so +/−/∗ and select-all can't tick something you can't see), else all."""
+        leaves = self._all_leaves()
+        if self._filter_text.strip():
+            return [le for le in leaves if not le.isHidden()]
+        return leaves
+
     def checked_leaves(self) -> list[ApprovalRow]:
         """Every spender leaf the user has ticked (via its own box or its token
         node, which auto-checks the subtree)."""
@@ -560,24 +854,26 @@ class ApprovalsPanel(QWidget):
                     out.append(r)
         return out
 
-    def _set_all_checked(self, state: Qt.CheckState) -> None:
+    def _set_checked(self, leaves: list[QTreeWidgetItem],
+                     state: Qt.CheckState) -> None:
+        # Set the LEAVES directly (not the token node), so a filtered-out sibling
+        # is left alone — the token node's auto-tristate recomputes from its
+        # children (Checked / PartiallyChecked / Unchecked) on its own.
         self.tree.blockSignals(True)
-        for ti in range(self.tree.topLevelItemCount()):
-            node = self.tree.topLevelItem(ti)
-            if node is not None:                      # setting the token node
-                node.setCheckState(0, state)          # auto-propagates to its leaves
+        for le in leaves:
+            le.setCheckState(0, state)
         self.tree.blockSignals(False)
         self._update_buttons()
 
     def _select_all(self) -> None:                    # + key
-        self._set_all_checked(Qt.CheckState.Checked)
+        self._set_checked(self._selectable_leaves(), Qt.CheckState.Checked)
 
     def _deselect_all(self) -> None:                  # − key
-        self._set_all_checked(Qt.CheckState.Unchecked)
+        self._set_checked(self._selectable_leaves(), Qt.CheckState.Unchecked)
 
     def _invert_selection(self) -> None:              # * key
         self.tree.blockSignals(True)
-        for leaf in self._all_leaves():
+        for leaf in self._selectable_leaves():
             leaf.setCheckState(0, Qt.CheckState.Unchecked
                                if leaf.checkState(0) == Qt.CheckState.Checked
                                else Qt.CheckState.Checked)
@@ -585,15 +881,32 @@ class ApprovalsPanel(QWidget):
         self._update_buttons()
 
     def _toggle_select_all(self) -> None:
-        """The button: check every leaf, or uncheck them all if already checked
-        — so a whole account's caps can be batch-revoked in one go."""
-        leaves = self._all_leaves()
+        """The button: check every (visible) leaf, or uncheck them if already all
+        checked — so a whole account (or a filtered view) can be batch-revoked in
+        one go."""
+        leaves = self._selectable_leaves()
         if not leaves:
             return
         if all(le.checkState(0) == Qt.CheckState.Checked for le in leaves):
             self._deselect_all()
         else:
             self._select_all()
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        # A token node's checkbox auto-propagates (ItemIsAutoTristate) to ALL its
+        # children — including ones the find bar has hidden. Under an active
+        # filter, undo that on the hidden ones so ticking a token subtree only
+        # selects the leaves you can actually see. Signals stay blocked so the
+        # correction doesn't re-enter; the node's tristate recomputes to partial.
+        if (self._filter_text.strip() and item is not None
+                and item.data(0, _TOKEN_ROLE) is not None):
+            self.tree.blockSignals(True)
+            for ci in range(item.childCount()):
+                child = item.child(ci)
+                if child.isHidden():
+                    child.setCheckState(0, Qt.CheckState.Unchecked)
+            self.tree.blockSignals(False)
+        self._update_buttons()
 
     def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
         node = self._token_items.get(r.token)
@@ -612,34 +925,69 @@ class ApprovalsPanel(QWidget):
         return node
 
     @staticmethod
-    def _leaf_text(r: ApprovalRow, reveal: bool) -> str:
-        """Column-0 text for a spender leaf: its name-tag normally, its actual
-        address when ``reveal`` (hover / selection) — or always the address
-        when there's no name-tag. ElideMiddle truncates a long value to fit."""
-        if r.spender_label and not reveal:
-            return r.spender_label
+    def _leaf_display(r: ApprovalRow, reveal: bool) -> tuple[str, bool]:
+        """(column-0 text, italic?) for a spender leaf. ``reveal`` (hover /
+        selection) always shows the plain address (regular). Otherwise, in
+        order: a definitive public name-tag (regular) › a self-reported soft
+        name (ITALIC — forgeable, so we flag lower confidence) › the bare
+        address. ElideMiddle truncates a long value to fit."""
+        if reveal:
+            return r.spender, False
+        if r.spender_label:
+            return r.spender_label, False
+        if r.spender_soft_label:
+            return r.spender_soft_label, True
+        return r.spender, False
+
+    @staticmethod
+    def _set_italic(leaf: QTreeWidgetItem, italic: bool) -> None:
+        f = leaf.font(0)
+        if f.italic() != italic:
+            f.setItalic(italic)
+            leaf.setFont(0, f)
+
+    @staticmethod
+    def _leaf_tooltip(r: ApprovalRow) -> str:
+        if r.spender_label:
+            return f"{r.spender_label}\n{r.spender}"
+        if r.spender_soft_label:
+            return (f"{r.spender_soft_label} — self-reported name (unverified, "
+                    f"could be spoofed)\n{r.spender}")
         return r.spender
 
     def _add_row(self, r: ApprovalRow) -> None:
         # Upsert: a fresh scan re-emits pairs already shown (from the cache) —
         # refresh the existing leaf in place rather than duplicating it.
+        node = self._token_node(r)
+        self._set_token_risk(node, r)                # "$X at risk" pill on the token line
         existing = self._leaf_for(r.token, r.spender)
         if existing is not None:
             self._fill_leaf(existing, r)
             return
-        leaf = _ApprovalItem(self._token_node(r))
+        leaf = _ApprovalItem(node)
         leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         leaf.setCheckState(0, Qt.CheckState.Unchecked)
         self._fill_leaf(leaf, r)
 
+    @staticmethod
+    def _set_token_risk(node: QTreeWidgetItem, r: ApprovalRow) -> None:
+        # All of a token's rows carry the same balance/price, so any refreshes
+        # the pill. Only set when there's a value, so an unpriced/not-held token
+        # (or a cache row lacking a balance) leaves the pill off rather than
+        # clearing a value a sibling row already set.
+        tag = _risk_tag(r)
+        if tag:
+            node.setData(1, _RISK_ROLE, tag)
+
     def _fill_leaf(self, leaf: QTreeWidgetItem, r: ApprovalRow) -> None:
-        leaf.setText(0, self._leaf_text(r, reveal=leaf is self._hovered))
+        text, italic = self._leaf_display(r, reveal=leaf is self._hovered)
+        leaf.setText(0, text)
+        self._set_italic(leaf, italic)
         leaf.setText(1, _allowance_cell(r))
         leaf.setTextAlignment(
             1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         leaf.setData(1, _USD_SORT_ROLE, _row_sort_value(r))
-        leaf.setToolTip(0, f"{r.spender_label}\n{r.spender}"
-                        if r.spender_label else r.spender)
+        leaf.setToolTip(0, self._leaf_tooltip(r))
         leaf.setData(0, _ROW_ROLE, r)
 
     def all_rows(self) -> list[ApprovalRow]:
@@ -655,9 +1003,13 @@ class ApprovalsPanel(QWidget):
                     out.append(r)
         return out
 
-    def prune_to(self, pairs: set[tuple[str, str]]) -> None:
-        """Drop leaves whose (token, spender) a fresh scan didn't re-confirm —
-        i.e. caps revoked outside qeth that now read zero."""
+    def prune_zeroed(self, pairs: set[tuple[str, str]]) -> None:
+        """Drop leaves whose (token, spender) a fresh scan read as DEFINITIVELY
+        zero (revoked). Only these are removed — a cached cap the scan couldn't
+        re-read (a transient failure) is left displayed, never dropped on a
+        hiccup."""
+        if not pairs:
+            return
         self.tree.blockSignals(True)
         for ti in range(self.tree.topLevelItemCount() - 1, -1, -1):
             node = self.tree.topLevelItem(ti)
@@ -667,7 +1019,7 @@ class ApprovalsPanel(QWidget):
                 leaf = node.child(ci)
                 r = leaf.data(0, _ROW_ROLE)
                 if (isinstance(r, ApprovalRow)
-                        and (r.token.lower(), r.spender.lower()) not in pairs):
+                        and (r.token.lower(), r.spender.lower()) in pairs):
                     if leaf is self._hovered:
                         self._hovered = None
                     node.removeChild(leaf)
@@ -698,18 +1050,24 @@ class ApprovalsPanel(QWidget):
         self.tree.expandAll()
 
     def _recompute_token_totals(self) -> None:
-        """Each token node's Allowance-sort key = the summed USD exposure of its
-        spenders (∞ if any is unlimited), so sorting by allowance ranks tokens by
-        total exposure."""
+        """Each token node's Allowance-sort key = its USD VALUE AT RISK (wallet
+        balance × price) — the amount its approvals could actually drain — so
+        sorting by allowance ranks the tokens holding real money to the top.
+        A summed allowance cap would just be ∞ for every token with any unlimited
+        approval (nearly all), tying them uselessly. Not-held / unpriced tokens
+        sort as 0 (bottom). Spender leaves keep sorting by their own cap."""
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
             if node is None:
                 continue
-            total = 0.0
+            risk = 0.0
             for ci in range(node.childCount()):
-                v = node.child(ci).data(1, _USD_SORT_ROLE)
-                total += float(v) if v is not None else 0.0
-            node.setData(1, _USD_SORT_ROLE, total)
+                r = node.child(ci).data(0, _ROW_ROLE)      # all children share the token
+                if isinstance(r, ApprovalRow):
+                    usd = _token_risk_usd(r)
+                    risk = float(usd) if usd is not None else 0.0
+                    break
+            node.setData(1, _USD_SORT_ROLE, risk)
 
     # --- hover / selection address reveal ---------------------------------
     def _on_item_entered(self, item: QTreeWidgetItem, column: int) -> None:
@@ -768,10 +1126,14 @@ class ApprovalsPanel(QWidget):
         self._syncing = False
 
     def _refresh_reveal(self) -> None:
-        """Rewrite each named leaf's column-0 text so the hovered / selected one
-        shows its address and the rest show their name-tag."""
+        """Rewrite each named leaf's column-0 text so the HOVERED one shows its
+        (regular-weight) address and the rest show their name — a name-tag
+        regular, a soft name italic. Reveal is **hover-only**: the selected row
+        keeps its readable name, so a selection (whose highlight already looks
+        like the hover highlight in some themes) doesn't ALSO read as a second
+        address-only row. A bare-address leaf has nothing to toggle and is
+        skipped."""
         hovered = self._hovered
-        current = self.tree.currentItem()
         self.tree.blockSignals(True)
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
@@ -780,12 +1142,13 @@ class ApprovalsPanel(QWidget):
             for ci in range(node.childCount()):
                 leaf = node.child(ci)
                 r = leaf.data(0, _ROW_ROLE)
-                if not isinstance(r, ApprovalRow) or not r.spender_label:
+                if not isinstance(r, ApprovalRow) or not (
+                        r.spender_label or r.spender_soft_label):
                     continue
-                reveal = leaf is hovered or (leaf is current and leaf.isSelected())
-                want = self._leaf_text(r, reveal)
-                if leaf.text(0) != want:
-                    leaf.setText(0, want)
+                text, italic = self._leaf_display(r, reveal=leaf is hovered)
+                if leaf.text(0) != text:
+                    leaf.setText(0, text)
+                self._set_italic(leaf, italic)
         self.tree.blockSignals(False)
 
     def _apply_token_icon(self, node: QTreeWidgetItem, token: str) -> None:
@@ -928,6 +1291,84 @@ class ApprovalsPanel(QWidget):
         if isinstance(r, ApprovalRow):
             self._open_in_explorer(r.spender)
 
+    # --- find / filter (browser-style, mirrors the Accounts tab) ----------
+    def _show_search(self) -> None:
+        """Reveal + focus the find bar, selecting any existing text (a second
+        Ctrl+F just re-focuses). Idempotent."""
+        if self._search_edit is None:
+            return
+        self._search_edit.setVisible(True)
+        if self.btn_search is not None:
+            self.btn_search.setChecked(True)         # no-op if already checked
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
+
+    def _hide_search(self) -> None:
+        """Hide the find bar and clear the filter (Escape / un-toggle). Clearing
+        the field drives textChanged → filter reset."""
+        if self._search_edit is None:
+            return
+        was_open = not self._search_edit.isHidden()
+        self._search_edit.setVisible(False)
+        self._search_edit.clear()                    # → _on_search_text("") → reset
+        if self.btn_search is not None:
+            self.btn_search.setChecked(False)
+        # Return keyboard focus to the tree when CLOSING an open bar — else the
+        # +/−/∗ selection keys (the tree's eventFilter needs tree focus) stay
+        # dead. Guarded on was_open so a bare clear() (account switch) doesn't
+        # yank focus to the approvals tree.
+        if was_open:
+            self.tree.setFocus()
+
+    def _on_search_toggled(self, checked: bool) -> None:
+        self._show_search() if checked else self._hide_search()
+
+    def _on_search_text(self, text: str) -> None:
+        self._filter_text = text
+        self._apply_filter()
+
+    def _search_by(self, text: str) -> None:
+        """Open the find bar pre-filled with ``text`` (the context-menu 'Search
+        by this address' entries)."""
+        if self._search_edit is None or not text:
+            return
+        self._show_search()
+        self._search_edit.setText(text)              # → textChanged → filter
+
+    def _apply_filter(self) -> None:
+        """Show only tokens/spenders matching the filter text (case-insensitive).
+        A token matches on its address OR symbol/name → its whole subtree shows;
+        else each spender leaf matches on its address OR name-tag OR soft label →
+        only matching leaves show, under any token that has one. setHidden only,
+        so the selection/sort/pills are untouched; an empty filter un-hides all
+        (the tree is always expanded, so no collapse state to restore)."""
+        needle = self._filter_text.strip().lower()
+        filtering = bool(needle)
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            hay = (str(node.data(0, _TOKEN_ROLE) or "").lower()
+                   + " " + node.text(0).lower())
+            for ci in range(node.childCount()):       # add the full symbol/name
+                r0 = node.child(ci).data(0, _ROW_ROLE)
+                if isinstance(r0, ApprovalRow):
+                    hay += f" {r0.symbol.lower()} {r0.name.lower()}"
+                    break
+            token_match = filtering and needle in hay
+            any_shown = False
+            for ci in range(node.childCount()):
+                leaf = node.child(ci)
+                r = leaf.data(0, _ROW_ROLE)
+                if not isinstance(r, ApprovalRow):
+                    continue
+                spender_hay = (f"{r.spender.lower()} {r.spender_label.lower()} "
+                               f"{r.spender_soft_label.lower()}")
+                show = (not filtering) or token_match or (needle in spender_hay)
+                leaf.setHidden(not show)
+                any_shown = any_shown or show
+            node.setHidden(filtering and not any_shown)
+
     def _on_context_menu(self, pos) -> None:
         it = self.tree.itemAt(pos)
         r = it.data(0, _ROW_ROLE) if it is not None else None
@@ -945,6 +1386,11 @@ class ApprovalsPanel(QWidget):
         act_copy_tok.setEnabled(r is not None or token is not None)
         act_explorer = menu.addAction(_icon(*_IC_EXPLORER), "Open spender in explorer")
         act_explorer.setEnabled(r is not None and self._explorer_base() is not None)
+        menu.addSeparator()
+        act_search_sp = menu.addAction(_icon(*_IC_SEARCH), "Filter by this spender")
+        act_search_sp.setEnabled(r is not None)
+        act_search_tok = menu.addAction(_icon(*_IC_SEARCH), "Filter by this token")
+        act_search_tok.setEnabled(r is not None or token is not None)
         menu.addSeparator()
         act_refresh = menu.addAction(_icon(*_IC_REFRESH), "Rescan history")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -964,6 +1410,12 @@ class ApprovalsPanel(QWidget):
             if addr:
                 QApplication.clipboard().setText(addr)
                 self.copied.emit(addr)
+        elif chosen is act_search_sp and r is not None:
+            self._search_by(r.spender)
+        elif chosen is act_search_tok:
+            addr = r.token if r is not None else token
+            if addr:
+                self._search_by(addr)
         elif chosen is act_refresh:
             self.refresh_requested.emit()
 
@@ -980,6 +1432,12 @@ class ApprovalsPlugin(Plugin):
         self._loaded_for: tuple[int, str] | None = None
         self._epoch = 0
         self._metadata = TokenMetadataCache()
+        # Approval-event logs are the discovery source of record (catches
+        # permit/internal-call approvals, and costs a few windowed requests on a
+        # >10k-tx account instead of paging its whole history). The tx source
+        # only patches the recent tail a logs indexer may lag behind.
+        self._log_source = ApprovalLogSource(
+            lambda: getattr(store, "etherscan_api_key", None))
         self._source = RoutedTransactionSource(
             EtherscanV2TransactionSource(
                 lambda: getattr(store, "etherscan_api_key", None)),
@@ -1008,6 +1466,7 @@ class ApprovalsPlugin(Plugin):
         self._cache = ApprovalsCache()               # persisted allowances + last block
         self._last_block = 0
         self._scan_pairs: set[tuple[str, str]] = set()   # pairs a live scan re-confirmed
+        self._scan_zeroed: set[tuple[str, str]] = set()  # pairs a live scan read as zero
 
     def widget(self) -> QWidget:
         if self._panel is None:
@@ -1242,30 +1701,42 @@ class ApprovalsPlugin(Plugin):
         epoch = self._epoch
         chain = self.host.current_chain()
         self._scan_pairs = set()
+        self._scan_zeroed = set()
         # Instant paint from the cache; only show the progress bar on a cold
         # scan. A warm scan refreshes the tail silently under the shown rows.
         self._panel.clear()
         cached = self._cache.load(chain.chain_id, addr)
         known_pairs: set[tuple[str, str]] = set()
+        known_soft: dict[str, str] = {}
         if cached and cached[0]:
             rows, self._last_block = cached
             self._panel.append_rows(rows)
             known_pairs = {(r.token.lower(), r.spender.lower()) for r in rows}
+            # Carry already-resolved soft names forward so the worker doesn't
+            # re-fetch them (or lose them when a later scan's budget runs out).
+            known_soft = {r.spender.lower(): r.spender_soft_label
+                          for r in rows if r.spender_soft_label}
         else:
             self._last_block = 0
             self._panel.begin_scan()
         snapshot = self._disk_cache.load(chain.chain_id, addr) or []
-        worker = ScanWorker(chain, addr, self._source, snapshot, self._metadata,
+        worker = ScanWorker(chain, addr, self._log_source, self._source,
+                            snapshot, self._metadata,
+                            from_block=self._last_block,
                             label_source=self._label_source,
                             price_source=self._price_source,
-                            known_pairs=known_pairs)
+                            known_pairs=known_pairs, known_soft_labels=known_soft,
+                            get_api_key=lambda: getattr(
+                                self._store, "etherscan_api_key", None))
         worker.batch_fetched.connect(self._on_batch)
         worker.rows_ready.connect(
             lambda c, a, rows, e=epoch: self._on_rows(c, a, rows, e))
+        worker.pairs_zeroed.connect(
+            lambda c, a, pairs, e=epoch: self._on_zeroed(c, a, pairs, e))
         worker.progress.connect(
             lambda c, a, s, t, e=epoch: self._on_progress(c, a, s, t, e))
         worker.scan_done.connect(
-            lambda c, a, ok, e=epoch: self._on_done(c, a, ok, e))
+            lambda c, a, ok, head, e=epoch: self._on_done(c, a, ok, head, e))
         # Drop our reference the moment it finishes, before the host's
         # deleteLater() runs — so _stop_scan never reaches a dead wrapper.
         worker.finished.connect(lambda w=worker: self._forget_scan(w))
@@ -1297,33 +1768,46 @@ class ApprovalsPlugin(Plugin):
             self._panel.append_rows(rows)
             self._scan_pairs |= {(r.token.lower(), r.spender.lower()) for r in rows}
 
+    def _on_zeroed(self, chain_id, addr_l, pairs, epoch) -> None:
+        # Pairs the scan read as DEFINITIVELY zero — the only ones a completed
+        # scan may prune. A pair whose read merely failed never lands here, so a
+        # transient glitch can't drop a real cap.
+        if self._fresh(chain_id, addr_l, epoch):
+            self._scan_zeroed |= {(t.lower(), s.lower()) for (t, s) in pairs}
+
     def _on_progress(self, chain_id, addr_l, seen, total, epoch) -> None:
         if self._panel is not None and self._fresh(chain_id, addr_l, epoch):
             self._panel.set_progress(int(seen), int(total or 0))
 
-    def _on_done(self, chain_id, addr_l, complete, epoch) -> None:
+    def _on_done(self, chain_id, addr_l, complete, logs_head, epoch) -> None:
         if self._panel is None or not self._fresh(chain_id, addr_l, epoch):
             return
         if complete:
-            # Drop cached caps the fresh scan didn't re-confirm (revoked
-            # elsewhere), then persist the reconciled state + how far we scanned.
-            self._panel.prune_to(self._scan_pairs)
-            self._persist()
+            # Drop only caps the fresh scan definitively read as zero (revoked
+            # elsewhere) — never a cap it just couldn't re-read — then persist
+            # the reconciled state + how far the logs indexer served (the
+            # incremental resume point).
+            self._panel.prune_zeroed(self._scan_zeroed)
+            self._persist(logs_head)
         else:
-            # Stopped before reaching the account's oldest txs — don't treat the
-            # view as loaded, so the next activation resumes and finishes the
-            # un-scanned older tail (the tx cache remembers where we stopped, so
-            # the resume skips re-paging what's already cached).
+            # Stopped/failed before finishing — don't treat the view as loaded,
+            # so the next activation resumes. Still advance the cursor to how far
+            # the logs got, so the resume doesn't re-window from 0.
+            if logs_head and int(logs_head) > self._last_block:
+                self._last_block = int(logs_head)
             self._loaded_for = None
         self._panel.finish_scan(bool(complete))
 
-    def _persist(self) -> None:
+    def _persist(self, logs_head=None) -> None:
         view = self._current_view()
         if view is None or self._panel is None:
             return
         cid, addr = view
-        blocks = [t.block_number for t in (self._disk_cache.load(cid, addr) or [])]
-        self._last_block = max(blocks, default=self._last_block)
+        # last_block is the Approval-log cursor (highest block the indexer
+        # served this scan), NOT the tx cache head. A reconcile/revoke persist
+        # passes no head → keep the existing cursor.
+        if logs_head is not None and int(logs_head) > self._last_block:
+            self._last_block = int(logs_head)
         self._cache.save(cid, addr, self._panel.all_rows(), self._last_block)
 
     def _on_copied(self, text: str) -> None:

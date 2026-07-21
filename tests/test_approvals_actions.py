@@ -243,7 +243,7 @@ def test_stop_scan_survives_a_deleted_worker(plugin):
     from PySide6.QtWidgets import QApplication
 
     from qeth.plugins.approvals import ScanWorker
-    w = ScanWorker(CHAIN, OWNER, object(), [], object())
+    w = ScanWorker(CHAIN, OWNER, object(), object(), [], object())
     plugin._scan = w                                   # pretend a scan is live
     w.deleteLater()
     QApplication.instance().sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -278,22 +278,62 @@ def test_kick_passes_cached_pairs_to_worker(plugin):
     assert PAIR in plugin._scan._known_pairs           # worker re-checks cached pairs
 
 
-def test_scan_done_prunes_and_persists(plugin):
+def test_scan_done_prunes_zeroed_and_persists(plugin):
     plugin._cache.save(CHAIN.chain_id, OWNER, [_row(spender=SPENDER)], 100)
     plugin._loaded_for = None
     plugin._kick(force=True)                            # renders the cached (old) pair
     other = "0x" + "cc" * 20
     plugin._on_rows(CHAIN.chain_id, OWNER.lower(), [_row(spender=other)], plugin._epoch)
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)
-    # old pair pruned (not re-confirmed), new one kept + persisted
+    # the old cached pair was read as DEFINITIVELY zero (revoked elsewhere)
+    plugin._on_zeroed(CHAIN.chain_id, OWNER.lower(), {PAIR}, plugin._epoch)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 12345, plugin._epoch)
+    # zeroed pair pruned, new one kept + persisted
     assert {r.spender for r in plugin._panel.all_rows()} == {other}
     loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
     assert loaded is not None and {r.spender for r in loaded[0]} == {other}
+    assert loaded[1] == 12345                          # logs_head persisted as the cursor
+
+
+def test_scan_done_keeps_a_cap_it_could_not_reread(plugin):
+    # THE TRANSIENT-READ PRUNE FIX: a cached cap the scan didn't definitively
+    # read as zero (its allowance() call reverted/failed this pass) must SURVIVE
+    # a completed scan — a momentary RPC hiccup can't delete a real approval.
+    plugin._cache.save(CHAIN.chain_id, OWNER, [_row(spender=SPENDER)], 100)
+    plugin._loaded_for = None
+    plugin._kick(force=True)                            # renders the cached pair
+    # scan completes having read NOTHING as zero (empty zeroed set)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 200, plugin._epoch)
+    assert {r.spender for r in plugin._panel.all_rows()} == {SPENDER}   # preserved
+    loaded = plugin._cache.load(CHAIN.chain_id, OWNER)
+    assert loaded is not None and {r.spender for r in loaded[0]} == {SPENDER}
+
+
+def test_stale_scan_completion_is_ignored_but_fresh_prunes(plugin):
+    # Proves the product behaviour a stateful-test oracle mis-asserted: a scan
+    # whose epoch was bumped by an intervening re-kick is STALE, and its
+    # scan_done/pairs_zeroed are correctly ignored (the superseding scan is the
+    # authority) — so a zeroed pair is NOT pruned by a stale completion. The
+    # SAME emissions at the current epoch DO prune. Not a product bug.
+    plugin._panel.append_rows([_row(spender=SPENDER)])
+    plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
+    stale = plugin._epoch
+    plugin._epoch += 1                                  # a re-kick/reconcile bumped it
+
+    # Stale completion (old epoch) → ignored: the cap survives.
+    plugin._on_zeroed(CHAIN.chain_id, OWNER.lower(), {PAIR}, stale)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 0, stale)
+    assert {r.spender for r in plugin._panel.all_rows()} == {SPENDER}   # NOT pruned
+
+    # Fresh completion (current epoch) → the zeroed cap is pruned.
+    fresh = plugin._epoch
+    plugin._on_zeroed(CHAIN.chain_id, OWNER.lower(), {PAIR}, fresh)
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 0, fresh)
+    assert plugin._panel.all_rows() == []                              # pruned
 
 
 def test_incomplete_scan_does_not_prune_or_persist(plugin):
     plugin._panel.append_rows([_row()])
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, 0, plugin._epoch)  # stopped
     assert plugin._panel.tree.topLevelItemCount() == 1     # nothing pruned
     assert plugin._cache.load(CHAIN.chain_id, OWNER) is None   # nothing persisted
 
@@ -308,13 +348,13 @@ def test_reconcile_zero_persists_the_removal(plugin):
 
 def test_stopped_scan_clears_loaded_for_to_resume(plugin):
     plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, plugin._epoch)   # stopped
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), False, 0, plugin._epoch)  # stopped
     assert plugin._loaded_for is None      # next activation resumes the un-scanned tail
 
 
 def test_completed_scan_keeps_loaded_for(plugin):
     plugin._loaded_for = (CHAIN.chain_id, OWNER.lower())
-    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, plugin._epoch)    # completed
+    plugin._on_done(CHAIN.chain_id, OWNER.lower(), True, 0, plugin._epoch)   # completed
     assert plugin._loaded_for == (CHAIN.chain_id, OWNER.lower())           # settled
 
 

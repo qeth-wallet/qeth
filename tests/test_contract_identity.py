@@ -267,6 +267,11 @@ def _transfer_calldata(to):
     return "0xa9059cbb" + "00" * 12 + to[2:].lower() + "0" * 64
 
 
+def _approve_calldata(spender, sel="0x095ea7b3"):
+    # approve(address,uint256): selector + 32B-padded spender + 32B amount
+    return sel + "00" * 12 + spender[2:].lower() + "0" * 64
+
+
 def test_cache_interaction_count(tmp_path):
     from qeth.transactions_cache import TransactionCache
     cache = TransactionCache(root=tmp_path)
@@ -315,6 +320,27 @@ def test_cache_interaction_count_dedups_by_hash(tmp_path):
     assert cache.interaction_count(1, contract, [me1, me2]) == 1
 
 
+def test_cache_approvals_to_count(tmp_path):
+    # An approve's `to` is the TOKEN; the spender is arg0 of the calldata. The
+    # count is over how many times I granted THIS spender an allowance, on any
+    # token, dedup by hash, mine-only.
+    from qeth.transactions_cache import TransactionCache
+    cache = TransactionCache(root=tmp_path)
+    me = "0x" + "11" * 20
+    tokenA, tokenB = "0x" + "aa" * 20, "0x" + "bb" * 20
+    spender, other_sp = "0x" + "5e" * 20, "0x" + "99" * 20
+    cache.save(1, me, [
+        _tx(me, tokenA, "0x1", _approve_calldata(spender)),                # approve → spender
+        _tx(me, tokenB, "0x2", _approve_calldata(spender, "0x39509351")),  # increaseAllowance
+        _tx(me, tokenA, "0x3", _approve_calldata(other_sp)),               # different spender
+        _tx(me, tokenA, "0x4", _transfer_calldata(spender)),               # not an approve
+        _tx("0x" + "ee" * 20, tokenA, "0x5", _approve_calldata(spender)),  # not mine
+    ])
+    assert cache.approvals_to_count(1, spender, [me]) == 2       # approve + increaseAllowance
+    assert cache.approvals_to_count(1, other_sp, [me]) == 1
+    assert cache.approvals_to_count(1, "0x" + "00" * 20, [me]) == 0
+
+
 def test_describe_interaction_familiar():
     idy = ContractIdentity(ADDR, True, name="Router", verified=True,
                            deployer=DEPLOYER, deployed_at=OLD)
@@ -335,6 +361,47 @@ def test_describe_eoa_interaction():
     assert "sent here 5× before" in seen.text
     first = describe_identity(eoa, my_addresses=[], interaction_count=0, now_ts=NOW)
     assert "first time sending here" in first.text and first.level == "caution"
+
+
+# --- approve context: the spender's familiarity --------------------------
+
+def test_describe_approve_known_spender():
+    idy = ContractIdentity(ADDR, True, name_tag="Uniswap: Router")
+    b = describe_identity(idy, my_addresses=[], context="approve",
+                          approval_count=7, interaction_count=0, now_ts=NOW)
+    assert "approved to this spender 7× before" in b.text
+    assert b.level == "ok"                         # a name-tag stays reassuring
+
+
+def test_describe_approve_first_time_is_caution():
+    idy = ContractIdentity(ADDR, True, name="Router", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD)
+    b = describe_identity(idy, my_addresses=[], context="approve",
+                          approval_count=0, interaction_count=0, now_ts=NOW)
+    assert "first approval to this spender" in b.text and b.level == "caution"
+
+
+def test_describe_approve_folds_in_direct_calls():
+    # Never approved to it, but I've called it directly → not a stranger.
+    idy = ContractIdentity(ADDR, True, name="Router", verified=True,
+                           deployer=DEPLOYER, deployed_at=OLD)
+    b = describe_identity(idy, my_addresses=[], context="approve",
+                          approval_count=0, interaction_count=12, now_ts=NOW)
+    assert "called it 12×" in b.text
+    assert "first approval" not in b.text          # a prior interaction clears the ⚠
+
+
+def test_describe_approve_unknown_history_shows_nothing():
+    # No tx cache → counts are None → don't assert first-time or a count.
+    idy = ContractIdentity(ADDR, True, name_tag="Uniswap: Router")
+    b = describe_identity(idy, my_addresses=[], context="approve", now_ts=NOW)
+    assert "approval" not in b.text and "Uniswap: Router" in b.text
+
+
+def test_describe_approve_to_eoa_is_flagged():
+    b = describe_identity(ContractIdentity(ADDR, False), my_addresses=[],
+                          context="approve", approval_count=0, now_ts=NOW)
+    assert "EOA" in b.text and b.level == "caution"
 
 
 # --- public name-tags (Blockscout OLI metadata) --------------------------

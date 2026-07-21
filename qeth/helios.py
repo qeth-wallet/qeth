@@ -57,6 +57,12 @@ log = logging.getLogger("qeth.helios")
 # luck while the proof-heavy fork reliably fails. Capability is thus MEASURED by
 # use, so a private/local node or full-node provider is trusted on its merits.
 _proof_incapable: set[str] = set()
+# chain ids a live sidecar proved it CANNOT sync this session (see _STUCK_LIMIT):
+# an upstream Helios build that can't decode a chain's consensus responses fails
+# from the first line and never recovers, so gate respawns — a doomed sidecar
+# isn't recreated on every chain switch. Reset next process (a helios upgrade may
+# fix it). Keyed by chain, not RPC: the failure is the binary's, not the node's.
+_unsyncable: set[int] = set()
 # JSON-RPC error text meaning "I can't serve a proof for a block that far back"
 # (vs a transient blip). -32602 "distance to target block exceeds maximum proof
 # window" is mevblocker's; the rest cover pruned / archive-less nodes.
@@ -150,6 +156,14 @@ _HELIOSUP_BIN = os.path.expanduser("~/.helios/bin/helios")
 
 _READY_TIMEOUT_S = 30.0
 _POLL_INTERVAL_S = 0.5
+# Consecutive helios problem lines (no interleaved progress, never reached ready)
+# that mean the sidecar is stuck for good, not slow-syncing. A healthy client
+# interleaves INFO progress that resets the count, and cold sync is seconds
+# (OP-mainnet ~1s, ETH ~6s); ~20 pure failures (≈20 s at helios's ~1×/s retry) is
+# unambiguous. The trigger seen live: helios-cli 0.11.1 can't decode Base's
+# consensus responses ("failed to advance: error decoding response body") — it
+# fails from the first line, on any execution-rpc, and never recovers.
+_STUCK_LIMIT = 20
 
 
 def helios_binary() -> str | None:
@@ -214,6 +228,10 @@ class HeliosSidecar:
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._ready = False
+        self._stuck = 0          # consecutive problem lines with no progress
+        self._gave_up = False
+        self._last_warn = ""     # dedupe repeated identical WARNING lines
+        self._warn_dupes = 0
         argv = [binary, module]
         if network:
             argv += ["--network", network]
@@ -249,6 +267,7 @@ class HeliosSidecar:
     _ALARM = ("error", "warn", "panic", "fatal", "unavailable",
               "refused", "unable", "failed", "timeout")
     _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+    _TS = re.compile(r"^\S*Z\s+")   # leading ISO-8601 timestamp on a helios line
 
     def _pump_output(self, stream: Any) -> None:
         try:
@@ -259,9 +278,53 @@ class HeliosSidecar:
                 self._log_tail.append(line)
                 low = line.lower()
                 if any(k in low for k in self._ALARM):
-                    log.warning("helios[%d]: %s", self.chain_id, line)
+                    self._stuck += 1
+                    self._warn(line)
+                    if (not self._ready and not self._gave_up
+                            and self._stuck >= _STUCK_LIMIT):
+                        self._give_up(line)
+                        break
                 else:
+                    self._stuck = 0        # a progress line → not stuck
+                    self._flush_dupes()
                     log.debug("helios[%d]: %s", self.chain_id, line)
+        except Exception:
+            pass
+
+    def _warn(self, line: str) -> None:
+        """Relay a helios problem line at WARNING, collapsing consecutive
+        identical ones — a stuck sidecar repeats the same error ~1×/s, and
+        logging each floods (the reported symptom). The first is logged live;
+        repeats are counted and summarised on the next distinct line."""
+        norm = self._TS.sub("", line)     # ignore the varying timestamp
+        if norm == self._last_warn:
+            self._warn_dupes += 1
+            return
+        self._flush_dupes()
+        log.warning("helios[%d]: %s", self.chain_id, line)
+        self._last_warn = norm
+
+    def _flush_dupes(self) -> None:
+        if self._warn_dupes:
+            log.warning("helios[%d]: previous warning repeated %d×",
+                        self.chain_id, self._warn_dupes)
+            self._warn_dupes = 0
+        self._last_warn = ""
+
+    def _give_up(self, last: str) -> None:
+        """Stop a sidecar that keeps failing without ever syncing (see
+        _STUCK_LIMIT): mark the chain unsyncable so it isn't respawned this
+        session, log once, and terminate. Verified reads for the chain then
+        degrade to the untrusted path — exactly as an unready sidecar does."""
+        self._gave_up = True
+        self._flush_dupes()
+        _unsyncable.add(self.chain_id)
+        log.warning("helios[%d]: giving up after %d consecutive failures "
+                    "without syncing — this Helios build can't verify chain "
+                    "%d; using unverified reads (last: %s)",
+                    self.chain_id, self._stuck, self.chain_id, last)
+        try:
+            self._proc.terminate()
         except Exception:
             pass
 
@@ -339,6 +402,8 @@ def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
     immediately; the sync happens inside the helios process)."""
     if chain.chain_id not in HELIOS_NETWORKS:
         return None
+    if chain.chain_id in _unsyncable:
+        return None                        # a sidecar already proved it can't sync
     binary = helios_binary()
     if binary is None:
         return None

@@ -48,9 +48,10 @@ def _panel(qtbot, host=None):
 
 
 def _row(token=TOKEN, spender=SP1, allowance=1, symbol="USDC", decimals=6,
-         price_usd=None):
+         price_usd=None, token_balance=0):
     return ApprovalRow(token=token, spender=spender, allowance=allowance,
-                       symbol=symbol, decimals=decimals, price_usd=price_usd)
+                       symbol=symbol, decimals=decimals, price_usd=price_usd,
+                       token_balance=token_balance)
 
 
 def test_spenders_group_under_one_token_node(qtbot):
@@ -144,11 +145,16 @@ def test_hover_reveals_address_then_restores(qtbot):
     assert leaf.text(0) == LABEL                     # restored
 
 
-def test_selection_reveals_address(qtbot):
+def test_selection_keeps_the_name_reveal_is_hover_only(qtbot):
+    # Reveal is hover-only: selecting a row keeps its readable name (so a
+    # selection isn't a second address-only row alongside the hovered one).
     p = _panel(qtbot)
     p.append_rows([_named_row()])
     leaf = p.tree.topLevelItem(0).child(0)
-    p.tree.setCurrentItem(leaf)                      # selection → reveal
+    p.tree.setCurrentItem(leaf)                      # selection → NO reveal
+    p._refresh_reveal()
+    assert leaf.text(0) == LABEL                     # name kept, not the address
+    p._on_item_entered(leaf, 0)                      # …until you hover it
     assert leaf.text(0) == SP1
 
 
@@ -411,50 +417,69 @@ def test_stretch_last_section_is_off(qtbot):
     assert p.tree.header().stretchLastSection() is False
 
 
-def test_sort_by_token_is_alphabetical_by_default(qtbot):
+def test_default_sort_ranks_by_value_at_risk(qtbot):
+    # No header click: the most-exposed token bubbles to the top out of the box.
+    # Both unlimited (so the OLD summed-cap sort tied them at ∞) — the sort ranks
+    # by the value actually HELD, so BIG ($5000) beats SMALL ($5).
+    p = _panel(qtbot)
+    p.append_rows([
+        _row(token=TOKEN, symbol="SMALL", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("1"), token_balance=5_000_000),        # $5
+        _row(token=TOKEN2, symbol="BIG", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("1"), token_balance=5_000_000_000),    # $5000
+    ])
+    assert p.tree.topLevelItem(0).text(0).startswith("BIG")
+    assert p.tree.topLevelItem(1).text(0).startswith("SMALL")
+
+
+def test_header_click_switches_to_token_alphabetical(qtbot):
+    # Clicking the identity header switches away from the value-at-risk default.
     p = _panel(qtbot)
     p.append_rows([
         _row(token=TOKEN2, symbol="ZRX", spender=SP1),
         _row(token=TOKEN, symbol="AAVE", spender=SP1),
     ])
+    p._on_header_clicked(0)
     assert p.tree.topLevelItem(0).text(0).startswith("AAVE")
     assert p.tree.topLevelItem(1).text(0).startswith("ZRX")
 
 
-def test_sort_by_allowance_ranks_by_usd_exposure(qtbot):
+def test_held_token_outranks_a_bigger_unheld_allowance(qtbot):
+    # A huge unlimited cap on a token you DON'T hold is $0 at risk → sorts below
+    # a modest holding of a token you do hold (the default value-at-risk order).
     p = _panel(qtbot)
     p.append_rows([
-        _row(token=TOKEN, symbol="LOW", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),        # $1
-        _row(token=TOKEN2, symbol="HIGH", spender=SP1,
-             allowance=1_000_000_000, decimals=6, price_usd=Decimal("1")),    # $1000
+        _row(token=TOKEN2, symbol="UNHELD", spender=SP1, allowance=_MAX,
+             price_usd=Decimal("1"), token_balance=0),                # nothing held
+        _row(token=TOKEN, symbol="HELD", spender=SP1, allowance=1_000_000,
+             decimals=6, price_usd=Decimal("1"), token_balance=10_000_000),   # $10
     ])
-    p._on_header_clicked(1)                    # sort by Allowance → highest first
-    assert p.tree.topLevelItem(0).text(0).startswith("HIGH")
-    assert p.tree.topLevelItem(1).text(0).startswith("LOW")
+    assert p.tree.topLevelItem(0).text(0).startswith("HELD")     # real risk first
+    assert p.tree.topLevelItem(1).text(0).startswith("UNHELD")   # $0 at risk → bottom
 
 
-def test_unlimited_sorts_to_top_by_allowance(qtbot):
-    p = _panel(qtbot)
-    p.append_rows([
-        _row(token=TOKEN, symbol="FIN", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),
-        _row(token=TOKEN2, symbol="INF", spender=SP1, allowance=_MAX),   # unlimited
-    ])
-    p._on_header_clicked(1)                    # by allowance, descending exposure
-    assert p.tree.topLevelItem(0).text(0).startswith("INF")   # ∞ exposure first
-
-
-def test_token_total_sums_spender_exposure(qtbot):
-    p = _panel(qtbot)
-    p.append_rows([
-        _row(token=TOKEN, symbol="T", spender=SP1,
-             allowance=1_000_000, decimals=6, price_usd=Decimal("1")),   # $1
-        _row(token=TOKEN, symbol="T", spender=SP2,
-             allowance=3_000_000, decimals=6, price_usd=Decimal("1")),   # $3
-    ])
+def test_token_sort_key_is_value_at_risk(qtbot):
     from qeth.plugins.approvals import _USD_SORT_ROLE
-    assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 4.0         # $1 + $3
+    p = _panel(qtbot)
+    p.append_rows([
+        _row(token=TOKEN, symbol="T", spender=SP1, allowance=_MAX,
+             decimals=6, price_usd=Decimal("2"), token_balance=3_000_000),   # 3 × $2
+    ])
+    assert p.tree.topLevelItem(0).data(1, _USD_SORT_ROLE) == 6.0         # value at risk
+
+
+def test_leaves_still_sort_by_their_own_cap(qtbot):
+    # Within a token, spender leaves keep ranking by allowance exposure — an
+    # unlimited cap leaf above a finite one.
+    p = _panel(qtbot)
+    p.append_rows([
+        _row(token=TOKEN, symbol="T", spender=SP1, allowance=1_000_000,
+             decimals=6, price_usd=Decimal("1")),                    # $1 finite
+        _row(token=TOKEN, symbol="T", spender=SP2, allowance=_MAX),  # unlimited
+    ])
+    node = p.tree.topLevelItem(0)
+    assert node.child(0).text(0) == SP2       # unlimited spender first
+    assert node.child(1).text(0) == SP1
 
 
 # --- resizable two-column split -------------------------------------------
@@ -478,9 +503,188 @@ def test_icon_buttons_are_flat(qtbot):
 def test_no_rescan_button_in_action_row(qtbot):
     p = _panel(qtbot)
     assert not hasattr(p, "btn_refresh")
-    # action, select-all, copy, explorer (no rescan)
+    # action, select-all, copy, explorer, search (no rescan)
     assert p.action_widgets() == [p.btn_action, p.btn_select_all, p.btn_copy,
-                                   p.btn_explorer]
+                                   p.btn_explorer, p.btn_search]
+
+
+# --- find / filter (Ctrl+F) ------------------------------------------------
+
+def _tok_visibility(p):
+    from qeth.plugins.approvals import _TOKEN_ROLE
+    return {p.tree.topLevelItem(i).data(0, _TOKEN_ROLE):
+            not p.tree.topLevelItem(i).isHidden()
+            for i in range(p.tree.topLevelItemCount())}
+
+
+def _visible_spenders(p):
+    from qeth.plugins.approvals import _ROW_ROLE
+    out = []
+    for i in range(p.tree.topLevelItemCount()):
+        node = p.tree.topLevelItem(i)
+        if node.isHidden():
+            continue
+        for j in range(node.childCount()):
+            leaf = node.child(j)
+            r = leaf.data(0, _ROW_ROLE)
+            if not leaf.isHidden() and r is not None:
+                out.append(r.spender.lower())
+    return sorted(set(out))
+
+
+def test_ctrl_f_shows_bar_escape_hides(qtbot):
+    p = _panel(qtbot)                                 # not shown → check isHidden flag
+    assert p._search_edit.isHidden()
+    p._show_search()
+    assert not p._search_edit.isHidden() and p.btn_search.isChecked()
+    p._hide_search()
+    assert p._search_edit.isHidden() and not p.btn_search.isChecked()
+
+
+def test_filter_by_token_address_shows_only_that_subtree(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="USDC", spender=SP1),
+                   _row(token=TOKEN2, symbol="DAI", spender=SP2)])
+    p._search_by(TOKEN)
+    vis = _tok_visibility(p)
+    assert vis[TOKEN.lower()] and not vis[TOKEN2.lower()]
+
+
+def test_filter_by_token_symbol(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="USDC", spender=SP1),
+                   _row(token=TOKEN2, symbol="DAI", spender=SP2)])
+    p._search_by("dai")
+    vis = _tok_visibility(p)
+    assert vis[TOKEN2.lower()] and not vis[TOKEN.lower()]
+
+
+def test_filter_by_spender_address_keeps_only_matching_leaves(qtbot):
+    p = _panel(qtbot)
+    # SP1 approved on both tokens; SP2 only on TOKEN2.
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by(SP1)
+    # both token nodes stay (each has an SP1 leaf), but SP2's leaf is hidden
+    assert _visible_spenders(p) == [SP1.lower()]
+    assert all(_tok_visibility(p).values())          # both tokens shown
+
+
+def test_filter_by_spender_soft_name(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([
+        ApprovalRow(token=TOKEN, spender=SP1, allowance=1, symbol="A",
+                    spender_soft_label="Venus crvUSD"),
+        _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by("venus")
+    vis = _tok_visibility(p)
+    assert vis[TOKEN.lower()] and not vis[TOKEN2.lower()]
+
+
+def test_filter_by_spender_name_tag(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([
+        ApprovalRow(token=TOKEN, spender=SP1, allowance=1, symbol="A",
+                    spender_label="Uniswap: Universal Router"),
+        _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by("uniswap")
+    assert _visible_spenders(p) == [SP1.lower()]
+
+
+def test_clearing_filter_restores_everything(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by(TOKEN)
+    assert not _tok_visibility(p)[TOKEN2.lower()]     # filtered out
+    p._hide_search()                                  # clears the field → reset
+    assert all(_tok_visibility(p).values())
+
+
+def test_active_filter_reapplies_to_streamed_rows(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1)])
+    p._search_by(TOKEN2)                              # filter a token not present yet
+    assert not _tok_visibility(p)[TOKEN.lower()]
+    p.append_rows([_row(token=TOKEN2, symbol="B", spender=SP2)])   # scan streams it in
+    vis = _tok_visibility(p)
+    assert vis[TOKEN2.lower()] and not vis[TOKEN.lower()]
+
+
+def test_clear_resets_the_filter(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, spender=SP1)])
+    p._search_by(TOKEN)
+    p.clear()
+    assert p._filter_text == "" and not p._search_edit.isVisible()
+
+
+def test_closing_search_returns_focus_to_tree(qtbot, monkeypatch):
+    # Else the +/−/∗ keys (handled by the tree's eventFilter, which needs tree
+    # focus) stay dead after closing the find bar — the reported regression.
+    p = _panel(qtbot)
+    focused = []
+    monkeypatch.setattr(p.tree, "setFocus", lambda *a: focused.append(True))
+    p._show_search()
+    p._hide_search()
+    assert focused                                    # closing an OPEN bar refocuses the tree
+
+
+def test_bare_clear_does_not_steal_tree_focus(qtbot, monkeypatch):
+    # A clear() from an account switch (bar never opened) must not yank focus.
+    p = _panel(qtbot)
+    focused = []
+    monkeypatch.setattr(p.tree, "setFocus", lambda *a: focused.append(True))
+    p.clear()
+    assert not focused
+
+
+# --- selection respects the active filter ----------------------------------
+
+def _cs(leaf):
+    return leaf.checkState(0)
+
+
+def test_select_all_under_filter_checks_only_visible(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2),
+                   _row(token=TOKEN2, symbol="B", spender=SP1)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2
+    p._select_all()                                   # + key / button
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN2, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # hidden → left alone
+    assert {r.spender.lower() for r in p.checked_leaves()} == {SP1.lower()}
+
+
+def test_select_all_without_filter_checks_everything(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._select_all()
+    assert len(p.checked_leaves()) == 2               # no filter → whole account
+
+
+def test_token_node_check_under_filter_skips_hidden_leaves(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)   # click the token node
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # auto-tristate undone
+
+
+def test_invert_under_filter_only_touches_visible(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2 (both unchecked)
+    p._invert_selection()                             # * key
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked     # visible flipped
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # hidden untouched
 
 
 def test_allowance_column_gets_a_gap_before_amount(qtbot):
@@ -558,18 +762,26 @@ def test_all_rows_returns_displayed(qtbot):
     assert {r.spender for r in p.all_rows()} == {SP1, SP2}
 
 
-def test_prune_to_drops_unconfirmed_leaves(qtbot):
+def test_prune_zeroed_drops_only_the_zeroed_leaves(qtbot):
     p = _panel(qtbot)
     p.append_rows([_row(spender=SP1), _row(spender=SP2)])
-    p.prune_to({(TOKEN.lower(), SP1.lower())})
+    p.prune_zeroed({(TOKEN.lower(), SP2.lower())})     # only SP2 read as zero
     assert p.tree.topLevelItem(0).childCount() == 1
-    assert p.all_rows()[0].spender == SP1
+    assert p.all_rows()[0].spender == SP1              # SP1 (not zeroed) survives
 
 
-def test_prune_to_empty_removes_token_node(qtbot):
+def test_prune_zeroed_empty_keeps_everything(qtbot):
+    # A scan that read nothing as zero prunes nothing — the transient-read fix.
     p = _panel(qtbot)
     p.append_rows([_row(spender=SP1)])
-    p.prune_to(set())
+    p.prune_zeroed(set())
+    assert p.tree.topLevelItemCount() == 1
+
+
+def test_prune_zeroed_removes_emptied_token_node(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1)])
+    p.prune_zeroed({(TOKEN.lower(), SP1.lower())})
     assert p.tree.topLevelItemCount() == 0
 
 
@@ -626,6 +838,41 @@ def test_select_all_disabled_when_empty(qtbot):
 def test_select_all_is_flat_icon_button(qtbot):
     p = _panel(qtbot)
     assert p.btn_select_all.isFlat() and p.btn_select_all.text() == ""
+
+
+# --- "at risk" token-node pill --------------------------------------------
+
+from qeth.plugins.approvals import _RISK_ROLE, _risk_tag, _token_risk_usd  # noqa: E402
+
+
+def test_risk_usd_is_balance_times_price():
+    # 5.0 USDC (6 decimals) at $1.00 → $5 at risk
+    r = _row(decimals=6, price_usd=Decimal("1"), token_balance=5_000_000)
+    assert _token_risk_usd(r) == Decimal("5")
+    assert _risk_tag(r) == "$5.00 at risk"
+
+
+def test_risk_tag_empty_when_not_held_or_unpriced():
+    assert _risk_tag(_row(price_usd=Decimal("1"), token_balance=0)) == ""  # not held
+    assert _risk_tag(_row(price_usd=None, token_balance=5_000_000)) == ""  # unpriced
+    # dust below a cent → no tag
+    assert _risk_tag(_row(decimals=6, price_usd=Decimal("0.0001"),
+                          token_balance=1)) == ""
+
+
+def test_token_node_shows_risk_pill_when_held_and_priced(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, decimals=6, price_usd=Decimal("2"),
+                        token_balance=10_000_000)])       # 10 tokens × $2 = $20
+    node = p._token_items[TOKEN]
+    assert node.data(1, _RISK_ROLE) == "$20.00 at risk"
+
+
+def test_token_node_no_pill_when_not_held(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(spender=SP1, price_usd=Decimal("2"), token_balance=0)])
+    node = p._token_items[TOKEN]
+    assert not node.data(1, _RISK_ROLE)
 
 
 # --- action-button stable width + selection keys --------------------------

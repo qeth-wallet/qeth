@@ -183,6 +183,33 @@ class TestRoutedTokenSourceCooldown:
         assert r.list_balances(ETH, ADDR) == ["ether"]
         assert primary.calls == 2
 
+    def test_falls_back_to_secondary_on_primary_error(self):
+        # Etherscan's addresstokenbalance is PRO-only → TokenSourceError on a
+        # free key. Must fall back to Blockscout, not propagate (which collapsed
+        # the Tokens tab to the top-N pass and dropped real holdings).
+        from qeth.token_discovery import RoutedTokenSource, TokenSourceError
+        primary = _FakeSource({1}, raises=TokenSourceError("PRO endpoint"), tag="ether")
+        secondary = _FakeSource({1}, tag="blockscout")
+        r = RoutedTokenSource(primary, secondary)
+        assert r.list_balances(ETH, ADDR) == ["blockscout"]
+        assert primary.calls == 1 and secondary.calls == 1
+
+    def test_falls_back_on_any_primary_exception(self):
+        from qeth.token_discovery import RoutedTokenSource
+        primary = _FakeSource({1}, raises=OSError("connection reset"), tag="ether")
+        secondary = _FakeSource({1}, tag="blockscout")
+        r = RoutedTokenSource(primary, secondary)
+        assert r.list_balances(ETH, ADDR) == ["blockscout"]
+
+    def test_primary_error_propagates_when_no_secondary_for_chain(self):
+        import pytest
+        from qeth.token_discovery import RoutedTokenSource, TokenSourceError
+        BNB = next(c for c in DEFAULT_CHAINS if c.chain_id == 56)
+        primary = _FakeSource({56}, raises=TokenSourceError("boom"), tag="ether")
+        secondary = _FakeSource(set(), tag="blockscout")   # can't serve BNB
+        with pytest.raises(TokenSourceError):
+            RoutedTokenSource(primary, secondary).list_balances(BNB, ADDR)
+
     def test_cooldown_ignored_when_secondary_cant_serve_chain(self):
         # BNB-style: secondary doesn't support the chain, so even inside
         # the window we must keep using the primary (no alternative).

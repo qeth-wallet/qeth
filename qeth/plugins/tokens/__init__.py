@@ -209,6 +209,91 @@ class OwnTokenDiscoveryWorker(QThread):
                 self.discovered.emit(self.chain_id, found)
 
 
+class VaultProvenanceWorker(QThread):
+    """Network-side rescue for held VAULT tokens the curated lists miss and
+    ``OwnTokenDiscoveryWorker`` can't see (the deposit tx isn't in the local
+    cache — an old deposit on a long-history account). For the on-screen
+    account's held-but-unrecognised tokens, it (1) narrows to ERC-4626-shaped
+    ones via an ``asset()`` multicall, then (2) confirms provenance — the
+    account ACQUIRED it via one of its own txs — from explorer ``Transfer``
+    logs. Trusted tokens ride the SAME ``discovered`` signal as own-history, so
+    they enter ``discovered_tokens`` and get shown + priced.
+
+    Emits ``discovered(chain_id, set[str] of contracts)``. Same wire shape as
+    ``OwnTokenDiscoveryWorker`` so the plugin reuses one handler."""
+
+    discovered = Signal(QULONGLONG, object)   # chain_id can exceed qint32
+
+    def __init__(self, chain, address: str, source, lists, store,
+                 my_addresses: list[str], get_api_key,
+                 client_factory=None, parent=None):
+        super().__init__(parent)
+        self.chain = chain
+        self.address = address
+        self.source = source
+        self.lists = lists
+        self.store = store
+        self.my_addresses = list(my_addresses)
+        self.get_api_key = get_api_key
+        self._client_factory = client_factory or EthClient
+
+    def run(self) -> None:
+        from ...token_discovery.vault_provenance import (
+            incoming_transfer_txhashes, read_vault_assets,
+            self_acquired_via_own_tx,
+        )
+        from ...transactions import fetch_incoming_transfer_logs
+        cid = self.chain.chain_id
+        if not self.source.supports(self.chain):
+            return
+        try:
+            client = self._client_factory(self.chain)
+        except Exception:
+            return
+        # Held tokens the visibility gate would drop (not curated / pinned /
+        # already-discovered / hidden) — the candidate pool for provenance.
+        try:
+            candidates = [
+                b.contract
+                for b in self.source.list_balances(self.chain, self.address)
+                if b.balance_raw > 0
+                and not (self.lists.is_known(cid, b.contract)
+                         or self.store.is_force_shown(cid, b.contract)
+                         or self.store.is_discovered_token(cid, b.contract)
+                         or self.store.is_hidden(cid, b.contract))
+            ]
+        except Exception:
+            return
+        if not candidates:
+            return
+        try:
+            vaults = read_vault_assets(client, candidates)   # {token: asset}
+        except Exception:
+            return
+        if not vaults:
+            return
+
+        def tx_from(h):
+            try:
+                tx = client.rpc("eth_getTransactionByHash", [h])
+                return (tx or {}).get("from")
+            except Exception:
+                return None
+
+        trusted: set[str] = set()
+        for token in vaults:
+            try:
+                rows = fetch_incoming_transfer_logs(
+                    self.chain, token, self.address, get_api_key=self.get_api_key)
+                if self_acquired_via_own_tx(
+                        incoming_transfer_txhashes(rows), tx_from, self.my_addresses):
+                    trusted.add(token)
+            except Exception:
+                continue
+        if trusted:
+            self.discovered.emit(cid, trusted)
+
+
 class MetadataWorker(QThread):
     """Fetch (name, symbol, decimals) on-chain via multicall for any
     contracts not already in the metadata cache."""
@@ -436,6 +521,10 @@ class TokensPlugin(Plugin):
         # one-shot per chain — the caches don't change without a live event that
         # already re-runs discovery).
         self._own_scan_done: set[int] = set()
+        # (chain, account) pairs whose held vaults have had a network provenance
+        # scan this session — one-shot per viewed account (it's a few explorer
+        # requests, unlike the disk-only own-tx scan which covers every account).
+        self._vault_scan_done: set[tuple[int, str]] = set()
         # Lifecycle objects (built lazily / in attach).
         self._panel = None
         self._refresh_timer: QTimer | None = None
@@ -1361,6 +1450,27 @@ class TokensPlugin(Plugin):
         worker.discovered.connect(self._on_own_tokens_discovered)
         self.host.start_worker(worker)
 
+    def _maybe_scan_own_vaults(self, chain) -> None:
+        """Once per (chain, on-screen account) per session, a network provenance
+        scan of the account's held VAULT tokens the own-tx (disk) scan missed —
+        the deposit tx isn't cached. Trusted vaults ride ``discovered`` into the
+        same handler as own-history, so they're shown + priced."""
+        if self.host is None:
+            return
+        sel = self.host.selected_address
+        if not sel:
+            return
+        key = (chain.chain_id, sel.lower())
+        if key in self._vault_scan_done:
+            return
+        self._vault_scan_done.add(key)
+        my = [a["address"] for a in self._store.accounts]
+        worker = VaultProvenanceWorker(
+            chain, sel, self._token_source, self._token_lists, self._store,
+            my, lambda: self._store.etherscan_api_key)
+        worker.discovered.connect(self._on_own_tokens_discovered)
+        self.host.start_worker(worker)
+
     def _on_own_tokens_discovered(self, chain_id: int, contracts) -> None:
         """Persist discovered contracts; refresh if we're viewing this chain so
         they get balance-checked, priced, and shown."""
@@ -1369,7 +1479,12 @@ class TokensPlugin(Plugin):
         if (self.host is not None
                 and self.host.current_chain().chain_id == chain_id
                 and self.host.selected_address):
-            self._refresh(self.host.selected_address)
+            # FORCE a full discovery round, not a plain _refresh: a discovery
+            # that lands WHILE the initial pipeline is still in flight (the
+            # network vault-provenance scan almost always does) would otherwise
+            # short-circuit on the in-flight guard and not surface its new tokens
+            # until the next 60s tick / account switch / restart.
+            self._invalidate_view_and_refresh()
 
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
@@ -1379,6 +1494,7 @@ class TokensPlugin(Plugin):
         host, panel = self.host, self._panel
         chain = self.host.current_chain()
         self._maybe_scan_own_tokens(chain)
+        self._maybe_scan_own_vaults(chain)
         view_key = (chain.chain_id, address.lower())
         is_new_view = self._displayed_view != view_key
 

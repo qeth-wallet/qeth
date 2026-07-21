@@ -1,11 +1,13 @@
 """Approvals discovery — pure, Qt-free approval-pair extraction + allowance reads.
 
-The candidate (token, spender) pairs come straight from the account's own
-``approve()`` / ``increaseAllowance()`` transactions — no cross-product, no
-held-token guessing. We then read ``allowance(account, spender)`` live for each
-pair and keep the nonzero ones. Cache-only source (the scan worker feeds it the
-account's full history), so an approval whose tx isn't in the history — granted
-pre-qeth, from another wallet, via Permit2 — won't appear (documented v1 limit).
+Candidate (token, spender) pairs come primarily from the account's ERC-20
+``Approval(owner, …)`` event logs (``approval_pairs_from_log_rows`` over the
+``ApprovalLogSource`` walk) — every allowance grant emits one, so this catches
+approvals set via ``permit`` / an internal router call, not just the account's
+own top-level ``approve`` transactions (``approve_pairs_in``, kept as a
+recent-tail patch for the window a logs indexer may lag behind head). We then
+read ``allowance(account, spender)`` live for each candidate and keep the
+nonzero ones — that multicall is the source of truth for the displayed cap.
 
 Free of Qt / network side effects at import, so it unit-tests standalone.
 """
@@ -60,6 +62,50 @@ def approval_pairs_from_logs(logs, owner: str) -> set[tuple[str, str]]:
     return out
 
 
+def approval_pairs_from_log_rows(
+    rows, owner: str,
+) -> tuple[set[tuple[str, str]], int]:
+    """``(pairs, max_block)`` from explorer ``module=logs`` Approval rows (each a
+    dict with ``topics`` = list of hex strings, ``address``, ``blockNumber`` in
+    hex). Keeps only 3-topic ERC-20 ``Approval(owner, spender, value)`` logs
+    whose owner (topic1) matches — a 4-topic Approval is an ERC-721 NFT approval
+    (its "spender" isn't an allowance), excluded here (and ``allowance()`` would
+    revert on it anyway). ``max_block`` is the highest block seen (0 if none) —
+    the windowing cursor for the next ``fetch(from_block=…)``."""
+    acct = owner.lower()
+    pairs: set[tuple[str, str]] = set()
+    max_block = 0
+    for r in rows or []:
+        # Advance the cursor over EVERY row the explorer returned in this
+        # window — they've all been scanned, so resuming above max_block can't
+        # skip anything. (An ERC-721 4-topic Approval or a topic we don't keep
+        # still counts as scanned; only the pair-keep below is selective.)
+        try:
+            b = int(r.get("blockNumber"), 16)
+        except (TypeError, ValueError):
+            b = 0
+        if b > max_block:
+            max_block = b
+        # Blockscout pads the topics array to 4 slots with trailing None for a
+        # 3-topic event ([topic0, owner, spender, None]); Etherscan/node return
+        # exactly the emitted topics. Drop the empties, then a real ERC-721
+        # Approval (4 genuine topics incl. tokenId) still reads as len 4 and is
+        # skipped — only the ERC-20 3-topic allowance is kept.
+        topics = [t for t in (r.get("topics") or []) if t]
+        if len(topics) != 3:
+            continue
+        if (topics[0] or "").lower() != _APPROVAL_TOPIC0:
+            continue
+        log_owner = ("0x" + topics[1][-40:]).lower()
+        if log_owner != acct:
+            continue
+        token = (r.get("address") or "").lower()
+        spender = ("0x" + topics[2][-40:]).lower()
+        if token and token != "0x":
+            pairs.add((token, spender))
+    return pairs, max_block
+
+
 @dataclass
 class ApprovalRow:
     token: str              # lowercase contract
@@ -68,10 +114,16 @@ class ApprovalRow:
     symbol: str = ""
     name: str = ""
     decimals: int = 18
-    spender_label: str = ""   # "Uniswap: Router" etc., "" when unknown
+    spender_label: str = ""   # definitive public name-tag (OLI), "" when unknown
+    # A SELF-REPORTED name shown only when there's no name-tag: the spender's own
+    # ERC-20 name (it's a token) or its verified ABI contract name (proxy-resolved).
+    # Rendered in italic — forgeable, so lower-trust than a name-tag. "" when none.
+    spender_soft_label: str = ""
     price_usd: Decimal | None = None   # USD per whole token; None = unpriced
     # (the USD *value* of the cap is derived: allowance/10**decimals * price_usd,
     # so it stays correct after a reconcile changes `allowance` in place)
+    token_balance: int = 0    # holder's raw wallet balance of `token` (0 = none/unknown)
+    #   → the "at risk" USD tag on the token node = token_balance/10**decimals * price_usd
 
 
 def _pad_address(addr: str) -> bytes:
@@ -111,10 +163,22 @@ def approve_pairs_in(txs: Iterable[Transaction], account: str) -> set[tuple[str,
 def fetch_allowances(
     client: EthClient, owner: str, pairs: Iterable[tuple[str, str]],
     *, batch_size: int = 100,
-) -> dict[tuple[str, str], int]:
+) -> tuple[dict[tuple[str, str], int], set[tuple[str, str]]]:
     """One multicall pass reading ``allowance(owner, spender)`` for every pair —
-    always the SAME owner (the selected account). Keeps only calls that
-    succeeded with a positive allowance; reverts (non-ERC-20s) drop silently."""
+    always the SAME owner (the selected account).
+
+    Returns ``(found, read)``:
+
+    - ``found`` — ``{pair: value}`` for calls that succeeded with a POSITIVE
+      allowance (the displayed caps).
+    - ``read`` — every pair whose call SUCCEEDED (returned a decodable uint,
+      including exactly 0). A pair in ``read`` but not ``found`` was
+      definitively read as zero (revoked); a pair in NEITHER had its call
+      revert/fail this pass (a non-ERC-20, or a transient glitch).
+
+    The distinction matters for pruning: a cached cap must only be dropped when
+    it was DEFINITIVELY read as zero, never on a transient read failure — else a
+    momentary RPC hiccup deletes a real approval from the persisted cache."""
     owner_word = _pad_address(owner)
     pending: dict[tuple[str, str], object] = {}
     with client.multicall(batch_size=batch_size) as mc:
@@ -122,8 +186,11 @@ def fetch_allowances(
             calldata = _SEL_ALLOWANCE + owner_word + _pad_address(spender)
             pending[(token, spender)] = mc.add(
                 token, calldata, decoder=_decode_uint256)
-    out: dict[tuple[str, str], int] = {}
+    found: dict[tuple[str, str], int] = {}
+    read: set[tuple[str, str]] = set()
     for key, p in pending.items():
-        if p.success and isinstance(p.value, int) and p.value > 0:  # type: ignore[attr-defined]
-            out[key] = p.value                                       # type: ignore[attr-defined]
-    return out
+        if p.success and isinstance(p.value, int):    # type: ignore[attr-defined]
+            read.add(key)
+            if p.value > 0:                            # type: ignore[attr-defined]
+                found[key] = p.value                   # type: ignore[attr-defined]
+    return found, read

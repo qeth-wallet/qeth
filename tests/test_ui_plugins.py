@@ -1870,6 +1870,25 @@ class TestTokensPlugin:
         vis2 = {t.symbol for t in tokens_plugin._compute_visible_tokens(ETH, toks, {})}
         assert "YBWBTC" in vis2 and "ORD" not in vis2
 
+    def test_mid_flight_discovery_forces_a_full_round(self, tokens_plugin, monkeypatch):
+        """A token discovered WHILE the initial pipeline is in flight (the
+        network vault scan almost always finishes then) must force a full
+        discovery round — a plain _refresh short-circuits on the in-flight guard,
+        so the new token wouldn't surface until the next tick / restart."""
+        host = _StubHost(address=ADDR)
+        tokens_plugin.attach(host)
+        cid = host.current_chain().chain_id
+        view = (cid, ADDR.lower())
+        tokens_plugin._displayed_view = view
+        tokens_plugin._discovery_in_flight.add(view)     # a pipeline is running
+        forced, plain = [], []
+        monkeypatch.setattr(tokens_plugin, "_invalidate_view_and_refresh",
+                            lambda: forced.append(True))
+        monkeypatch.setattr(tokens_plugin, "_refresh", lambda a: plain.append(a))
+        tokens_plugin._on_own_tokens_discovered(cid, ["0x" + "ab" * 20])   # a NEW token
+        assert forced == [True]        # full round forced past the in-flight guard
+        assert plain == []             # not the short-circuiting plain refresh
+
     def test_recognised_unpriced_token_hides_after_grace_window(
         self, tokens_plugin, monkeypatch,
     ):
@@ -3703,6 +3722,20 @@ class TestEventPreviewTab:
         assert dlg._allow_edit.isEnabled()                 # never disabled
         assert dlg._allow_edit.text() == ""                # empty…
         assert dlg._allow_edit.placeholderText() == "∞"    # …with a grey ∞
+
+    def test_approve_dialog_shows_a_spender_identity_row(self, qtbot):
+        # The Contract: row identifies the TOKEN; an approve also gets a
+        # distinct Spender: row for the party the allowance empowers.
+        from PySide6.QtWidgets import QLabel
+        dlg, _, _ = self._approve_dlg(qtbot, amount=(1 << 256) - 1)
+        labels = {lbl.text() for lbl in dlg.findChildren(QLabel)}
+        assert "Spender:" in labels and "Contract:" in labels
+
+    def test_non_approve_sign_has_no_spender_row(self, qtbot):
+        from PySide6.QtWidgets import QLabel
+        dlg = self._sign(qtbot, lambda w: None, data="0x")     # plain call, not approve
+        labels = {lbl.text() for lbl in dlg.findChildren(QLabel)}
+        assert "Spender:" not in labels
 
     def test_approve_typing_unticks_unlimited(self, qtbot):
         import qeth.plugins.transactions as txmod

@@ -18,9 +18,11 @@ ETH = Chain("Ethereum", 1, "https://eth.example")
 def _clean_registry():
     hl._sidecars.clear()
     hl._proof_incapable.clear()
+    hl._unsyncable.clear()
     yield
     hl._sidecars.clear()
     hl._proof_incapable.clear()
+    hl._unsyncable.clear()
 
 
 def _enable(monkeypatch, binary="/fake/helios"):
@@ -144,6 +146,89 @@ def test_output_captured_ansi_stripped_and_dumped_on_timeout(monkeypatch, caplog
         assert sc.wait_ready(timeout=3, sleep=lambda s: None,
                              clock=lambda: next(t)) is False
     assert "checkpoint unavailable" in caplog.text             # tail surfaced
+
+
+# --- stuck-sidecar give-up + WARNING dedupe -----------------------------------
+
+def test_stuck_sidecar_gives_up_terminates_and_marks_unsyncable(monkeypatch, caplog):
+    """A sidecar that keeps failing without ever syncing (helios-cli 0.11.1 on
+    Base: 'failed to advance: error decoding response body' from line one, never
+    recovers) is given up on: the process is terminated, the chain is marked
+    unsyncable, and the WARNING flood collapses to a few lines."""
+    import io
+    import logging
+    monkeypatch.setattr(hl, "_rpc",
+                        lambda *a, **k: {"startingBlock": "0x0"})   # never synced
+    base = Chain("Base", 8453, "https://base.example")
+    sc = hl.HeliosSidecar(base, "/fake/helios", popen=_FakeProc)
+    # Distinct timestamps, identical message — the flood as it actually arrives.
+    lines = "".join(
+        f"2026-07-20T21:00:{i:02d}.0Z ERROR helios::opstack: "
+        "failed to advance: error decoding response body\n"
+        for i in range(hl._STUCK_LIMIT))
+    with caplog.at_level(logging.WARNING, logger="qeth.helios"):
+        sc._pump_output(io.StringIO(lines))
+    assert sc._gave_up is True
+    assert 8453 in hl._unsyncable
+    assert sc._proc.returncode == -15            # terminated from the pump thread
+    warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) <= 4                        # deduped, NOT one-per-line
+    assert any("giving up" in m for m in warns)
+    assert any("repeated" in m for m in warns)
+
+
+def test_repeated_warnings_are_deduped(monkeypatch, caplog):
+    import io
+    import logging
+    monkeypatch.setattr(hl, "_rpc",
+                        lambda *a, **k: {"startingBlock": "0x0"})
+    sc = hl.HeliosSidecar(ETH, "/fake/helios", popen=_FakeProc)
+    stream = io.StringIO(
+        "".join(f"2026-01-01T00:00:0{i}Z WARN helios::consensus: rpc timeout\n"
+                for i in range(5))                                   # 5 identical
+        + "2026-01-01T00:00:09Z ERROR helios::opstack: a different problem\n")
+    with caplog.at_level(logging.WARNING, logger="qeth.helios"):
+        sc._pump_output(stream)
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert sum("rpc timeout" in m for m in msgs) == 1               # collapsed
+    assert any("repeated 4" in m for m in msgs)                     # count surfaced
+    assert any("a different problem" in m for m in msgs)
+
+
+def test_progress_line_resets_the_stuck_counter(monkeypatch):
+    """A slow-but-progressing sync must NOT be killed: an INFO progress line
+    resets the consecutive-failure counter, so transient blips never reach the
+    give-up threshold."""
+    import io
+    monkeypatch.setattr(hl, "_rpc",
+                        lambda *a, **k: {"startingBlock": "0x0"})
+    sc = hl.HeliosSidecar(ETH, "/fake/helios", popen=_FakeProc)
+    err = "2026-01-01T00:00:00Z ERROR helios::opstack: transient blip"
+    ok = "2026-01-01T00:00:00Z  INFO helios::client: latest block number=1 age=0s"
+    parts: list[str] = []
+    for _ in range(10):
+        parts += [err] * (hl._STUCK_LIMIT - 1) + [ok]     # never 20 in a row
+    sc._pump_output(io.StringIO("\n".join(parts) + "\n"))
+    assert sc._gave_up is False
+    assert 1 not in hl._unsyncable
+
+
+def test_unsyncable_chain_is_not_respawned(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)   # would-be synced
+    spawned = []
+
+    def popen(argv, **kw):
+        spawned.append(argv)
+        return _FakeProc(argv)
+
+    monkeypatch.setattr(hl.subprocess, "Popen", popen)
+    base = Chain("Base", 8453, "https://base.example")
+    hl._unsyncable.add(8453)
+    assert hl._ensure_sidecar(base) is None
+    assert hl.verified_chain(base, wait_s=5) is None
+    assert spawned == []                          # gated before Popen
+    assert 8453 not in hl._sidecars
 
 
 def test_spawn_argv_shape():

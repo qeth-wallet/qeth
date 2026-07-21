@@ -186,10 +186,18 @@ class TestPopup:
 class TestBuild:
     def _build_mod(self):
         import importlib.util
+        import sys
         spec = importlib.util.spec_from_file_location(
             "wxbuild", WEBEXT / "build.py")
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # Don't leave a __pycache__/ behind in the extension dir — Chrome refuses
+        # to Load-unpacked any dir containing a "_"-prefixed name.
+        prev = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.dont_write_bytecode = prev
         return mod
 
     def test_packages_exactly_the_shipping_files(self, tmp_path):

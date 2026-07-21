@@ -653,8 +653,9 @@ class ApprovalsPanel(QWidget):
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
-        # Hover / selection reveals a named spender's ACTUAL address (so it can
-        # be eyeballed / checked on the explorer without losing the name label).
+        # Hovering a named spender reveals its ACTUAL address (so it can be
+        # eyeballed / checked on the explorer). Hover-only — the SELECTED row
+        # keeps its name, so a selection isn't a second address-only row.
         self.tree.setMouseTracking(True)
         self.tree.itemEntered.connect(self._on_item_entered)
         self.tree.viewport().installEventFilter(self)
@@ -766,7 +767,6 @@ class ApprovalsPanel(QWidget):
             b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
-        self.tree.itemSelectionChanged.connect(self._refresh_reveal)
         self.tree.itemChanged.connect(self._on_item_changed)
         self._update_buttons()
 
@@ -1126,12 +1126,14 @@ class ApprovalsPanel(QWidget):
         self._syncing = False
 
     def _refresh_reveal(self) -> None:
-        """Rewrite each named leaf's column-0 text so the hovered / selected one
-        shows its (regular-weight) address and the rest show their name — a
-        name-tag regular, a soft name italic. A bare-address leaf has nothing to
-        toggle and is skipped."""
+        """Rewrite each named leaf's column-0 text so the HOVERED one shows its
+        (regular-weight) address and the rest show their name — a name-tag
+        regular, a soft name italic. Reveal is **hover-only**: the selected row
+        keeps its readable name, so a selection (whose highlight already looks
+        like the hover highlight in some themes) doesn't ALSO read as a second
+        address-only row. A bare-address leaf has nothing to toggle and is
+        skipped."""
         hovered = self._hovered
-        current = self.tree.currentItem()
         self.tree.blockSignals(True)
         for ti in range(self.tree.topLevelItemCount()):
             node = self.tree.topLevelItem(ti)
@@ -1143,8 +1145,7 @@ class ApprovalsPanel(QWidget):
                 if not isinstance(r, ApprovalRow) or not (
                         r.spender_label or r.spender_soft_label):
                     continue
-                reveal = leaf is hovered or (leaf is current and leaf.isSelected())
-                text, italic = self._leaf_display(r, reveal)
+                text, italic = self._leaf_display(r, reveal=leaf is hovered)
                 if leaf.text(0) != text:
                     leaf.setText(0, text)
                 self._set_italic(leaf, italic)

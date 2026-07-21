@@ -145,11 +145,16 @@ def test_hover_reveals_address_then_restores(qtbot):
     assert leaf.text(0) == LABEL                     # restored
 
 
-def test_selection_reveals_address(qtbot):
+def test_selection_keeps_the_name_reveal_is_hover_only(qtbot):
+    # Reveal is hover-only: selecting a row keeps its readable name (so a
+    # selection isn't a second address-only row alongside the hovered one).
     p = _panel(qtbot)
     p.append_rows([_named_row()])
     leaf = p.tree.topLevelItem(0).child(0)
-    p.tree.setCurrentItem(leaf)                      # selection → reveal
+    p.tree.setCurrentItem(leaf)                      # selection → NO reveal
+    p._refresh_reveal()
+    assert leaf.text(0) == LABEL                     # name kept, not the address
+    p._on_item_entered(leaf, 0)                      # …until you hover it
     assert leaf.text(0) == SP1
 
 

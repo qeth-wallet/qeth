@@ -1307,10 +1307,17 @@ class ApprovalsPanel(QWidget):
         the field drives textChanged → filter reset."""
         if self._search_edit is None:
             return
+        was_open = not self._search_edit.isHidden()
         self._search_edit.setVisible(False)
         self._search_edit.clear()                    # → _on_search_text("") → reset
         if self.btn_search is not None:
             self.btn_search.setChecked(False)
+        # Return keyboard focus to the tree when CLOSING an open bar — else the
+        # +/−/∗ selection keys (the tree's eventFilter needs tree focus) stay
+        # dead. Guarded on was_open so a bare clear() (account switch) doesn't
+        # yank focus to the approvals tree.
+        if was_open:
+            self.tree.setFocus()
 
     def _on_search_toggled(self, checked: bool) -> None:
         self._show_search() if checked else self._hide_search()

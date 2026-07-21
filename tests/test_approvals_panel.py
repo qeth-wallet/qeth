@@ -615,6 +615,26 @@ def test_clear_resets_the_filter(qtbot):
     assert p._filter_text == "" and not p._search_edit.isVisible()
 
 
+def test_closing_search_returns_focus_to_tree(qtbot, monkeypatch):
+    # Else the +/−/∗ keys (handled by the tree's eventFilter, which needs tree
+    # focus) stay dead after closing the find bar — the reported regression.
+    p = _panel(qtbot)
+    focused = []
+    monkeypatch.setattr(p.tree, "setFocus", lambda *a: focused.append(True))
+    p._show_search()
+    p._hide_search()
+    assert focused                                    # closing an OPEN bar refocuses the tree
+
+
+def test_bare_clear_does_not_steal_tree_focus(qtbot, monkeypatch):
+    # A clear() from an account switch (bar never opened) must not yank focus.
+    p = _panel(qtbot)
+    focused = []
+    monkeypatch.setattr(p.tree, "setFocus", lambda *a: focused.append(True))
+    p.clear()
+    assert not focused
+
+
 # --- selection respects the active filter ----------------------------------
 
 def _cs(leaf):

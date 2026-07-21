@@ -1,4 +1,4 @@
-"""Opt-in Selenium harness: load the real MV3 extension (integrations/webext/)
+"""Opt-in Selenium harness: load the real MV3 extension (extensions/webext/)
 into headless Chromium AND Firefox and exercise the IN-PAGE provider against a
 stub ``RpcServer`` — the layer test_webext_protocol.py can't reach (it drives the
 WS protocol with a fake background, no browser).
@@ -44,7 +44,7 @@ from qeth.rpc import RpcServer
 
 pytestmark = pytest.mark.browser
 
-EXT_DIR = Path(__file__).resolve().parents[1] / "integrations" / "webext"
+EXT_DIR = Path(__file__).resolve().parents[1] / "extensions" / "webext"
 ACCOUNT = "0x" + "11" * 20
 
 

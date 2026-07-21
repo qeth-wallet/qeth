@@ -1,4 +1,4 @@
-"""Static gates for the qeth browser extension (integrations/webext/).
+"""Static gates for the qeth browser extension (extensions/webext/).
 
 No node/browser: these parse the manifest and scan the source files to pin the
 cross-browser wiring, the shared-provider mirror, and world hygiene. The
@@ -13,8 +13,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WEBEXT = ROOT / "integrations" / "webext"
-FALKON = ROOT / "integrations" / "falkon" / "qeth_connector"
+WEBEXT = ROOT / "extensions" / "webext"
+FALKON = ROOT / "extensions" / "falkon" / "qeth_connector"
 MANIFEST = json.loads((WEBEXT / "manifest.json").read_text())
 
 
@@ -254,7 +254,7 @@ class TestBuild:
         assert "README.md" not in members
         assert "build.py" not in members
         # Version-stamped from the app version; Chrome background.
-        assert zip_path.name == f"qeth-webext-{mod.app_version()}.zip"
+        assert zip_path.name == f"qeth-{mod.app_version()}-chrome.zip"
         assert manifest["version"] == mod.app_version()
         assert manifest["background"] == {"service_worker": "background.js"}
 
@@ -263,7 +263,7 @@ class TestBuild:
         import zipfile
         mod = self._build_mod()
         zip_path = mod.build(tmp_path, "firefox")
-        assert zip_path.name == f"qeth-webext-{mod.app_version()}-firefox.zip"
+        assert zip_path.name == f"qeth-{mod.app_version()}-firefox.zip"
         with zipfile.ZipFile(zip_path) as zf:
             manifest = _json.loads(zf.read("manifest.json"))
         assert manifest["background"] == {"scripts": ["background.js"]}

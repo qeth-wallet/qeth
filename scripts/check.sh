@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 fail=0
 
 echo "== ruff (lint) =="
-uv run ruff check qeth tests integrations || fail=1
+uv run ruff check qeth tests extensions || fail=1
 
 echo "== mypy (types) =="
 uv run mypy || fail=1
@@ -27,7 +27,7 @@ uv run mypy || fail=1
 echo "== ty (types, preview — non-blocking) =="
 if uv run --quiet ty --version >/dev/null 2>&1; then
     syspkgs="$(uv run python -c 'import PySide6, os; print(os.path.dirname(os.path.dirname(PySide6.__file__)))')"
-    uv run ty check --extra-search-path "$syspkgs" qeth integrations/falkon || true
+    uv run ty check --extra-search-path "$syspkgs" qeth extensions/falkon || true
 else
     echo "  (ty not installed — skipping; \`uv pip install ty\` to enable)"
 fi

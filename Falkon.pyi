@@ -1,7 +1,7 @@
 # Type stub for the `Falkon` module — the browser-plugin API injected into the
 # Python interpreter by the Falkon web browser at runtime (there is no PyPI
 # package). Lets a type checker resolve `import Falkon` in
-# integrations/falkon/qeth_connector/ instead of treating it as Any. Covers
+# extensions/falkon/qeth_connector/ instead of treating it as Any. Covers
 # only the surface the connector uses.
 from typing import Any
 

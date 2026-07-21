@@ -24,7 +24,7 @@ def test_package_is_ruff_clean():
     ruff = shutil.which("ruff")
     assert ruff is not None, "ruff is not installed (it's in the dev group)"
     proc = subprocess.run(
-        [ruff, "check", "qeth", "tests", "integrations"],
+        [ruff, "check", "qeth", "tests", "extensions"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,

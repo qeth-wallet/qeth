@@ -123,7 +123,7 @@ async def _cors(request: web.Request, handler):
     # extension context, but our Falkon connector injects the
     # provider into the page's main world, so its fetch / WebSocket
     # comes straight from the dapp origin and is subject to PNA.
-    # See integrations/falkon/.
+    # See extensions/falkon/.
     resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
 

@@ -1,6 +1,6 @@
 """CORS / Private Network Access headers on the JSON-RPC server.
 
-The Falkon connector (integrations/falkon/) injects its provider into the
+The Falkon connector (extensions/falkon/) injects its provider into the
 page's own origin, so a dapp served over public HTTPS reaches the loopback
 server directly — and Chromium's Private Network Access blocks that unless
 the response grants it. These tests lock the granting headers in.

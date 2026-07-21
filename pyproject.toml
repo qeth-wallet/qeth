@@ -95,7 +95,7 @@ dev = [
 # and nobody pulls a browser-automation stack they don't need. Install with:
 #     uv sync --group webext
 # to run the opt-in Selenium harness (tests/test_webext_browser.py, `-m browser`)
-# that drives integrations/webext/ in headless Chromium + Firefox. The browsers
+# that drives extensions/webext/ in headless Chromium + Firefox. The browsers
 # and their drivers (chromedriver/geckodriver) are system-installed, on PATH;
 # selenium>=4.20 is needed for install_addon(<dir>). Absent it, the harness
 # self-skips (pytest.importorskip at the top of the test module).
@@ -148,7 +148,7 @@ qt_api = "pyside6"
 python_version = "3.10"
 # Resolve the out-of-tree Falkon connector (its own `qeth_connector` package)
 # and the root-level `Falkon.pyi` stub for the browser-plugin API.
-mypy_path = ["integrations/falkon", "."]
+mypy_path = ["extensions/falkon", "."]
 # Enforced scope: the WHOLE package — the Qt-free core AND the PySide6 UI
 # layer — fully type-checked, with NO per-module error-code exemptions. The
 # flat→scoped Qt-enum migration is complete (always Qt.AlignmentFlag.AlignLeft,
@@ -226,9 +226,9 @@ files = [
     "qeth/chain_rpc_dialog.py",
     # The Falkon browser-connector plugin (out-of-tree package; uses the
     # root Falkon.pyi stub). Same scoped-Qt-enum rules apply.
-    "integrations/falkon/qeth_connector",
+    "extensions/falkon/qeth_connector",
     # The browser-extension build/sign script (stdlib only).
-    "integrations/webext/build.py",
+    "extensions/webext/build.py",
 ]
 warn_redundant_casts = true
 warn_unused_ignores = true

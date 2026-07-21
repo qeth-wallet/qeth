@@ -14,7 +14,7 @@ the sources as text rather than importing them.)
 
 from pathlib import Path
 
-FALKON = Path(__file__).resolve().parent.parent / "integrations" / "falkon" / "qeth_connector"
+FALKON = Path(__file__).resolve().parent.parent / "extensions" / "falkon" / "qeth_connector"
 PROVIDER = (FALKON / "provider.js").read_text()
 INIT = (FALKON / "__init__.py").read_text()
 
@@ -79,7 +79,7 @@ def _load_module(filename):
 
 class TestProbe:
     """The Qt-free status probe shared by the settings dialog and the toolbar
-    button (integrations/falkon/qeth_connector/probe.py)."""
+    button (extensions/falkon/qeth_connector/probe.py)."""
 
     def _probe(self):
         return _load_module("probe.py")

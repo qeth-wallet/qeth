@@ -3,15 +3,19 @@
 
 Stdlib only — no node, no npm, matching the project's build story.
 
-    python build.py                # → out/qeth-webext-<version>.zip (Chrome)
-                                   #   + out/qeth-webext-<version>-firefox.zip
+    python build.py                # → ../chrome/qeth-<version>-chrome.zip
+                                   #   (committed Chrome distributable)
     python build.py sync           # stamp the app version (qeth/__init__.py
                                    #   __version__) into manifest.json + the
                                    #   Falkon connector's metadata.desktop
     python build.py sign           # build, then sign the Firefox .xpi via AMO
-                                   #   (unlisted / self-distribution) if the
+                                   #   → ../firefox/qeth-<version>.xpi if the
                                    #   QETH_AMO_JWT_ISSUER / _SECRET env vars
                                    #   are set; otherwise just builds.
+
+The committed, distributable packages live in per-browser sibling dirs
+(``extensions/chrome/`` and ``extensions/firefox/``); the shared source is here
+in ``extensions/webext/``. Intermediate zips go to ``out/`` (gitignored).
 
 Two packages, one codebase: Chrome uses an MV3 service-worker background;
 Firefox MV3 has no service-worker support and needs the event-page form
@@ -52,6 +56,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 FALKON_DESKTOP = HERE.parent / "falkon" / "qeth_connector" / "metadata.desktop"
+# The committed, distributable packages live in per-browser sibling dirs (the
+# shared source is here in webext/). build → chrome zip; sign → signed firefox xpi.
+CHROME_DIR = HERE.parent / "chrome"
+FIREFOX_DIR = HERE.parent / "firefox"
 
 # Exactly what ships. Anything not listed (README, .gitignore, out/, build.py,
 # the source SVG) stays out of the package.
@@ -107,8 +115,8 @@ def _verify_tree() -> None:
     if falkon.exists() and (HERE / "provider.js").read_bytes() != falkon.read_bytes():
         raise SystemExit(
             "provider.js has drifted from the Falkon copy — re-mirror it "
-            "(cp integrations/falkon/qeth_connector/provider.js "
-            "integrations/webext/provider.js).")
+            "(cp extensions/falkon/qeth_connector/provider.js "
+            "extensions/webext/provider.js).")
     # Every packaged file exists.
     missing = [f for f in PACKAGE_FILES if not (HERE / f).is_file()]
     if missing:
@@ -141,8 +149,16 @@ def build(out_dir: Path, target: str = "chrome") -> Path:
     _verify_tree()
     version = app_version()
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "" if target == "chrome" else f"-{target}"
-    return _zip(out_dir / f"qeth-webext-{version}{suffix}.zip", target)
+    return _zip(out_dir / f"qeth-{version}-{target}.zip", target)
+
+
+def _replace_dist(dest: Path, target: str) -> Path:
+    """Refresh a committed per-browser distributable: drop any prior
+    ``qeth-*`` package so only the current version stays tracked, then build."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for old in dest.glob("qeth-*"):
+        old.unlink()
+    return build(dest, target)
 
 
 def write_unpacked(dest_dir: Path, target: str) -> Path:
@@ -353,7 +369,12 @@ def sign(zip_path: Path, out_dir: Path) -> Path | None:
     if xpi_bytes is None:
         raise SystemExit("AMO signing timed out waiting for the signed file")
 
-    xpi_path = out_dir / f"qeth-webext-{version}.xpi"
+    # Clean+write together at the very end, so a failed/aborted sign leaves the
+    # previously committed .xpi intact rather than deleting it up front.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("qeth-*.xpi"):
+        old.unlink()
+    xpi_path = out_dir / f"qeth-{version}.xpi"
     xpi_path.write_bytes(xpi_bytes)
     print(f"signed {xpi_path}  ({xpi_path.stat().st_size} bytes)")
     return xpi_path
@@ -370,13 +391,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sync":
         sync_versions()
         return 0
-    # Keep the source files' displayed version in step, then package both
-    # browsers' zips (Chrome zip is what `sign` never touches; Firefox is signed).
+    # Keep the source files' displayed version in step. The Chrome distributable
+    # IS the packaged zip → commit it to extensions/chrome/. The Firefox zip is
+    # only an intermediate (uploaded to AMO); its committed distributable is the
+    # signed .xpi, written to extensions/firefox/ by sign().
     sync_versions()
-    build(args.out, "chrome")
+    _replace_dist(CHROME_DIR, "chrome")
     fx_zip = build(args.out, "firefox")
     if args.command == "sign":
-        sign(fx_zip, args.out)
+        sign(fx_zip, FIREFOX_DIR)
     return 0
 
 

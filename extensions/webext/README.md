@@ -8,7 +8,7 @@ bundler, no npm.
 The extension's version always equals the app version (`qeth/__init__.py`
 `__version__`) — `build.py` stamps it into every package and `build.py sync`
 writes it back into `manifest.json` and the Falkon connector's
-`metadata.desktop`, so the two integrations never drift (a test gate enforces
+`metadata.desktop`, so the two extensions never drift (a test gate enforces
 it).
 
 ## How it works
@@ -21,7 +21,7 @@ provider.js ── postMessage ── relay.js ── runtime Port ── backgr
 ```
 
 - `provider.js` is shared **byte-for-byte** with
-  `integrations/falkon/qeth_connector/provider.js`; `config.js` flips it into
+  `extensions/falkon/qeth_connector/provider.js`; `config.js` flips it into
   WebSocket push mode (no polling, no direct-fetch fallback). A test gate and
   `build.py` enforce the mirror — fix the provider in the Falkon copy and
   re-copy it here.

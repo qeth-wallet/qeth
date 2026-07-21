@@ -7,7 +7,7 @@ browser extension and dapps connect unchanged.
 ## Install
 
 Grab the package for your distro from the
-**[latest release](https://github.com/michwill/qeth/releases/latest)**. There
+**[latest release](https://github.com/qeth-wallet/qeth/releases/latest)**. There
 are two kinds:
 
 - **Native — `.rpm` / `.deb`.** Link the **system Qt**, so your desktop's Qt

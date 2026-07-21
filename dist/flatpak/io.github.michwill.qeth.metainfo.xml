@@ -28,8 +28,8 @@
     <category>Network</category>
     <category>Finance</category>
   </categories>
-  <url type="homepage">https://github.com/michwill/qeth</url>
-  <url type="bugtracker">https://github.com/michwill/qeth/issues</url>
+  <url type="homepage">https://github.com/qeth-wallet/qeth</url>
+  <url type="bugtracker">https://github.com/qeth-wallet/qeth/issues</url>
   <developer id="io.github.michwill">
     <name>Michael Egorov</name>
   </developer>

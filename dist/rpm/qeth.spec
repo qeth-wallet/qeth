@@ -4,7 +4,7 @@ Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/michwill/qeth
+URL:            https://github.com/qeth-wallet/qeth
 Source0:        %{name}-%{version}.tar.gz
 
 # Vendored deps include compiled extensions (pycryptodome) -> arch-specific.

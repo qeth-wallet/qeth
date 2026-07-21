@@ -98,7 +98,7 @@ Depends: python3 (>= 3.13), python3-pyside6.qtcore, python3-pyside6.qtgui, pytho
 Installed-Size: $INSTALLED_KB
 Section: utils
 Priority: optional
-Homepage: https://github.com/michwill/qeth
+Homepage: https://github.com/qeth-wallet/qeth
 Description: Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
  qeth is a PySide6 Ethereum wallet for the Linux desktop with Ledger support and
  a Frame-compatible JSON-RPC server. This build targets LMDE 7 / Debian 13

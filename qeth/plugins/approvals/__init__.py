@@ -20,11 +20,14 @@ from typing import TYPE_CHECKING, ClassVar
 
 from eth_utils import to_checksum_address
 from PySide6.QtCore import QEvent, QRect, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
+from PySide6.QtGui import (
+    QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QProgressBar, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMenu, QProgressBar, QPushButton, QSizePolicy, QStyle,
+    QStyledItemDelegate, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ... import QULONGLONG
@@ -123,6 +126,8 @@ _IC_STOP = (("media-playback-stop", "process-stop"),
             QStyle.StandardPixmap.SP_MediaStop)
 _IC_SELECT_ALL = (("edit-select-all", "select-all", "checkbox"),
                   QStyle.StandardPixmap.SP_FileDialogListView)
+_IC_SEARCH = (("edit-find", "system-search", "search"),
+              QStyle.StandardPixmap.SP_FileDialogInfoView)
 
 # At/above this an allowance reads as "unlimited" — the same threshold the
 # approve dialog's Unlimited toggle uses (2**255 is half the uint256 space,
@@ -584,6 +589,21 @@ class ReconcileWorker(QThread):
 
 # --- panel ----------------------------------------------------------------
 
+class _SearchEdit(QLineEdit):
+    """The Approvals find-bar field. Emits ``escape_pressed`` on Escape so the
+    bar closes + clears (browser-style). A subclass rather than a QShortcut:
+    keyPressEvent delivery is deterministic under headless QTest, and Escape
+    only dismisses when the field is focused."""
+
+    escape_pressed = Signal()
+
+    def keyPressEvent(self, event):  # noqa: N802 — Qt method name
+        if event.key() == Qt.Key.Key_Escape:
+            self.escape_pressed.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class ApprovalsPanel(QWidget):
     modify_requested = Signal(object)      # ApprovalRow   (commit 2)
     revoke_requested = Signal(object)      # [ApprovalRow] (commit 3)
@@ -612,6 +632,11 @@ class ApprovalsPanel(QWidget):
         self._sort_order = Qt.SortOrder.DescendingOrder
         self._col0_frac: float | None = None              # user's split ratio
         self._syncing = False                             # re-entrancy guard
+        # Browser-style find bar (Ctrl+F / the search icon button): filters the
+        # token→spender tree by token (address/symbol) or spender (address/name).
+        # btn_search / act_find are built in _build (like the other buttons).
+        self._filter_text = ""
+        self._search_edit: QLineEdit | None = None
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
 
@@ -651,6 +676,24 @@ class ApprovalsPanel(QWidget):
         hh.sectionClicked.connect(self._on_header_clicked)
         hh.sectionResized.connect(self._on_section_resized)
         v.addWidget(self.tree, 1)
+
+        # Find bar under the tree — hidden until Ctrl+F or the search button.
+        self._search_edit = _SearchEdit()
+        self._search_edit.setPlaceholderText(
+            "Filter by token or spender — address or name")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setVisible(False)
+        self._search_edit.textChanged.connect(self._on_search_text)
+        self._search_edit.escape_pressed.connect(self._hide_search)
+        v.addWidget(self._search_edit)
+        # Ctrl+F: show + focus the bar (browser find — a second press re-focuses
+        # rather than toggling shut). Scoped to the panel + its children.
+        self.act_find = QAction("Find", self)
+        self.act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.act_find.setShortcutContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.act_find.triggered.connect(self._show_search)
+        self.addAction(self.act_find)
 
         self.status_lbl = QLabel("")
         self.status_lbl.setVisible(False)
@@ -713,7 +756,13 @@ class ApprovalsPanel(QWidget):
         self.btn_explorer.setIcon(_icon(*_IC_EXPLORER))
         self.btn_explorer.setToolTip("Open spender in the block explorer")
         self.btn_explorer.clicked.connect(self._open_selected_in_explorer)
-        for b in (self.btn_select_all, self.btn_copy, self.btn_explorer):
+        self.btn_search = QPushButton()
+        self.btn_search.setIcon(_icon(*_IC_SEARCH))
+        self.btn_search.setToolTip("Filter approvals (Ctrl+F)")
+        self.btn_search.setCheckable(True)
+        self.btn_search.toggled.connect(self._on_search_toggled)
+        for b in (self.btn_select_all, self.btn_copy, self.btn_explorer,
+                  self.btn_search):
             b.setFlat(True)
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
@@ -726,7 +775,7 @@ class ApprovalsPanel(QWidget):
 
     def action_widgets(self) -> list[QWidget]:
         return [self.btn_action, self.btn_select_all, self.btn_copy,
-                self.btn_explorer]
+                self.btn_explorer, self.btn_search]
 
     # --- scan lifecycle ---------------------------------------------------
     def begin_scan(self) -> None:
@@ -761,6 +810,7 @@ class ApprovalsPanel(QWidget):
         self._token_items.clear()
         self._set_status("")
         self._update_buttons()
+        self._hide_search()                          # a fresh account starts unfiltered
 
     # --- population -------------------------------------------------------
     def append_rows(self, rows: list[ApprovalRow]) -> None:
@@ -769,6 +819,8 @@ class ApprovalsPanel(QWidget):
             self._add_row(r)
         self.tree.blockSignals(False)
         self._apply_sort()                           # recompute sums, sort, expandAll
+        if self._filter_text.strip():
+            self._apply_filter()                     # re-hide non-matches in a live scan
         self._layout_columns()                       # keep the split filling the width
         self._update_buttons()
         self._refresh_reveal()
@@ -1210,6 +1262,77 @@ class ApprovalsPanel(QWidget):
         if isinstance(r, ApprovalRow):
             self._open_in_explorer(r.spender)
 
+    # --- find / filter (browser-style, mirrors the Accounts tab) ----------
+    def _show_search(self) -> None:
+        """Reveal + focus the find bar, selecting any existing text (a second
+        Ctrl+F just re-focuses). Idempotent."""
+        if self._search_edit is None:
+            return
+        self._search_edit.setVisible(True)
+        if self.btn_search is not None:
+            self.btn_search.setChecked(True)         # no-op if already checked
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
+
+    def _hide_search(self) -> None:
+        """Hide the find bar and clear the filter (Escape / un-toggle). Clearing
+        the field drives textChanged → filter reset."""
+        if self._search_edit is None:
+            return
+        self._search_edit.setVisible(False)
+        self._search_edit.clear()                    # → _on_search_text("") → reset
+        if self.btn_search is not None:
+            self.btn_search.setChecked(False)
+
+    def _on_search_toggled(self, checked: bool) -> None:
+        self._show_search() if checked else self._hide_search()
+
+    def _on_search_text(self, text: str) -> None:
+        self._filter_text = text
+        self._apply_filter()
+
+    def _search_by(self, text: str) -> None:
+        """Open the find bar pre-filled with ``text`` (the context-menu 'Search
+        by this address' entries)."""
+        if self._search_edit is None or not text:
+            return
+        self._show_search()
+        self._search_edit.setText(text)              # → textChanged → filter
+
+    def _apply_filter(self) -> None:
+        """Show only tokens/spenders matching the filter text (case-insensitive).
+        A token matches on its address OR symbol/name → its whole subtree shows;
+        else each spender leaf matches on its address OR name-tag OR soft label →
+        only matching leaves show, under any token that has one. setHidden only,
+        so the selection/sort/pills are untouched; an empty filter un-hides all
+        (the tree is always expanded, so no collapse state to restore)."""
+        needle = self._filter_text.strip().lower()
+        filtering = bool(needle)
+        for ti in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(ti)
+            if node is None:
+                continue
+            hay = (str(node.data(0, _TOKEN_ROLE) or "").lower()
+                   + " " + node.text(0).lower())
+            for ci in range(node.childCount()):       # add the full symbol/name
+                r0 = node.child(ci).data(0, _ROW_ROLE)
+                if isinstance(r0, ApprovalRow):
+                    hay += f" {r0.symbol.lower()} {r0.name.lower()}"
+                    break
+            token_match = filtering and needle in hay
+            any_shown = False
+            for ci in range(node.childCount()):
+                leaf = node.child(ci)
+                r = leaf.data(0, _ROW_ROLE)
+                if not isinstance(r, ApprovalRow):
+                    continue
+                spender_hay = (f"{r.spender.lower()} {r.spender_label.lower()} "
+                               f"{r.spender_soft_label.lower()}")
+                show = (not filtering) or token_match or (needle in spender_hay)
+                leaf.setHidden(not show)
+                any_shown = any_shown or show
+            node.setHidden(filtering and not any_shown)
+
     def _on_context_menu(self, pos) -> None:
         it = self.tree.itemAt(pos)
         r = it.data(0, _ROW_ROLE) if it is not None else None
@@ -1227,6 +1350,11 @@ class ApprovalsPanel(QWidget):
         act_copy_tok.setEnabled(r is not None or token is not None)
         act_explorer = menu.addAction(_icon(*_IC_EXPLORER), "Open spender in explorer")
         act_explorer.setEnabled(r is not None and self._explorer_base() is not None)
+        menu.addSeparator()
+        act_search_sp = menu.addAction(_icon(*_IC_SEARCH), "Filter by this spender")
+        act_search_sp.setEnabled(r is not None)
+        act_search_tok = menu.addAction(_icon(*_IC_SEARCH), "Filter by this token")
+        act_search_tok.setEnabled(r is not None or token is not None)
         menu.addSeparator()
         act_refresh = menu.addAction(_icon(*_IC_REFRESH), "Rescan history")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -1246,6 +1374,12 @@ class ApprovalsPanel(QWidget):
             if addr:
                 QApplication.clipboard().setText(addr)
                 self.copied.emit(addr)
+        elif chosen is act_search_sp and r is not None:
+            self._search_by(r.spender)
+        elif chosen is act_search_tok:
+            addr = r.token if r is not None else token
+            if addr:
+                self._search_by(addr)
         elif chosen is act_refresh:
             self.refresh_requested.emit()
 

@@ -498,9 +498,121 @@ def test_icon_buttons_are_flat(qtbot):
 def test_no_rescan_button_in_action_row(qtbot):
     p = _panel(qtbot)
     assert not hasattr(p, "btn_refresh")
-    # action, select-all, copy, explorer (no rescan)
+    # action, select-all, copy, explorer, search (no rescan)
     assert p.action_widgets() == [p.btn_action, p.btn_select_all, p.btn_copy,
-                                   p.btn_explorer]
+                                   p.btn_explorer, p.btn_search]
+
+
+# --- find / filter (Ctrl+F) ------------------------------------------------
+
+def _tok_visibility(p):
+    from qeth.plugins.approvals import _TOKEN_ROLE
+    return {p.tree.topLevelItem(i).data(0, _TOKEN_ROLE):
+            not p.tree.topLevelItem(i).isHidden()
+            for i in range(p.tree.topLevelItemCount())}
+
+
+def _visible_spenders(p):
+    from qeth.plugins.approvals import _ROW_ROLE
+    out = []
+    for i in range(p.tree.topLevelItemCount()):
+        node = p.tree.topLevelItem(i)
+        if node.isHidden():
+            continue
+        for j in range(node.childCount()):
+            leaf = node.child(j)
+            r = leaf.data(0, _ROW_ROLE)
+            if not leaf.isHidden() and r is not None:
+                out.append(r.spender.lower())
+    return sorted(set(out))
+
+
+def test_ctrl_f_shows_bar_escape_hides(qtbot):
+    p = _panel(qtbot)                                 # not shown → check isHidden flag
+    assert p._search_edit.isHidden()
+    p._show_search()
+    assert not p._search_edit.isHidden() and p.btn_search.isChecked()
+    p._hide_search()
+    assert p._search_edit.isHidden() and not p.btn_search.isChecked()
+
+
+def test_filter_by_token_address_shows_only_that_subtree(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="USDC", spender=SP1),
+                   _row(token=TOKEN2, symbol="DAI", spender=SP2)])
+    p._search_by(TOKEN)
+    vis = _tok_visibility(p)
+    assert vis[TOKEN.lower()] and not vis[TOKEN2.lower()]
+
+
+def test_filter_by_token_symbol(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="USDC", spender=SP1),
+                   _row(token=TOKEN2, symbol="DAI", spender=SP2)])
+    p._search_by("dai")
+    vis = _tok_visibility(p)
+    assert vis[TOKEN2.lower()] and not vis[TOKEN.lower()]
+
+
+def test_filter_by_spender_address_keeps_only_matching_leaves(qtbot):
+    p = _panel(qtbot)
+    # SP1 approved on both tokens; SP2 only on TOKEN2.
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by(SP1)
+    # both token nodes stay (each has an SP1 leaf), but SP2's leaf is hidden
+    assert _visible_spenders(p) == [SP1.lower()]
+    assert all(_tok_visibility(p).values())          # both tokens shown
+
+
+def test_filter_by_spender_soft_name(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([
+        ApprovalRow(token=TOKEN, spender=SP1, allowance=1, symbol="A",
+                    spender_soft_label="Venus crvUSD"),
+        _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by("venus")
+    vis = _tok_visibility(p)
+    assert vis[TOKEN.lower()] and not vis[TOKEN2.lower()]
+
+
+def test_filter_by_spender_name_tag(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([
+        ApprovalRow(token=TOKEN, spender=SP1, allowance=1, symbol="A",
+                    spender_label="Uniswap: Universal Router"),
+        _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by("uniswap")
+    assert _visible_spenders(p) == [SP1.lower()]
+
+
+def test_clearing_filter_restores_everything(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN2, symbol="B", spender=SP2)])
+    p._search_by(TOKEN)
+    assert not _tok_visibility(p)[TOKEN2.lower()]     # filtered out
+    p._hide_search()                                  # clears the field → reset
+    assert all(_tok_visibility(p).values())
+
+
+def test_active_filter_reapplies_to_streamed_rows(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1)])
+    p._search_by(TOKEN2)                              # filter a token not present yet
+    assert not _tok_visibility(p)[TOKEN.lower()]
+    p.append_rows([_row(token=TOKEN2, symbol="B", spender=SP2)])   # scan streams it in
+    vis = _tok_visibility(p)
+    assert vis[TOKEN2.lower()] and not vis[TOKEN.lower()]
+
+
+def test_clear_resets_the_filter(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, spender=SP1)])
+    p._search_by(TOKEN)
+    p.clear()
+    assert p._filter_text == "" and not p._search_edit.isVisible()
 
 
 def test_allowance_column_gets_a_gap_before_amount(qtbot):

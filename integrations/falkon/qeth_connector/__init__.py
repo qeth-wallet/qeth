@@ -80,7 +80,37 @@ class QethConnectorPlugin(Falkon.PluginInterface, QtCore.QObject):
         Falkon.ExternalJsObject.registerExtraObject(_BRIDGE_ID, self._bridge)
         self._install_scripts()
 
+        # A qeth status button on each window's navigation bar (like a browser
+        # extension's toolbar icon), all fed by one shared poller. Safe defaults
+        # first, then wire it inside a guard: the button is a nicety, and a
+        # hiccup here must never take the bridge/provider (the wallet link) down.
+        self._poller = None
+        self._button_cls = None
+        self._buttons: dict = {}
+        try:
+            self._install_toolbar_button(state)
+        except Exception as e:
+            log.warning("qeth toolbar status button unavailable: %s", e)
+
+    def _install_toolbar_button(self, state):
+        from qeth_connector.toolbar import QethStatusButton, StatusPoller
+        self._poller = StatusPoller(parent=self)
+        self._button_cls = QethStatusButton
+        plugins = Falkon.MainApplication.instance().plugins()
+        plugins.mainWindowCreated.connect(self._add_button)
+        plugins.mainWindowDeleted.connect(self._remove_button)
+        # Plugins enabled after startup miss mainWindowCreated for the windows
+        # already open — seed them (mirrors Falkon's own bundled plugins).
+        if state == Falkon.PluginInterface.LateInitState:
+            for window in Falkon.MainApplication.instance().windows():
+                self._add_button(window)
+
     def unload(self):
+        for window in list(self._buttons):
+            self._remove_button(window)
+        if getattr(self, "_poller", None) is not None:
+            self._poller.stop()
+            self._poller = None
         try:
             Falkon.ExternalJsObject.unregisterExtraObject(self._bridge)
         except Exception as e:
@@ -91,6 +121,25 @@ class QethConnectorPlugin(Falkon.PluginInterface, QtCore.QObject):
                 for existing in scripts.find(name):
                     scripts.remove(existing)
         self._bridge = None
+
+    def _add_button(self, window):
+        if self._button_cls is None or window in self._buttons:
+            return
+        try:
+            button = self._button_cls(self._poller)
+            window.navigationBar().addToolButton(button)
+        except Exception as e:
+            log.warning("qeth toolbar button not added: %s", e)
+            return
+        self._buttons[window] = button
+
+    def _remove_button(self, window):
+        button = self._buttons.pop(window, None)
+        if button is not None:
+            try:
+                window.navigationBar().removeToolButton(button)
+            except Exception as e:
+                log.debug("remove toolbar button: %s", e)
 
     def testPlugin(self):
         # Loaded unconditionally; degrades gracefully when qeth isn't

@@ -14,7 +14,6 @@
 # is also serving the page provider.
 # ============================================================
 
-import json
 import os
 
 from PySide6.QtCore import Qt, QByteArray, QUrl
@@ -27,7 +26,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-_ENDPOINT = "http://127.0.0.1:1248/"
+from qeth_connector import probe
+from qeth_connector.probe import chain_name as _chain_name
+
+_ENDPOINT = probe.ENDPOINT
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -42,21 +44,6 @@ def _connector_version():
     except OSError:
         pass
     return ""
-
-# Friendly names for the chains qeth ships with; anything else falls
-# back to "Chain <id>". Purely cosmetic for the status line.
-_CHAIN_NAMES = {
-    1: "Ethereum", 10: "Optimism", 56: "BNB Chain", 100: "Gnosis",
-    137: "Polygon", 8453: "Base", 42161: "Arbitrum", 43114: "Avalanche",
-}
-
-
-def _chain_name(hex_id):
-    try:
-        cid = int(hex_id, 16)
-    except (TypeError, ValueError):
-        return str(hex_id)
-    return _CHAIN_NAMES.get(cid, f"Chain {cid}")
 
 
 class StatusDialog(QDialog):
@@ -156,13 +143,8 @@ class StatusDialog(QDialog):
         req = QNetworkRequest(QUrl(_ENDPOINT))
         req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader,
                       "application/json")
-        req.setTransferTimeout(4000)
-        batch = [
-            {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
-            {"jsonrpc": "2.0", "id": 2, "method": "eth_accounts", "params": []},
-        ]
-        body = json.dumps(batch).encode("utf-8")
-        reply = self._nam.post(req, QByteArray(body))
+        req.setTransferTimeout(probe.REQUEST_TIMEOUT_MS)
+        reply = self._nam.post(req, QByteArray(probe.batch_body()))
         reply.finished.connect(lambda r=reply: self._done(r))
 
     def _done(self, reply):
@@ -171,27 +153,10 @@ class StatusDialog(QDialog):
         reply.deleteLater()
         if err != QNetworkReply.NetworkError.NoError:
             self._error = str(err).split(".")[-1]
-            self._render()
-            return
-        try:
-            envs = json.loads(data)
-        except Exception as e:
-            self._error = str(e)
-            self._render()
-            return
-        if not isinstance(envs, list):
-            envs = [envs]
-        for env in envs:
-            rid = env.get("id")
-            if env.get("error"):
-                if rid == 1:   # chain id failing means the link is broken
-                    self._error = env["error"].get("message", "error")
-                continue
-            result = env.get("result")
-            if rid == 1:
-                self._chain = result
-            elif rid == 2 and isinstance(result, list) and result:
-                self._account = result[0]
+        else:
+            st = probe.parse_status(data)
+            self._chain, self._account, self._error = (
+                st.chain, st.account, st.error)
         self._render()
 
     # --- render -------------------------------------------------------

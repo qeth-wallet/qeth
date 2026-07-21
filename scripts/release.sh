@@ -20,6 +20,12 @@
 #                           then rename the verify output to qeth-verify-<v>-1.fc*.x86_64.rpm
 #                           (the spec keeps Name: qeth for both — only the file is renamed)
 #
+# Browser extensions are NOT part of this 10-asset set — they publish to AMO /
+# the Chrome Web Store separately, and their committed packages live in
+# extensions/{firefox,chrome}/. At release time regenerate + republish them per
+# extensions/README.md ("Releasing / publishing"): `build.py sign` produces the
+# AMO-signed Firefox .xpi; upload the chrome zip to the CWS dashboard (unlisted).
+#
 # Usage:
 #   scripts/release.sh              # build host assets + collect + verify (no publish)
 #   scripts/release.sh --publish    # ...then tag, push, and gh release create

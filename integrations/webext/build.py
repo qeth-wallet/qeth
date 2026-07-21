@@ -37,6 +37,7 @@ import base64
 import copy
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -193,6 +194,17 @@ def _jwt(issuer: str, secret: str) -> str:
     return (signing_input + b"." + base64.urlsafe_b64encode(sig).rstrip(b"=")).decode()
 
 
+class AmoError(SystemExit):
+    """An AMO API call failed. Carries the HTTP status so callers can branch
+    (a version-create legitimately 404s for a brand-new add-on and 409s when
+    that exact version already exists). Subclasses SystemExit so an unhandled
+    one still aborts with the message, as before."""
+
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
+
+
 def _api(method: str, path: str, token: str, *,
          data: bytes | None = None, headers: dict | None = None) -> dict:
     url = path if path.startswith("http") else f"{AMO_API}{path}"
@@ -204,7 +216,9 @@ def _api(method: str, path: str, token: str, *,
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"AMO {method} {url} → {e.code}: {e.read().decode(errors='replace')}")
+        raise AmoError(
+            f"AMO {method} {url} → {e.code}: {e.read().decode(errors='replace')}",
+            code=e.code)
     return json.loads(body) if body else {}
 
 
@@ -236,6 +250,48 @@ def _poll(path: str, token: str, *, want: str, tries: int = 60, delay: int = 5) 
     raise SystemExit(f"AMO polling timed out waiting for {want!r} at {path}")
 
 
+def _version_file(version: dict) -> dict:
+    """The file record on a version-detail response. The field is singular
+    ``file`` in the current API and was a ``files`` list in older revisions —
+    accept both so a server-side rename doesn't break signing."""
+    f = version.get("file")
+    if f is None and isinstance(version.get("files"), list) and version["files"]:
+        f = version["files"][0]
+    return f or {}
+
+
+def _download(url: str, token: str) -> bytes:
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", f"JWT {token}")
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return resp.read()
+
+
+def _is_signed(xpi_bytes: bytes) -> bool:
+    """True once AMO has signed the package (its Mozilla signature block is
+    present). A version's download url appears BEFORE auto-signing finishes, so
+    an early fetch returns the unsigned zip — poll on this, not just the url."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(xpi_bytes)) as z:
+            return any(n.startswith("META-INF/mozilla") for n in z.namelist())
+    except zipfile.BadZipFile:
+        return False
+
+
+def _find_version_id(guid: str, version: str, token_for) -> int:
+    """The id of version ``version`` under ``guid``. Needed when the create call
+    reports the version already exists, or when a first-ever submission creates
+    the add-on (whose response is the add-on, not the version). Unlisted
+    versions only appear with the explicit filter."""
+    vers = _api("GET",
+                f"/addons/addon/{guid}/versions/?filter=all_with_unlisted",
+                token_for())
+    for v in vers.get("results", []):
+        if v.get("version") == version:
+            return v["id"]
+    raise SystemExit(f"AMO: version {version} not found under {guid}")
+
+
 def sign(zip_path: Path, out_dir: Path) -> Path | None:
     issuer = os.environ.get("QETH_AMO_JWT_ISSUER")
     secret = os.environ.get("QETH_AMO_JWT_SECRET")
@@ -246,42 +302,58 @@ def sign(zip_path: Path, out_dir: Path) -> Path | None:
         return None
 
     guid = _manifest()["browser_specific_settings"]["gecko"]["id"]
-    token = _jwt(issuer, secret)
+    version = app_version()
+    hdrs = {"Content-Type": "application/json"}
+    # A fresh short-lived JWT per call (they expire in 60s and some steps poll
+    # for minutes).
+    def token():
+        return _jwt(issuer, secret)
 
-    # 1. upload the package (unlisted channel).
+    # 1. upload the package (unlisted / self-distribution channel).
     body, ctype = _multipart({"channel": "unlisted"}, "upload",
                              zip_path.name, zip_path.read_bytes())
-    up = _api("POST", "/addons/upload/", token, data=body, headers={"Content-Type": ctype})
+    up = _api("POST", "/addons/upload/", token(), data=body,
+              headers={"Content-Type": ctype})
     up_uuid = up["uuid"]
     print(f"AMO upload {up_uuid} — validating…")
-    _poll(f"/addons/upload/{up_uuid}/", token, want="valid")
+    _poll(f"/addons/upload/{up_uuid}/", token(), want="valid")
 
-    # 2. create a version (creates the add-on on first run, keyed by the guid).
-    token = _jwt(issuer, secret)
-    payload = json.dumps({"upload": up_uuid}).encode()
+    # 2. attach it as a version of the add-on, resolving the version id. The
+    #    create endpoint 404s the first time this guid is seen (create the
+    #    add-on, which creates the version) and 409s if the exact version is
+    #    already up (re-fetch it, so a re-run just re-downloads the signed xpi).
     try:
-        ver = _api("POST", f"/addons/addon/{guid}/versions/", token,
-                   data=payload, headers={"Content-Type": "application/json"})
-    except SystemExit:
-        token = _jwt(issuer, secret)
-        payload = json.dumps({"version": {"upload": up_uuid}}).encode()
-        ver = _api("POST", "/addons/addon/", token,
-                   data=payload, headers={"Content-Type": "application/json"})
+        ver = _api("POST", f"/addons/addon/{guid}/versions/", token(),
+                   data=json.dumps({"upload": up_uuid}).encode(), headers=hdrs)
+        version_id = ver["id"]
+    except AmoError as e:
+        if e.code == 409:
+            version_id = _find_version_id(guid, version, token)
+        elif e.code == 404:
+            _api("POST", "/addons/addon/", token(),
+                 data=json.dumps({"version": {"upload": up_uuid}}).encode(),
+                 headers=hdrs)
+            version_id = _find_version_id(guid, version, token)
+        else:
+            raise
 
-    # 3. wait for the signed file and download it.
-    ver_url = ver.get("url") or f"{AMO_API}/addons/addon/{guid}/versions/{ver['id']}/"
-    token = _jwt(issuer, secret)
-    info = _poll(ver_url, token, want="file")
-    file_info = info["file"]
-    if not file_info.get("url"):
-        raise SystemExit("signed file has no download url yet: " + json.dumps(file_info)[:300])
+    # 3. poll the version until AMO has SIGNED its file, then download the xpi.
+    #    Unlisted files auto-sign, but the download url appears before signing
+    #    finishes — so fetch and check for the signature, not just the url.
+    version_path = f"/addons/addon/{guid}/versions/{version_id}/"
+    xpi_bytes = None
+    for _ in range(60):
+        url = _version_file(_api("GET", version_path, token())).get("url")
+        if url:
+            candidate = _download(url, token())
+            if _is_signed(candidate):
+                xpi_bytes = candidate
+                break
+        time.sleep(5)
+    if xpi_bytes is None:
+        raise SystemExit("AMO signing timed out waiting for the signed file")
 
-    token = _jwt(issuer, secret)
-    req = urllib.request.Request(file_info["url"])
-    req.add_header("Authorization", f"JWT {token}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        xpi_bytes = resp.read()
-    xpi_path = out_dir / f"qeth-webext-{app_version()}.xpi"
+    xpi_path = out_dir / f"qeth-webext-{version}.xpi"
     xpi_path.write_bytes(xpi_bytes)
     print(f"signed {xpi_path}  ({xpi_path.stat().st_size} bytes)")
     return xpi_path

@@ -37,7 +37,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "qeth-companion@qeth.org",
+      "id": "wallet@qeth.eth",
       "strict_min_version": "128.0"
     }
   },

@@ -94,21 +94,24 @@ class QethConnectorPlugin(Falkon.PluginInterface, QtCore.QObject):
 
     def _install_toolbar_button(self, state):
         from qeth_connector.toolbar import QethStatusButton, StatusPoller
+        app = Falkon.MainApplication.instance()
+        if app is None:
+            return
         self._poller = StatusPoller(parent=self)
         self._button_cls = QethStatusButton
-        plugins = Falkon.MainApplication.instance().plugins()
+        plugins = app.plugins()
         plugins.mainWindowCreated.connect(self._add_button)
         plugins.mainWindowDeleted.connect(self._remove_button)
         # Plugins enabled after startup miss mainWindowCreated for the windows
         # already open — seed them (mirrors Falkon's own bundled plugins).
         if state == Falkon.PluginInterface.LateInitState:
-            for window in Falkon.MainApplication.instance().windows():
+            for window in app.windows():
                 self._add_button(window)
 
     def unload(self):
         for window in list(self._buttons):
             self._remove_button(window)
-        if getattr(self, "_poller", None) is not None:
+        if self._poller is not None:
             self._poller.stop()
             self._poller = None
         try:

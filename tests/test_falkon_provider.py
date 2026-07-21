@@ -58,3 +58,33 @@ def test_snapshot_before_request_comparison_preserved():
     # BEFORE the request (a real bug fix), not self.* after _absorb ran.
     assert 'var prevChain = this.chainId;' in PROVIDER
     assert 'var prevAccount = this.selectedAddress;' in PROVIDER
+
+
+def _load_bridge():
+    # bridge.py imports only PySide6 (no Falkon runtime), so it's importable —
+    # unlike __init__.py/settings.py, which is why the rest read source as text.
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("qeth_falkon_bridge",
+                                                  FALKON / "bridge.py")
+    mod = importlib.util.module_from_spec(spec)
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev
+    return mod
+
+
+def test_bridge_forwards_only_http_origins():
+    # Finding C from the Frame Companion review: a file:// page's
+    # window.location.origin collapses to a shared "file://", so every local
+    # file would share one per-origin slot in qeth. Only http(s) origins are
+    # forwarded as the Origin header; everything else is origin-less.
+    bridge = _load_bridge()
+    assert bridge._dapp_origin("https://app.uniswap.org") == "https://app.uniswap.org"
+    assert bridge._dapp_origin("http://localhost:3000") == "http://localhost:3000"
+    for opaque in ("file://", "null", "", None, "chrome://x", "about:blank",
+                   "data:text/html,x"):
+        assert bridge._dapp_origin(opaque) == "", opaque

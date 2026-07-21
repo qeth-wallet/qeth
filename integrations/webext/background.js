@@ -144,13 +144,17 @@ function onPortGone(port) {
 }
 
 // port.sender.origin is unforgeable (set by the browser). Fall back to the
-// url's origin; skip opaque ("null") origins — the request still goes,
-// unlabelled, and the server treats it as origin-less.
+// url's origin. Only an http(s) origin identifies a dapp — anything else
+// (a file:// page, whose origin collapses to a shared "file://" or an opaque
+// "null"; chrome-extension://; about:; data:) is treated as origin-less, so
+// local files can't share one per-origin slot and borrow each other's chain
+// pin. The request still goes, unlabelled (server treats it origin-less).
+// Mirrors _effective_origin() in qeth/rpc.py, which trusts only http(s) hosts.
 function originOf(port) {
   var s = port.sender || {};
   var o = s.origin;
   if (!o && s.url) { try { o = new URL(s.url).origin; } catch (e) {} }
-  if (!o || o === "null") return null;
+  if (!o || !/^https?:\/\//i.test(o)) return null;
   return o;
 }
 

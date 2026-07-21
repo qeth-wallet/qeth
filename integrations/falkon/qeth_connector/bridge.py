@@ -38,6 +38,17 @@ log = logging.getLogger("qeth.falkon.bridge")
 _ENDPOINT = "http://127.0.0.1:1248/"
 
 
+def _dapp_origin(origin):
+    """The ``Origin`` header value to forward for a dapp request, or ``""`` for
+    none. Only an http(s) origin identifies a website. A ``file://`` page's
+    ``window.location.origin`` collapses to a shared ``"file://"`` (and other
+    schemes to an opaque ``"null"``), so those are treated as origin-less rather
+    than letting every local file share one per-origin slot in qeth. Mirrors
+    originOf() in the webext background and _effective_origin() in qeth/rpc.py."""
+    o = (origin or "").strip()
+    return o if o.lower().startswith(("http://", "https://")) else ""
+
+
 class QethBridge(QObject):
     # cid, json-text — emitted for every reply, routed back to the frame
     # whose relay sent the request.
@@ -57,8 +68,9 @@ class QethBridge(QObject):
         req = QNetworkRequest(QUrl(self._endpoint))
         req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader,
                       "application/json")
-        if origin:
-            req.setRawHeader(b"Origin", origin.encode("ascii", "ignore"))
+        dapp = _dapp_origin(origin)
+        if dapp:
+            req.setRawHeader(b"Origin", dapp.encode("ascii", "ignore"))
         reply = self._nam.post(req, QByteArray(text.encode("utf-8")))
 
         def done():

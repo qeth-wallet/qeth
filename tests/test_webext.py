@@ -184,6 +184,24 @@ class TestTransportFiles:
         assert "__frameOrigin" in src                 # per-frame origin stamp
         assert "sender" in src                        # from the unforgeable port
 
+    def test_background_origin_is_from_sender_and_http_only(self):
+        # Finding A + C from the Frame Companion review: the dapp origin must
+        # come from the unforgeable port.sender (never a page-supplied field),
+        # and only http(s) origins are trusted — a file:// page collapses to a
+        # shared "file://" otherwise. The forwarded payload is a fresh object
+        # (method/params/id + __frameOrigin), NOT a spread of the page payload.
+        # Read raw (not comment-stripped): the http(s) regex literal contains
+        # `//`, which the comment stripper would eat.
+        raw = (WEBEXT / "background.js").read_text()
+        assert "port.sender" in raw
+        assert "originOf(port)" in raw
+        assert "!/^https?:\\/\\//i.test(o)" in raw     # http(s)-only origin gate
+        # No spread of the page payload into the upstream message (that's how
+        # Frame leaked page-controlled __frameOrigin/__extensionConnecting).
+        code = _strip_js_comments(raw)
+        assert "...payload" not in code and "...msg" not in code
+        assert "__extensionConnecting" not in code
+
     def test_background_keepalive_is_local_and_periodic(self):
         src = (WEBEXT / "background.js").read_text()
         assert "periodInMinutes" in src               # alarms keepalive

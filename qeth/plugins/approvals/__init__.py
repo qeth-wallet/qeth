@@ -767,7 +767,7 @@ class ApprovalsPanel(QWidget):
 
         self.tree.itemSelectionChanged.connect(self._update_buttons)
         self.tree.itemSelectionChanged.connect(self._refresh_reveal)
-        self.tree.itemChanged.connect(self._update_buttons)
+        self.tree.itemChanged.connect(self._on_item_changed)
         self._update_buttons()
 
         if self._host is not None:
@@ -834,6 +834,15 @@ class ApprovalsPanel(QWidget):
             out.extend(node.child(ci) for ci in range(node.childCount()))
         return out
 
+    def _selectable_leaves(self) -> list[QTreeWidgetItem]:
+        """Leaves a bulk select/revoke should act on: only the ones ON SCREEN
+        when a filter is active (a leaf hidden by the find bar keeps its state,
+        so +/−/∗ and select-all can't tick something you can't see), else all."""
+        leaves = self._all_leaves()
+        if self._filter_text.strip():
+            return [le for le in leaves if not le.isHidden()]
+        return leaves
+
     def checked_leaves(self) -> list[ApprovalRow]:
         """Every spender leaf the user has ticked (via its own box or its token
         node, which auto-checks the subtree)."""
@@ -845,24 +854,26 @@ class ApprovalsPanel(QWidget):
                     out.append(r)
         return out
 
-    def _set_all_checked(self, state: Qt.CheckState) -> None:
+    def _set_checked(self, leaves: list[QTreeWidgetItem],
+                     state: Qt.CheckState) -> None:
+        # Set the LEAVES directly (not the token node), so a filtered-out sibling
+        # is left alone — the token node's auto-tristate recomputes from its
+        # children (Checked / PartiallyChecked / Unchecked) on its own.
         self.tree.blockSignals(True)
-        for ti in range(self.tree.topLevelItemCount()):
-            node = self.tree.topLevelItem(ti)
-            if node is not None:                      # setting the token node
-                node.setCheckState(0, state)          # auto-propagates to its leaves
+        for le in leaves:
+            le.setCheckState(0, state)
         self.tree.blockSignals(False)
         self._update_buttons()
 
     def _select_all(self) -> None:                    # + key
-        self._set_all_checked(Qt.CheckState.Checked)
+        self._set_checked(self._selectable_leaves(), Qt.CheckState.Checked)
 
     def _deselect_all(self) -> None:                  # − key
-        self._set_all_checked(Qt.CheckState.Unchecked)
+        self._set_checked(self._selectable_leaves(), Qt.CheckState.Unchecked)
 
     def _invert_selection(self) -> None:              # * key
         self.tree.blockSignals(True)
-        for leaf in self._all_leaves():
+        for leaf in self._selectable_leaves():
             leaf.setCheckState(0, Qt.CheckState.Unchecked
                                if leaf.checkState(0) == Qt.CheckState.Checked
                                else Qt.CheckState.Checked)
@@ -870,15 +881,32 @@ class ApprovalsPanel(QWidget):
         self._update_buttons()
 
     def _toggle_select_all(self) -> None:
-        """The button: check every leaf, or uncheck them all if already checked
-        — so a whole account's caps can be batch-revoked in one go."""
-        leaves = self._all_leaves()
+        """The button: check every (visible) leaf, or uncheck them if already all
+        checked — so a whole account (or a filtered view) can be batch-revoked in
+        one go."""
+        leaves = self._selectable_leaves()
         if not leaves:
             return
         if all(le.checkState(0) == Qt.CheckState.Checked for le in leaves):
             self._deselect_all()
         else:
             self._select_all()
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        # A token node's checkbox auto-propagates (ItemIsAutoTristate) to ALL its
+        # children — including ones the find bar has hidden. Under an active
+        # filter, undo that on the hidden ones so ticking a token subtree only
+        # selects the leaves you can actually see. Signals stay blocked so the
+        # correction doesn't re-enter; the node's tristate recomputes to partial.
+        if (self._filter_text.strip() and item is not None
+                and item.data(0, _TOKEN_ROLE) is not None):
+            self.tree.blockSignals(True)
+            for ci in range(item.childCount()):
+                child = item.child(ci)
+                if child.isHidden():
+                    child.setCheckState(0, Qt.CheckState.Unchecked)
+            self.tree.blockSignals(False)
+        self._update_buttons()
 
     def _token_node(self, r: ApprovalRow) -> QTreeWidgetItem:
         node = self._token_items.get(r.token)

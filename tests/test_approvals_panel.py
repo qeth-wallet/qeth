@@ -615,6 +615,53 @@ def test_clear_resets_the_filter(qtbot):
     assert p._filter_text == "" and not p._search_edit.isVisible()
 
 
+# --- selection respects the active filter ----------------------------------
+
+def _cs(leaf):
+    return leaf.checkState(0)
+
+
+def test_select_all_under_filter_checks_only_visible(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2),
+                   _row(token=TOKEN2, symbol="B", spender=SP1)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2
+    p._select_all()                                   # + key / button
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN2, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # hidden → left alone
+    assert {r.spender.lower() for r in p.checked_leaves()} == {SP1.lower()}
+
+
+def test_select_all_without_filter_checks_everything(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._select_all()
+    assert len(p.checked_leaves()) == 2               # no filter → whole account
+
+
+def test_token_node_check_under_filter_skips_hidden_leaves(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2
+    p.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)   # click the token node
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # auto-tristate undone
+
+
+def test_invert_under_filter_only_touches_visible(qtbot):
+    p = _panel(qtbot)
+    p.append_rows([_row(token=TOKEN, symbol="A", spender=SP1),
+                   _row(token=TOKEN, symbol="A", spender=SP2)])
+    p._search_by(SP1)                                 # hides TOKEN/SP2 (both unchecked)
+    p._invert_selection()                             # * key
+    assert _cs(p._leaf_for(TOKEN, SP1)) == Qt.CheckState.Checked     # visible flipped
+    assert _cs(p._leaf_for(TOKEN, SP2)) == Qt.CheckState.Unchecked   # hidden untouched
+
+
 def test_allowance_column_gets_a_gap_before_amount(qtbot):
     p = _shown_panel(qtbot)
     vp = p.tree.viewport().width()

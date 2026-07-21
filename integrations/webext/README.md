@@ -94,6 +94,26 @@ done
 The `-off` (dimmed) set is the toolbar icon when qeth is unreachable; the
 full-colour set shows once connected.
 
+## Automated coverage
+
+`tests/test_webext_browser.py` (opt-in, `-m browser`) loads this extension into
+headless **Chromium and Firefox** via Selenium against a stub `RpcServer`, and
+covers a chunk of the matrix below automatically: EIP-6963 announce, injected
+`window.ethereum`/`isMetaMask`, `eth_chainId`/`eth_accounts`/`eth_requestAccounts`
+round-trip, `wallet_switchEthereumChain` → `chainChanged` push, the signer-absent
+`-32601`, Safe-App-style **iframe inertness**, and disconnect→reconnect. Run it:
+
+```sh
+uv sync --group webext      # selenium is in the opt-in `webext` group, not `dev`
+uv run pytest -m browser -v
+```
+
+Drivers (`chromedriver`/`geckodriver`) must be on `PATH`, and port **1248** free
+(stop qeth first — the harness self-skips if it's held). The rows below that stay
+**manual**: real dapps, popup/toolbar-icon visuals, `personal_sign`/`eth_sendTransaction`
+approvals (need the running app + its sign dialog), service-worker force-eviction,
+the Firefox event-page idle→alarm reconnect timing, and store-packaged installs.
+
 ## Manual test matrix
 
 Run on **Chromium and Firefox**, with qeth running, unless noted:

@@ -84,6 +84,19 @@ dev = [
     "Pillow>=10",
 ]
 
+# Browser-extension dev/test tooling — a SEPARATE opt-in group, deliberately NOT
+# in `dev`, so the default `uv sync` (core dev: mypy/ruff/pytest/…) stays lean
+# and nobody pulls a browser-automation stack they don't need. Install with:
+#     uv sync --group webext
+# to run the opt-in Selenium harness (tests/test_webext_browser.py, `-m browser`)
+# that drives integrations/webext/ in headless Chromium + Firefox. The browsers
+# and their drivers (chromedriver/geckodriver) are system-installed, on PATH;
+# selenium>=4.20 is needed for install_addon(<dir>). Absent it, the harness
+# self-skips (pytest.importorskip at the top of the test module).
+webext = [
+    "selenium>=4.20",
+]
+
 [tool.uv]
 # Supply-chain policy: never resolve a package version newer than ~1 week old.
 # A malicious/compromised fresh upload is usually caught + yanked within days,
@@ -109,11 +122,15 @@ ty = "2099-01-01T00:00:00Z"
 # Network tests exercise real Blockscout / DefiLlama / GoPlus / Curve /
 # chain RPC endpoints; they're skipped by default to keep `pytest` fast
 # and hermetic. To run only them:    uv run pytest -m network
-# To run everything (offline + online): uv run pytest -m ''
+# The `browser` tests launch a real headless Chromium/Firefox and are likewise
+# skipped by default (they need drivers on PATH + a free port 1248):
+#                                    uv run pytest -m browser
+# To run everything (offline + online + browser): uv run pytest -m ''
 markers = [
     "network: requires live network and external services",
+    "browser: launches headless Chromium/Firefox with the webext against a stub RpcServer; needs chromedriver/geckodriver on PATH and a free port 1248",
 ]
-addopts = "-m 'not network'"
+addopts = "-m 'not network and not browser'"
 # pytest-qt: tell it which Qt binding we use. The "offscreen" Qt
 # platform plugin is set in tests/conftest.py before QApplication is
 # created, so UI tests don't pop windows on the developer's screen

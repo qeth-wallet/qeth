@@ -48,6 +48,25 @@ EXT_DIR = Path(__file__).resolve().parents[1] / "integrations" / "webext"
 ACCOUNT = "0x" + "11" * 20
 
 
+def _load_build():
+    """Import the extension's build.py (for its per-browser manifest packaging)
+    without leaving a __pycache__/ in the extension dir."""
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("wxbuild", EXT_DIR / "build.py")
+    mod = importlib.util.module_from_spec(spec)
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev
+    return mod
+
+
+BUILD = _load_build()
+
+
 # --- the tiny test dapp (served over http, in memory) ------------------------
 
 _CAPTURE = """
@@ -177,7 +196,7 @@ def _make_chromium(profile_dir):
     return webdriver.Chrome(options=opts, service=service)
 
 
-def _make_firefox():
+def _make_firefox(ext_dir):
     opts = FirefoxOptions()
     opts.binary_location = shutil.which("firefox")
     opts.add_argument("-headless")
@@ -191,7 +210,7 @@ def _make_firefox():
     opts.set_preference("browser.shell.checkDefaultBrowser", False)
     service = FirefoxService(executable_path=shutil.which("geckodriver"))
     drv = webdriver.Firefox(options=opts, service=service)
-    drv.install_addon(str(EXT_DIR), temporary=True)   # selenium>=4.20 zips a dir
+    drv.install_addon(str(ext_dir), temporary=True)   # selenium>=4.20 zips a dir
     return drv
 
 
@@ -205,7 +224,11 @@ def driver(request, rpc, dapp_url, tmp_path_factory):
     else:
         if not shutil.which("geckodriver") or not shutil.which("firefox"):
             pytest.skip("geckodriver / firefox not on PATH")
-        drv = _make_firefox()
+        # The source manifest is Chrome-flavoured (service_worker); Firefox MV3
+        # needs the event-page variant, so materialise it from build.py.
+        fx_dir = BUILD.write_unpacked(
+            tmp_path_factory.mktemp("fx-ext"), "firefox")
+        drv = _make_firefox(fx_dir)
     try:
         # Readiness probe: provider.js always sets window.qeth once its content
         # script injects. Firefox failing this means the MV3 host grant didn't

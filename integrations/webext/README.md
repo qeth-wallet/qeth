@@ -1,9 +1,15 @@
-# qeth Companion — browser extension
+# qeth — browser extension
 
 Connects dapps in Chrome-family browsers and Firefox to the running qeth
 desktop wallet (Frame-compatible JSON-RPC server on `127.0.0.1:1248`), the
 same role the Falkon connector plays inside Falkon. One MV3 codebase, no
 bundler, no npm.
+
+The extension's version always equals the app version (`qeth/__init__.py`
+`__version__`) — `build.py` stamps it into every package and `build.py sync`
+writes it back into `manifest.json` and the Falkon connector's
+`metadata.desktop`, so the two integrations never drift (a test gate enforces
+it).
 
 ## How it works
 
@@ -33,26 +39,35 @@ provider.js ── postMessage ── relay.js ── runtime Port ── backgr
 ## Build
 
 ```sh
-python build.py                # → out/qeth-webext-<version>.zip
+python build.py                # → out/qeth-webext-<version>.zip          (Chrome)
+                               #   out/qeth-webext-<version>-firefox.zip   (Firefox)
+python build.py sync           # stamp the app version into the source files
 python build.py sign           # build, then AMO-sign the .xpi (see below)
 ```
 
-One zip serves both stores (a Firefox `.xpi` is just a zip). Chrome loads
-unpacked during development and needs no signing.
+**Two packages, one codebase.** Chrome MV3 uses a service-worker background;
+Firefox MV3 has no service-worker support and needs the event-page form
+(`background.scripts`). Declaring both keys in one manifest makes Chrome log
+`'background.scripts' requires manifest version of 2 or lower`, so the source
+`manifest.json` is Chrome-clean (service worker only — the unpacked dev target)
+and `build.py` generates the Firefox variant. Chrome loads unpacked during
+development and needs no signing.
 
 ## Install
 
 **Chrome-family:** `chrome://extensions` → enable Developer mode → **Load
 unpacked** → select this directory. (Or load the built zip.)
 
-**Firefox (temporary):** `about:debugging#/runtime/this-firefox` → **Load
-Temporary Add-on** → pick `manifest.json`. Gone on restart — for a permanent
-install use a signed `.xpi` (below).
+**Firefox (temporary):** build first (`python build.py`), then
+`about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick the
+`out/qeth-webext-<version>-firefox.zip` (the source `manifest.json` is
+Chrome-flavoured, so don't load this directory directly in Firefox). Gone on
+restart — for a permanent install use a signed `.xpi` (below).
 
 **Firefox host access:** host permissions are user-grantable on Firefox, and
 without them the content scripts never inject (dapps won't see qeth). Grant via
 the extension's toolbar popup (**Grant site access**) or `about:addons` →
-qeth Companion → Permissions. Chrome grants them at install.
+qeth → Permissions. Chrome grants them at install.
 
 ## Firefox signing (permanent .xpi, unlisted / self-distribution)
 

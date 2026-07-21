@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "qeth Companion",
-  "version": "0.1.0",
+  "name": "qeth",
+  "version": "0.20.0",
   "description": "Connects dapps in this browser to the qeth desktop wallet on 127.0.0.1:1248.",
   "minimum_chrome_version": "116",
   "background": {
-    "service_worker": "background.js",
-    "scripts": ["background.js"]
+    "service_worker": "background.js"
   },
   "action": {
     "default_title": "qeth",

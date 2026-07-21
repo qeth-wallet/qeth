@@ -143,5 +143,19 @@
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   }
 
+  // --- back/forward cache -------------------------------------------
+  // When this page is frozen into the bfcache, Chrome complains that "the page
+  // keeping the extension port is moved into back/forward cache" the moment the
+  // background next posts to it. Close the Port before the freeze so nothing
+  // holds it, and re-open on restore. pagehide fires just before freeze/unload;
+  // pageshow with persisted=true means we came back out of the bfcache.
+  window.addEventListener("pagehide", function () {
+    stopPing();
+    if (port) { try { port.disconnect(); } catch (e) {} port = null; }
+  });
+  window.addEventListener("pageshow", function (e) {
+    if (e.persisted && !dead && !port) connectPort();
+  });
+
   connectPort();
 })();

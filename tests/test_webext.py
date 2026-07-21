@@ -18,6 +18,25 @@ FALKON = ROOT / "integrations" / "falkon" / "qeth_connector"
 MANIFEST = json.loads((WEBEXT / "manifest.json").read_text())
 
 
+def _load_build():
+    """Import build.py by path without leaving a __pycache__/ in the extension
+    dir (Chrome refuses to Load-unpacked a dir with a '_'-prefixed name)."""
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("wxbuild", WEBEXT / "build.py")
+    mod = importlib.util.module_from_spec(spec)
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev
+    return mod
+
+
+BUILD = _load_build()
+
+
 def _strip_js_comments(src: str) -> str:
     """Drop // line and /* */ block comments so scans see code, not prose
     (the header comment legitimately says 'the Falkon browser.')."""
@@ -38,11 +57,28 @@ class TestManifest:
     def test_is_mv3(self):
         assert MANIFEST["manifest_version"] == 3
 
-    def test_dual_background_for_both_browsers(self):
-        # Chrome uses service_worker; Firefox MV3 uses scripts (event page).
-        bg = MANIFEST["background"]
-        assert bg["service_worker"] == "background.js"
-        assert bg["scripts"] == ["background.js"]
+    def test_source_background_is_chrome_service_worker_only(self):
+        # The source manifest is the Chromium unpacked-dev target, so it must
+        # NOT carry the MV2 `background.scripts` key — Chrome logs
+        # "'background.scripts' requires manifest version of 2 or lower" on it.
+        assert MANIFEST["background"] == {"service_worker": "background.js"}
+
+    def test_firefox_variant_uses_event_page_scripts(self):
+        # Firefox MV3 has no service-worker background; build.py generates the
+        # event-page form for the Firefox package (and browser test).
+        fx = BUILD._manifest_for("firefox")
+        assert fx["background"] == {"scripts": ["background.js"]}
+        chrome = BUILD._manifest_for("chrome")
+        assert chrome["background"] == {"service_worker": "background.js"}
+
+    def test_version_tracks_the_app_version(self):
+        # Both extensions carry the app version (qeth/__init__.py __version__).
+        # `build.py sync` keeps the source files in step; this gate fails if
+        # someone bumps __version__ without re-syncing.
+        app = BUILD.app_version()
+        assert MANIFEST["version"] == app
+        desktop = (FALKON / "metadata.desktop").read_text()
+        assert f"X-Falkon-Version={app}" in desktop
 
     def test_min_chrome_116_for_ws_keepalive(self):
         # <116 service workers aren't kept alive by WebSocket activity.
@@ -185,33 +221,53 @@ class TestPopup:
 
 class TestBuild:
     def _build_mod(self):
-        import importlib.util
-        import sys
-        spec = importlib.util.spec_from_file_location(
-            "wxbuild", WEBEXT / "build.py")
-        mod = importlib.util.module_from_spec(spec)
-        # Don't leave a __pycache__/ behind in the extension dir — Chrome refuses
-        # to Load-unpacked any dir containing a "_"-prefixed name.
-        prev = sys.dont_write_bytecode
-        sys.dont_write_bytecode = True
-        try:
-            spec.loader.exec_module(mod)
-        finally:
-            sys.dont_write_bytecode = prev
-        return mod
+        return BUILD
 
     def test_packages_exactly_the_shipping_files(self, tmp_path):
+        import json as _json
         import zipfile
         mod = self._build_mod()
-        zip_path = mod.build(tmp_path)
+        zip_path = mod.build(tmp_path)                    # chrome (default)
         with zipfile.ZipFile(zip_path) as zf:
             members = set(zf.namelist())
+            manifest = _json.loads(zf.read("manifest.json"))
         # Exactly the package set — no README/.gitignore/build.py/out/svg.
         assert members == set(mod.PACKAGE_FILES)
         assert "README.md" not in members
         assert "build.py" not in members
-        # Version-stamped from the manifest.
-        assert zip_path.name == f"qeth-webext-{MANIFEST['version']}.zip"
+        # Version-stamped from the app version; Chrome background.
+        assert zip_path.name == f"qeth-webext-{mod.app_version()}.zip"
+        assert manifest["version"] == mod.app_version()
+        assert manifest["background"] == {"service_worker": "background.js"}
+
+    def test_firefox_build_ships_the_event_page_manifest(self, tmp_path):
+        import json as _json
+        import zipfile
+        mod = self._build_mod()
+        zip_path = mod.build(tmp_path, "firefox")
+        assert zip_path.name == f"qeth-webext-{mod.app_version()}-firefox.zip"
+        with zipfile.ZipFile(zip_path) as zf:
+            manifest = _json.loads(zf.read("manifest.json"))
+        assert manifest["background"] == {"scripts": ["background.js"]}
+
+    def test_write_unpacked_materialises_the_target_manifest(self, tmp_path):
+        import json as _json
+        mod = self._build_mod()
+        dest = mod.write_unpacked(tmp_path / "fx", "firefox")
+        manifest = _json.loads((dest / "manifest.json").read_text())
+        assert manifest["background"] == {"scripts": ["background.js"]}
+        # Every shipping file landed.
+        for rel in mod.PACKAGE_FILES:
+            assert (dest / rel).is_file()
+
+    def test_build_does_not_mutate_the_source_tree(self, tmp_path):
+        # build()/write_unpacked() stamp the version into the PACKAGED manifest
+        # only — the committed manifest.json must be untouched (sync does that).
+        mod = self._build_mod()
+        before = (WEBEXT / "manifest.json").read_bytes()
+        mod.build(tmp_path)
+        mod.write_unpacked(tmp_path / "u", "chrome")
+        assert (WEBEXT / "manifest.json").read_bytes() == before
 
     def test_build_rejects_a_drifted_provider(self, tmp_path, monkeypatch):
         import pytest

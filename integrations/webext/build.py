@@ -3,15 +3,27 @@
 
 Stdlib only — no node, no npm, matching the project's build story.
 
-    python build.py                # → out/qeth-webext-<version>.zip
+    python build.py                # → out/qeth-webext-<version>.zip (Chrome)
+                                   #   + out/qeth-webext-<version>-firefox.zip
+    python build.py sync           # stamp the app version (qeth/__init__.py
+                                   #   __version__) into manifest.json + the
+                                   #   Falkon connector's metadata.desktop
     python build.py sign           # build, then sign the Firefox .xpi via AMO
                                    #   (unlisted / self-distribution) if the
                                    #   QETH_AMO_JWT_ISSUER / _SECRET env vars
                                    #   are set; otherwise just builds.
 
-One zip serves both stores: Chrome Web Store takes it as-is, and a Firefox
-`.xpi` is just a zip — AMO signs that same package. Chrome is installed
-unpacked during development and needs no signing.
+Two packages, one codebase: Chrome uses an MV3 service-worker background;
+Firefox MV3 has no service-worker support and needs the event-page form
+(``background.scripts``). Declaring both keys in one manifest makes Chrome log
+``'background.scripts' requires manifest version of 2 or lower``, so the source
+manifest is Chrome-clean (service_worker only — that's the unpacked dev target)
+and the Firefox variant is generated here (``_manifest_for("firefox")``).
+
+The extension version always equals the app version (``qeth/__init__.py``
+``__version__``): ``build`` stamps it into every packaged manifest, and ``sync``
+writes it back into the source files so an unpacked dev load shows it too
+(tests/test_webext.py gates that they don't drift).
 
 The AMO signing flow (JWT auth + submission API) is exercised only with real
 credentials, so it is env-gated and untested offline; the zip build is covered
@@ -22,10 +34,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -35,6 +49,8 @@ import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+FALKON_DESKTOP = HERE.parent / "falkon" / "qeth_connector" / "metadata.desktop"
 
 # Exactly what ships. Anything not listed (README, .gitignore, out/, build.py,
 # the source SVG) stays out of the package.
@@ -54,8 +70,33 @@ PACKAGE_FILES = [
 AMO_API = "https://addons.mozilla.org/api/v5"
 
 
+def app_version() -> str:
+    """The single source of truth — ``qeth/__init__.py`` ``__version__``, read
+    statically (no import: qeth pulls in PySide6 and the eth stack)."""
+    src = (REPO / "qeth" / "__init__.py").read_text()
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', src, re.M)
+    if not m:
+        raise SystemExit("could not read __version__ from qeth/__init__.py")
+    return m.group(1)
+
+
 def _manifest() -> dict:
     return json.loads((HERE / "manifest.json").read_text())
+
+
+def _manifest_for(target: str) -> dict:
+    """The manifest for a browser target, version-stamped from the app version.
+
+    ``chrome`` is the source manifest as-is (MV3 service worker). ``firefox``
+    swaps the background to the event-page form (``scripts``) — Firefox MV3 has
+    no service-worker background — so neither store sees a key it warns on."""
+    m = copy.deepcopy(_manifest())
+    m["version"] = app_version()
+    if target == "firefox":
+        m["background"] = {"scripts": ["background.js"]}
+    elif target != "chrome":
+        raise SystemExit(f"unknown target {target!r} (chrome|firefox)")
+    return m
 
 
 def _verify_tree() -> None:
@@ -73,20 +114,68 @@ def _verify_tree() -> None:
         raise SystemExit("missing packaged files: " + ", ".join(missing))
 
 
-def build(out_dir: Path) -> Path:
-    _verify_tree()
-    version = _manifest()["version"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / f"qeth-webext-{version}.zip"
+def _member_bytes(rel: str, target: str) -> bytes:
+    """The bytes to pack for ``rel`` — the generated manifest for the target,
+    the on-disk file for everything else."""
+    if rel == "manifest.json":
+        return (json.dumps(_manifest_for(target), indent=2) + "\n").encode()
+    return (HERE / rel).read_bytes()
+
+
+def _zip(zip_path: Path, target: str) -> Path:
     # Deterministic zip: fixed member order, fixed timestamp.
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel in PACKAGE_FILES:
             info = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
-            zf.writestr(info, (HERE / rel).read_bytes())
+            zf.writestr(info, _member_bytes(rel, target))
     print(f"built {zip_path}  ({zip_path.stat().st_size} bytes)")
     return zip_path
+
+
+def build(out_dir: Path, target: str = "chrome") -> Path:
+    """Package one browser's zip. Chrome is the default (the unpacked dev
+    target); the version is always the app version, stamped into the manifest."""
+    _verify_tree()
+    version = app_version()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "" if target == "chrome" else f"-{target}"
+    return _zip(out_dir / f"qeth-webext-{version}{suffix}.zip", target)
+
+
+def write_unpacked(dest_dir: Path, target: str) -> Path:
+    """Materialise an unpacked extension dir for ``target`` (used by the Firefox
+    browser test, whose source manifest is Chrome-only)."""
+    _verify_tree()
+    for rel in PACKAGE_FILES:
+        dst = dest_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(_member_bytes(rel, target))
+    return dest_dir
+
+
+def sync_versions() -> str:
+    """Write the app version into the source manifest.json and the Falkon
+    connector's metadata.desktop so both extensions track it. Only rewrites a
+    file when it's actually stale (keeps ``build`` side-effect-free in tests)."""
+    version = app_version()
+    mpath = HERE / "manifest.json"
+    manifest = json.loads(mpath.read_text())
+    if manifest.get("version") != version:
+        manifest["version"] = version
+        mpath.write_text(json.dumps(manifest, indent=2) + "\n")
+        print(f"synced manifest.json → {version}")
+    if FALKON_DESKTOP.exists():
+        lines = FALKON_DESKTOP.read_text().splitlines()
+        want = f"X-Falkon-Version={version}"
+        for i, ln in enumerate(lines):
+            if ln.startswith("X-Falkon-Version=") and ln != want:
+                lines[i] = want
+                FALKON_DESKTOP.write_text("\n".join(lines) + "\n")
+                print(f"synced Falkon metadata.desktop → {version}")
+                break
+    return version
 
 
 # --- AMO signing (Firefox .xpi, unlisted / self-distribution) -----------
@@ -192,20 +281,30 @@ def sign(zip_path: Path, out_dir: Path) -> Path | None:
     req.add_header("Authorization", f"JWT {token}")
     with urllib.request.urlopen(req, timeout=120) as resp:
         xpi_bytes = resp.read()
-    xpi_path = out_dir / f"qeth-webext-{_manifest()['version']}.xpi"
+    xpi_path = out_dir / f"qeth-webext-{app_version()}.xpi"
     xpi_path.write_bytes(xpi_bytes)
     print(f"signed {xpi_path}  ({xpi_path.stat().st_size} bytes)")
     return xpi_path
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("command", nargs="?", default="build", choices=["build", "sign"])
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="build",
+                    choices=["build", "sync", "sign"])
     ap.add_argument("--out", type=Path, default=HERE / "out")
     args = ap.parse_args(argv)
-    zip_path = build(args.out)
+    if args.command == "sync":
+        sync_versions()
+        return 0
+    # Keep the source files' displayed version in step, then package both
+    # browsers' zips (Chrome zip is what `sign` never touches; Firefox is signed).
+    sync_versions()
+    build(args.out, "chrome")
+    fx_zip = build(args.out, "firefox")
     if args.command == "sign":
-        sign(zip_path, args.out)
+        sign(fx_zip, args.out)
     return 0
 
 

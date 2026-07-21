@@ -21,7 +21,7 @@ function chainName(hexId) {
 function $(id) { return document.getElementById(id); }
 
 function setVersion() {
-  try { $("version").textContent = "qeth Companion " + chrome.runtime.getManifest().version; }
+  try { $("version").textContent = "qeth " + chrome.runtime.getManifest().version; }
   catch (e) {}
 }
 

@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.21.0
+Version:        0.22.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,15 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Wed Jul 22 2026 Michael Egorov <michwill@yieldbasis.com> - 0.22.0-1
+- Token icons: fixed missing icons for tokens whose logo is an ipfs:// URI
+  (e.g. UNI) — resolve them via an HTTPS gateway, prefer a fetchable http logo
+  when merging token lists, and re-request an icon a row missed on first paint.
+- Faster new-account load: the token list renders the native asset and popular
+  held tokens immediately, then fills in vaults and the tail, instead of a
+  blank list until everything is discovered — and no longer blinks blank when
+  more tokens arrive mid-scan.
+
 * Wed Jul 22 2026 Michael Egorov <michwill@yieldbasis.com> - 0.21.0-1
 - Browser extension (Chrome + Firefox, MV3) connecting dapps to the wallet, the
   same role the Falkon connector plays inside Falkon; the Firefox add-on is

@@ -1233,3 +1233,74 @@ def test_reconcile_tick_reads_displayed_balances_only_while_ws_live(
     tp._shutting_down = True                       # quitting → no new worker
     tp._on_reconcile_tick()
     assert len(workers) == 1
+
+
+def test_cold_start_paints_priority_batch(qtbot, tmp_qeth):
+    """Cold start (no wallet cache): _paint_priority_batch renders the native
+    row + held recognised tokens right away — recognised-but-unpriced tokens
+    show via the grace window — so a brand-new account is a populated list
+    while the discovery spine still runs, not a blank one."""
+    from PySide6.QtCore import Qt
+    from qeth.plugins.tokens import TokensPlugin, TokenListPanel
+    from qeth.token_discovery import TokenBalance
+    from qeth.store import Store
+    from qeth.icons import IconCache
+    from qeth.chains import DEFAULT_CHAINS
+
+    ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+    TOK = "0x" + "ab" * 20
+    store = Store.load()
+    tp = TokensPlugin(store)
+    tp._token_lists._loaded = True
+    tp._token_lists.is_known = lambda cid, a: a.lower() == TOK   # recognised
+    icons = IconCache()
+    icons.request = lambda *a, **k: None                          # no network
+    panel = TokenListPanel(icons, store)
+    qtbot.addWidget(panel)
+    tp._panel = panel
+    panel._token_lists = tp._token_lists
+    panel._unpriced_grace = tp._within_unpriced_grace
+
+    view_key = (1, "0xme")
+    tp._displayed_view = view_key
+    held = [TokenBalance(contract=TOK, symbol="UNI", name="Uniswap",
+                         decimals=18, balance_raw=5 * 10 ** 18)]
+    tp._paint_priority_batch(ETH, 3 * 10 ** 18, held, view_key)
+
+    all_keys, visible_keys = set(), set()
+    for r in range(panel.table.rowCount()):
+        it = panel.table.item(r, 0)
+        if not it:
+            continue
+        all_keys.add(it.data(Qt.ItemDataRole.UserRole))
+        if not panel.table.isRowHidden(r):
+            visible_keys.add(it.data(Qt.ItemDataRole.UserRole))
+    assert (1, TOK) in visible_keys                    # held token shown at once
+    assert (1, panel.NATIVE_CONTRACT) in all_keys      # native/gas row present
+
+
+def test_cold_start_priority_paint_respects_view_guard(qtbot, tmp_qeth):
+    """A stale priority paint for a view that's no longer on screen must not
+    paint (guarded on _displayed_view)."""
+    from qeth.plugins.tokens import TokensPlugin, TokenListPanel
+    from qeth.token_discovery import TokenBalance
+    from qeth.store import Store
+    from qeth.icons import IconCache
+    from qeth.chains import DEFAULT_CHAINS
+
+    ETH = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
+    store = Store.load()
+    tp = TokensPlugin(store)
+    tp._token_lists._loaded = True
+    tp._token_lists.is_known = lambda cid, a: True
+    panel = TokenListPanel(IconCache(), store)
+    qtbot.addWidget(panel)
+    tp._panel = panel
+    panel._token_lists = tp._token_lists
+    panel._unpriced_grace = tp._within_unpriced_grace
+
+    tp._displayed_view = (1, "0xother")                # a DIFFERENT view is shown
+    held = [TokenBalance(contract="0x" + "cd" * 20, symbol="X", name="X",
+                         decimals=18, balance_raw=10 ** 18)]
+    tp._paint_priority_batch(ETH, 0, held, (1, "0xme"))
+    assert panel.table.rowCount() == 0                 # nothing painted

@@ -1604,6 +1604,22 @@ class TokensPlugin(Plugin):
             # metadata cache prefill we did at startup still helps
             # the receipt-credit path know how to label a fresh
             # inbound USDT without a separate metadata fetch.
+            # Cold start (no cache): paint native + held recognised tokens
+            # immediately so the list is populated within the first explorer
+            # round-trip, instead of staying blank until the whole
+            # metadata→balance→risk→prices spine below finishes, and kick a
+            # small price fetch over just those holdings so their USD values
+            # land fast (not gated on the full-union price fetch). The spine
+            # still runs and reconciles balances + prices in
+            # _on_combined_ready.
+            if cached is None:
+                self._paint_priority_batch(
+                    chain, blockscout_native_wei, blockscout_tokens,
+                    pv["view_key"],
+                )
+                self._kick_priority_prices(
+                    chain, blockscout_tokens, pv["view_key"])
+
             forced = {a for (cid, a) in self._store.shown_tokens
                       if cid == chain.chain_id}
             # Custom-added tokens: always balance-checked (so they surface the
@@ -2013,6 +2029,58 @@ class TokensPlugin(Plugin):
             return b.balance * p.price_usd if p else Decimal(0)
         out.sort(key=_value, reverse=True)
         return out
+
+    def _paint_priority_batch(
+        self, chain, native_wei: int, tokens: list, view_key,
+    ) -> None:
+        """Cold-start early paint: render the native/gas row + the held
+        recognised tokens the instant the explorer list returns, before the
+        rest of the discovery spine (metadata → balance multicall → risk →
+        full-union prices) finishes. Everything needed is already in hand —
+        native is a fresh RPC read and each held token carries its
+        symbol/name/decimals + a (slightly stale) balance. Recognised-but-
+        unpriced tokens show via the grace window, so the list is populated
+        right away instead of blank; _on_combined_ready reconciles balances
+        and prices when the spine completes (usually an in-place update). Only
+        runs for a brand-new account (no cache); a cached view already painted
+        from cache. Guarded on view_key so a stale worker can't paint the
+        wrong account."""
+        if self._panel is None or self._displayed_view != view_key:
+            return
+        entries = {
+            (chain.chain_id, b.contract.lower()): e
+            for b in tokens
+            if (e := self._token_lists.get(chain.chain_id, b.contract)) is not None
+        }
+        visible = self._compute_visible_tokens(chain, tokens, {})
+        self._panel.render_full(
+            chain, native_wei, visible, entries, {},
+            apply_dust_filter=not self._show_all,
+        )
+
+    def _kick_priority_prices(self, chain, tokens: list, view_key) -> None:
+        """Cold start: price just the held tokens (+ native) fast, so USD
+        values land on the priority rows within one round-trip instead of
+        waiting on the main spine's price fetch over the whole top-tokens
+        union. Panel-only — the spine persists the reconciled set to cache."""
+        if self.host is None or not tokens:
+            return
+        pw = PricesWorker(
+            self._price_source, chain, [b.contract for b in tokens],
+            include_native=True,
+        )
+        pw.prices_ready.connect(
+            lambda cid, prices, ch=chain, vk=view_key:
+            self._apply_priority_prices(ch, vk, prices))
+        self.host.start_worker(pw)
+
+    def _apply_priority_prices(self, chain, view_key, prices: dict) -> None:
+        """Apply the priority price fetch to the panel, only while the same
+        cold-start view is still on screen."""
+        if self._panel is None or self._displayed_view != view_key:
+            return
+        self._panel.set_prices(
+            chain.chain_id, prices, apply_dust_filter=not self._show_all)
 
     def _on_refresh_tick(self) -> None:
         """Periodic re-fetch for the currently-displayed account."""

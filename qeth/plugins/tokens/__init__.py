@@ -1483,8 +1483,11 @@ class TokensPlugin(Plugin):
             # that lands WHILE the initial pipeline is still in flight (the
             # network vault-provenance scan almost always does) would otherwise
             # short-circuit on the in-flight guard and not surface its new tokens
-            # until the next 60s tick / account switch / restart.
-            self._invalidate_view_and_refresh()
+            # until the next 60s tick / account switch / restart. reset_view=
+            # False so a cold-start view that's already showing its priority
+            # batch isn't re-blanked with the 'Discovering tokens…' placeholder
+            # (the white-flash); the round reconciles the new token in place.
+            self._invalidate_view_and_refresh(reset_view=False)
 
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
@@ -1611,8 +1614,11 @@ class TokensPlugin(Plugin):
             # small price fetch over just those holdings so their USD values
             # land fast (not gated on the full-union price fetch). The spine
             # still runs and reconciles balances + prices in
-            # _on_combined_ready.
-            if cached is None:
+            # _on_combined_ready. Gated on is_new_view so a forced re-refresh
+            # of the same view (own-token/vault discovery landing mid-pipeline)
+            # doesn't re-paint over — and momentarily un-price — the batch it
+            # already painted; the discovery round reconciles it in place.
+            if cached is None and is_new_view:
                 self._paint_priority_batch(
                     chain, blockscout_native_wei, blockscout_tokens,
                     pv["view_key"],
@@ -2307,10 +2313,19 @@ class TokensPlugin(Plugin):
                 "balance", 4000)
         self._invalidate_view_and_refresh()
 
-    def _invalidate_view_and_refresh(self) -> None:
-        """Force the next _refresh to do a full discovery round rather
-        than short-circuiting on _discovery_in_flight / _displayed_view."""
-        self._displayed_view = None
+    def _invalidate_view_and_refresh(self, reset_view: bool = True) -> None:
+        """Force the next _refresh to do a full discovery round rather than
+        short-circuiting on _discovery_in_flight. ``reset_view=True`` also
+        clears _displayed_view so the refresh treats it as a new view (an
+        instant show_cached re-render for user actions like hide/pin/show-all,
+        which have a cache). Pass ``reset_view=False`` when a populated
+        cold-start view is still discovering (own-token/vault discovery landing
+        mid-pipeline): resetting the view would make _refresh re-blank the
+        table with the 'Discovering tokens…' placeholder (no cache saved yet),
+        the half-second white flash — keeping it lets the discovery round
+        reconcile in place instead."""
+        if reset_view:
+            self._displayed_view = None
         self._discovery_in_flight.clear()
         if self.host is None:
             return

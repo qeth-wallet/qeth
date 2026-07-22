@@ -1304,3 +1304,42 @@ def test_cold_start_priority_paint_respects_view_guard(qtbot, tmp_qeth):
                          decimals=18, balance_raw=10 ** 18)]
     tp._paint_priority_batch(ETH, 0, held, (1, "0xme"))
     assert panel.table.rowCount() == 0                 # nothing painted
+
+
+def test_own_token_discovery_refresh_keeps_view_no_blank(tmp_qeth, monkeypatch):
+    """A vault / own-token discovery landing mid-cold-start forces a
+    re-discovery (clears the in-flight guard) but must NOT reset _displayed_view
+    — otherwise _refresh re-blanks the already-populated table with the
+    'Discovering tokens…' placeholder (the half-second white flash)."""
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.store import Store
+    tp = TokensPlugin(Store())
+    view = (1, "0xme")
+    tp._displayed_view = view
+    tp._discovery_in_flight = {view}
+    tp.host = SimpleNamespace(
+        current_chain=lambda: SimpleNamespace(chain_id=1),
+        selected_address="0xme")
+    tp._store.add_discovered_tokens = (                       # pretend it's new
+        lambda cid, cs: True)                # type: ignore[method-assign]
+    seen = {}
+    monkeypatch.setattr(tp, "_refresh",
+                        lambda a: seen.update(view=tp._displayed_view))
+    tp._on_own_tokens_discovered(1, ["0x" + "ab" * 20])
+    assert seen["view"] == view                 # kept → is_new_view False → no re-blank
+    assert view not in tp._discovery_in_flight   # in-flight cleared → full round runs
+
+
+def test_invalidate_view_reset_flag(tmp_qeth):
+    """reset_view=True (default) clears _displayed_view (user actions want the
+    instant show_cached re-render); reset_view=False keeps it."""
+    from qeth.plugins.tokens import TokensPlugin
+    from qeth.store import Store
+    tp = TokensPlugin(Store())
+    tp.host = None                               # returns right after the reset/guard
+    tp._displayed_view = (1, "0xme")
+    tp._invalidate_view_and_refresh()
+    assert tp._displayed_view is None            # default resets
+    tp._displayed_view = (1, "0xme")
+    tp._invalidate_view_and_refresh(reset_view=False)
+    assert tp._displayed_view == (1, "0xme")     # kept

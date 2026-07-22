@@ -61,6 +61,23 @@ chmod +x qeth-0.13.0-x86_64.AppImage
 
 Self-contained — runs on any reasonably recent x86-64 Linux (glibc ≥ 2.34).
 
+### Gentoo / Calculate Linux
+
+A Portage overlay lives at
+[`qeth-wallet/qeth-gentoo`](https://github.com/qeth-wallet/qeth-gentoo). Like the
+`.rpm`/`.deb` it links the **system PySide6** for native theming and vendors only
+the eth stack from source:
+
+```sh
+eselect repository add qeth-gentoo git https://github.com/qeth-wallet/qeth-gentoo.git
+emaint sync -r qeth-gentoo
+emerge --autounmask-write -av net-p2p/qeth   # apply the printed USE/keyword changes, then re-run
+```
+
+Optional features are USE flags (`simulate helios qr frame ledger` default on;
+`falkon chromium firefox` default off) — details in the
+[overlay README](https://github.com/qeth-wallet/qeth-gentoo#readme).
+
 ### From source
 
 **Linux desktop** — uses your distro's Qt so the app matches your theme:

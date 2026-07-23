@@ -88,7 +88,7 @@ signs an **unlisted** package (free, not listed in the catalog — you host the
 
 Credentials are read only from the environment (never stored in the repo).
 Without them, `sign` just builds the zip. The `gecko.id` in the manifest
-(`firefox@qeth.eth`) binds every signed version to the add-on on your AMO
+(`wallet@qeth.eth`) binds every signed version to the add-on on your AMO
 account and must stay stable — it's an identifier, not a real address, so it
 needn't be a domain you own (AMO validates only its shape). Changing it once
 users have installed breaks their auto-updates.

@@ -142,10 +142,17 @@ auto-detect a host Helios if you prefer to manage it yourself.
 
 qeth ships its own Chrome/Firefox extension (a Frame-compatible connector) that
 exposes the wallet to dapps through the local JSON-RPC server. Prebuilt packages
-live in [`extensions/`](extensions/) — the AMO-signed Firefox `.xpi` and the
-Chrome `.zip`.
+live in [`extensions/`](extensions/):
 
-![qeth browser extension](docs/images/extension-screenshot.png)
+- **Firefox** — the AMO-signed `.xpi` in [`extensions/firefox/`](extensions/firefox/).
+  Install via *about:addons → gear → Install Add-on From File…*.
+- **Chrome** — the `.zip` in [`extensions/chrome/`](extensions/chrome/); load it
+  unpacked (`chrome://extensions` → Developer mode → Load unpacked) or from the
+  Chrome Web Store.
+
+![qeth in Firefox](docs/images/firefox-extension-screenshot.png)
+
+![qeth in Chrome](docs/images/chrome-extension-screenshot.png)
 
 ## Notes
 

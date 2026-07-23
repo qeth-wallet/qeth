@@ -4,6 +4,8 @@ A Qt (PySide6) Ethereum wallet for the Linux desktop — hardware-wallet (Ledger
 support and a Frame-compatible JSON-RPC server on `127.0.0.1:1248`, so the Frame
 browser extension and dapps connect unchanged.
 
+![qeth wallet](docs/images/app-screenshot.png)
+
 ## Install
 
 Grab the package for your distro from the
@@ -135,6 +137,15 @@ work out of the box with nothing extra. It's the only way verified mode works in
 the Flatpak (the sandbox can't reach a host binary); the verify AppImage needs
 glibc ≥ 2.39 (Ubuntu 24.04+, Fedora 39+). The normal packages stay lean and
 auto-detect a host Helios if you prefer to manage it yourself.
+
+## Browser extension
+
+qeth ships its own Chrome/Firefox extension (a Frame-compatible connector) that
+exposes the wallet to dapps through the local JSON-RPC server. Prebuilt packages
+live in [`extensions/`](extensions/) — the AMO-signed Firefox `.xpi` and the
+Chrome `.zip`.
+
+![qeth browser extension](docs/images/extension-screenshot.png)
 
 ## Notes
 

@@ -53,7 +53,7 @@ Store, not the GitHub release asset set.
    prior `qeth-*` so only the current version stays tracked).
 
 2. **Firefox** — the `sign` step already uploaded + signed the version on AMO
-   (unlisted add-on `wallet@qeth.eth`). Distribute the committed
+   (unlisted add-on `firefox@qeth.eth`). Distribute the committed
    `firefox/qeth-<v>.xpi` as a file: host it / attach it to the GitHub release /
    link it from the site. Users install via `about:addons → Install Add-on From
    File…`.

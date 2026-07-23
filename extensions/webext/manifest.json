@@ -50,7 +50,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "wallet@qeth.eth",
+      "id": "firefox@qeth.eth",
       "strict_min_version": "128.0"
     }
   },

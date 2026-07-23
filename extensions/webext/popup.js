@@ -20,6 +20,21 @@ function chainName(hexId) {
 
 function $(id) { return document.getElementById(id); }
 
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+// Build an element with plain text content — avoids innerHTML so untrusted
+// values (the account address from the wallet) can never inject markup, and
+// keeps AMO's addons-linter happy ("unsafe assignment to innerHTML").
+function el(tag, text) {
+  var e = document.createElement(tag);
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function text(s) { return document.createTextNode(s); }
+
 function setVersion() {
   try { $("version").textContent = "qeth " + chrome.runtime.getManifest().version; }
   catch (e) {}
@@ -28,19 +43,31 @@ function setVersion() {
 function showConnected(chainId, account) {
   $("status").className = "status ok";
   $("status").textContent = "Connected to qeth";
-  var acct = account
-    ? '<span class="addr">' + account + "</span>"
-    : "No account selected in qeth";
-  $("detail").innerHTML =
-    "Network: <b>" + chainName(chainId) + "</b><br>Account: " + acct;
+  var detail = $("detail");
+  clear(detail);
+  detail.appendChild(text("Network: "));
+  detail.appendChild(el("b", chainName(chainId)));
+  detail.appendChild(document.createElement("br"));
+  detail.appendChild(text("Account: "));
+  if (account) {
+    var addr = el("span", account);
+    addr.className = "addr";
+    detail.appendChild(addr);
+  } else {
+    detail.appendChild(text("No account selected in qeth"));
+  }
 }
 
 function showDisconnected() {
   $("status").className = "status off";
   $("status").textContent = "Not connected";
-  $("detail").innerHTML =
+  var detail = $("detail");
+  clear(detail);
+  detail.appendChild(text(
     "The qeth wallet doesn't seem to be running. Start qeth — it serves the " +
-    "connector on <code>127.0.0.1:1248</code> — then press Recheck.";
+    "connector on "));
+  detail.appendChild(el("code", "127.0.0.1:1248"));
+  detail.appendChild(text(" — then press Recheck."));
 }
 
 function probe() {

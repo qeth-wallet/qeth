@@ -1909,7 +1909,10 @@ class TestTokensPlugin:
         """A token discovered WHILE the initial pipeline is in flight (the
         network vault scan almost always finishes then) must force a full
         discovery round — a plain _refresh short-circuits on the in-flight guard,
-        so the new token wouldn't surface until the next tick / restart."""
+        so the new token wouldn't surface until the next tick / restart. With
+        reset_view=False: the cold-start view is already showing its priority
+        batch, and resetting it would re-blank the table with the 'Discovering
+        tokens…' placeholder (the white flash) instead of reconciling in place."""
         host = _StubHost(address=ADDR)
         tokens_plugin.attach(host)
         cid = host.current_chain().chain_id
@@ -1918,10 +1921,11 @@ class TestTokensPlugin:
         tokens_plugin._discovery_in_flight.add(view)     # a pipeline is running
         forced, plain = [], []
         monkeypatch.setattr(tokens_plugin, "_invalidate_view_and_refresh",
-                            lambda: forced.append(True))
+                            lambda reset_view=True: forced.append(reset_view))
         monkeypatch.setattr(tokens_plugin, "_refresh", lambda a: plain.append(a))
         tokens_plugin._on_own_tokens_discovered(cid, ["0x" + "ab" * 20])   # a NEW token
-        assert forced == [True]        # full round forced past the in-flight guard
+        assert forced == [False]       # full round forced past the in-flight
+                                       # guard, without re-blanking the view
         assert plain == []             # not the short-circuiting plain refresh
 
     def test_recognised_unpriced_token_hides_after_grace_window(

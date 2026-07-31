@@ -314,6 +314,25 @@ def test_rpc_round_trip(page):
         assert [a.lower() for a in r["ok"]] == [ACCOUNT.lower()]
 
 
+def test_permissions_round_trip(page):
+    """EIP-2255. qeth auto-connects, so a permission request is an immediate
+    grant — dapps whose connect action is wallet_requestPermissions rather than
+    eth_requestAccounts must not see a -32601 and report a failed connect."""
+    r = _request(page, "wallet_requestPermissions", [{"eth_accounts": {}}])
+    assert r["err"] is None
+    assert r["ok"][0]["parentCapability"] == "eth_accounts"
+    caveat = r["ok"][0]["caveats"][0]
+    assert caveat["type"] == "restrictReturnedAccounts"
+    assert [a.lower() for a in caveat["value"]] == [ACCOUNT.lower()]
+    # The provider absorbs the caveat, so a dapp that ONLY calls
+    # requestPermissions still reads an address off us.
+    assert _js(page, "window.ethereum.selectedAddress").lower() == ACCOUNT.lower()
+    assert _request(page, "wallet_getPermissions")["ok"] == r["ok"]
+    # Disconnect: accepted (null), with no server-side gate to clear.
+    rv = _request(page, "wallet_revokePermissions", [{"eth_accounts": {}}])
+    assert rv["err"] is None and rv["ok"] is None
+
+
 def test_switch_chain(page):
     page.execute_script("window.__events = []; "
                         "window.ethereum.on('chainChanged', v => window.__events.push(v));")
@@ -344,6 +363,26 @@ def test_iframe_inert(page):
         r = _request(page, "eth_requestAccounts")                  # lifts the gate
         assert [a.lower() for a in r["ok"]] == [ACCOUNT.lower()]
         assert [a.lower() for a in _request(page, "eth_accounts")["ok"]] == [ACCOUNT.lower()]
+    finally:
+        page.switch_to.default_content()
+
+
+def test_iframe_permissions_gate(page):
+    """The inert sub-frame mode covers EIP-2255 too: wallet_getPermissions asks
+    the same "are we connected?" question as eth_accounts, so it's answered
+    locally with [] until an explicit connect — otherwise a library probing
+    with it would read us as authorized and auto-pick us ahead of the page's
+    Safe connector. wallet_requestPermissions IS such an explicit connect, so
+    it lifts the gate exactly like eth_requestAccounts."""
+    page.switch_to.frame(0)
+    try:
+        _wait_js(page, "window.qeth", timeout=15)
+        assert _request(page, "wallet_getPermissions")["ok"] == []
+        r = _request(page, "wallet_requestPermissions", [{"eth_accounts": {}}])
+        assert [a.lower() for a in r["ok"][0]["caveats"][0]["value"]] \
+            == [ACCOUNT.lower()]
+        assert [a.lower() for a in _request(page, "eth_accounts")["ok"]] \
+            == [ACCOUNT.lower()]
     finally:
         page.switch_to.default_content()
 

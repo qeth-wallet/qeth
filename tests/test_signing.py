@@ -2078,14 +2078,70 @@ class TestRpcEventBroadcast:
         # the hermeticity guard would fail it. Assert -32601 instead.
         server._proxy = AsyncMock(side_effect=AssertionError("must not proxy"))
         for method in (
-            "wallet_watchAsset", "wallet_getPermissions",
-            "wallet_requestPermissions", "wallet_revokePermissions",
-            "wallet_getCapabilities", "wallet_sendCalls",
+            "wallet_watchAsset", "wallet_getCapabilities", "wallet_sendCalls",
+            "wallet_getCallsStatus", "wallet_showCallsStatus",
         ):
             with pytest.raises(RpcError) as ei:
                 asyncio.run(server._dispatch(method, [], origin="https://d.example"))
             assert ei.value.code == -32601
             server._proxy.assert_not_awaited()
+
+    def test_request_permissions_grants_eth_accounts_without_a_prompt(self):
+        """EIP-2255. qeth has no connect gate — every origin already gets the
+        default account — so requesting eth_accounts is an immediate grant.
+        Several wallet libraries connect with wallet_requestPermissions instead
+        of eth_requestAccounts; answering -32601 made those dapps report a
+        failed connect rather than falling back."""
+        server = self._make_server()
+        acct = server.store.default_account
+        assert acct
+        want = [{
+            "invoker": "https://d.example",
+            "parentCapability": "eth_accounts",
+            "caveats": [{"type": "restrictReturnedAccounts", "value": [acct]}],
+        }]
+        for method, params in (
+            ("wallet_requestPermissions", [{"eth_accounts": {}}]),
+            ("wallet_getPermissions", []),
+            # A caller that omits/garbles the requested-capability object is
+            # read as asking for eth_accounts (the only thing we grant).
+            ("wallet_requestPermissions", []),
+        ):
+            got = asyncio.run(
+                server._dispatch(method, params, origin="https://d.example"))
+            assert got == want
+
+    def test_request_permissions_names_the_capability_it_cannot_grant(self):
+        from qeth.rpc import RpcError
+        server = self._make_server()
+        with pytest.raises(RpcError) as ei:
+            asyncio.run(server._dispatch(
+                "wallet_requestPermissions",
+                [{"eth_accounts": {}, "endowment:sign": {}}],
+                origin="https://d.example"))
+        assert ei.value.code == -32601
+        assert "endowment:sign" in ei.value.message
+        # Granting nothing must not read as success — the dapp has to see the
+        # refusal, not an empty list it would mistake for a grant.
+
+    def test_permissions_are_empty_without_a_default_account(self):
+        server = self._make_server()
+        server.store.default_account = None
+        assert asyncio.run(server._dispatch(
+            "wallet_getPermissions", [], origin="https://d.example")) == []
+
+    def test_revoke_permissions_is_accepted_as_a_no_op(self):
+        """A dapp's Disconnect button: accept it (null result) so the dapp can
+        clear its own state. Nothing to clear here — qeth keeps no per-origin
+        connect gate, so the account is served again on the next request, same
+        as any other origin."""
+        server = self._make_server()
+        assert asyncio.run(server._dispatch(
+            "wallet_revokePermissions", [{"eth_accounts": {}}],
+            origin="https://d.example")) is None
+        assert asyncio.run(server._dispatch(
+            "eth_accounts", [], origin="https://d.example")) \
+            == [server.store.default_account]
 
 
 def test_chain_added_signal_carries_ids_above_qint32(qtbot):

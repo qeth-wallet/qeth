@@ -47,8 +47,16 @@ def test_subframe_inert_behaviour_intact():
     # survive the transport refactor unchanged.
     assert 'this.isMetaMask = !IN_SUBFRAME;' in PROVIDER
     assert 'this._authorized = !IN_SUBFRAME;' in PROVIDER
-    # eth_accounts answered locally as [] while unauthorized.
-    assert 'if (!this._authorized && args.method === "eth_accounts")' in PROVIDER
+    # eth_accounts answered locally as [] while unauthorized — and so is
+    # wallet_getPermissions, which asks the same "are we connected?" question
+    # in EIP-2255 form (a library probing with it would otherwise read us as
+    # authorized inside the frame and take us over the Safe connector).
+    assert 'if (!this._authorized && (args.method === "eth_accounts"' in PROVIDER
+    assert '|| args.method === "wallet_getPermissions")' in PROVIDER
+    # An explicit connect lifts the gate — either spelling of it.
+    assert 'if (args.method === "eth_requestAccounts"' in PROVIDER
+    assert '|| args.method === "wallet_requestPermissions") self._authorized = true;' \
+        in PROVIDER
     # EIP-6963 announce is top-frame only.
     assert 'if (!IN_SUBFRAME) {' in PROVIDER
 

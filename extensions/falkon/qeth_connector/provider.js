@@ -144,9 +144,14 @@
       return Promise.reject(rpcError(-32600, "Invalid request: 'method' required"));
     }
     // Unauthorized sub-frame: report no account (the dapp reads this as "not
-    // connected") until an explicit eth_requestAccounts flips _authorized in
-    // the .then below. Answered locally so we never even reach the wallet.
-    if (!this._authorized && args.method === "eth_accounts") {
+    // connected") until an explicit connect flips _authorized in the .then
+    // below. Answered locally so we never even reach the wallet.
+    // wallet_getPermissions is the same question in EIP-2255 clothing — a
+    // library that probes with it would otherwise see eth_accounts granted and
+    // auto-pick us over the page's Safe connector, the exact bug the inert
+    // sub-frame mode exists to avoid.
+    if (!this._authorized && (args.method === "eth_accounts"
+                              || args.method === "wallet_getPermissions")) {
       return Promise.resolve([]);
     }
     this._engage();
@@ -158,7 +163,11 @@
       self._pending[payload.id] = { resolve: resolve, reject: reject };
       self._dispatch(payload);
     }).then(function (result) {
-      if (args.method === "eth_requestAccounts") self._authorized = true;
+      // Both are explicit, user-driven connects: several wallet libraries
+      // (and every "switch account" button) reach for wallet_requestPermissions
+      // rather than eth_requestAccounts, and that must lift the gate too.
+      if (args.method === "eth_requestAccounts"
+          || args.method === "wallet_requestPermissions") self._authorized = true;
       self._absorb(args.method, args.params, result);
       return result;
     });
@@ -201,6 +210,10 @@
       try {
         if (this._setChainId(params[0].chainId)) this.emit("chainChanged", this.chainId);
       } catch (e) {}
+    } else if (method === "wallet_requestPermissions"
+               || method === "wallet_getPermissions") {
+      var permitted = firstPermittedAccount(result);
+      if (permitted) this.selectedAddress = permitted;
     } else if (method === "eth_subscribe" && result && params && params[0]) {
       // Remember our own wallet-event subscriptions so _onSubPush can map a
       // pushed notification's id back to its type (push mode only).
@@ -406,6 +419,25 @@
   // --- helpers ---------------------------------------------------------
   function rpcError(code, message) {
     var e = new Error(message || "qeth error"); e.code = code; return e;
+  }
+
+  // EIP-2255: dig the address out of an eth_accounts permission's
+  // restrictReturnedAccounts caveat, so a dapp that connects with
+  // wallet_requestPermissions alone still populates selectedAddress (it never
+  // calls eth_accounts, and would otherwise read a null address off us).
+  function firstPermittedAccount(perms) {
+    if (!perms || !perms.length) return null;
+    for (var i = 0; i < perms.length; i++) {
+      var p = perms[i];
+      if (!p || p.parentCapability !== "eth_accounts") continue;
+      var caveats = p.caveats || [];
+      for (var j = 0; j < caveats.length; j++) {
+        var c = caveats[j];
+        if (c && c.type === "restrictReturnedAccounts"
+            && c.value && c.value.length) return c.value[0];
+      }
+    }
+    return null;
   }
 
   // --- install ---------------------------------------------------------

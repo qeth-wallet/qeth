@@ -45,14 +45,20 @@ _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 # and returns messier, provider-specific errors). See _dispatch.
 _UNSUPPORTED_WALLET_METHODS = frozenset({
     "wallet_watchAsset",
-    "wallet_getPermissions",
-    "wallet_requestPermissions",
-    "wallet_revokePermissions",
     "wallet_getCapabilities",
     "wallet_sendCalls",
     "wallet_getCallsStatus",
     "wallet_showCallsStatus",
 })
+
+# EIP-2255 capabilities qeth can grant. qeth has no connect prompt — every
+# origin is handed the default account on request — so "requesting"
+# eth_accounts is an immediate, unconditional grant, not a dialog. Answering
+# these properly (rather than -32601) matters because a wallet library's
+# connect action is often wallet_requestPermissions, NOT eth_requestAccounts:
+# those dapps surfaced the rejection as a failed connect instead of falling
+# back. Anything outside this set is refused by name.
+_GRANTABLE_PERMISSIONS = frozenset({"eth_accounts"})
 
 
 def _require_safe_chain_urls(rpc_url: str, explorer: str) -> None:
@@ -449,6 +455,30 @@ class RpcServer:
             return cid
         return self.store.current_chain().chain_id
 
+    def _granted_permissions(self, origin: str | None) -> list[dict]:
+        """The EIP-2255 permission objects currently in force for ``origin``.
+
+        qeth auto-connects, so the answer is derived, not stored: the account
+        an ``eth_accounts`` call would return IS the granted capability, with
+        the address carried in the standard ``restrictReturnedAccounts``
+        caveat. An empty list when the wallet has no default account — nothing
+        is granted then, and that's what ``eth_accounts`` reports too.
+
+        Same value for ``wallet_getPermissions`` and a successful
+        ``wallet_requestPermissions``: with no connect gate, asking for the
+        permission and reading it back can't differ."""
+        acct = self.store.default_account
+        if not acct:
+            return []
+        return [{
+            "invoker": origin,
+            "parentCapability": "eth_accounts",
+            "caveats": [{
+                "type": "restrictReturnedAccounts",
+                "value": [acct],
+            }],
+        }]
+
     def set_rpc_chain(self, chain_id: int) -> None:
         """Called when the wallet UI's chain combo flips. The
         store has already been updated (it's the source of truth
@@ -680,6 +710,30 @@ class RpcServer:
             # treat the entries as address strings and choke on a null.
             acct = self.store.default_account
             return [acct] if acct else []
+
+        if method == "wallet_getPermissions":
+            return self._granted_permissions(origin)
+
+        if method == "wallet_requestPermissions":
+            requested = params[0] if params and hasattr(params[0], "keys") \
+                else {"eth_accounts": {}}
+            unknown = sorted(set(requested) - _GRANTABLE_PERMISSIONS)
+            if unknown:
+                # Name what we can't do rather than a blanket -32601 on the
+                # method: a dapp asking for eth_accounts + something exotic
+                # learns which half failed.
+                raise RpcError(
+                    -32601, "unsupported permission(s): " + ", ".join(unknown))
+            return self._granted_permissions(origin)
+
+        if method == "wallet_revokePermissions":
+            # Accepted so a dapp's Disconnect button works (it clears its own
+            # state on the null result), but there is nothing on our side to
+            # clear: qeth keeps no per-origin connect gate, so the next request
+            # from this origin is served exactly as before. Deliberately silent
+            # about that rather than erroring — a -32601 here just made
+            # Disconnect look broken.
+            return None
 
         if method == "eth_chainId":
             return hex(self._chain_for_origin(origin))

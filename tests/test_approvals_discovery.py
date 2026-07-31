@@ -36,6 +36,23 @@ def test_own_approve_is_a_pair():
     assert pairs == {(TOKEN.lower(), SPENDER.lower())}
 
 
+def test_approve_with_unparseable_spender_yields_no_pair():
+    """Both halves of `if token and spender` are load-bearing, and only the
+    token half was covered. A truncated approve (right selector, no argument
+    word) decodes to spender=None; relaxing that guard to `or` survived
+    mutation and would reach `spender.lower()` on None — an AttributeError
+    mid-scan on a wallet that happens to hold one malformed tx."""
+    truncated = _tx(A, TOKEN, "0x095ea7b3")
+    assert spender_of(truncated.input_data) is None       # the precondition
+    assert approve_pairs_in([truncated], A) == set()
+
+
+def test_approve_to_no_contract_yields_no_pair():
+    """The token half: an approve whose `to` is empty (a contract creation
+    carrying that selector) has no token to key the pair on."""
+    assert approve_pairs_in([_tx(A, "", _approve_data(SPENDER))], A) == set()
+
+
 def test_received_approve_ignored():
     # sent by someone else (from_addr != A) → not A's approval
     assert approve_pairs_in([_tx(B, TOKEN, _approve_data(SPENDER))], A) == set()

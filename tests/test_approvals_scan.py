@@ -136,6 +136,42 @@ def test_row_carries_token_balance_for_the_at_risk_tag(monkeypatch):
     assert row.token_balance == 7_000_000            # wallet balance read + attached
 
 
+def test_row_keeps_the_tokens_own_decimals(monkeypatch):
+    """`decimals=int(m.get("decimals") or 18)` — the 18 is a FALLBACK for
+    metadata that omits the field, not a default for every token. The stub
+    metadata above answers 18 for everything, so mutating that `or` to `and`
+    (which pins every token at 18) survived. A 6-decimal token then renders its
+    allowance 10^12 times too small — the user misreads the cap by a trillion."""
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 5), set(pairs)))
+
+    class _Usdc(_FakeMeta):
+        def get(self, cid, token):
+            return {"symbol": "USDC", "name": "USD Coin", "decimals": 6}
+
+    w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 100)]]),
+                   _FakeTxSource(), [], _Usdc(), client_factory=_FakeClient)
+    got = _run(w)
+    row = next(r for b in got["rows"] for r in b)
+    assert row.decimals == 6
+    assert row.symbol == "USDC"
+
+
+def test_row_decimals_falls_back_to_18_when_metadata_omits_it(monkeypatch):
+    """The other half of that `or`: absent/zero metadata still yields 18."""
+    monkeypatch.setattr(ap, "fetch_allowances",
+                        lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 5), set(pairs)))
+
+    class _NoDecimals(_FakeMeta):
+        def get(self, cid, token):
+            return {"symbol": "TK", "name": "Tok"}
+
+    w = ScanWorker(CHAIN, A, _FakeLogSource([[_log(TOKEN, A, SPENDER, 100)]]),
+                   _FakeTxSource(), [], _NoDecimals(), client_factory=_FakeClient)
+    got = _run(w)
+    assert next(r for b in got["rows"] for r in b).decimals == 18
+
+
 def test_balance_read_failure_is_tolerated(monkeypatch):
     monkeypatch.setattr(ap, "fetch_allowances",
                         lambda client, owner, pairs, **k: (dict.fromkeys(pairs, 5), set(pairs)))

@@ -1947,6 +1947,65 @@ class TestTokensPlugin:
         assert "CUS" in visible        # custom: shown despite dust value
         assert "ORD" not in visible    # ordinary dust token: filtered
 
+    def test_visible_tokens_are_ordered_by_usd_value(self, tokens_plugin):
+        """The list is sorted by USD value descending — balance × price, so a
+        big holding of a cheap token ranks below a small holding of an
+        expensive one. Mutation testing found NOTHING asserted the order:
+        replacing the sort key's body with `return None` survived (every key
+        equal keeps the input order), as did turning the `*` into `//`."""
+        from decimal import Decimal
+        from qeth.token_discovery import TokenBalance
+        from qeth.pricing import Price
+        tokens_plugin.attach(_StubHost())
+        cheap = "0x" + "c1" * 20      # 1000 units @ $0.01  = $10
+        mid = "0x" + "d1" * 20        # 5 units   @ $8       = $40
+        dear = "0x" + "e1" * 20       # 1 unit   @ $100     = $100
+        toks = [
+            TokenBalance(contract=cheap, symbol="CHEAP", name="c", decimals=0,
+                         balance_raw=1000),
+            TokenBalance(contract=mid, symbol="MID", name="m", decimals=0,
+                         balance_raw=5),
+            TokenBalance(contract=dear, symbol="DEAR", name="d", decimals=0,
+                         balance_raw=1),
+        ]
+
+        def _p(v):
+            return Price(price_usd=Decimal(v), timestamp=0, source="test")
+
+        prices = {cheap: _p("0.01"), mid: _p("8"), dear: _p("100")}
+        order = [t.symbol for t in
+                 tokens_plugin._compute_visible_tokens(ETH, toks, prices)]
+        # Input order is CHEAP, MID, DEAR — so a no-op sort would leave it
+        # unchanged and this assertion is what gives the test teeth.
+        assert order == ["DEAR", "MID", "CHEAP"]
+
+    def test_dust_filter_compares_balance_times_price(self, tokens_plugin):
+        """The dust cut is balance × price against $0.01. Pinning the actual
+        arithmetic: `//` in place of `*` survived mutation, and it inverts the
+        decision for exactly this shape — a large balance of a near-worthless
+        token floor-divides to a HUGE number and would be kept, while the
+        genuinely valuable row is dropped."""
+        from decimal import Decimal
+        from qeth.token_discovery import TokenBalance
+        from qeth.pricing import Price
+        tokens_plugin.attach(_StubHost())
+        worthless = "0x" + "17" * 20   # 1e6 units @ $1e-9 = $0.001 → dust
+        valuable = "0x" + "18" * 20    # 1 unit    @ $5     = $5     → kept
+        toks = [
+            TokenBalance(contract=worthless, symbol="WORTH", name="w",
+                         decimals=0, balance_raw=1_000_000),
+            TokenBalance(contract=valuable, symbol="VAL", name="v",
+                         decimals=0, balance_raw=1),
+        ]
+        prices = {
+            worthless: Price(price_usd=Decimal("0.000000001"), timestamp=0,
+                             source="test"),
+            valuable: Price(price_usd=Decimal("5"), timestamp=0, source="test"),
+        }
+        visible = {t.symbol for t in
+                   tokens_plugin._compute_visible_tokens(ETH, toks, prices)}
+        assert visible == {"VAL"}
+
     def test_discovered_token_survives_gates_priced_and_unpriced(self, tokens_plugin):
         """An own-tx-discovered vault/LP token is dust-exempt when priced AND
         survives the unknown-unpriced drop when it has no price yet — unlike an

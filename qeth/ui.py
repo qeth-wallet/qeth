@@ -884,7 +884,9 @@ class MainWindow(QMainWindow):
             token_info=self.token_info,
             icon_cache=self.icon_cache(),
             native_price_usd=native_price_usd,
-            known_addresses=self.account_addresses(),
+            # The BOOK, not the bare addresses: the decoded call names an
+            # address of ours with its wallet label ("# Cold storage").
+            known_addresses=self.account_book(),
             sim_floor_provider=self.transactions_plugin.fork_floor_block,
             nonce_floor_provider=self.transactions_plugin.pending_nonce_floor,
             parent=self,
@@ -939,7 +941,7 @@ class MainWindow(QMainWindow):
             "token_info": self.token_info,
             "icon_cache": self.icon_cache(),
             "native_price_usd": self.native_price_usd(chain.chain_id, from_addr),
-            "known_addresses": self.account_addresses(),
+            "known_addresses": self.account_book(),   # labelled — see above
             "sim_floor_provider": tp.fork_floor_block,
             "nonce_floor_provider": tp.pending_nonce_floor,
         }

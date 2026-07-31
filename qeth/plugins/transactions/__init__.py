@@ -560,6 +560,25 @@ def _format_token_amount(raw: int, decimals: int, symbol: str) -> str:
     return f"{text} {symbol}"
 
 
+def _own_address_labels(known_addresses) -> dict[str, str]:
+    """Normalise a caller's own-wallet input to ``{lower_address: label}``.
+
+    Accepts either bare addresses (a set/list — the caller has no labels) or
+    ``(address, label)`` pairs as ``Host.account_book`` returns them, so a
+    caller that only knows the addresses isn't forced to invent labels;
+    unlabelled entries map to ``""``. The result stands in for the old plain
+    set everywhere it was used — ``in`` and iteration behave identically, and
+    the labels ride along for the decoded-call annotation."""
+    out: dict[str, str] = {}
+    for item in known_addresses or ():
+        if isinstance(item, str):
+            out[item.lower()] = ""
+        else:
+            addr, label = item
+            out[addr.lower()] = label or ""
+    return out
+
+
 def _render_decoded(text_edit, decoded: dict,
                     token_context: dict | None = None,
                     known_addresses=None) -> None:
@@ -590,6 +609,9 @@ def _render_decoded(text_edit, decoded: dict,
     is the trap we hit before)."""
     mono = _pick_mono_font()
     text_edit.setFont(mono)
+    # Accept either input shape here (a bare address set from a caller with no
+    # labels, or the (address, label) book) so _arg_html below can just index it.
+    own = _own_address_labels(known_addresses)
 
     fn_name = decoded.get("function") or "?"
     args = decoded.get("args") or []
@@ -630,7 +652,7 @@ def _render_decoded(text_edit, decoded: dict,
             arg, indent=1,
             last=(i == len(args) - 1),
             token_context=token_context if use_amounts else None,
-            known_addresses=known_addresses,
+            known_addresses=own,
         ))
     parts.append(")")
     # Calldata the ABI didn't account for — a gas-packed router (Odos
@@ -653,7 +675,7 @@ def _render_decoded(text_edit, decoded: dict,
 
 def _arg_html(arg: dict, *, indent: int, last: bool,
               token_context: dict | None = None,
-              known_addresses=None) -> str:
+              known_addresses: dict[str, str] | None = None) -> str:
     """Serialise one ``arg`` node (leaf, struct branch, or array
     branch) to an HTML fragment. ``last`` controls the trailing
     punctuation: non-final entries get a comma, the last in any
@@ -697,20 +719,31 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
     # Bold + italic an address argument that belongs to one of the
     # user's own wallets — so a self-send / approval-to-self stands out
     # in the decoded call.
+    own_label = ""
     if (type_ == "address" and known_addresses
             and value_text.lower() in known_addresses):
         inner = f"<b><i>{inner}</i></b>"
+        # …and name it: a raw hex address is unrecognisable, so the bold alone
+        # says "one of yours" without saying WHICH. Unlabelled wallets add
+        # nothing to say, and get the emphasis on its own as before.
+        own_label = known_addresses[value_text.lower()]
     value_span = (
         f'<span style="color:{_VALUE_COLOR};">'
         f"{inner}</span>"
     )
-    # Trailing "  # X SYMBOL" comment for ERC-20 amounts. Only uintN
-    # leaves on a function the caller marked as amount-carrying —
-    # see _render_decoded for that gating.
+    # Trailing "  # …" comment: the owning wallet's label on an address of
+    # ours, or the human-readable ERC-20 amount on a uintN leaf of a function
+    # the caller marked as amount-carrying (see _render_decoded for that
+    # gating). Mutually exclusive by type — an address is never an amount.
     comment_html = ""
-    if (token_context is not None
-            and type_.startswith("uint")
-            and value is not None):
+    if own_label:
+        comment_html = (
+            f'  <span style="color:{_COMMENT_COLOR};">'
+            f"# {_escape_html(own_label)}</span>"
+        )
+    elif (token_context is not None
+              and type_.startswith("uint")
+              and value is not None):
         try:
             raw = int(str(value))
         except ValueError:
@@ -725,7 +758,9 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
                 f'  <span style="color:{_COMMENT_COLOR};">'
                 f"# {_escape_html(text)}</span>"
             )
-    return head + value_span + comment_html + tail
+    # Separator BEFORE the comment, Python-style — appending ``tail`` last put
+    # the comma after it ("# Cold storage,"), which reads as part of the label.
+    return head + value_span + tail.rstrip("\n") + comment_html + "\n"
 
 
 def _is_full_history(txs: list[Transaction]) -> bool:
@@ -1415,8 +1450,15 @@ class TransactionsPlugin(Plugin):
             price_lookup(chain.chain_id, self.host.selected_address)
             if callable(price_lookup) else None
         )
+        # The labelled book when the host has one (the decoded call annotates
+        # an address of ours with its wallet label); bare addresses otherwise —
+        # _own_address_labels takes either.
+        book_fn = getattr(self.host, "account_book", None)
         addrs_fn = getattr(self.host, "account_addresses", None)
-        known_addresses = addrs_fn() if callable(addrs_fn) else []
+        if callable(book_fn):
+            known_addresses = book_fn()
+        else:
+            known_addresses = addrs_fn() if callable(addrs_fn) else []
         dialog = TransactionDetailsDialog(
             tx, chain,
             abi_source=self._abi_source,
@@ -3247,7 +3289,7 @@ class _EventsView(QWidget):
                  abi_source, abi_cache, start_worker, parent=None):
         super().__init__(parent)
         self.chain = chain
-        self._known_addresses = {a.lower() for a in (known_addresses or ())}
+        self._known_addresses = _own_address_labels(known_addresses)
         self._token_info = token_info
         self._icon_cache = icon_cache
         self._abi_source = abi_source
@@ -3866,7 +3908,7 @@ class TransactionDetailsDialog(Dialog):
             else ContractIdentityCache())
         self._tx_cache = tx_cache
         self._start_worker = start_worker
-        self._known_addresses = {a.lower() for a in (known_addresses or ())}
+        self._known_addresses = _own_address_labels(known_addresses)
         # Optional dependencies for ERC-20 annotation on the "To:" row.
         # Plugin passes both when available; tests can leave them None
         # and the dialog falls back to a plain address line.
@@ -3959,7 +4001,7 @@ class TransactionDetailsDialog(Dialog):
             to_addr=tx.to_addr, chain=chain,
             identity_source=self._identity_source,
             identity_cache=self._identity_cache,
-            my_addresses=known_addresses or [],
+            my_addresses=self._known_addresses,
             start_worker=self._start_worker, tx_cache=self._tx_cache)
         if _id_label is not None and _id_kick is not None:
             form.addRow("Contract:", _id_label)
@@ -3972,7 +4014,7 @@ class TransactionDetailsDialog(Dialog):
                 to_addr=parsed[0], chain=chain,
                 identity_source=self._identity_source,
                 identity_cache=self._identity_cache,
-                my_addresses=known_addresses or [],
+                my_addresses=self._known_addresses,
                 start_worker=self._start_worker, tx_cache=self._tx_cache,
                 mode="approve")
             if sp_label is not None and sp_kick is not None:
@@ -4701,10 +4743,11 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         self._token_info = token_info
         self._icon_cache = icon_cache
         self._native_price_usd = native_price_usd
-        # Addresses the user owns (lowercased), so subclasses can flag when
-        # the recipient is one of their own wallets. Empty set = no hints.
-        self._known_addresses = {a.lower() for a in (known_addresses or ())}
-        self._known_addresses_list = list(known_addresses or ())
+        # {lower address: label} for the wallets the user owns, so subclasses
+        # can flag when the recipient is one of their own — and name it in the
+        # decoded call. Empty = no hints. Iterating yields the addresses, which
+        # is all the ``my_addresses=`` consumers below want.
+        self._known_addresses = _own_address_labels(known_addresses)
         # Gas state, populated by _on_gas_suggested.
         self._gas_ready = False
         # The latest gas probe's worker. A recipient edit re-kicks
@@ -5516,7 +5559,7 @@ class SignTransactionDialog(_TxComposerDialog):
             to_addr=req.to_addr, chain=self.chain,
             identity_source=self._identity_source,
             identity_cache=self._identity_cache,
-            my_addresses=self._known_addresses_list,
+            my_addresses=self._known_addresses,
             start_worker=self._start_worker, tx_cache=self._tx_cache)
         if _id_label is not None and _id_kick is not None:
             header.addRow("Contract:", _id_label)
@@ -5530,7 +5573,7 @@ class SignTransactionDialog(_TxComposerDialog):
                 to_addr=parsed[0], chain=self.chain,
                 identity_source=self._identity_source,
                 identity_cache=self._identity_cache,
-                my_addresses=self._known_addresses_list,
+                my_addresses=self._known_addresses,
                 start_worker=self._start_worker, tx_cache=self._tx_cache,
                 mode="approve")
             if sp_label is not None and sp_kick is not None:
@@ -6053,7 +6096,7 @@ class SendTokenDialog(_TxComposerDialog):
         label.setStyleSheet("")
         worker = ContractIdentityWorker(
             self._identity_source, self._identity_cache, self.chain.chain_id,
-            addr, self._known_addresses_list, tx_cache=self._tx_cache,
+            addr, self._known_addresses, tx_cache=self._tx_cache,
             mode="send")
         worker.ready.connect(
             lambda badge, a=addr: self._on_identity_ready(a, badge))

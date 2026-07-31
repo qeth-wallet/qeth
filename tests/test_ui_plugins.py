@@ -843,6 +843,61 @@ class TestTransactionsPlugin:
         assert any(mine in r for r in bold_italic_runs)
         assert not any("dead" in r.lower() for r in bold_italic_runs)
 
+    def test_render_decoded_names_own_wallets_in_a_comment(self, qtbot, tmp_qeth):
+        """The bold+italic says "one of yours" but not WHICH — a raw hex
+        address is unrecognisable. When the caller passes the labelled book
+        (Host.account_book) the wallet's label rides along as a `# ` comment,
+        like the ERC-20 amount annotation. An unlabelled wallet has nothing to
+        say, so it keeps the emphasis alone rather than an empty comment."""
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        cold = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        bare = "0x1111111111111111111111111111111111111111"
+        other = "0x000000000000000000000000000000000000dead"
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {
+            "function": "transferFrom",
+            "args": [
+                {"name": "_from", "type": "address", "value": cold},
+                {"name": "_mid", "type": "address", "value": bare},
+                {"name": "_to", "type": "address", "value": other},
+            ],
+        }, None, known_addresses=[(cold.upper(), "Cold storage"), (bare, "")])
+
+        lines = edit.toPlainText().splitlines()
+        labelled = next(ln for ln in lines if cold in ln)
+        assert labelled.rstrip().endswith("# Cold storage")
+        # Case-insensitive match on the book side (it's stored checksummed).
+        assert next(ln for ln in lines if bare in ln).rstrip().endswith(bare + ",")
+        assert "#" not in next(ln for ln in lines if other in ln)
+
+    def test_render_decoded_label_does_not_displace_the_amount_comment(
+        self, qtbot, tmp_qeth,
+    ):
+        """The two `#` annotations share one slot but never collide — an
+        address is never an amount. A token transfer to our own wallet shows
+        both, one per line."""
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        mine = "0x7a16ff8270133f063aab6c9977183d9e72835428"
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {
+            "function": "transfer",
+            "args": [
+                {"name": "_to", "type": "address", "value": mine},
+                {"name": "_value", "type": "uint256", "value": "5000000"},
+            ],
+        }, {"symbol": "USDC", "decimals": 6},
+            known_addresses=[(mine, "Savings")])
+
+        text = edit.toPlainText()
+        assert "# Savings" in text
+        assert "# 5 USDC" in text
+
     def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
         """The function name in the decoded-call view stays bold only
         if the chosen monospace family ships a Bold style. The CSS

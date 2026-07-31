@@ -311,6 +311,53 @@ class TestRecipientOwnWalletHint:
         assert dlg.recipient_edit.styleSheet() == ""
 
 
+class TestOwnWalletLabelInDecodedCall:
+    """Sending to one of your own wallets names it in the calldata preview:
+
+        _to: address = 0x2222…,  # Cold storage
+
+    Regression: the label survived to the dialog but was wiped on the way to
+    the renderer. The dialog normalises known_addresses into a
+    {address: label} map, then _render_decoded normalised it AGAIN — and a
+    second pass over a mapping iterates bare address keys, re-labelling every
+    one of them "". Bold stayed, the label vanished, which is exactly what the
+    unit test on _render_decoded (called with pairs, normalised once) missed.
+    So drive it end-to-end from the dialog."""
+
+    def test_recipient_label_reaches_the_decoded_view(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[(FROM, "Main"), (OWN_OTHER, "Cold storage")],
+        )
+        dlg.recipient_edit.setText(OWN_OTHER)
+        dlg.amount_edit.setText("5")
+        text = dlg.decoded_view.toPlainText()
+        assert "# Cold storage" in text
+        assert "# 5 USDC" in text          # the amount comment still lands
+
+    def test_stranger_recipient_gets_no_label(self, qtbot, monkeypatch):
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[(FROM, "Main")],
+        )
+        dlg.recipient_edit.setText(STRANGER)
+        dlg.amount_edit.setText("5")
+        text = dlg.decoded_view.toPlainText()
+        assert "# Main" not in text
+        assert STRANGER.lower() in text.lower()
+
+    def test_bare_addresses_still_work(self, qtbot, monkeypatch):
+        # A caller with no labels to give (several openers, and tests) passes
+        # plain addresses — the emphasis works, there's just nothing to name.
+        dlg = _make_dialog(
+            qtbot, monkeypatch, balance_raw=10_000_000,
+            known_addresses=[FROM, OWN_OTHER],
+        )
+        dlg.recipient_edit.setText(OWN_OTHER)
+        dlg.amount_edit.setText("5")
+        assert "#" not in dlg.decoded_view.toPlainText().split("_value")[0]
+
+
 class TestRecipientTokenContractHint:
     """Sending a token (or ETH) to a token contract almost always
     burns the funds, so the recipient field turns red. Detection is

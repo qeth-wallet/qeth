@@ -568,7 +568,15 @@ def _own_address_labels(known_addresses) -> dict[str, str]:
     caller that only knows the addresses isn't forced to invent labels;
     unlabelled entries map to ``""``. The result stands in for the old plain
     set everywhere it was used — ``in`` and iteration behave identically, and
-    the labels ride along for the decoded-call annotation."""
+    the labels ride along for the decoded-call annotation.
+
+    IDEMPOTENT, which is load-bearing: dialogs normalise once into
+    ``_known_addresses`` and hand THAT to ``_render_decoded``, which normalises
+    again. Without this first branch the second pass iterates the mapping, sees
+    bare address keys, and re-labels every one of them ``""`` — silently
+    dropping the annotation everywhere it actually mattered."""
+    if isinstance(known_addresses, dict):
+        return {a.lower(): (lbl or "") for a, lbl in known_addresses.items()}
     out: dict[str, str] = {}
     for item in known_addresses or ():
         if isinstance(item, str):

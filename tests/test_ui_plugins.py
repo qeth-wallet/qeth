@@ -898,6 +898,19 @@ class TestTransactionsPlugin:
         assert "# Savings" in text
         assert "# 5 USDC" in text
 
+    def test_own_address_labels_is_idempotent(self):
+        """Load-bearing: the dialogs normalise once into _known_addresses and
+        hand THAT map to _render_decoded, which normalises again. A second pass
+        that iterated the mapping would see bare address keys and re-label every
+        one of them "" — the labels silently vanished from every dialog while
+        the direct-call unit tests (which normalise once) stayed green."""
+        from qeth.plugins.transactions import _own_address_labels
+
+        once = _own_address_labels([("0xAbC", "Cold storage"), "0xDeF"])
+        assert once == {"0xabc": "Cold storage", "0xdef": ""}
+        assert _own_address_labels(once) == once
+        assert _own_address_labels(None) == {}
+
     def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
         """The function name in the decoded-call view stays bold only
         if the chosen monospace family ships a Bold style. The CSS

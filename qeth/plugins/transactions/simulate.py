@@ -564,8 +564,8 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
         if helios_chain is not None and _floor_ahead_of_head(
                 helios_chain, floor_block):
             # The Helios head is still behind the fork floor — this wallet's
-            # latest confirmed tx OR the block a just-received token last
-            # changed at (it catches up within ~30s). A verified fork is capped
+            # latest confirmed tx OR the block one of its tokens last moved at
+            # (it catches up within ~30s). A verified fork is capped
             # at Helios's head, so it would run BEFORE that block and miss the
             # state — falsely reverting e.g. a send of the token that just
             # arrived. Fall through to the unverified sim, which forks at the

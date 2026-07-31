@@ -191,6 +191,34 @@ def test_reset_chain_clears_only_that_chains_floors(tmp_path):
     assert ledger.is_token_stale(137, ACC, TOK, 1)     # other chain untouched
 
 
+def test_note_transfer_keeps_the_highest_block_per_account(tmp_path):
+    """The account-wide token-movement stamp the verified-preview fork floor
+    reads. Monotonic (an out-of-order log can't pull it back), per account and
+    per chain, and shared across tokens — a transfer of ANY token raises it."""
+    ledger, _, _ = _ledger(tmp_path)
+    other_tok = "0x" + "ef" * 20
+    ledger.note_transfer(1, ACC, 100)
+    ledger.note_transfer(1, ACC, 90)                    # out of order → ignored
+    assert ledger.transfer_block[(1, ACC.lower())] == 100
+    ledger.note_transfer(1, ACC, 120)                   # a different token, later
+    assert ledger.transfer_block[(1, ACC.lower())] == 120
+    ledger.note_transfer(1, ACC, None)                  # block-less → no ordering
+    assert ledger.transfer_block[(1, ACC.lower())] == 120
+    assert (137, ACC.lower()) not in ledger.transfer_block
+    assert (1, other_tok.lower()) not in ledger.transfer_block
+
+
+def test_reset_chain_keeps_the_transfer_stamp(tmp_path):
+    """reset_chain drops the READ-ordering floors after a ws gap so fresh reads
+    can re-establish truth. The transfer stamp isn't one of those — nothing is
+    rejected against it — and a ws gap is exactly when the fork floor most needs
+    to remember the last movement it saw."""
+    ledger, _, _ = _ledger(tmp_path)
+    ledger.note_transfer(1, ACC, 100)
+    ledger.reset_chain(1)
+    assert ledger.transfer_block[(1, ACC.lower())] == 100
+
+
 def test_getters_track_swapped_token_sources(tmp_path):
     """Metadata lookups go through getters, so a caller that swaps its
     token_lists / token_metadata after construction is seen — the plugin's

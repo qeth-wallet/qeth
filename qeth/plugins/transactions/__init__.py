@@ -1241,6 +1241,10 @@ class TransactionsPlugin(Plugin):
             is that token (an ERC-20 transfer's ``to`` is the token contract) —
             so sending a token that arrived seconds ago doesn't fork before the
             inbound transfer and falsely revert on a zero balance.
+          - the block of the latest ERC-20 Transfer we saw touching the account
+            at all, whatever this tx does — the same protection when the sim's
+            ``to`` ISN'T the token (swapping a just-arrived token calls a
+            router; the per-token floor above never fires for it).
           - else ``None`` (the fork uses its per-chain lag alone).
 
         When the floor exceeds Helios's synced head the caller serves an
@@ -1253,9 +1257,10 @@ class TransactionsPlugin(Plugin):
         if any(t.pending and not getattr(t, "dropped", False) for t in sent):
             return _FORK_FLOOR_HEAD   # already "fork at head"; nothing's fresher
         blocks = [t.block_number for t in sent if t.block_number]
-        token_block = self._sent_asset_floor(chain_id, address, sim_target)
-        if token_block is not None:
-            blocks.append(token_block)
+        blocks += [b for b in (self._sent_asset_floor(chain_id, address,
+                                                      sim_target),
+                               self._token_activity_floor(chain_id, address))
+                   if b is not None]
         return max(blocks) if blocks else None
 
     def _sent_asset_floor(self, chain_id: int, address: str,
@@ -1270,6 +1275,24 @@ class TransactionsPlugin(Plugin):
         tokens = self.host.plugin("tokens") if self.host else None
         getter = getattr(tokens, "last_balance_block", None)
         return getter(chain_id, address, sim_target) if callable(getter) else None
+
+    def _token_activity_floor(self, chain_id: int,
+                              address: str) -> int | None:
+        """The block of the latest ERC-20 Transfer observed touching
+        ``address`` — the account-wide floor, independent of what the previewed
+        tx does. ``_sent_asset_floor`` above only fires when the sim's ``to`` is
+        the token itself (a plain transfer / approve); the common
+        receive-then-swap goes through a router, so without this the preview
+        would still fork before the arrival and revert on a zero balance.
+
+        From the tokens plugin's BalanceLedger, stamped only by real movement
+        (ws Transfer logs + confirmed receipts) — never by the periodic balance
+        sweeps, which would otherwise hold the floor at the head permanently and
+        disable verified previews outright. ``None`` when the tokens plugin is
+        disabled or nothing has moved this session."""
+        tokens = self.host.plugin("tokens") if self.host else None
+        getter = getattr(tokens, "last_transfer_block", None)
+        return getter(chain_id, address) if callable(getter) else None
 
     def _rebuild_live_snapshot(self) -> None:
         """Main-thread rebuild of the pending snapshot the LiveWatcher reads,

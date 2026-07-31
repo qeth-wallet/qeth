@@ -58,6 +58,17 @@ class BalanceLedger:
         # applied. Native is ordered per account (a stale read can't regress
         # it); tokens are ordered individually above.
         self.native_block: dict[tuple[int, str], int] = {}
+        # (chain_id, account_lower) -> highest block at which we OBSERVED an
+        # ERC-20 Transfer touching the account, either direction. NOT a read
+        # ordering stamp like the two above — nothing is rejected against it.
+        # It records "this account's token state moved at block N" for the
+        # verified-preview fork floor, so a simulation never forks BEFORE a
+        # token that just arrived (see TransactionsPlugin.fork_floor_block).
+        # Deliberately NOT cleared by reset_chain: it isn't a freshness floor,
+        # and a ws gap is exactly when we most want the last observed movement
+        # remembered. It can only be over-stamped by a reorg rewinding past it,
+        # which self-heals as the head re-passes (the fork clamps to the head).
+        self.transfer_block: dict[tuple[int, str], int] = {}
 
     def reset_chain(self, chain_id: int) -> None:
         """Drop every freshness floor for ``chain_id``. Called on a ws
@@ -100,6 +111,19 @@ class BalanceLedger:
         if block is None:
             return
         self.native_block[(chain_id, account.lower())] = int(block)
+
+    def note_transfer(self, chain_id: int, account: str, block) -> None:
+        """Record that an ERC-20 Transfer touching ``account`` was seen at
+        ``block`` (monotonic max, per account across all tokens). Both
+        directions count: an inbound arrival is the motivating case, but a
+        third party pulling tokens out via an allowance moves the balance a
+        preview must also see. Cheap and unconditional — the value is only ever
+        READ by the fork floor."""
+        if block is None:
+            return
+        key = (chain_id, account.lower())
+        self.transfer_block[key] = max(
+            self.transfer_block.get(key, 0), int(block))
 
     def native_stale(self, chain_id: int, account: str, block) -> bool:
         """True if ``block`` is older than the last native read applied for the

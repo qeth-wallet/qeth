@@ -305,6 +305,29 @@ def test_on_balance_dirty_targeted_runs_off_view(qtbot):
     assert sorted(worker.contracts) == ["0xtok", "0xtok2"]
 
 
+def test_on_balance_dirty_stamps_the_fork_floor_off_view(qtbot):
+    """A ws Transfer also records the block the account's token state moved at,
+    for ANY account (not just the on-screen one) — that stamp is the fork floor
+    a verified preview must not fork before, and the preview's `from` need not
+    be the account currently displayed. Exposed as last_transfer_block."""
+    from types import SimpleNamespace
+    from qeth.plugins.tokens import TokensPlugin
+    tp = TokensPlugin(Mock())
+    tp.host = Mock()
+    tp._displayed_view = (1, "0xother")            # not the dirtied account
+
+    ch = SimpleNamespace(chain_id=100)
+    assert tp.last_transfer_block(100, "0xABC") is None
+    tp.on_balance_dirty(ch, "0xABC", "0xToK", 4242)
+    assert tp.last_transfer_block(100, "0xABC") == 4242
+    # A later leg of the same burst (another token) carries the floor forward.
+    tp.on_balance_dirty(ch, "0xABC", "0xToK2", 4250)
+    assert tp.last_transfer_block(100, "0xabc") == 4250
+    # Untouched accounts / chains stay unstamped → floor unaffected there.
+    assert tp.last_transfer_block(100, "0xother") is None
+    assert tp.last_transfer_block(1, "0xABC") is None
+
+
 def test_apply_targeted_balances_persists_then_renders_on_view(qtbot, monkeypatch):
     """The authoritative result is persisted for any account (so an off-view tx
     is ready on tab switch), and the on-screen view is re-rendered from that

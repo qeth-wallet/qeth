@@ -32,6 +32,8 @@ def _plugin_with_cache(cache):
     ``{(chain_id, addr): [tx, ...]}`` dict."""
     plug = TransactionsPlugin.__new__(TransactionsPlugin)
     plug._cache = cache if isinstance(cache, dict) else {(1, ADDR): cache}
+    plug.host = None       # as before attach(); tests that need a sibling
+                           # plugin overwrite it with a stub host
     return plug
 
 
@@ -155,6 +157,37 @@ def test_floor_includes_the_sent_tokens_balance_block():
     assert plug.fork_floor_block(1, ADDR, OTHER) == 100
     # No target (native send / provider called with 2 args) → unchanged.
     assert plug.fork_floor_block(1, ADDR) == 100
+
+
+def test_floor_includes_the_accounts_last_transfer_block():
+    """Receive-then-swap: the token arrived at block 150 but the tx being
+    previewed calls a ROUTER, so the per-token floor (keyed on the sim's `to`)
+    never fires. The account-wide transfer stamp raises the floor anyway, so the
+    preview can't fork before the arrival and revert on a zero balance."""
+    from types import SimpleNamespace
+    router = "0x" + "cd" * 20
+    # our last sent tx at 100, and nothing at all on Polygon
+    plug = _plugin_with_cache({(1, ADDR): [_tx(100)], (137, ADDR): []})
+    _tokens = SimpleNamespace(
+        last_balance_block=lambda cid, addr, tok: None,   # not the sim target
+        last_transfer_block=lambda cid, addr: 150 if cid == 1 else None)
+    plug.host = SimpleNamespace(
+        plugin=lambda pid: _tokens if pid == "tokens" else None)
+    assert plug.fork_floor_block(1, ADDR, router) == 150
+    # Per chain — a transfer on mainnet doesn't float Polygon's floor.
+    assert plug.fork_floor_block(137, ADDR, router) is None
+    # max(our_tx_block, last_transfer_block): our own newer tx still wins.
+    plug2 = _plugin_with_cache([_tx(200)])
+    plug2.host = plug.host
+    assert plug2.fork_floor_block(1, ADDR, router) == 200
+
+
+def test_floor_without_the_tokens_plugin():
+    # tokens disabled → neither token floor is available; the tx floor stands.
+    from types import SimpleNamespace
+    plug = _plugin_with_cache([_tx(100)])
+    plug.host = SimpleNamespace(plugin=lambda pid: None)
+    assert plug.fork_floor_block(1, ADDR, "0x" + "cd" * 20) == 100
 
 
 def test_pending_sentinel_beats_the_token_block():

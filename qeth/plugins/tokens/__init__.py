@@ -579,6 +579,22 @@ class TokensPlugin(Plugin):
         return self._ledger.balance_block.get(
             (chain_id, address.lower(), token.lower()))
 
+    def last_transfer_block(self, chain_id: int, address: str) -> int | None:
+        """The block of the most recent ERC-20 Transfer we OBSERVED touching
+        ``address`` on ``chain_id``, across every token — the account-wide
+        counterpart of :meth:`last_balance_block`, which is keyed on one token.
+
+        The verified preview uses it as a fork floor so a token that arrived
+        seconds ago is never invisible to the simulation, whatever the tx does
+        with it: swapping it goes through a router, so the per-token floor
+        (keyed on the sim's ``to``) doesn't fire there. Only real movement
+        stamps this — the periodic balance sweeps do not — so an idle wallet
+        leaves the floor alone and verified previews keep running.
+
+        ``None`` until a transfer is seen (in-memory, so a fresh start has no
+        stamp and the floor is unaffected)."""
+        return self._ledger.transfer_block.get((chain_id, address.lower()))
+
     def _native_chain_icon(self, chain_id: int):
         """Chain logo for the native-asset row, via the host's chain-icon
         cache (kicks a fetch on miss). None until attached / fetched."""
@@ -850,6 +866,13 @@ class TokensPlugin(Plugin):
         - **On the on-screen view only**, also schedule the full discovery
           refresh (prices, and surfacing a brand-new token not yet cached)."""
         if token:
+            # Remember that this account's token state moved at ``block``,
+            # whatever we end up reading: the verified-preview fork floor must
+            # not fork before a token that just arrived (see
+            # TransactionsPlugin.fork_floor_block). Stamped for every account,
+            # not just the on-screen one, since the preview's `from` is what
+            # matters and this runs before the on-screen early-return below.
+            self._ledger.note_transfer(chain.chain_id, account, block)
             if balance is not None and native is not None:
                 # authoritative ws read at the event's block → apply now, no
                 # http round-trip and no waiting (block-ordering still guards
@@ -1359,6 +1382,11 @@ class TokensPlugin(Plugin):
         for (wallet, token_lower), delta in credits.items():
             self._ledger.apply_floor(
                 chain, wallet, token_lower, receipt_block, delta)
+        # Same token-movement stamp the ws Transfer path leaves, for the
+        # receipt route (a chain with no live ws, or a log the subscription
+        # missed): the fork floor must not fork before this block.
+        for wallet in touched:
+            self._ledger.note_transfer(chain_id, wallet, receipt_block)
         if not affected_wallets or self.host is None:
             return
         # Confirm-driven reconcile: a confirmed tx is the source of truth, so

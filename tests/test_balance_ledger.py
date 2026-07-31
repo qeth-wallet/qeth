@@ -191,6 +191,24 @@ def test_reset_chain_clears_only_that_chains_floors(tmp_path):
     assert ledger.is_token_stale(137, ACC, TOK, 1)     # other chain untouched
 
 
+def test_block_none_native_read_cannot_overwrite_an_ordered_value(tmp_path):
+    """The token half of this rule has a test; NATIVE didn't, so mutating its
+    guard (`block is None` -> `is not None`) survived. A block-less read carries
+    no ordering, so once ANY ordered native read has landed it must never
+    overwrite it — otherwise a failed block leg silently regresses the balance
+    to whatever that unordered aggregate happened to return."""
+    ledger, cache, _ = _ledger(tmp_path)
+    ledger.apply_read(CHAIN, ACC, 9 * 10**18, {}, block=10)      # ordered
+    assert cache.load(1, ACC).native_balance_wei == 9 * 10**18
+    ledger.apply_read(CHAIN, ACC, 1, {}, block=None)             # unordered
+    assert cache.load(1, ACC).native_balance_wei == 9 * 10**18   # not clobbered
+    # …but a block-less read IS applied where nothing has been ordered yet
+    # (a fresh wallet), which is what makes the guard a floor and not a ban.
+    other = "0x" + "cc" * 20
+    ledger.apply_read(CHAIN, other, 7, {}, block=None)
+    assert cache.load(1, other).native_balance_wei == 7
+
+
 def test_note_transfer_keeps_the_highest_block_per_account(tmp_path):
     """The account-wide token-movement stamp the verified-preview fork floor
     reads. Monotonic (an out-of-order log can't pull it back), per account and

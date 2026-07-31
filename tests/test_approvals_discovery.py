@@ -331,3 +331,38 @@ def test_fetch_allowances_splits_found_readzero_and_failed():
     assert (TOKEN.lower(), s_pos.lower()) in read
     assert (TOKEN.lower(), s_zero.lower()) in read              # definitively zero
     assert (TOKEN.lower(), s_fail.lower()) not in read         # failed → not prunable
+
+
+def test_fetch_allowances_needs_BOTH_success_and_a_number():
+    """A pair only counts as READ (i.e. prunable) when the call succeeded AND
+    decoded to an integer. Half-failures are the realistic shape: a call that
+    reverted but left a value behind, or one that "succeeded" returning bytes
+    the decoder couldn't parse (an empty return from a non-ERC-20).
+
+    Mutation-testing found this: the older case modelled a failure as
+    (False, None) — both halves false — so relaxing the guard to `success OR
+    isinstance(value, int)` changed nothing and went green. Under that
+    relaxation either half-failure lands in `read`, and the caller then prunes
+    a real allowance from the persisted cache on a transient glitch."""
+    s_no_value = "0x" + "44" * 20        # call OK, undecodable return
+    s_stale = "0x" + "55" * 20           # call failed, stale value attached
+    client = _FakeMCClient({
+        s_no_value.lower(): (True, None),
+        s_stale.lower(): (False, 500),
+    })
+    pairs = [(TOKEN.lower(), s_no_value.lower()),
+             (TOKEN.lower(), s_stale.lower())]
+    found, read = fetch_allowances(client, A, pairs)
+    assert found == {}
+    assert read == set()       # neither is prunable — we never got a real zero
+
+
+def test_fetch_allowances_keeps_a_one_unit_allowance():
+    """`> 0`, not `>= 1`-ish sloppiness: a cap of exactly 1 raw unit is a real
+    (if tiny) approval and must still be listed, not rounded away as revoked."""
+    s_dust = "0x" + "66" * 20
+    client = _FakeMCClient({s_dust.lower(): (True, 1)})
+    pairs = [(TOKEN.lower(), s_dust.lower())]
+    found, read = fetch_allowances(client, A, pairs)
+    assert found == {(TOKEN.lower(), s_dust.lower()): 1}
+    assert (TOKEN.lower(), s_dust.lower()) in read

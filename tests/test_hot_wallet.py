@@ -256,3 +256,29 @@ class TestHotWalletSigner:
         from eth_account import Account
         rebuilt = Account.recover_transaction(raw)
         assert rebuilt.lower() == addr.lower()
+
+    @pytest.mark.parametrize("missing", ["gas", "nonce"])
+    def test_sign_refuses_when_either_gas_or_nonce_is_unset(self, tmp_qeth,
+                                                            missing):
+        """EITHER one missing must refuse. Nothing pinned that: relaxing the
+        guard to `gas is None AND nonce is None` survived mutation, and under
+        it a request with only one set is signed with a None field — a
+        malformed tx built from a half-filled request rather than a clear
+        refusal at the door."""
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        signer = HotWalletSigner(
+            _fake_store({"address": addr, "source": "hot", "label": ""}),
+            PASSPHRASE,
+        )
+        fields = {"gas": 21000, "nonce": 7}
+        fields[missing] = None
+        req = SigningRequest(
+            chain_id=1, from_addr=addr, to_addr="0x" + "11" * 20,
+            value_wei=0, data="0x",
+            max_fee_per_gas=10 * 10**9, max_priority_fee_per_gas=10**9,
+            **fields,
+        )
+        from qeth.chains import DEFAULT_CHAINS
+        with pytest.raises(SignerError, match="gas and nonce"):
+            signer.sign(req, DEFAULT_CHAINS[0])

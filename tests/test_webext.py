@@ -113,6 +113,8 @@ class TestManifest:
     def test_all_referenced_icons_exist(self):
         refs = set(MANIFEST["icons"].values())
         refs |= set(MANIFEST["action"]["default_icon"].values())
+        assert refs, "manifest declares no icons at all"   # else this loop
+                                                           # checks nothing
         for rel in refs:
             assert (WEBEXT / rel).is_file(), f"missing icon {rel}"
 
@@ -221,7 +223,12 @@ class TestPopup:
     def test_popup_has_no_inline_script(self):
         # MV3 CSP forbids inline scripts; every <script> must be external.
         html = (WEBEXT / "popup.html").read_text()
-        for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", html, re.S):
+        scripts = re.findall(r"<script([^>]*)>(.*?)</script>", html, re.S)
+        # The popup DOES load popup.js, so a no-match means the pattern stopped
+        # seeing the markup — not that the page is clean. Without this the test
+        # would go green while an inline block sat right there.
+        assert scripts, "no <script> found — the pattern no longer matches"
+        for attrs, body in scripts:
             assert "src=" in attrs, "inline <script> block in popup.html"
             assert body.strip() == "", "popup <script> has an inline body"
 

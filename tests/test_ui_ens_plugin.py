@@ -28,6 +28,21 @@ ADDR = "0x7a16ff8270133f063aab6c9977183d9e72835428"
 NOW = 1_700_000_000
 
 
+def _tree_shape(panel):
+    """Every row's (depth, column-0 text) — a cheap structural snapshot, so a
+    "nothing changed" assertion can actually see a grafted-on row."""
+    out: list[tuple[int, str]] = []
+
+    def walk(item, depth):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            out.append((depth, child.text(0)))
+            walk(child, depth + 1)
+
+    walk(panel.tree.invisibleRootItem(), 0)
+    return out
+
+
 class _StubHost:
     def __init__(self, chain=ETH, address: str | None = None):
         self._chain = chain
@@ -279,8 +294,12 @@ class TestEnsPanel:
         panel = EnsPanel()
         qtbot.addWidget(panel)
         panel.populate(build_tree([EnsName("alice.eth")]), NOW)
-        # must not raise
-        panel.add_records("nobody.eth", EnsRecords())
+        before = _tree_shape(panel)
+        panel.add_records("nobody.eth", EnsRecords())     # must not raise…
+        # …and must not invent a row for a name we don't hold, which is what
+        # "is a noop" claims. Checking only that it didn't raise would pass
+        # just as happily if it grafted "nobody.eth" onto the tree.
+        assert _tree_shape(panel) == before
 
     def test_expand_emits_records_requested_once(self, qtbot):
         panel = EnsPanel()

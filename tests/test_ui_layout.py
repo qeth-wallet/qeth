@@ -152,10 +152,14 @@ def test_every_right_plugin_tree_is_a_tab_stop(mainwindow):
     # General: a plugin's focus_widget() (not a hardcoded list) drives the
     # tab-stops, so any right-slot plugin exposing one joins the navigation.
     stops = set(mainwindow._collect_tab_stops())
-    for plugin in mainwindow.right_slot.plugins():
-        fw = plugin.focus_widget()
-        if fw is not None:
-            assert fw in stops
+    plugins = mainwindow.right_slot.plugins()
+    focusable = [(p, p.focus_widget()) for p in plugins]
+    # Assert the PREMISE too, or this passes vacuously: a regression that made
+    # focus_widget() return None everywhere would leave nothing to check and
+    # still go green, which is exactly what the test's name promises it won't.
+    assert plugins and all(fw is not None for _, fw in focusable), focusable
+    for plugin, fw in focusable:
+        assert fw in stops, type(plugin).__name__
 
 
 def test_left_right_cycles_through_all_right_tabs_including_ens(qtbot, mainwindow):

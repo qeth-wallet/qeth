@@ -1,0 +1,73 @@
+name: macOS (Apple Silicon)
+
+# Runs the test suite on Apple Silicon. There is no macOS package yet — this
+# exists to find out what actually breaks on darwin/arm64 before committing to
+# a distribution format, and to keep it from silently re-breaking afterwards.
+#
+# macos-15 (and macos-14) are arm64 runners; macos-13 is the Intel one. Public
+# repo, so the minutes are free.
+#
+# Unlike the Linux dev flow this does NOT use --system-site-packages: that
+# exists solely to pick up a distro PySide6 so the user's qt6ct/Breeze theme
+# applies. macOS has no such system package and Qt's Cocoa platform plugin is
+# native, so the PyPI wheel (the `bundled` extra) is the right source here.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'qeth/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'qeth/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+jobs:
+  tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Environment
+        run: |
+          sw_vers
+          echo "arch: $(uname -m)"
+          uv --version
+
+      # --all-extras covers bundled (PySide6) + simulate + frame + qr; the dev
+      # group (pytest, ruff, mypy, hypothesis) comes in by default.
+      - name: Install
+        run: uv sync --all-extras
+
+      - name: Versions under test
+        run: |
+          uv run python -c "import sys, platform; print(sys.version); print(platform.platform(), platform.machine())"
+          uv run python -c "import PySide6; from PySide6 import QtCore; print('PySide6', PySide6.__version__, 'Qt', QtCore.qVersion())"
+          uv run python -c "import qeth; print('qeth', qeth.__version__)"
+
+      # conftest forces QT_QPA_PLATFORM=offscreen before QApplication exists, so
+      # no display is needed. Network- and browser-marked tests are deselected
+      # by the addopts default.
+      - name: Test suite
+        run: uv run pytest -q
+
+      # Informational: the same static checks the suite already gates on, run
+      # standalone so a failure reads as "lint/types" rather than a test id.
+      - name: Ruff
+        if: always()
+        run: uv run ruff check qeth/ tests/
+
+      - name: mypy
+        if: always()
+        run: uv run mypy

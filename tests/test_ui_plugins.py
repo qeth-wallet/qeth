@@ -1000,6 +1000,52 @@ class TestTransactionsPlugin:
         assert pending == {other}
         assert "call" not in tree["args"][0]["batch"][0]
 
+    def test_paired_payload_decodes_against_its_target(self, qtbot, tmp_qeth):
+        """A Safe forwarding ONE call: the `data` argument is decoded with the
+        ABI of the `to` it names, and renders as that target's call instead of
+        raw hex. This is the common Safe tx — batches are the rarer case."""
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded, enrich_batch_entries
+        target = "0x" + "77" * 20
+        tree = {"function": "execTransaction", "args": [
+            {"name": "to", "type": "address", "value": target},
+            {"name": "data", "type": "bytes", "target": target,
+             "value": "0xa9059cbb" + "00" * 12 + "11" * 20 + f"{42:064x}"},
+        ]}
+        pending = enrich_batch_entries(
+            tree, 1, abi_for=lambda a: self.ERC20_ABI_MIN,
+            token_info=lambda cid, a: SimpleNamespace(symbol="USDC"))
+        assert pending == set()
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, tree)
+        text = edit.toPlainText()
+        assert f"data: bytes = USDC {target}.transfer(" in text
+        assert "value: uint256 = 42" in text
+        assert "0xa9059cbb" not in text        # replaced, not printed alongside
+
+    def test_deeply_nested_batch_entries_are_resolved(self, tmp_qeth):
+        """multiSend → execTransaction → multiSend is a real Safe shape. The
+        walker must descend into an entry's own decoded call, or the innermost
+        entries never reach the resolver and render as 'unverified' despite
+        having an ABI available."""
+        from qeth.plugins.transactions import enrich_batch_entries
+        inner_target = "0x" + "99" * 20
+        tree = self._batch_tree({
+            "operation": 0, "to": "0x" + "55" * 20, "value": 0, "data": "0x",
+            "call": {"function": "execTransaction", "args": [
+                {"name": "data", "type": "bytes", "value": "0x8d80ff0a",
+                 "batch": [{"operation": 0, "to": inner_target, "value": 0,
+                            "data": "0xa9059cbb" + "00" * 12 + "11" * 20
+                                    + f"{7:064x}"}]}]}})
+        pending = enrich_batch_entries(
+            tree, 1, abi_for=lambda a: self.ERC20_ABI_MIN if a == inner_target
+            else None)
+        deep = (tree["args"][0]["batch"][0]["call"]["args"][0]["batch"][0])
+        assert pending == set()
+        assert deep["call"]["function"] == "transfer"
+
     def test_render_batch_names_target_and_flags_delegatecall(self, qtbot,
                                                               tmp_qeth):
         from PySide6.QtWidgets import QTextEdit

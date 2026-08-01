@@ -567,13 +567,16 @@ _BYTES_ELIDE_CHARS = 258
 
 
 def _batch_entry_html(entry: dict, *, indent: int, last: bool,
-                      known_addresses) -> str:
+                      known_addresses, head: str | None = None) -> str:
     """One multiSend transaction: ``SYM 0xtarget.fn(args…)``, or the bare
     selector when we couldn't get the target's ABI. A DELEGATECALL entry is
     flagged — the Safe runs that contract's code AS ITSELF, so it isn't the
     bounded 'call another contract' the rest of the batch does."""
     pad = "    " * indent
     tail = "\n" if last else ",\n"
+    # ``head`` lets a paired bytes ARGUMENT keep its "name: type = " prefix;
+    # a batch entry has none and just sits at the indent.
+    lead = pad if head is None else head
     to = entry.get("to") or ""
     symbol = entry.get("symbol") or ""
     sym_html = f"<b>{_escape_html(symbol)}</b> " if symbol else ""
@@ -590,15 +593,16 @@ def _batch_entry_html(entry: dict, *, indent: int, last: bool,
     if call is None:
         data = entry.get("data") or "0x"
         sel = _escape_html(data[:10])
-        return (f"{pad}{sym_html}{target}.<b>{sel}</b>…  "
+        # Separator BEFORE the comment, Python-style — see _arg_html.
+        return (f"{lead}{sym_html}{target}.<b>{sel}</b>…{tail.rstrip(chr(10))}  "
                 f'<span style="color:{_COMMENT_COLOR};">'
-                f"# unverified contract — selector only</span>{warn}{tail}")
+                f"# unverified contract — selector only</span>{warn}\n")
     inner = call.get("args") or []
     body = "".join(
         _arg_html(child, indent=indent + 1, last=(k == len(inner) - 1),
                   known_addresses=known_addresses)
         for k, child in enumerate(inner))
-    opened = (f"{pad}{sym_html}{target}."
+    opened = (f"{lead}{sym_html}{target}."
               f"<b>{_escape_html(call.get('function') or '?')}</b>(")
     if not inner:
         return opened + ")" + warn + tail
@@ -606,10 +610,22 @@ def _batch_entry_html(entry: dict, *, indent: int, last: bool,
 
 
 def _walk_batches(nodes: list[dict]) -> Iterator[dict]:
-    """Yield every multiSend batch entry anywhere in a decoded tree — a batch
-    can sit inside a tuple, an array, or another decoded call."""
+    """Yield every node that needs a TARGET's ABI to decode — a multiSend batch
+    entry, or a ``bytes`` argument paired with the address it's calldata for
+    (a Safe's execTransaction). Both carry ``to``/``target`` + ``data``, so one
+    resolver and one renderer serve them. Recurses through tuples, arrays and
+    already-decoded inner calls."""
     for node in nodes:
-        yield from node.get("batch") or ()
+        for entry in node.get("batch") or ():
+            yield entry
+            # An entry can itself decode to a call carrying another batch —
+            # multiSend → execTransaction → multiSend is a real Safe shape.
+            # Without descending here the innermost entries never reach the
+            # resolver and render as "unverified" despite having an ABI.
+            if entry.get("call"):
+                yield from _walk_batches(entry["call"].get("args") or [])
+        if node.get("target") and node.get("value"):
+            yield node
         if node.get("children"):
             yield from _walk_batches(node["children"])
         call = node.get("call")
@@ -634,7 +650,9 @@ def enrich_batch_entries(decoded: dict, chain_id: int, *, abi_for,
     would be a confident lie — an unresolved entry keeps its selector instead."""
     pending: set[str] = set()
     for entry in _walk_batches(decoded.get("args") or []):
-        target = (entry.get("to") or "").lower()
+        # A batch entry keys its destination as "to"; a paired bytes argument
+        # as "target" (the sibling address it is calldata for).
+        target = (entry.get("to") or entry.get("target") or "").lower()
         if not target:
             continue
         if token_info is not None and not entry.get("symbol"):
@@ -646,8 +664,10 @@ def enrich_batch_entries(decoded: dict, chain_id: int, *, abi_for,
             continue
         abi = abi_for(target)
         if abi:
-            inner = decode_call(abi, entry.get("data") or "", target)
-            if inner is not None:
+            # batch entry -> "data"; paired bytes argument -> its own "value"
+            calldata = entry.get("data") or entry.get("value") or ""
+            inner = decode_call(abi, calldata, target)
+            if inner is not None and not inner.get("extra"):
                 entry["call"] = inner
                 continue
         if abi is None:
@@ -814,6 +834,16 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
                     f"# {len(batch)} call{'s' if len(batch) != 1 else ''}"
                     f"</span>\n")
         return head_txt + "".join(rows) + f"{pad})" + tail
+
+    if arg.get("target") and arg.get("call") is not None:
+        # A bytes argument decoded against the sibling address it targets
+        # (execTransaction's `data` for its `to`). Same one-line form as a
+        # batch entry, so a Safe's single call and its batches read alike.
+        return _batch_entry_html(
+            {"to": arg["target"], "symbol": arg.get("symbol"),
+             "call": arg["call"], "operation": 0, "value": 0},
+            indent=indent, last=last, known_addresses=known_addresses,
+            head=head)
 
     call = arg.get("call")
     if call is not None:

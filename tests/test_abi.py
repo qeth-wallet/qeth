@@ -460,6 +460,21 @@ class TestMultiSend:
                  + (999).to_bytes(32, "big") + b"\xaa")               # len > rest
         assert decode_multisend(self._call(lying)) is None
 
+    def test_multisend_as_the_outermost_call_still_unpacks(self):
+        """When multiSend IS the tx, the decoder has already stripped the
+        selector and abi-decoded the argument, so what reaches the bytes node
+        is the bare packed blob — not calldata. Unpacking keys off the
+        enclosing function name instead of a selector."""
+        abi = [{"type": "function", "name": "multiSend",
+                "stateMutability": "payable", "outputs": [],
+                "inputs": [{"name": "transactions", "type": "bytes"}]}]
+        packed = (self._entry(0, "0x" + "44" * 20, 0, b"\x0a\x0b\x0c\x0d")
+                  + self._entry(1, "0x" + "55" * 20, 5, b"\x01\x02\x03\x04"))
+        out = decode_call(abi, self._call(packed))
+        batch = out["args"][0]["batch"]
+        assert [e["to"] for e in batch] == ["0x" + "44" * 20, "0x" + "55" * 20]
+        assert batch[1]["operation"] == 1 and batch[1]["value"] == 5
+
     def test_expansion_attaches_the_batch_to_the_bytes_arg(self):
         """The tree carries the entries on the bytes node, so the renderer
         never sees the packed blob."""
@@ -471,6 +486,60 @@ class TestMultiSend:
                     + abi_encode(["bytes"], [bytes.fromhex(inner[2:])]).hex())
         out = decode_call(abi, calldata)
         assert [e["to"] for e in out["args"][0]["batch"]] == ["0x" + "33" * 20]
+
+
+class TestPairedTargetCalldata:
+    """``execTransaction(address to, uint256 value, bytes data, …)`` — a Safe
+    forwarding ONE call. The payload isn't for the Safe's own ABI and isn't a
+    multiSend, so it needs pairing with the sibling address it targets."""
+
+    SAFE_ABI = [{
+        "type": "function", "name": "execTransaction",
+        "stateMutability": "payable", "outputs": [{"type": "bool"}],
+        "inputs": [{"name": "to", "type": "address"},
+                   {"name": "value", "type": "uint256"},
+                   {"name": "data", "type": "bytes"},
+                   {"name": "operation", "type": "uint8"},
+                   {"name": "gasToken", "type": "address"},
+                   {"name": "refundReceiver", "type": "address"}]}]
+
+    def _exec(self, to: str, data: bytes) -> str:
+        from eth_abi import encode as abi_encode
+        from eth_utils import function_signature_to_4byte_selector
+        sel = function_signature_to_4byte_selector(
+            "execTransaction(address,uint256,bytes,uint8,address,address)").hex()
+        zero = "0x" + "00" * 20
+        return "0x" + sel + abi_encode(
+            ["address", "uint256", "bytes", "uint8", "address", "address"],
+            [to, 0, data, 0, zero, zero]).hex()
+
+    def test_payload_records_the_address_it_targets(self):
+        to = "0x" + "77" * 20
+        out = decode_call(self.SAFE_ABI,
+                          self._exec(to, bytes.fromhex("a9059cbb" + "00" * 64)))
+        data_arg = next(a for a in out["args"] if a["name"] == "data")
+        assert data_arg["target"].lower() == to
+
+    def test_target_is_the_address_BEFORE_the_payload(self):
+        """A Safe call also carries gasToken/refundReceiver AFTER data; those
+        are unrelated, and pairing with one would decode against the wrong
+        contract."""
+        to = "0x" + "77" * 20
+        out = decode_call(self.SAFE_ABI,
+                          self._exec(to, bytes.fromhex("a9059cbb" + "00" * 64)))
+        data_arg = next(a for a in out["args"] if a["name"] == "data")
+        assert data_arg["target"].lower() != "0x" + "00" * 20
+
+    def test_no_target_when_no_address_precedes_the_payload(self):
+        abi = [{"type": "function", "name": "submit", "outputs": [],
+                "stateMutability": "payable",
+                "inputs": [{"name": "payload", "type": "bytes"}]}]
+        from eth_abi import encode as abi_encode
+        from eth_utils import function_signature_to_4byte_selector
+        sel = function_signature_to_4byte_selector("submit(bytes)").hex()
+        out = decode_call(abi, "0x" + sel + abi_encode(
+            ["bytes"], [bytes.fromhex("a9059cbb" + "00" * 64)]).hex())
+        assert "target" not in out["args"][0]
 
 
 def function_selector(entry: dict) -> str:

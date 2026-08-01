@@ -542,25 +542,9 @@ _MAX_CALL_NESTING = 2
 MULTISEND_SELECTOR = "0x8d80ff0a"
 
 
-def decode_multisend(input_data: str) -> list[dict] | None:
-    """Unpack a ``multiSend(bytes)`` call into its constituent transactions.
-
-    Returns ``[{"operation", "to", "value", "data"}, …]`` — ``data`` is the
-    inner calldata, still undecoded (each entry targets a DIFFERENT contract,
-    so naming it needs that contract's ABI). ``None`` when this isn't a
-    multiSend or the payload doesn't unpack EXACTLY: a trailing byte or a
-    length running past the end means we misread the format, and half a batch
-    is worse than none — the caller then leaves the raw bytes on screen.
-
-    ``operation`` is 0 for CALL and 1 for DELEGATECALL; the latter runs the
-    target's code as the Safe itself, so callers should surface it."""
-    if not input_data or not input_data.lower().startswith(MULTISEND_SELECTOR):
-        return None
-    try:
-        from eth_abi import decode as abi_decode
-        (packed,) = abi_decode(["bytes"], bytes.fromhex(_strip_0x(input_data)[8:]))
-    except Exception:
-        return None
+def _unpack_multisend(packed: bytes) -> list[dict] | None:
+    """The packed-blob half of :func:`decode_multisend` — see it for the
+    format and for why an inexact unpack yields None."""
     out: list[dict] = []
     i, n = 0, len(packed)
     while i < n:
@@ -583,8 +567,60 @@ def decode_multisend(input_data: str) -> list[dict] | None:
     return out or None
 
 
+def unpack_multisend_arg(value_hex: str) -> list[dict] | None:
+    """Unpack the ``transactions`` ARGUMENT of a multiSend call (the bare
+    packed blob, no selector). Used when multiSend is the outermost call, where
+    the decoder has already stripped the selector and abi-decoded the bytes."""
+    if not value_hex or not value_hex.startswith("0x"):
+        return None
+    try:
+        return _unpack_multisend(bytes.fromhex(_strip_0x(value_hex)))
+    except ValueError:
+        return None
+
+
+def decode_multisend(input_data: str) -> list[dict] | None:
+    """Unpack a ``multiSend(bytes)`` call into its constituent transactions.
+
+    Returns ``[{"operation", "to", "value", "data"}, …]`` — ``data`` is the
+    inner calldata, still undecoded (each entry targets a DIFFERENT contract,
+    so naming it needs that contract's ABI). ``None`` when this isn't a
+    multiSend or the payload doesn't unpack EXACTLY: a trailing byte or a
+    length running past the end means we misread the format, and half a batch
+    is worse than none — the caller then leaves the raw bytes on screen.
+
+    ``operation`` is 0 for CALL and 1 for DELEGATECALL; the latter runs the
+    target's code as the Safe itself, so callers should surface it."""
+    if not input_data or not input_data.lower().startswith(MULTISEND_SELECTOR):
+        return None
+    try:
+        from eth_abi import decode as abi_decode
+        (packed,) = abi_decode(["bytes"], bytes.fromhex(_strip_0x(input_data)[8:]))
+    except Exception:
+        return None
+    return _unpack_multisend(packed)
+
+
+def _sibling_target(nodes: list[dict], index: int) -> str | None:
+    """The address a ``bytes`` argument is calldata FOR, when its own call
+    names one alongside it.
+
+    ``execTransaction(address to, uint256 value, bytes data, …)`` is the shape
+    that matters — a Safe forwarding one call — and the same (target, payload)
+    pairing covers forwarders and ``aggregate3``'s (target, allowFailure,
+    callData) tuples. Takes the nearest address BEFORE the payload: every one
+    of these puts the destination first, while the trailing addresses on a Safe
+    call (``gasToken``, ``refundReceiver``) are unrelated and would be a wrong
+    guess. A wrong pairing is self-correcting anyway — the payload simply won't
+    decode against that contract's ABI, so nothing is named."""
+    for node in reversed(nodes[:index]):
+        if node.get("type") == "address" and node.get("value"):
+            return str(node["value"])
+    return None
+
+
 def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
-                         depth: int) -> None:
+                         depth: int, fn_name: str | None = None) -> None:
     """Decode ``bytes`` arguments that are themselves calldata, in place.
 
     This is what makes a batched call readable: ``multicall(bytes[] data)``
@@ -599,15 +635,25 @@ def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
     ``proof`` arguments — and without that check a proof whose first four bytes
     happen to collide with a selector would be rendered as a bogus call. Exact
     round-tripping makes a false positive vanishingly unlikely."""
-    for node in nodes:
+    for index, node in enumerate(nodes):
         children = node.get("children")
         if children:
-            _expand_nested_calls(children, abi, address, depth)
+            _expand_nested_calls(children, abi, address, depth, fn_name)
             continue
         if node.get("type") != "bytes":
             continue
         value = node.get("value") or ""
-        if not value.startswith("0x") or len(value) < 10:
+        if not value.startswith("0x"):
+            continue
+        # multiSend as the OUTERMOST call: the decoder already stripped the
+        # selector and abi-decoded the argument, so what's left is the bare
+        # packed blob rather than calldata.
+        if fn_name == "multiSend":
+            batch = unpack_multisend_arg(value)
+            if batch is not None:
+                node["batch"] = batch
+                continue
+        if len(value) < 10:
             continue
         batch = decode_multisend(value)
         if batch is not None:
@@ -618,6 +664,13 @@ def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
         inner = decode_call(abi, value, address, _depth=depth + 1)
         if inner is not None and not inner.get("extra"):
             node["call"] = inner
+            continue
+        # Not for THIS contract — but the call may name the contract it IS for
+        # (a Safe's execTransaction forwards one call to its `to` argument).
+        # Record the target; the UI fetches that ABI and decodes against it.
+        target = _sibling_target(nodes, index)
+        if target:
+            node["target"] = target
 
 
 def decode_call(abi: Abi | None, input_data: str,
@@ -674,7 +727,8 @@ def decode_call(abi: Abi | None, input_data: str,
     if extra:
         result["extra"] = extra
     if _depth < _MAX_CALL_NESTING:
-        _expand_nested_calls(args_list, abi, address, _depth)
+        _expand_nested_calls(args_list, abi, address, _depth,
+                             result.get("function"))
     return result
 
 

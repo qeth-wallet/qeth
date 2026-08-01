@@ -560,6 +560,12 @@ def _format_token_amount(raw: int, decimals: int, symbol: str) -> str:
     return f"{text} {symbol}"
 
 
+# Dynamic `bytes` longer than this (in rendered hex chars, so ~128 bytes) is
+# shown head…tail with its size in a trailing comment. Short payloads — a
+# selector, a small hook argument — still render in full.
+_BYTES_ELIDE_CHARS = 258
+
+
 def _own_address_labels(known_addresses) -> dict[str, str]:
     """Normalise a caller's own-wallet input to ``{lower_address: label}``.
 
@@ -705,6 +711,24 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
     else:
         head = pad
 
+    call = arg.get("call")
+    if call is not None:
+        # A ``bytes`` argument that is itself calldata (a multicall element, a
+        # router payload). Render the CALL it performs rather than kilobytes of
+        # hex — the whole point of decoding a batch. Nothing is hidden: the
+        # bytes are unpacked into the call they encode, not dropped.
+        inner_args = call.get("args") or []
+        body = "".join(
+            _arg_html(child, indent=indent + 1,
+                      last=(j == len(inner_args) - 1),
+                      known_addresses=known_addresses)
+            for j, child in enumerate(inner_args)
+        )
+        opened = (f"{head}<b>{_escape_html(call.get('function') or '?')}</b>(")
+        if not inner_args:
+            return opened + ")" + tail
+        return opened + "\n" + body + f"{pad})" + tail
+
     children = arg.get("children")
     if children is not None:
         # Tuple uses { }, array uses [ ]. Empty containers stay on
@@ -723,6 +747,15 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
 
     value = arg.get("value")
     value_text = "" if value is None else str(value)
+    # A long dynamic `bytes` blob — a Merkle proof, a signature bundle, an
+    # inner payload we couldn't decode — is never read digit by digit, and at
+    # full length it buries everything around it (this tx carries ten 7 KB
+    # proofs, which is exactly the calldata a multicall batches). Show both
+    # ends plus the size, so the shape and length stay verifiable.
+    elided_bytes = 0
+    if type_ == "bytes" and len(value_text) > _BYTES_ELIDE_CHARS:
+        elided_bytes = max(0, (len(value_text) - 2) // 2)
+        value_text = f"{value_text[:34]}…{value_text[-8:]}"
     inner = _escape_html(value_text)
     # Bold + italic an address argument that belongs to one of the
     # user's own wallets — so a self-send / approval-to-self stands out
@@ -744,7 +777,12 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
     # the caller marked as amount-carrying (see _render_decoded for that
     # gating). Mutually exclusive by type — an address is never an amount.
     comment_html = ""
-    if own_label:
+    if elided_bytes:
+        comment_html = (
+            f'  <span style="color:{_COMMENT_COLOR};">'
+            f"# {elided_bytes} bytes</span>"
+        )
+    elif own_label:
         comment_html = (
             f'  <span style="color:{_COMMENT_COLOR};">'
             f"# {_escape_html(own_label)}</span>"

@@ -911,6 +911,51 @@ class TestTransactionsPlugin:
         assert _own_address_labels(once) == once
         assert _own_address_labels(None) == {}
 
+    def test_render_decoded_expands_a_batched_call(self, qtbot, tmp_qeth):
+        """A multicall renders as the calls it performs, indented under the
+        array, instead of a wall of hex."""
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        def _inner(fn, to):
+            return {"name": "", "type": "bytes", "value": "0x" + "ab" * 40,
+                    "call": {"function": fn, "args": [
+                        {"name": "to", "type": "address", "value": to}]}}
+
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {
+            "function": "multicall",
+            "args": [{"name": "data", "type": "bytes[]", "children": [
+                _inner("transfer", "0x" + "11" * 20),
+                _inner("claim", "0x" + "22" * 20),
+            ]}],
+        })
+        lines = [ln.rstrip() for ln in edit.toPlainText().splitlines()]
+        assert lines[0] == "multicall("
+        assert "        transfer(" in lines
+        assert "        claim(" in lines
+        # the wrapper's raw hex is replaced by the call, not printed alongside
+        assert not any("abab" in ln for ln in lines)
+
+    def test_render_decoded_elides_a_long_bytes_blob(self, qtbot, tmp_qeth):
+        """A 7 KB Merkle proof would bury the calls around it. Both ends plus
+        the size stay visible, so the shape and length are still checkable."""
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+
+        blob = "0x" + "cd" * 3000
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, {"function": "setAccountData", "args": [
+            {"name": "proof", "type": "bytes", "value": blob},
+            {"name": "short", "type": "bytes", "value": "0x" + "ef" * 8},
+        ]})
+        text = edit.toPlainText()
+        assert "# 3000 bytes" in text
+        assert "…" in text and blob not in text          # elided
+        assert "0x" + "ef" * 8 in text                    # short one intact
+
     def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
         """The function name in the decoded-call view stays bold only
         if the chosen monospace family ships a Bold style. The CSS

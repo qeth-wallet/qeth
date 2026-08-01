@@ -360,6 +360,65 @@ class TestDecodeCall:
         assert out["extra"] == "0xdeadbeef"
 
 
+class TestNestedCalls:
+    """A batched call — ``multicall(bytes[] data)`` — delegatecalls ITSELF, so
+    every element of ``data`` decodes against the same ABI we already hold.
+    Expanding them turns 30 KB of hex into the list of calls it performs."""
+
+    MULTICALL_ABI = ERC20_ABI + [
+        {"type": "function", "name": "multicall", "stateMutability": "payable",
+         "inputs": [{"name": "data", "type": "bytes[]"}],
+         "outputs": [{"name": "results", "type": "bytes[]"}]},
+    ]
+
+    @staticmethod
+    def _transfer(to_byte: str, amount: int) -> bytes:
+        return bytes.fromhex(
+            "a9059cbb" + "00" * 12 + to_byte * 20 + f"{amount:064x}")
+
+    def _multicall(self, *inner: bytes) -> str:
+        from eth_abi import encode as abi_encode
+        return "0xac9650d8" + abi_encode(["bytes[]"], [list(inner)]).hex()
+
+    def test_multicall_elements_expand_into_calls(self):
+        out = decode_call(
+            self.MULTICALL_ABI,
+            self._multicall(self._transfer("11", 1000),
+                            self._transfer("22", 7)),
+            address="0xdac17f958d2ee523a2206206994597c13d831ec7")
+        assert out["function"] == "multicall"
+        elements = out["args"][0]["children"]
+        assert [e["call"]["function"] for e in elements] == ["transfer", "transfer"]
+        # inner args decode fully, not just the selector
+        first = {a["name"]: a["value"] for a in elements[0]["call"]["args"]}
+        assert first["_value"] == "1000"
+        assert first["_to"].lower() == "0x" + "11" * 20
+        assert elements[1]["call"]["args"][1]["value"] == "7"
+
+    def test_opaque_bytes_are_not_mistaken_for_a_call(self):
+        """A Merkle proof sits right next to batched calldata in real txs. Only
+        blobs that re-encode to their WHOLE selves become calls, so a proof
+        whose first four bytes collide with a selector stays opaque."""
+        proof = bytes.fromhex("a9059cbb" + "de" * 137)   # selector, junk tail
+        out = decode_call(self.MULTICALL_ABI, self._multicall(proof),
+                          address="0xdac17f958d2ee523a2206206994597c13d831ec7")
+        element = out["args"][0]["children"][0]
+        assert "call" not in element
+        assert element["value"] == "0x" + proof.hex()   # left verbatim
+
+    def test_nesting_is_depth_bounded(self):
+        """A multicall of multicalls unwraps; deeper does not, so a crafted
+        blob can't drive unbounded recursion."""
+        lvl1 = bytes.fromhex(self._multicall(self._transfer("11", 1))[2:])
+        lvl2 = bytes.fromhex(self._multicall(lvl1)[2:])
+        out = decode_call(self.MULTICALL_ABI, self._multicall(lvl2),
+                          address="0xdac17f958d2ee523a2206206994597c13d831ec7")
+        outer = out["args"][0]["children"][0]["call"]           # depth 1
+        middle = outer["args"][0]["children"][0]["call"]        # depth 2
+        assert middle["function"] == "multicall"
+        assert "call" not in middle["args"][0]["children"][0]   # depth 3 stops
+
+
 class TestDecodeCallTuples:
     """Tuple/struct args turn into branch nodes with per-component
     children so the dialog can render them indented with each inner

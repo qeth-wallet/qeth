@@ -527,8 +527,45 @@ def decode_via_4byte(input_data: str, *, transport=None) -> dict | None:
     return None
 
 
+# How deep a batched call is unwrapped. A multicall of multicalls is real (a
+# router batching through an aggregator); a third level is not — and the bound
+# stops a pathological or adversarial blob from recursing forever.
+_MAX_CALL_NESTING = 2
+
+
+def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
+                         depth: int) -> None:
+    """Decode ``bytes`` arguments that are themselves calldata, in place.
+
+    This is what makes a batched call readable: ``multicall(bytes[] data)``
+    delegatecalls ITSELF, so every element of ``data`` decodes against the very
+    same ABI we already hold — no extra fetch, no selector list to maintain.
+    The same walk covers a lone ``bytes`` argument (a router's ``execute(bytes
+    payload)``), because the rule is structural rather than a hardcoded set of
+    multicall shapes.
+
+    A match must re-encode to the WHOLE blob (``extra`` empty). Batched calls
+    sit right next to genuine opaque ``bytes`` — this tx carries 7 KB Merkle
+    ``proof`` arguments — and without that check a proof whose first four bytes
+    happen to collide with a selector would be rendered as a bogus call. Exact
+    round-tripping makes a false positive vanishingly unlikely."""
+    for node in nodes:
+        children = node.get("children")
+        if children:
+            _expand_nested_calls(children, abi, address, depth)
+            continue
+        if node.get("type") != "bytes":
+            continue
+        value = node.get("value") or ""
+        if not value.startswith("0x") or len(value) < 10:
+            continue
+        inner = decode_call(abi, value, address, _depth=depth + 1)
+        if inner is not None and not inner.get("extra"):
+            node["call"] = inner
+
+
 def decode_call(abi: Abi | None, input_data: str,
-                address: str | None = None) -> dict | None:
+                address: str | None = None, *, _depth: int = 0) -> dict | None:
     """Decode ``input_data`` against ``abi``. Returns a tree like
 
         {"function": "register",
@@ -543,7 +580,12 @@ def decode_call(abi: Abi | None, input_data: str,
     or ``None`` when there's no ABI, the calldata is empty, or
     decoding fails. Leaf nodes have ``value`` (stringified); tuple
     nodes have ``children``. The UI walks the tree to render
-    indented, type-annotated output."""
+    indented, type-annotated output.
+
+    A ``bytes`` leaf that is itself calldata for this ABI also carries
+    ``call`` — the decoded inner call — so a batched ``multicall`` renders as
+    the calls it performs instead of a wall of hex (see
+    :func:`_expand_nested_calls`)."""
     if not abi or not input_data or input_data in ("0x", "0X"):
         return None
     try:
@@ -575,6 +617,8 @@ def decode_call(abi: Abi | None, input_data: str,
     extra = _trailing_calldata(contract, func, args, input_data)
     if extra:
         result["extra"] = extra
+    if _depth < _MAX_CALL_NESTING:
+        _expand_nested_calls(args_list, abi, address, _depth)
     return result
 
 

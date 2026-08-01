@@ -43,3 +43,5 @@ venv/
 /dist/appimage/*.AppImage
 dist/flatpak/helios
 dist/flatpak/.qeth-verify.yml
+
+/resume

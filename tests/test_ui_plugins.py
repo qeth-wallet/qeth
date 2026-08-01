@@ -3686,10 +3686,10 @@ class TestDetailsEventsView:
         qtbot.addWidget(dlg)
         return dlg
 
-    def _logs(self):
+    def _logs(self, address=None):
         from qeth.abi import _TRANSFER_TOPIC, _APPROVAL_TOPIC
         def ta(a): return "0x" + "00" * 12 + a[2:]
-        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        usdc = address or "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         return [
             # Transfer TO us — should pass the default filter.
             {"address": usdc, "topics": [_TRANSFER_TOPIC, ta("0x" + "bb" * 20),
@@ -3783,6 +3783,52 @@ class TestDetailsEventsView:
         dlg = self._dialog(qtbot, token_info=token_info)
         dlg._events.set_logs(self._logs())
         assert "USDC" in dlg._events.events_view.toPlainText()
+
+    def test_unlisted_token_gets_its_onchain_symbol(self, qtbot, tmp_qeth):
+        """A vault / LP / freshly-deployed / user-pinned token is on no curated
+        list, and used to render as a bare 40-hex address. Its on-chain
+        symbol() — cached in TokenMetadataCache — names it instead."""
+        vault = "0x651d4b8168488fa163d85304662e8278d4c55baa"
+        dlg = self._dialog(qtbot)                       # token_info knows nothing
+        dlg._events._token_meta.put_many(
+            1, {vault: {"symbol": "ybBTC", "name": "Yield Basis BTC",
+                        "decimals": 18}})
+        dlg._events.set_logs(self._logs(address=vault))
+        assert "ybBTC" in dlg._events.events_view.toPlainText()
+
+    def test_unlisted_symbol_is_italic_not_bold(self, qtbot, tmp_qeth):
+        """An on-chain symbol is SELF-REPORTED and forgeable — poisoning spam
+        names itself USDC — so it renders italic (the Approvals soft-label
+        convention), while a curated token stays bold. The weight is the whole
+        signal; showing both the same way would launder an unverified name."""
+        from PySide6.QtGui import QFont
+        from types import SimpleNamespace
+        listed = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        spoof = "0x651d4b8168488fa163d85304662e8278d4c55baa"
+
+        def weights(dlg, sym):
+            out = []
+            doc = dlg._events.events_view.document()
+            block = doc.firstBlock()
+            while block.isValid():
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid() and sym in frag.text():
+                        cf = frag.charFormat()
+                        out.append((cf.fontWeight() >= QFont.Bold, cf.fontItalic()))
+                    it += 1
+                block = block.next()
+            return out
+
+        dlg = self._dialog(qtbot, token_info=lambda cid, a: (
+            SimpleNamespace(symbol="USDC") if a.lower() == listed else None))
+        dlg._events._token_meta.put_many(
+            1, {spoof: {"symbol": "USDT", "name": "n", "decimals": 6}})
+        dlg._events.set_logs(self._logs(address=listed)
+                             + self._logs(address=spoof))
+        assert (True, False) in weights(dlg, "USDC")     # curated → bold
+        assert (False, True) in weights(dlg, "USDT")     # self-reported → italic
 
 
 class _SimList:

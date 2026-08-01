@@ -3307,6 +3307,13 @@ class _EventsView(QWidget):
         self._show_all_events = False
         self._event_abis: dict = {}
         self._abi_inflight: set = set()
+        # On-chain (name, symbol, decimals) for contracts no token list knows —
+        # vaults, LP/gauge tokens, anything freshly deployed or user-pinned.
+        # Its own instance rather than the plugin's: this view is built by
+        # dialogs that reach nothing but their kwargs, and the disk file is
+        # shared (put_many merges), so a fetch here spares one there.
+        self._token_meta = TokenMetadataCache()
+        self._meta_inflight: set[str] = set()
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3412,6 +3419,7 @@ class _EventsView(QWidget):
         self.show_all_events_btn.setEnabled(bool(self._logs))
         if self._show_all_events:
             self._ensure_event_abis()
+        self._ensure_token_symbols()
         self._render_events_view()
 
     def _on_show_all_events(self, checked: bool) -> None:
@@ -3458,19 +3466,70 @@ class _EventsView(QWidget):
         return False
 
     def _token_prefix_html(self, doc, contract: str) -> str:
-        if self._token_info is None or not contract:
+        """The ``SYM`` badge in front of a log's contract address.
+
+        Two tiers, and the weight says which:
+
+        - a CURATED token (on a token list) → logo + **bold** symbol. Vouched
+          for by a third party, so it can be shown plainly.
+        - anything else we can read on chain → *italic* symbol, no logo. This
+          is the token's OWN self-reported ``symbol()`` — forgeable, and
+          address-poisoning spam routinely names itself USDC — so it's marked
+          lower-confidence exactly like the Approvals tab's soft labels rather
+          than being passed off as a verified name.
+
+        Without the second tier a vault/LP token, a freshly-listed token, or
+        one the user pinned themselves rendered as a bare 40-hex address, which
+        is unreadable in a signing preview."""
+        if not contract:
             return ""
-        entry = self._token_info(self.chain.chain_id, contract)
-        if entry is None:
-            return ""
-        img = ""
-        if self._icon_cache is not None:
-            pix = self._icon_cache.get(self.chain.chain_id, contract)
-            if pix is not None and not pix.isNull():
-                url = f"tok:{contract.lower()}"
-                doc.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), pix)
-                img = f'<img src="{url}" width="14" height="14"> '
-        return f'{img}<b>{_escape_html(entry.symbol)}</b> '
+        entry = (self._token_info(self.chain.chain_id, contract)
+                 if self._token_info is not None else None)
+        if entry is not None:
+            img = ""
+            if self._icon_cache is not None:
+                pix = self._icon_cache.get(self.chain.chain_id, contract)
+                if pix is not None and not pix.isNull():
+                    url = f"tok:{contract.lower()}"
+                    doc.addResource(
+                        QTextDocument.ResourceType.ImageResource, QUrl(url), pix)
+                    img = f'<img src="{url}" width="14" height="14"> '
+            return f'{img}<b>{_escape_html(entry.symbol)}</b> '
+        meta = self._token_meta.get(self.chain.chain_id, contract)
+        symbol = (meta or {}).get("symbol")
+        if symbol:
+            return f'<i>{_escape_html(str(symbol))}</i> '
+        return ""
+
+    def _ensure_token_symbols(self) -> None:
+        """Read ``symbol()`` on chain for the logs' contracts we can't name from
+        a token list or the metadata cache. One multicall for the batch; the
+        view re-renders as it lands. Immutable per contract, so the disk cache
+        means this happens once ever (and it's shared with the plugin's own
+        cache — see TokenMetadataCache.put_many)."""
+        cid = self.chain.chain_id
+        want = {a for lg in self._logs
+                if (a := (lg.get("address") or "").lower())
+                and not (self._token_info(cid, a) if self._token_info else None)}
+        todo = [c for c in self._token_meta.missing(cid, sorted(want))
+                if c not in self._meta_inflight]
+        if not todo:
+            return
+        self._meta_inflight.update(todo)
+        from ..tokens import MetadataWorker
+        worker = MetadataWorker(self.chain, todo)
+        worker.fetched.connect(self._on_token_meta)
+        worker.failed.connect(
+            lambda _e, cs=todo: self._meta_inflight.difference_update(cs))
+        self._start_worker(worker)
+
+    def _on_token_meta(self, chain_id, meta) -> None:
+        self._meta_inflight.difference_update({c.lower() for c in (meta or {})})
+        if not meta:
+            return
+        self._token_meta.put_many(int(chain_id), meta)
+        if int(chain_id) == self.chain.chain_id:
+            self._render_events_view()
 
     def _render_events_view(self) -> None:
         rendered: list[tuple] = []   # (decoded_or_None, raw_log)

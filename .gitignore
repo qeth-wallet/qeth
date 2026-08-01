@@ -16,6 +16,8 @@ build/
 /dist/rpm/*.rpm
 !/dist/deb/
 /dist/deb/*.deb
+!/dist/macos/
+/dist/macos/out/
 
 # venv
 .venv/

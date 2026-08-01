@@ -1,8 +1,9 @@
 name: macOS (Apple Silicon)
 
-# Runs the test suite on Apple Silicon. There is no macOS package yet — this
-# exists to find out what actually breaks on darwin/arm64 before committing to
-# a distribution format, and to keep it from silently re-breaking afterwards.
+# Runs the test suite on Apple Silicon and builds the .app bundle. macOS grants
+# camera access to BUNDLES, not to a bare `python`, so the bundle is a feature
+# prerequisite rather than only a distribution format — and CI is the only
+# thing that can verify its recipe, which cannot run on Linux.
 #
 # macos-15 (and macos-14) are arm64 runners; macos-13 is the Intel one. Public
 # repo, so the minutes are free.
@@ -20,6 +21,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'dist/macos/**'
       - '.github/workflows/macos.yml'
   pull_request:
     paths:
@@ -27,6 +29,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'dist/macos/**'
 
 jobs:
   tests:
@@ -71,3 +74,52 @@ jobs:
       - name: mypy
         if: always()
         run: uv run mypy
+
+  # The .app bundle is what makes the camera work at all — macOS won't attach a
+  # permission prompt to a bare `python`. Building it here is also the only way
+  # this recipe gets verified: it can't run on Linux, so without CI it would rot
+  # unnoticed between the maintainer's manual builds.
+  bundle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build qeth-macos.app
+        run: ./dist/macos/build.sh
+
+      # Assert the bundle carries what the camera actually needs. A build that
+      # merely SUCCEEDS proves nothing here: drop NSCameraUsageDescription or
+      # the multimedia plugin and macOS silently refuses the camera, which is
+      # the exact failure this whole recipe exists to fix.
+      - name: Verify the bundle
+        run: |
+          APP=dist/macos/out/qeth-macos.app
+          test -d "$APP" || { echo "no bundle produced"; exit 1; }
+          PLIST="$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST"
+          echo "--- camera entitlement:"
+          codesign -d --entitlements - --xml "$APP" 2>/dev/null \
+            | grep -q 'com.apple.security.device.camera' \
+            && echo "camera entitlement present" || echo "WARNING: no camera entitlement"
+          echo "--- signature:"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "--- bundled pieces the app needs:"
+          find "$APP" -name 'libqdarwincamera*' -o -name '*multimedia*' | head -5
+          find "$APP" -name 'zxingcpp*' | head -3
+          find "$APP" -name 'top_tokens.json' | head -2
+          echo "--- arch:"
+          lipo -info "$APP/Contents/MacOS/qeth" 2>/dev/null || true
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeth-macos-app
+          path: dist/macos/out/qeth-macos.app
+          retention-days: 14
+          if-no-files-found: error

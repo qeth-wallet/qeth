@@ -90,8 +90,20 @@ uv sync --inexact --no-dev          # runtime deps only (no dev tooling)
 uv run python -m qeth
 ```
 
-**Self-contained venv** — when there's no system PySide6 (macOS, or a
-minimal box): drop `--system-site-packages` and bundle Qt from PyPI:
+**macOS** — camera access requires an application bundle so macOS can associate
+the permission prompt with qeth. Build and launch the local app:
+
+```sh
+./dist/macos/build.sh
+open dist/macos/out/qeth-macos.app
+```
+
+The PyInstaller build uses uv's selected project interpreter and the locked
+project dependencies, including the QR feature. Re-run the script after
+changing the source.
+
+**Self-contained venv** — on a minimal box without system PySide6, drop
+`--system-site-packages` and bundle Qt from PyPI:
 
 ```sh
 uv venv
@@ -160,4 +172,5 @@ live in [`extensions/`](extensions/):
 - The native `.rpm`/`.deb` give native theming because they use the system Qt;
   the Flatpak/AppImage are portable but ship their own Qt.
 - Packaging recipes: [`dist/rpm/`](dist/rpm/), [`dist/deb/`](dist/deb/),
-  [`dist/flatpak/`](dist/flatpak/), [`dist/appimage/`](dist/appimage/).
+  [`dist/flatpak/`](dist/flatpak/), [`dist/appimage/`](dist/appimage/), and
+  [`dist/macos/`](dist/macos/).

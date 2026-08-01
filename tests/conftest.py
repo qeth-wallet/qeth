@@ -193,6 +193,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     import qeth.token_discovery.toptokens
     import qeth.transactions_cache
     import qeth.plugins.tokens.wallet_cache
+    import qeth.icons
     import qeth.plugins.tokens.risk
 
     monkeypatch.setattr(qeth.plugins.approvals.cache, "CACHE_DIR",
@@ -211,6 +212,12 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.activity_cache, "ACTIVITIES_DIR",
                         tmp_path / "activities")
     monkeypatch.setattr(qeth.abi_cache, "CACHE_DIR", tmp_path / "abi")
+    # The icon cache was the one on-disk store NOT redirected, so tests read
+    # (and wrote) the developer's real ~/.qeth/icons. That masked a hermeticity
+    # hole: on a populated box every logo was a cache hit, while a clean
+    # machine — CI — missed and fetched from raw.githubusercontent, tripping
+    # the network guard in whichever test the background thread outlived.
+    monkeypatch.setattr(qeth.icons, "ICONS_DIR", tmp_path / "icons")
     monkeypatch.setattr(qeth.plugins.ens.ens_app, "CACHE_DIR", tmp_path / "ens")
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
                         tmp_path / "keystores")
@@ -298,6 +305,7 @@ def hermetic_mainwindow(monkeypatch):
     from qeth.plugins import ens as ens_plugin
     from qeth.plugins import tokens as tokens_plugin
     from qeth.plugins import transactions as transactions_plugin
+    from qeth import icons as icons_mod
 
     def _noop_run(self):  # pragma: no cover - simple no-op
         return
@@ -312,6 +320,10 @@ def hermetic_mainwindow(monkeypatch):
         (ens_plugin, ["EnsNamesWorker", "EnsRecordsWorker", "EnsVerifyWorker",
                       "EnsTextKeysWorker"]),
         (approvals_plugin, ["ScanWorker", "ReconcileWorker"]),
+        # Logo fetches (trustwallet / curve-assets on raw.githubusercontent).
+        # Not plugin workers, so they were missed by the per-plugin lists above
+        # and only showed up on a machine with an empty icon cache.
+        (icons_mod, ["_IconFetchWorker", "_ChainIconFetchWorker"]),
     ):
         for cls_name in cls_names:
             cls = getattr(mod, cls_name, None)

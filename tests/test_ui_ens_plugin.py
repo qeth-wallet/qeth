@@ -9,6 +9,7 @@ that the plugin renders from cache without a fetch.
 
 from unittest.mock import MagicMock
 
+import sys
 import pytest
 from eth_abi import encode as abi_encode
 from PySide6.QtCore import Qt
@@ -1064,8 +1065,14 @@ class TestEnsPanel:
         qtbot.addWidget(panel)
         assert panel._b_transfer.text() == "&Transfer"
         assert panel._b_renew.text() == "&Extend"
-        assert not panel._b_transfer.shortcut().isEmpty()
         assert panel._b_manager.text() == ""
+        # Qt only turns "&X" into an actual shortcut where the platform has
+        # mnemonics. macOS deliberately has none (Apple's HIG uses no
+        # Alt-underline accelerators), so Qt leaves the shortcut empty there
+        # and renders the label without the ampersand — correct behaviour, not
+        # a regression, so only assert the binding where it should exist.
+        if sys.platform != "darwin":
+            assert not panel._b_transfer.shortcut().isEmpty()
 
     def test_add_button_emits_add_custom(self, qtbot):
         panel = EnsPanel()

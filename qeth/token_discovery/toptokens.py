@@ -172,8 +172,13 @@ class TopTokens:
         fetch: FetchFn = fetch_top_tokens,
     ):
         self._cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
+        # ``parent.parent``: this module is qeth/token_discovery/toptokens.py
+        # and the seed ships at qeth/data/top_tokens.json — one level UP. The
+        # old single-parent path pointed at qeth/token_discovery/data/, which
+        # has never existed, so the bundled seed never loaded on a fresh
+        # install; a developer box hid it behind the refreshed runtime cache.
         self._seed_path = seed_path or (
-            Path(__file__).resolve().parent / "data" / "top_tokens.json")
+            Path(__file__).resolve().parent.parent / "data" / "top_tokens.json")
         self._ttl = ttl_seconds
         self._clock = clock
         self._fetch = fetch

@@ -118,9 +118,16 @@ def test_fetch_top_tokens_ranks_and_maps(monkeypatch):
     assert [t.address for t in out[137]] == ["0x" + "33" * 20]
 
 
-def test_shipped_seed_is_valid_and_has_usdc():
-    # The bundled qeth/data/top_tokens.json must load and carry the majors.
-    tt = TopTokens()
+def test_shipped_seed_is_valid_and_has_usdc(tmp_path):
+    """The bundled qeth/data/top_tokens.json must load and carry the majors.
+
+    ``cache_dir`` points at an EMPTY dir on purpose, so this exercises the
+    shipped seed rather than whatever the developer's ~/.qeth/toptokens holds.
+    Without that the test passed on any box that had ever run the app while the
+    seed path was wrong (it pointed one directory too deep, so a fresh install
+    got nothing) — the runtime cache silently stood in for it, and only a clean
+    CI machine noticed."""
+    tt = TopTokens(cache_dir=tmp_path)
     assert USDC in tt.contracts(1)
     assert len(tt.contracts(1)) > 100        # mainnet head is substantial
     assert all(a == a.lower() and a.startswith("0x")

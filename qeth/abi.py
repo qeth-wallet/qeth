@@ -533,6 +533,56 @@ def decode_via_4byte(input_data: str, *, transport=None) -> dict | None:
 _MAX_CALL_NESTING = 2
 
 
+# Safe's MultiSend: multiSend(bytes transactions). Its argument is NOT
+# abi-encoded — it's a hand-packed concatenation of
+#     operation(1) ‖ to(20) ‖ value(32) ‖ dataLength(32) ‖ data(dataLength)
+# repeated, which the library walks with assembly. Nothing generic can unpack
+# that, so the one structural rule that batched calls follow elsewhere doesn't
+# reach it and the format is spelled out here.
+MULTISEND_SELECTOR = "0x8d80ff0a"
+
+
+def decode_multisend(input_data: str) -> list[dict] | None:
+    """Unpack a ``multiSend(bytes)`` call into its constituent transactions.
+
+    Returns ``[{"operation", "to", "value", "data"}, …]`` — ``data`` is the
+    inner calldata, still undecoded (each entry targets a DIFFERENT contract,
+    so naming it needs that contract's ABI). ``None`` when this isn't a
+    multiSend or the payload doesn't unpack EXACTLY: a trailing byte or a
+    length running past the end means we misread the format, and half a batch
+    is worse than none — the caller then leaves the raw bytes on screen.
+
+    ``operation`` is 0 for CALL and 1 for DELEGATECALL; the latter runs the
+    target's code as the Safe itself, so callers should surface it."""
+    if not input_data or not input_data.lower().startswith(MULTISEND_SELECTOR):
+        return None
+    try:
+        from eth_abi import decode as abi_decode
+        (packed,) = abi_decode(["bytes"], bytes.fromhex(_strip_0x(input_data)[8:]))
+    except Exception:
+        return None
+    out: list[dict] = []
+    i, n = 0, len(packed)
+    while i < n:
+        if i + 85 > n:                     # 1 + 20 + 32 + 32 header
+            return None
+        operation = packed[i]
+        to = "0x" + packed[i + 1:i + 21].hex()
+        value = int.from_bytes(packed[i + 21:i + 53], "big")
+        length = int.from_bytes(packed[i + 53:i + 85], "big")
+        i += 85
+        if length > n - i:
+            return None
+        out.append({
+            "operation": operation,
+            "to": to,
+            "value": value,
+            "data": "0x" + packed[i:i + length].hex(),
+        })
+        i += length
+    return out or None
+
+
 def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
                          depth: int) -> None:
     """Decode ``bytes`` arguments that are themselves calldata, in place.
@@ -558,6 +608,12 @@ def _expand_nested_calls(nodes: list[dict], abi: Abi, address: str | None,
             continue
         value = node.get("value") or ""
         if not value.startswith("0x") or len(value) < 10:
+            continue
+        batch = decode_multisend(value)
+        if batch is not None:
+            # Each entry targets a different contract, so the entries carry raw
+            # calldata; the UI resolves each target's ABI and fills in ``call``.
+            node["batch"] = batch
             continue
         inner = decode_call(abi, value, address, _depth=depth + 1)
         if inner is not None and not inner.get("extra"):

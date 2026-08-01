@@ -24,7 +24,7 @@ import os
 import time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 from eth_utils import to_checksum_address
 
@@ -566,6 +566,95 @@ def _format_token_amount(raw: int, decimals: int, symbol: str) -> str:
 _BYTES_ELIDE_CHARS = 258
 
 
+def _batch_entry_html(entry: dict, *, indent: int, last: bool,
+                      known_addresses) -> str:
+    """One multiSend transaction: ``SYM 0xtarget.fn(args…)``, or the bare
+    selector when we couldn't get the target's ABI. A DELEGATECALL entry is
+    flagged — the Safe runs that contract's code AS ITSELF, so it isn't the
+    bounded 'call another contract' the rest of the batch does."""
+    pad = "    " * indent
+    tail = "\n" if last else ",\n"
+    to = entry.get("to") or ""
+    symbol = entry.get("symbol") or ""
+    sym_html = f"<b>{_escape_html(symbol)}</b> " if symbol else ""
+    target = (f'<span style="color:{_TYPE_COLOR};">{_escape_html(to)}</span>')
+    warn = ""
+    if int(entry.get("operation") or 0) == 1:
+        warn = (f'  <span style="color:{_COMMENT_COLOR};">'
+                f"# ⚠ delegatecall — runs as the Safe itself</span>")
+    value = int(entry.get("value") or 0)
+    if value:
+        warn += (f'  <span style="color:{_COMMENT_COLOR};">'
+                 f"# sends {_escape_html(str(wei_to_ether(value)))}</span>")
+    call = entry.get("call")
+    if call is None:
+        data = entry.get("data") or "0x"
+        sel = _escape_html(data[:10])
+        return (f"{pad}{sym_html}{target}.<b>{sel}</b>…  "
+                f'<span style="color:{_COMMENT_COLOR};">'
+                f"# unverified contract — selector only</span>{warn}{tail}")
+    inner = call.get("args") or []
+    body = "".join(
+        _arg_html(child, indent=indent + 1, last=(k == len(inner) - 1),
+                  known_addresses=known_addresses)
+        for k, child in enumerate(inner))
+    opened = (f"{pad}{sym_html}{target}."
+              f"<b>{_escape_html(call.get('function') or '?')}</b>(")
+    if not inner:
+        return opened + ")" + warn + tail
+    return opened + warn + "\n" + body + f"{pad})" + tail
+
+
+def _walk_batches(nodes: list[dict]) -> Iterator[dict]:
+    """Yield every multiSend batch entry anywhere in a decoded tree — a batch
+    can sit inside a tuple, an array, or another decoded call."""
+    for node in nodes:
+        yield from node.get("batch") or ()
+        if node.get("children"):
+            yield from _walk_batches(node["children"])
+        call = node.get("call")
+        if call:
+            yield from _walk_batches(call.get("args") or [])
+
+
+def enrich_batch_entries(decoded: dict, chain_id: int, *, abi_for,
+                         token_info=None) -> set[str]:
+    """Decode each multiSend entry against ITS OWN target's ABI, in place.
+
+    A Safe batch calls several different contracts, so unlike a self-calling
+    multicall there is no single ABI to reuse — ``abi_for(address)`` supplies
+    the target's, or ``None`` when it isn't cached yet. Returns the set of
+    addresses that still need one, so the caller can fetch them and re-render.
+
+    Deliberately does NOT fall back to the 4-byte signature database. Its
+    entries collide: ``0xa9059cbb`` resolves to both ``transfer(address,
+    uint256)`` and the crafted ``workMyDirefulOwner(uint256,uint256)``, and
+    ``0x095ea7b3`` (approve) to ``_SIMONdotBLACK_(…)``. Rendering one of those
+    beside a real token amount, in the dialog where the user decides to sign,
+    would be a confident lie — an unresolved entry keeps its selector instead."""
+    pending: set[str] = set()
+    for entry in _walk_batches(decoded.get("args") or []):
+        target = (entry.get("to") or "").lower()
+        if not target:
+            continue
+        if token_info is not None and not entry.get("symbol"):
+            info = token_info(chain_id, target)
+            symbol = getattr(info, "symbol", None) if info is not None else None
+            if symbol:
+                entry["symbol"] = symbol
+        if entry.get("call") is not None:
+            continue
+        abi = abi_for(target)
+        if abi:
+            inner = decode_call(abi, entry.get("data") or "", target)
+            if inner is not None:
+                entry["call"] = inner
+                continue
+        if abi is None:
+            pending.add(target)
+    return pending
+
+
 def _own_address_labels(known_addresses) -> dict[str, str]:
     """Normalise a caller's own-wallet input to ``{lower_address: label}``.
 
@@ -710,6 +799,21 @@ def _arg_html(arg: dict, *, indent: int, last: bool,
         head = f"{pad}{_escape_html(name)}: {type_span} = "
     else:
         head = pad
+
+    batch = arg.get("batch")
+    if batch is not None:
+        # A Safe multiSend. Each entry names its OWN target, so it reads
+        # "SYM 0xaddr.fn(…)" like the events pane rather than a bare call.
+        rows = []
+        for j, entry in enumerate(batch):
+            rows.append(_batch_entry_html(
+                entry, indent=indent + 1, last=(j == len(batch) - 1),
+                known_addresses=known_addresses))
+        head_txt = (f"{head}<b>multiSend</b>(  "
+                    f'<span style="color:{_COMMENT_COLOR};">'
+                    f"# {len(batch)} call{'s' if len(batch) != 1 else ''}"
+                    f"</span>\n")
+        return head_txt + "".join(rows) + f"{pad})" + tail
 
     call = arg.get("call")
     if call is not None:
@@ -4014,6 +4118,11 @@ class TransactionDetailsDialog(Dialog):
         self._tx_cache = tx_cache
         self._start_worker = start_worker
         self._known_addresses = _own_address_labels(known_addresses)
+        # A Safe multiSend's entries each target a DIFFERENT contract, so their
+        # ABIs are fetched per target and folded into the tree we keep here,
+        # which is re-rendered as each one lands.
+        self._decoded_tree: dict | None = None
+        self._batch_abi_inflight: set[str] = set()
         # Optional dependencies for ERC-20 annotation on the "To:" row.
         # Plugin passes both when available; tests can leave them None
         # and the dialog falls back to a plain address line.
@@ -4277,7 +4386,34 @@ class TransactionDetailsDialog(Dialog):
                    "a fallback or proxy call)")
         self.decoded_view.setPlainText(msg)
 
+    def _resolve_batch_targets(self, decoded) -> None:
+        """Fill in each Safe multiSend entry from its own target's ABI, and
+        fetch the ones we don't have cached (re-rendering as each lands).
+        Cache-first, so a repeat view of the same batch needs no network."""
+        self._decoded_tree = decoded
+        pending = enrich_batch_entries(
+            decoded, self.chain.chain_id,
+            abi_for=lambda a: self._abi_cache.load(self.chain.chain_id, a),
+            token_info=self._token_info)
+        if self._abi_source is None:
+            return
+        for addr in sorted(pending):
+            if addr in self._batch_abi_inflight:
+                continue
+            self._batch_abi_inflight.add(addr)
+            worker = AbiFetchWorker(
+                self._abi_source, self._abi_cache, self.chain.chain_id, addr)
+            worker.ready.connect(
+                lambda _abi, a=addr: self._on_batch_abi_ready(a))
+            self._start_worker(worker)
+
+    def _on_batch_abi_ready(self, addr: str) -> None:
+        self._batch_abi_inflight.discard(addr)
+        if self._decoded_tree is not None:
+            self._render_decoded_call(self._decoded_tree)
+
     def _render_decoded_call(self, decoded) -> None:
+        self._resolve_batch_targets(decoded)
         # If the called contract is on the curated whitelist, pass
         # its (symbol, decimals) so the renderer can annotate token-
         # amount uints with the human-readable "# 5000 crvUSD" form.

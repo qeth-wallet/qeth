@@ -956,6 +956,76 @@ class TestTransactionsPlugin:
         assert "…" in text and blob not in text          # elided
         assert "0x" + "ef" * 8 in text                    # short one intact
 
+    ERC20_ABI_MIN = [{
+        "type": "function", "name": "transfer", "stateMutability": "nonpayable",
+        "inputs": [{"name": "to", "type": "address"},
+                   {"name": "value", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "bool"}]}]
+
+    def _batch_tree(self, *entries):
+        return {"function": "execTransaction",
+                "args": [{"name": "data", "type": "bytes",
+                          "value": "0x8d80ff0a", "batch": list(entries)}]}
+
+    def test_batch_entries_decode_against_their_own_target(self, tmp_qeth):
+        """A Safe batch calls several DIFFERENT contracts, so each entry is
+        decoded with its own target's ABI — not the Safe's."""
+        from types import SimpleNamespace
+        from qeth.plugins.transactions import enrich_batch_entries
+        usdc = "0x" + "a0" * 20
+        tree = self._batch_tree({
+            "operation": 0, "to": usdc, "value": 0,
+            "data": "0xa9059cbb" + "00" * 12 + "11" * 20 + f"{42:064x}"})
+        pending = enrich_batch_entries(
+            tree, 1, abi_for=lambda a: self.ERC20_ABI_MIN if a == usdc else None,
+            token_info=lambda cid, a: SimpleNamespace(symbol="USDC"))
+        entry = tree["args"][0]["batch"][0]
+        assert pending == set()
+        assert entry["call"]["function"] == "transfer"
+        assert entry["call"]["args"][1]["value"] == "42"
+        assert entry["symbol"] == "USDC"
+
+    def test_unresolved_target_is_reported_not_guessed(self, tmp_qeth):
+        """No ABI for the target → the address is returned as pending (so the
+        caller fetches it) and the entry stays undecoded. Deliberately NOT
+        filled from the 4-byte database: its entries collide, and 0xa9059cbb
+        resolves there to the crafted `workMyDirefulOwner(uint256,uint256)` as
+        readily as to `transfer` — a confident lie in the signing dialog."""
+        from qeth.plugins.transactions import enrich_batch_entries
+        other = "0x" + "bb" * 20
+        tree = self._batch_tree({
+            "operation": 0, "to": other, "value": 0,
+            "data": "0xa9059cbb" + "00" * 12 + "11" * 20 + f"{42:064x}"})
+        pending = enrich_batch_entries(tree, 1, abi_for=lambda a: None)
+        assert pending == {other}
+        assert "call" not in tree["args"][0]["batch"][0]
+
+    def test_render_batch_names_target_and_flags_delegatecall(self, qtbot,
+                                                              tmp_qeth):
+        from PySide6.QtWidgets import QTextEdit
+        from qeth.plugins.transactions import _render_decoded
+        usdc, lib, unknown = "0x" + "a0" * 20, "0x" + "cc" * 20, "0x" + "bb" * 20
+        tree = self._batch_tree(
+            {"operation": 0, "to": usdc, "value": 0, "symbol": "USDC",
+             "data": "0x", "call": {"function": "transfer", "args": [
+                 {"name": "value", "type": "uint256", "value": "42"}]}},
+            {"operation": 1, "to": lib, "value": 0, "data": "0x",
+             "call": {"function": "setup", "args": []}},
+            {"operation": 0, "to": unknown, "value": 0,
+             "data": "0xa9059cbb" + "00" * 32},
+        )
+        edit = QTextEdit()
+        qtbot.addWidget(edit)
+        _render_decoded(edit, tree)
+        text = edit.toPlainText()
+        assert "multiSend(  # 3 calls" in text
+        assert f"USDC {usdc}.transfer(" in text        # symbol + target + fn
+        assert "⚠ delegatecall" in text                 # operation == 1 flagged
+        # the entry we couldn't resolve shows its selector, not a guessed name
+        assert f"{unknown}.0xa9059cbb…" in text
+        assert "unverified contract — selector only" in text
+        assert "transfer(address,uint256)" not in text
+
     def test_pick_mono_font_returns_family_with_bold_variant(self, qtbot):
         """The function name in the decoded-call view stays bold only
         if the chosen monospace family ships a Bold style. The CSS

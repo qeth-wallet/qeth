@@ -419,6 +419,67 @@ class TestNestedCalls:
         assert "call" not in middle["args"][0]["children"][0]   # depth 3 stops
 
 
+class TestMultiSend:
+    """Safe batches go through MultiSend, whose argument is hand-packed
+    (op‖to‖value‖len‖data) rather than abi-encoded — nothing generic unpacks
+    it, and a misread would mislabel what the Safe is about to execute."""
+
+    @staticmethod
+    def _entry(op: int, to: str, value: int, data: bytes) -> bytes:
+        return (bytes([op]) + bytes.fromhex(to[2:]) + value.to_bytes(32, "big")
+                + len(data).to_bytes(32, "big") + data)
+
+    def _call(self, packed: bytes) -> str:
+        from eth_abi import encode as abi_encode
+        return "0x8d80ff0a" + abi_encode(["bytes"], [packed]).hex()
+
+    def test_unpacks_each_transaction(self):
+        from qeth.abi import decode_multisend
+        a, b = "0x" + "11" * 20, "0x" + "22" * 20
+        out = decode_multisend(self._call(
+            self._entry(0, a, 0, bytes.fromhex("a9059cbb" + "00" * 4))
+            + self._entry(1, b, 10**18, bytes.fromhex("deadbeef"))))
+        assert [e["to"] for e in out] == [a, b]
+        assert [e["operation"] for e in out] == [0, 1]      # CALL, DELEGATECALL
+        assert [e["value"] for e in out] == [0, 10**18]
+        assert out[1]["data"] == "0xdeadbeef"
+
+    def test_not_a_multisend_returns_none(self):
+        from qeth.abi import decode_multisend
+        assert decode_multisend("0xa9059cbb" + "00" * 64) is None
+        assert decode_multisend("") is None
+
+    def test_a_payload_that_does_not_unpack_exactly_is_rejected(self):
+        """Half a batch is worse than none: a length running past the end, or
+        a stray trailing byte, means we misread the format — so the caller
+        keeps showing raw bytes rather than a plausible-looking partial list."""
+        from qeth.abi import decode_multisend
+        good = self._entry(0, "0x" + "11" * 20, 0, b"\xaa\xbb")
+        assert decode_multisend(self._call(good + b"\x00")) is None   # short hdr
+        lying = (bytes([0]) + bytes.fromhex("11" * 20) + (0).to_bytes(32, "big")
+                 + (999).to_bytes(32, "big") + b"\xaa")               # len > rest
+        assert decode_multisend(self._call(lying)) is None
+
+    def test_expansion_attaches_the_batch_to_the_bytes_arg(self):
+        """The tree carries the entries on the bytes node, so the renderer
+        never sees the packed blob."""
+        abi = [{"type": "function", "name": "exec_", "stateMutability": "payable",
+                "inputs": [{"name": "payload", "type": "bytes"}], "outputs": []}]
+        from eth_abi import encode as abi_encode
+        inner = self._call(self._entry(0, "0x" + "33" * 20, 0, b"\x01\x02\x03\x04"))
+        calldata = ("0x" + function_selector(abi[0])
+                    + abi_encode(["bytes"], [bytes.fromhex(inner[2:])]).hex())
+        out = decode_call(abi, calldata)
+        assert [e["to"] for e in out["args"][0]["batch"]] == ["0x" + "33" * 20]
+
+
+def function_selector(entry: dict) -> str:
+    from eth_utils import function_signature_to_4byte_selector
+    types = ",".join(i["type"] for i in entry["inputs"])
+    return function_signature_to_4byte_selector(
+        f"{entry['name']}({types})").hex()
+
+
 class TestDecodeCallTuples:
     """Tuple/struct args turn into branch nodes with per-component
     children so the dialog can render them indented with each inner

@@ -94,27 +94,48 @@ jobs:
 
       # Assert the bundle carries what the camera actually needs. A build that
       # merely SUCCEEDS proves nothing here: drop NSCameraUsageDescription or
-      # the multimedia plugin and macOS silently refuses the camera, which is
-      # the exact failure this whole recipe exists to fix.
+      # the Darwin media plugin and macOS silently refuses the camera, which is
+      # the exact failure this whole recipe exists to fix. Every check below
+      # therefore EXITS NON-ZERO on absence — an earlier version only printed
+      # its findings, and its glob (libqdarwincamera*, a filename that doesn't
+      # exist in Qt 6) matched nothing while the step still passed green.
       - name: Verify the bundle
         run: |
+          set -euo pipefail
           APP=dist/macos/out/qeth-macos.app
-          test -d "$APP" || { echo "no bundle produced"; exit 1; }
+          test -d "$APP" || { echo "::error::no bundle produced"; exit 1; }
           PLIST="$APP/Contents/Info.plist"
+
           /usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$PLIST"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST"
-          echo "--- camera entitlement:"
+
           codesign -d --entitlements - --xml "$APP" 2>/dev/null \
             | grep -q 'com.apple.security.device.camera' \
-            && echo "camera entitlement present" || echo "WARNING: no camera entitlement"
-          echo "--- signature:"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          echo "--- bundled pieces the app needs:"
-          find "$APP" -name 'libqdarwincamera*' -o -name '*multimedia*' | head -5
-          find "$APP" -name 'zxingcpp*' | head -3
-          find "$APP" -name 'top_tokens.json' | head -2
-          echo "--- arch:"
-          lipo -info "$APP/Contents/MacOS/qeth" 2>/dev/null || true
+            || { echo "::error::camera entitlement missing"; exit 1; }
+          codesign --verify --deep --strict "$APP"
+
+          # The macOS multimedia backend. Named libdarwinmediaplugin.dylib in
+          # Qt 6 — without it QCamera finds no device and the scanner hangs.
+          find "$APP" -name 'libdarwinmediaplugin.dylib' | grep -q . \
+            || { echo "::error::Darwin media plugin missing"; exit 1; }
+          # QR decode, and the seed the token list falls back on.
+          find "$APP" -name 'zxingcpp*.so' | grep -q . \
+            || { echo "::error::zxingcpp missing"; exit 1; }
+          find "$APP" -name 'top_tokens.json' | grep -q . \
+            || { echo "::error::bundled top-tokens seed missing"; exit 1; }
+
+          # Pure-Python packages live in the embedded PYZ, not on disk, so
+          # check the archive rather than the filesystem: `eth` is py-evm,
+          # whose absence would silently cost the pre-broadcast preview.
+          uv run --with pyinstaller python -m PyInstaller.utils.cliutils.archive_viewer \
+            --list --recursive "$APP/Contents/MacOS/qeth" > /tmp/pyz.txt
+          for mod in web3 "eth\." ledgereth; do
+            grep -q "'$mod" /tmp/pyz.txt \
+              || { echo "::error::$mod not in the bundle"; exit 1; }
+          done
+
+          lipo -info "$APP/Contents/MacOS/qeth"
+          echo "bundle verified"
 
       - name: Upload the bundle
         uses: actions/upload-artifact@v4

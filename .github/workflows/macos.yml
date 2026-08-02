@@ -137,10 +137,41 @@ jobs:
           lipo -info "$APP/Contents/MacOS/qeth"
           echo "bundle verified"
 
-      - name: Upload the bundle
+      # Wrap the .app in a disk image BEFORE uploading. actions/upload-artifact
+      # zips its path and resolves symlinks doing so, and PyInstaller symlinks
+      # Contents/Resources <-> Contents/Frameworks on macOS: uploading the
+      # bundle directly produced a 657 MB flattened copy with every symlink
+      # replaced by a duplicate file, which invalidates the code signature and
+      # gives "damaged and can't be opened". A .dmg is one opaque file to the
+      # zip, so the bundle inside it survives byte-for-byte — and it's the
+      # format a Mac user expects anyway.
+      - name: Package as a disk image
+        run: |
+          set -euo pipefail
+          hdiutil create -volname qeth \
+            -srcfolder dist/macos/out/qeth-macos.app \
+            -ov -format UDZO dist/macos/out/qeth-macos.dmg
+          ls -lh dist/macos/out/qeth-macos.dmg
+
+      # Prove the round-trip: mount the image and re-verify the signature of
+      # the bundle INSIDE it. That is what a downloader actually runs, and it
+      # is exactly the check the raw-directory artifact would have failed.
+      - name: Verify the image round-trips
+        run: |
+          set -euo pipefail
+          MNT=$(mktemp -d)
+          hdiutil attach dist/macos/out/qeth-macos.dmg -mountpoint "$MNT" -nobrowse -quiet
+          codesign --verify --deep --strict "$MNT/qeth-macos.app"
+          test -L "$MNT/qeth-macos.app/Contents/Resources/qeth" \
+            || echo "note: Resources/qeth is a real dir in this build, not a symlink"
+          find "$MNT/qeth-macos.app" -type l | wc -l | xargs echo "symlinks preserved:"
+          hdiutil detach "$MNT" -quiet
+          echo "disk image verified"
+
+      - name: Upload the disk image
         uses: actions/upload-artifact@v4
         with:
-          name: qeth-macos-app
-          path: dist/macos/out/qeth-macos.app
+          name: qeth-macos-dmg
+          path: dist/macos/out/qeth-macos.dmg
           retention-days: 14
           if-no-files-found: error

@@ -81,7 +81,7 @@ if [ "$INDIR" != "$OUT" ]; then
     for pat in "qeth_${VERSION}_amd64.deb"      "qeth-verify_${VERSION}_amd64.deb" \
                "qeth_${VERSION}_debian13_amd64.deb" "qeth-verify_${VERSION}_debian13_amd64.deb" \
                "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm" \
-               "qeth-${VERSION}-macos-arm64.dmg"; do
+               "qeth-${VERSION}-macos-arm64.dmg" "qeth-verify-${VERSION}-macos-arm64.dmg"; do
         # shellcheck disable=SC2086
         for f in "$INDIR"/$pat; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
     done
@@ -108,16 +108,18 @@ echo ">> all 10 Linux assets present"
 
 # macOS .dmg — built by CI, so it may legitimately not be ready. Publish without
 # it rather than blocking the whole release on a runner.
-DMG="$OUT/qeth-$VERSION-macos-arm64.dmg"
 mac_asset=()
-if [ -e "$DMG" ]; then
-    ls -la "$DMG" | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
-    mac_asset=("$DMG")
-    echo ">> macOS .dmg included"
-else
-    echo "!! NOTE: no $DMG — publishing WITHOUT the macOS build."
-    echo "   Fetch it from the macOS CI run for this commit (see header)."
-fi
+for DMG in "$OUT/qeth-$VERSION-macos-arm64.dmg" \
+           "$OUT/qeth-verify-$VERSION-macos-arm64.dmg"; do
+    if [ -e "$DMG" ]; then
+        ls -la "$DMG" | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
+        mac_asset+=("$DMG")
+    else
+        echo "!! NOTE: no $(basename "$DMG") — publishing WITHOUT it."
+        echo "   Fetch it from the macOS CI run for this commit (see header)."
+    fi
+done
+[ ${#mac_asset[@]} -gt 0 ] && echo ">> macOS: ${#mac_asset[@]} .dmg included"
 [ "$PUBLISH" = 1 ] || { echo ">> done (dry run — pass --publish to tag + release)"; exit 0; }
 
 # 5. Publish (opt-in): tag, push, gh release create.

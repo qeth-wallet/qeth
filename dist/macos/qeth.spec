@@ -1,5 +1,15 @@
-"""PyInstaller recipe for the native macOS application bundle."""
+"""PyInstaller recipe for the native macOS application bundle.
 
+Set ``QETH_BUNDLE_HELIOS=/path/to/helios`` to build the "verify" variant, which
+ships the Helios light client so transaction previews run against proof-verified
+state out of the box — the same opt-in the .deb/.rpm/Flatpak/AppImage builds
+use. It lands beside the app's other binaries and qeth_launcher.py points
+QETH_HELIOS_BIN at it. The variant is named separately so both can be built into
+the same distpath; the bundle identifier is deliberately shared, since they are
+alternative builds of one app (as on every other platform).
+"""
+
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
@@ -10,10 +20,16 @@ from qeth import __version__
 repo_root = Path(SPECPATH).parent.parent
 macos_dir = repo_root / "dist" / "macos"
 
+_helios = os.environ.get("QETH_BUNDLE_HELIOS", "").strip()
+if _helios and not Path(_helios).is_file():
+    raise SystemExit(f"QETH_BUNDLE_HELIOS is not a file: {_helios}")
+_binaries = [(_helios, ".")] if _helios else []
+_name = "qeth-verify-macos" if _helios else "qeth-macos"
+
 analysis = Analysis(
     [str(macos_dir / "qeth_launcher.py")],
     pathex=[str(repo_root)],
-    binaries=[],
+    binaries=_binaries,
     datas=collect_data_files("qeth"),
     hiddenimports=[],
     hookspath=[],
@@ -47,11 +63,11 @@ collected = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="qeth-macos",
+    name=_name,
 )
 app = BUNDLE(
     collected,
-    name="qeth-macos.app",
+    name=f"{_name}.app",
     icon=str(macos_dir / "qeth.icns"),
     bundle_identifier="io.github.michwill.qeth",
     version=__version__,

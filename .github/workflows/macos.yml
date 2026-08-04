@@ -89,8 +89,24 @@ jobs:
         with:
           enable-cache: true
 
+      # The "verify" variant bundles the Helios light client, matching the
+      # -verify .deb/.rpm/Flatpak/AppImage. Pinned to the same release those
+      # ship (0.11.1) rather than "latest", so a release is reproducible and an
+      # upstream change can't silently alter what we distribute.
+      - name: Fetch Helios (darwin arm64)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/helios.tar.gz \
+            https://github.com/a16z/helios/releases/download/0.11.1/helios_darwin_arm64.tar.gz
+          tar -xzf /tmp/helios.tar.gz -C /tmp
+          chmod +x /tmp/helios
+          /tmp/helios --version
+
       - name: Build qeth-macos.app
         run: ./dist/macos/build.sh
+
+      - name: Build qeth-verify-macos.app
+        run: QETH_BUNDLE_HELIOS=/tmp/helios ./dist/macos/build.sh
 
       # Assert the bundle carries what the camera actually needs. A build that
       # merely SUCCEEDS proves nothing here: drop NSCameraUsageDescription or
@@ -102,8 +118,8 @@ jobs:
       - name: Verify the bundle
         run: |
           set -euo pipefail
-          APP=dist/macos/out/qeth-macos.app
-          test -d "$APP" || { echo "::error::no bundle produced"; exit 1; }
+          for APP in dist/macos/out/qeth-macos.app dist/macos/out/qeth-verify-macos.app; do
+          test -d "$APP" || { echo "::error::no bundle produced: $APP"; exit 1; }
           PLIST="$APP/Contents/Info.plist"
 
           /usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$PLIST"
@@ -135,7 +151,18 @@ jobs:
           done
 
           lipo -info "$APP/Contents/MacOS/qeth"
-          echo "bundle verified"
+
+          # helios belongs in the verify bundle and NOWHERE else: a normal
+          # build that quietly shipped it would mislabel what users downloaded.
+          if [ "$APP" = "dist/macos/out/qeth-verify-macos.app" ]; then
+            find "$APP" -name helios -type f | grep -q . \
+              || { echo "::error::verify bundle has no helios"; exit 1; }
+          else
+            find "$APP" -name helios -type f | grep -q . \
+              && { echo "::error::helios leaked into the normal bundle"; exit 1; }
+          fi
+          echo "verified: $APP"
+          done
 
       # Wrap the .app in a disk image BEFORE uploading. actions/upload-artifact
       # zips its path and resolves symlinks doing so, and PyInstaller symlinks
@@ -148,10 +175,11 @@ jobs:
       - name: Package as a disk image
         run: |
           set -euo pipefail
-          hdiutil create -volname qeth \
-            -srcfolder dist/macos/out/qeth-macos.app \
-            -ov -format UDZO dist/macos/out/qeth-macos.dmg
-          ls -lh dist/macos/out/qeth-macos.dmg
+          for v in qeth-macos qeth-verify-macos; do
+            hdiutil create -volname "$v" -srcfolder "dist/macos/out/$v.app" \
+              -ov -format UDZO "dist/macos/out/$v.dmg"
+          done
+          ls -lh dist/macos/out/*.dmg
 
       # Prove the round-trip: mount the image and re-verify the signature of
       # the bundle INSIDE it. That is what a downloader actually runs, and it
@@ -159,19 +187,19 @@ jobs:
       - name: Verify the image round-trips
         run: |
           set -euo pipefail
-          MNT=$(mktemp -d)
-          hdiutil attach dist/macos/out/qeth-macos.dmg -mountpoint "$MNT" -nobrowse -quiet
-          codesign --verify --deep --strict "$MNT/qeth-macos.app"
-          test -L "$MNT/qeth-macos.app/Contents/Resources/qeth" \
-            || echo "note: Resources/qeth is a real dir in this build, not a symlink"
-          find "$MNT/qeth-macos.app" -type l | wc -l | xargs echo "symlinks preserved:"
-          hdiutil detach "$MNT" -quiet
-          echo "disk image verified"
+          for v in qeth-macos qeth-verify-macos; do
+            MNT=$(mktemp -d)
+            hdiutil attach "dist/macos/out/$v.dmg" -mountpoint "$MNT" -nobrowse -quiet
+            codesign --verify --deep --strict "$MNT/$v.app"
+            find "$MNT/$v.app" -type l | wc -l | xargs echo "$v symlinks preserved:"
+            hdiutil detach "$MNT" -quiet
+          done
+          echo "disk images verified"
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v4
         with:
           name: qeth-macos-dmg
-          path: dist/macos/out/qeth-macos.dmg
+          path: dist/macos/out/*.dmg
           retention-days: 14
           if-no-files-found: error

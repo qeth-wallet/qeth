@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.22.0
+Version:        0.23.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,19 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Aug 02 2026 Michael Egorov <michwill@yieldbasis.com> - 0.23.0-1
+- macOS: native .app bundle (dist/macos/) so the QR scanner can obtain camera
+  permission; CI builds and verifies it on Apple Silicon
+- Decoded calls: batched multicall and Safe execTransaction/multiSend payloads
+  are decoded into the calls they perform instead of a wall of hex
+- Decoded calls: own wallets are named by their label; tokens outside every
+  curated list are named from their on-chain symbol()
+- Dapps: EIP-2255 wallet_requestPermissions/getPermissions/revokePermissions
+  are implemented rather than rejected
+- Previews: the verified-simulation fork floor also tracks incoming ERC-20
+  transfers, so a just-received token is never invisible to a preview
+- Fixed: the bundled top-token seed never loaded on a fresh install
+
 * Wed Jul 22 2026 Michael Egorov <michwill@yieldbasis.com> - 0.22.0-1
 - Token icons: fixed missing icons for tokens whose logo is an ipfs:// URI
   (e.g. UNI) — resolve them via an HTTPS gateway, prefer a fetchable http logo

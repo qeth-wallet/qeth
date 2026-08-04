@@ -20,6 +20,16 @@
 #                           then rename the verify output to qeth-verify-<v>-1.fc*.x86_64.rpm
 #                           (the spec keeps Name: qeth for both — only the file is renamed)
 #
+# The macOS .dmg is built by CI (.github/workflows/macos.yml) on an Apple
+# Silicon runner — it cannot be produced on this host. Download the `qeth-macos-dmg`
+# artifact from the run for THIS commit and drop it in dist/release as
+# qeth-<version>-macos-arm64.dmg:
+#   gh run download <run-id> --name qeth-macos-dmg -D /tmp/m \
+#     && mv /tmp/m/qeth-macos.dmg dist/release/qeth-$VERSION-macos-arm64.dmg
+# It is ad-hoc signed, NOT notarized: the release notes must tell users to clear
+# com.apple.quarantine. Optional — the release publishes without it (with a
+# warning), since it depends on a CI run finishing.
+#
 # Browser extensions are NOT part of this 10-asset set — they publish to AMO /
 # the Chrome Web Store separately, and their committed packages live in
 # extensions/{firefox,chrome}/. At release time regenerate + republish them per
@@ -70,7 +80,8 @@ echo ">> [4/4] collecting .deb / .rpm from $INDIR"
 if [ "$INDIR" != "$OUT" ]; then
     for pat in "qeth_${VERSION}_amd64.deb"      "qeth-verify_${VERSION}_amd64.deb" \
                "qeth_${VERSION}_debian13_amd64.deb" "qeth-verify_${VERSION}_debian13_amd64.deb" \
-               "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm"; do
+               "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm" \
+               "qeth-${VERSION}-macos-arm64.dmg"; do
         # shellcheck disable=SC2086
         for f in "$INDIR"/$pat; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
     done
@@ -93,7 +104,20 @@ if [ "$missing" = 1 ]; then
     exit 1
 fi
 ls -la "$OUT"/*.rpm "$OUT"/*.deb "$OUT"/*.AppImage "$OUT"/*.flatpak | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
-echo ">> all 10 assets present"
+echo ">> all 10 Linux assets present"
+
+# macOS .dmg — built by CI, so it may legitimately not be ready. Publish without
+# it rather than blocking the whole release on a runner.
+DMG="$OUT/qeth-$VERSION-macos-arm64.dmg"
+mac_asset=()
+if [ -e "$DMG" ]; then
+    ls -la "$DMG" | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
+    mac_asset=("$DMG")
+    echo ">> macOS .dmg included"
+else
+    echo "!! NOTE: no $DMG — publishing WITHOUT the macOS build."
+    echo "   Fetch it from the macOS CI run for this commit (see header)."
+fi
 [ "$PUBLISH" = 1 ] || { echo ">> done (dry run — pass --publish to tag + release)"; exit 0; }
 
 # 5. Publish (opt-in): tag, push, gh release create.
@@ -109,5 +133,6 @@ gh release create "v$VERSION" --title "qeth $VERSION" "${notes_arg[@]}" \
   "$OUT/qeth_${VERSION}_amd64.deb" "$OUT/qeth-verify_${VERSION}_amd64.deb" \
   "$OUT/qeth_${VERSION}_debian13_amd64.deb" "$OUT/qeth-verify_${VERSION}_debian13_amd64.deb" \
   "$OUT/qeth-$VERSION-x86_64.AppImage" "$OUT/qeth-verify-$VERSION-x86_64.AppImage" \
-  "$OUT/qeth-$VERSION.flatpak" "$OUT/qeth-verify-$VERSION.flatpak"
+  "$OUT/qeth-$VERSION.flatpak" "$OUT/qeth-verify-$VERSION.flatpak" \
+  ${mac_asset[0]+"${mac_asset[@]}"}
 gh release view "v$VERSION" --json url --jq '">> published: \(.url)"'

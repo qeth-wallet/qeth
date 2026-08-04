@@ -102,11 +102,78 @@ jobs:
           chmod +x /tmp/helios
           /tmp/helios --version
 
+      # Signing is entirely optional: with no secrets configured every step
+      # below is skipped and the job produces the same ad-hoc-signed bundles as
+      # before. Set MACOS_CERT_P12 (base64 .p12), MACOS_CERT_PASSWORD,
+      # APPLE_API_KEY_ID, APPLE_API_ISSUER_ID and APPLE_API_KEY_P8 (base64 .p8)
+      # to switch the job to Developer ID + notarization. The secrets are read
+      # through env rather than interpolated into the script, so nothing can
+      # land in the log.
+      - name: Signing configured?
+        id: signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "${CERT_P12:-}" ] && [ -n "${API_KEY:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Developer ID signing + notarization ENABLED"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No signing secrets — building ad-hoc signed (not notarized)"
+          fi
+
+      - name: Import the Developer ID certificate
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # A throwaway keychain, so nothing touches the runner's login one.
+          KEYCHAIN=$RUNNER_TEMP/qeth-signing.keychain-db
+          KEYCHAIN_PW=$(openssl rand -hex 24)
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Without this, codesign blocks on a GUI prompt that never comes.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          [ -n "$IDENTITY" ] || { echo "::error::no Developer ID Application identity in the .p12"; exit 1; }
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "signing identity: $IDENTITY"
+
       - name: Build qeth-macos.app
         run: ./dist/macos/build.sh
 
       - name: Build qeth-verify-macos.app
         run: QETH_BUNDLE_HELIOS=/tmp/helios ./dist/macos/build.sh
+
+      # Re-sign every nested Mach-O with OUR Team ID and enable the hardened
+      # runtime, which notarization requires. PyInstaller's own ad-hoc
+      # signatures carry no Team ID, so library validation would reject them —
+      # see dist/macos/qeth.entitlements for why the exceptions are there.
+      - name: Sign the bundles (Developer ID)
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          for APP in dist/macos/out/qeth-macos.app dist/macos/out/qeth-verify-macos.app; do
+            codesign --force --deep --options runtime --timestamp \
+              --entitlements dist/macos/qeth.entitlements \
+              --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_IDENTITY" "$APP"
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            # Gatekeeper still rejects here — the ticket only exists after
+            # notarization + stapling below. Informational only.
+            spctl -a -vvv -t exec "$APP" 2>&1 | sed "s/^/  spctl: /" || true
+          done
 
       # Assert the bundle carries what the camera actually needs. A build that
       # merely SUCCEEDS proves nothing here: drop NSCameraUsageDescription or
@@ -195,6 +262,38 @@ jobs:
             hdiutil detach "$MNT" -quiet
           done
           echo "disk images verified"
+
+      # Notarize the disk images and staple the ticket so it validates offline.
+      # notarytool authenticates with an App Store Connect API key — no Apple ID
+      # or app-specific password, so nothing interactive.
+      - name: Notarize and staple
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/api.p8"
+          trap 'rm -f "$RUNNER_TEMP/api.p8"' EXIT
+          for v in qeth-macos qeth-verify-macos; do
+            DMG="dist/macos/out/$v.dmg"
+            # Sign the image itself too, so the container is trusted as well.
+            codesign --force --timestamp --keychain "$SIGN_KEYCHAIN" \
+              --sign "$SIGN_IDENTITY" "$DMG"
+            # --wait blocks until Apple returns a verdict (usually minutes). A
+            # rejection fails the step; `notarytool log` names the offending
+            # binary, which for a PyInstaller app is usually an entitlement gap.
+            xcrun notarytool submit "$DMG" --wait \
+              --key "$RUNNER_TEMP/api.p8" --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID"
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
+            # THE check that matters: Gatekeeper must now accept a fresh
+            # download. If this rejects, users still see the quarantine wall.
+            spctl -a -vvv -t open --context context:primary-signature "$DMG"
+            echo "notarized + stapled: $DMG"
+          done
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v4

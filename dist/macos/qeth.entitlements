@@ -2,7 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Camera access, to read QR codes from air-gapped signers. -->
     <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- The rest are HARDENED RUNTIME exceptions. They are inert in the
+         ad-hoc build we ship today (the hardened runtime is only enabled when
+         CI signs with a Developer ID), but notarization REQUIRES the hardened
+         runtime, and without these a PyInstaller app is rejected or crashes on
+         launch. Taken from Electrum's contrib/osx/entitlements.plist — the
+         closest analogue to qeth (Python + Qt + PyInstaller + hardware wallets
+         + QR camera), which documents each one. Ledger Live's Electron build
+         arrives at the same set from the opposite direction.
+
+         Required for binaries built by PyInstaller (pyinstaller#4629): it
+         loads unsigned .so files at runtime, which library validation rejects
+         unless every nested Mach-O carries OUR Team ID. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Required for USB HID access (hardware wallets) — NOT for any JIT,
+         despite the names. Electrum attributes these to Ledger/Trezor support
+         via an Electron-Cash commit. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
     <true/>
 </dict>
 </plist>

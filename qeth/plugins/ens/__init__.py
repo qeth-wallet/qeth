@@ -2513,21 +2513,21 @@ class EnsPlugin(Plugin):
                                       block=block))
         self._refresh_writable(address)
 
-    def _can_sign(self, address: str) -> bool:
-        """True when the selected account can sign (hot or ledger, not watch-only)."""
-        a = (address or "").lower()
-        return any(acc.get("address", "").lower() == a
-                   and acc.get("source") in ("hot", "ledger")
-                   for acc in self._store.accounts)
-
     def _refresh_writable(self, address: str) -> None:
-        # Each action gates on the role that can actually sign it (and the
-        # account must be a signer at all — watch-only → read-only):
+        # Each action gates on the ON-CHAIN ROLE that authorises it:
         #   • record/resolver/subdomain writes → the manager (controller);
         #   • transfer → the registrant (NFT owner);
         #   • set-manager (reclaim) → the registrant of an *unwrapped* name
         #     (a wrapped name's controller is managed through the NameWrapper).
-        can_sign = self._can_sign(address)
+        #
+        # Deliberately NOT gated on whether the account can sign. That check
+        # belongs at sign time (MainWindow._begin_sign warns "no known signer"),
+        # which is where the rest of qeth puts it — the Send button isn't gated
+        # on the source either. Building a tx is useful without broadcasting it:
+        # a watch-only or multisig-observer account can open the flow to read
+        # the simulated events. Gating here also silently excluded air-gapped
+        # (QR) accounts, which sign fine everywhere else, because the old check
+        # hardcoded ("hot", "ledger") instead of asking the signer registry.
         # Subdomains whose PARENT this account controls (and both unwrapped) —
         # the owner of a name can (re)assign its subnodes' managers via
         # registry.setSubnodeOwner, so gate "Set manager" on those too.
@@ -2570,19 +2570,13 @@ class EnsPlugin(Plugin):
         # (parent owner → setSubnodeOwner) in _can_set_manager.
         owner_settable = (self._controller & self._in_new_registry) - self._wrapped
         if self._panel is not None:
-            self._panel.set_writable(self._controller if can_sign else set())
-            self._panel.set_transferable(
-                self._registrant if can_sign else set())
-            self._panel.set_reclaimable(
-                (self._registrant - self._wrapped) if can_sign else set())
-            self._panel.set_subnode_manageable(
-                subnode_mgr if can_sign else set())
-            self._panel.set_owner_settable(
-                owner_settable if can_sign else set())
-            self._panel.set_wrapped_subnode_manageable(
-                wrapped_subnode_mgr if can_sign else set())
-            self._panel.set_subnode_removable(
-                subnode_removable if can_sign else set())
+            self._panel.set_writable(self._controller)
+            self._panel.set_transferable(self._registrant)
+            self._panel.set_reclaimable(self._registrant - self._wrapped)
+            self._panel.set_subnode_manageable(subnode_mgr)
+            self._panel.set_owner_settable(owner_settable)
+            self._panel.set_wrapped_subnode_manageable(wrapped_subnode_mgr)
+            self._panel.set_subnode_removable(subnode_removable)
 
     # --- records (lazy) ---------------------------------------------------
 

@@ -1475,6 +1475,9 @@ class TestEnsWriteActions:
     OTHER = "0x" + "cd" * 20
 
     def _plugin(self, qtbot, *, signable=True, owned=("vitalik.eth",)):
+        # `signable` only chooses the account SOURCE. It no longer affects the
+        # write gating (that keys on the on-chain role alone) — the "no known
+        # signer" refusal happens at sign time.
         from qeth.plugins.ens import ENS_CHAIN_ID  # noqa: F401
         store = _StubStore()
         if signable:
@@ -1566,11 +1569,36 @@ class TestEnsWriteActions:
         }, True)
         assert "vitalik.eth" in plugin.widget()._writable
 
-    def test_watch_only_is_not_writable(self, qtbot):
-        plugin, host, store = self._plugin(qtbot, signable=False)
+    def test_write_gating_ignores_whether_the_account_can_sign(self, qtbot):
+        """The buttons gate on the ON-CHAIN ROLE, never on signing ability.
+
+        Building a tx is useful without broadcasting it — a watch-only or
+        multisig-observer account opens the flow to read the simulated events,
+        and the "no known signer" refusal belongs at sign time (where the rest
+        of qeth puts it; the Send button isn't source-gated either).
+
+        This previously gated on a hardcoded ("hot", "ledger") allowlist, which
+        also silently locked out air-gapped QR accounts — they sign fine
+        everywhere else — so curve.eth showed every management button greyed
+        out for its actual manager."""
+        for source in ("hot", "ledger", "qr", "watch_only"):
+            plugin, host, store = self._plugin(qtbot)
+            store.accounts = [{"address": ADDR, "source": source}]
+            plugin._on_verified(ADDR, {
+                "vitalik.eth": OwnershipCheck(
+                    controller=ADDR, owner_known=True, resolver=self.RESOLVER),
+            }, True)
+            assert plugin.widget()._writable == {"vitalik.eth"}, source
+
+    def test_write_gating_still_respects_the_on_chain_role(self, qtbot):
+        """The counterpart: not being the controller still disables the writes,
+        however good the signer is."""
+        plugin, host, store = self._plugin(qtbot)
+        store.accounts = [{"address": ADDR, "source": "hot"}]
         plugin._on_verified(ADDR, {
             "vitalik.eth": OwnershipCheck(
-                controller=ADDR, owner_known=True, resolver=self.RESOLVER),
+                controller="0x" + "99" * 20, owner_known=True,
+                resolver=self.RESOLVER),
         }, True)
         assert plugin.widget()._writable == set()
 

@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.23.0
+Version:        0.23.1
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -130,6 +130,14 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Aug 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.23.1-1
+- ENS: record/transfer/subdomain buttons were greyed out for accounts that
+  can sign — the gate keyed on a hardcoded signer allowlist that omitted
+  air-gapped (QR) accounts. It now gates on the on-chain role alone, so a
+  watch-only account can also build a tx to read its simulated events
+- macOS: added the -verify build that bundles the Helios light client, giving
+  macOS the same normal/verify pair as every other package format
+
 * Sun Aug 02 2026 Michael Egorov <michwill@yieldbasis.com> - 0.23.0-1
 - macOS: native .app bundle (dist/macos/) so the QR scanner can obtain camera
   permission; CI builds and verifies it on Apple Silicon

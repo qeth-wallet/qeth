@@ -243,8 +243,18 @@ jobs:
         run: |
           set -euo pipefail
           for v in qeth-macos qeth-verify-macos; do
-            hdiutil create -volname "$v" -srcfolder "dist/macos/out/$v.app" \
-              -ov -format UDZO "dist/macos/out/$v.dmg"
+            # hdiutil intermittently fails the SECOND create in a row with
+            # "Resource busy" — the previous image's resources aren't released
+            # yet. Retry rather than fail a release build on a known flake.
+            for attempt in 1 2 3 4 5; do
+              if hdiutil create -volname "$v" -srcfolder "dist/macos/out/$v.app" \
+                   -ov -format UDZO "dist/macos/out/$v.dmg"; then
+                break
+              fi
+              [ "$attempt" = 5 ] && { echo "::error::hdiutil create failed for $v after 5 attempts"; exit 1; }
+              echo "hdiutil busy — retry $attempt for $v"
+              sleep 10
+            done
           done
           ls -lh dist/macos/out/*.dmg
 

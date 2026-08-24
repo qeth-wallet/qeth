@@ -274,6 +274,19 @@ follow_imports = "skip"
 follow_imports_for_stubs = true
 ignore_missing_imports = true
 
+# numpy is never imported by qeth — it arrives transitively from a dependency's
+# stubs, courtesy of --system-site-packages. Its __init__.pyi uses PEP 695
+# `type` statements, which mypy rejects under our python_version = "3.10", and
+# a stub SYNTAX error aborts the whole run ("errors prevented further
+# checking") — so the gate reported one failure and silently checked NOTHING.
+# That's how a real arg-type error in rpc.py survived. Same treatment as
+# zxingcpp: don't follow into an unparseable third-party stub.
+[[tool.mypy.overrides]]
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py310"    # match [tool.mypy] python_version
 

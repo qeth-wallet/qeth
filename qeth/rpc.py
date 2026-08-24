@@ -7,8 +7,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from aiohttp import (
-    ClientConnectorError, ClientOSError, ClientSession, TCPConnector,
-    ServerDisconnectedError, WSMsgType, web,
+    ClientConnectorError, ClientOSError, ClientSession, ClientTimeout,
+    TCPConnector, ServerDisconnectedError, WSMsgType, web,
 )
 
 from . import __version__
@@ -1075,6 +1075,13 @@ class RpcServer:
     # IP ever goes stale, so a long TTL is safe.
     _DNS_CACHE_TTL_S = 3600
 
+    # Per-request cap on one upstream attempt. As a ClientTimeout, not a
+    # bare 15: aiohttp still coerces a number to ClientTimeout(total=...),
+    # but that form is undeclared in its signature (mypy rejects it) and is
+    # a legacy leftover to stop leaning on. Matches async_chain /
+    # live_watcher, which already pass ClientTimeout.
+    _REQUEST_TIMEOUT = ClientTimeout(total=15)
+
     async def _proxy(
         self, method: str, params: list,
         origin: str | None = None,
@@ -1113,7 +1120,7 @@ class RpcServer:
                 continue  # on cooldown — skip rather than pile on a 15 s timeout
             try:
                 async with self._client.post(
-                    url, json=payload, timeout=15,
+                    url, json=payload, timeout=self._REQUEST_TIMEOUT,
                 ) as r:
                     status = r.status
                     body = await r.text()

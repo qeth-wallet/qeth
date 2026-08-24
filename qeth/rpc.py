@@ -11,6 +11,7 @@ from aiohttp import (
     ServerDisconnectedError, WSMsgType, web,
 )
 
+from . import __version__
 from .chain import is_provider_limit_error
 from .chains import Chain
 from .signing import (
@@ -40,15 +41,46 @@ class RpcError(Exception):
 _RPC_URL_SCHEMES = frozenset({"http", "https", "ws", "wss"})
 _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 
-# wallet_*-namespaced methods qeth doesn't implement. Answered with a clean
-# -32601 rather than proxied to the chain RPC (which can't serve them either
-# and returns messier, provider-specific errors). See _dispatch.
-_UNSUPPORTED_WALLET_METHODS = frozenset({
-    "wallet_watchAsset",
-    "wallet_getCapabilities",
-    "wallet_sendCalls",
-    "wallet_getCallsStatus",
-    "wallet_showCallsStatus",
+# Method namespaces that address the WALLET, never the chain. Anything under
+# these prefixes that _dispatch doesn't handle itself is answered with a clean
+# -32601 instead of being proxied upstream (see the end of _dispatch).
+#
+# This is a prefix rule, not a list of known names, on purpose: an unhandled
+# wallet-namespaced method is a qeth gap by definition, and forwarding it to
+# an Ethereum node is always wrong. A node can't serve it, so the call buys
+# nothing — it just leaks the dapp's request (and, on a 4xx, walks every
+# fallback RPC for that chain) to answer with provider-specific noise a
+# connector then has to guess at. Frame's own extension made this concrete:
+# it asks the wallet for ``wallet_getEthereumChains`` on every reconnect, and
+# the old name-by-name denylist didn't cover it, so each one hit the chain.
+#
+# ``personal_`` is in the list for a second reason: on a real node it's the
+# KEYSTORE admin namespace (personal_unlockAccount, personal_newAccount,
+# personal_listAccounts). Forwarding those to whichever provider the user
+# configured is never something qeth should do, and personal_ecRecover —
+# the one member a dapp actually calls — is pure signature recovery no
+# public RPC exposes anyway. qeth's own personal_sign / personal_signMessage
+# are handled well before this guard.
+_WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_")
+
+# eth_subscribe types a NODE can serve. Everything else is a wallet-level
+# event (Frame extends eth_subscribe with them) and must be handled here or
+# refused — never proxied.
+_NODE_SUBSCRIPTIONS = frozenset({
+    "newHeads", "logs", "newPendingTransactions", "syncing",
+})
+
+# Wallet-level eth_subscribe types, matching Frame's provider so the Frame
+# extension and eth-provider/ethereum-provider clients subscribe unchanged.
+# qeth pushes these as eth_subscription notifications from the Qt thread
+# (see broadcast_* / _schedule_event).
+_WALLET_SUBSCRIPTIONS = frozenset({
+    "accountsChanged", "chainChanged", "networkChanged",
+    # Frame's omnichain events. qeth registers them so the subscribe
+    # succeeds (an error here makes the Frame extension log a failed
+    # subscription on every connect); chainsChanged fires when the user
+    # edits the chain list, assetsChanged is accepted but never pushed.
+    "chainsChanged", "assetsChanged",
 })
 
 # EIP-2255 capabilities qeth can grant. qeth has no connect prompt — every
@@ -455,6 +487,58 @@ class RpcServer:
             return cid
         return self.store.current_chain().chain_id
 
+    def _ethereum_chains(self) -> list[dict]:
+        """The configured chains, in Frame's ``wallet_getEthereumChains``
+        shape, so the Frame extension's chain menu and omnichain dapps read
+        qeth unchanged.
+
+        ``connected`` mirrors Frame's "is this chain's connection live"
+        field as closely as a proxy can: qeth holds no persistent per-chain
+        connection, so a chain counts as connected unless every endpoint it
+        has is currently inside _proxy's fail-fast cooldown.
+
+        Callable from either thread — the asyncio loop (_dispatch) and the
+        Qt thread (broadcast_chains_changed) — so the clock comes off
+        ``self._loop`` rather than ``get_event_loop()``, which has no loop
+        to find on the Qt side. Before the loop starts there are no
+        recorded failures anyway, so every chain reads as connected."""
+        loop = self._loop
+        now = loop.time() if loop is not None else None
+
+        def reachable(chain: Chain) -> bool:
+            if now is None:
+                return True
+            urls = [chain.rpc_url, *chain.fallback_rpcs]
+            return any(
+                now - self._host_last_fail.get(url, float("-inf"))
+                >= self._FAIL_FAST_S
+                for url in urls
+            )
+
+        return [
+            {
+                "chainId": c.chain_id,
+                # Legacy alias — Frame reports both, and older connectors
+                # key off networkId.
+                "networkId": c.chain_id,
+                "name": c.name,
+                "connected": reachable(c),
+                "nativeCurrency": {
+                    # qeth only tracks the ticker, which doubles as the
+                    # display name; every EVM native is 18-decimal.
+                    "name": c.symbol,
+                    "symbol": c.symbol,
+                    "decimals": 18,
+                },
+                # Frame ships icon URLs; qeth's chain art is bundled on disk
+                # with no URL to hand out, so the list stays empty (Frame
+                # sends an empty list for an icon-less chain too).
+                "icon": [],
+                "explorers": [{"url": c.explorer}] if c.explorer else [],
+            }
+            for c in self.store.chains
+        ]
+
     def _granted_permissions(self, origin: str | None) -> list[dict]:
         """The EIP-2255 permission objects currently in force for ``origin``.
 
@@ -504,6 +588,15 @@ class RpcServer:
         ``provider.emit('accountsChanged', accounts)`` on
         ``window.ethereum`` so dapps re-render without polling."""
         self._schedule_event("accountsChanged", accounts)
+
+    def broadcast_chains_changed(self) -> None:
+        """Frame's ``chainsChanged`` event — the set of AVAILABLE chains
+        changed (one was added, removed or edited), as opposed to
+        ``chainChanged``, which is the user moving between them. Call from
+        the Qt thread after the chain list is edited; the Frame extension
+        refreshes its chain menu from the payload instead of re-asking via
+        ``wallet_getEthereumChains``."""
+        self._schedule_event("chainsChanged", self._ethereum_chains())
 
     def broadcast_chain_changed(self, chain_id: int) -> None:
         """EIP-1193 ``chainChanged`` event. Hex-encoded chainId per
@@ -678,25 +771,30 @@ class RpcServer:
                          ) -> Any:
         if method == "eth_subscribe":
             # Frame extends eth_subscribe with wallet-event types
-            # (accountsChanged, chainChanged, networkChanged) on top
-            # of the standard newHeads/logs/etc. Dapps subscribe
+            # (_WALLET_SUBSCRIPTIONS) on top of the standard
+            # newHeads/logs/etc (_NODE_SUBSCRIPTIONS). Dapps subscribe
             # once and we push eth_subscription notifications when
             # the user changes state in the qeth UI.
             sub_type = params[0] if params else None
-            if sub_type in (
-                "accountsChanged", "chainChanged", "networkChanged",
-            ):
+            if sub_type in _WALLET_SUBSCRIPTIONS:
                 if ws is None:
                     raise RpcError(
                         -32600,
                         "eth_subscribe for wallet events requires WebSocket",
                     )
                 return self._register_subscription(ws, sub_type, origin)
-            # newHeads / logs / newPendingTransactions / syncing fall
-            # through to the upstream RPC — they need their own
-            # subscription bookkeeping (forwarding upstream
-            # notifications back here) which isn't wired up yet.
-            return await self._proxy(method, params, origin=origin)
+            if sub_type in _NODE_SUBSCRIPTIONS:
+                # newHeads / logs / newPendingTransactions / syncing fall
+                # through to the upstream RPC — they need their own
+                # subscription bookkeeping (forwarding upstream
+                # notifications back here) which isn't wired up yet.
+                return await self._proxy(method, params, origin=origin)
+            # Neither a wallet event nor anything a node subscribes to.
+            # Refuse it here rather than proxying: an unknown type can only
+            # come back as an upstream error anyway, and shipping it out
+            # spends a chain request (plus a fallback walk) to say "no".
+            raise RpcError(
+                -32601, f"eth_subscribe type not supported: {sub_type!r}")
 
         if method == "eth_unsubscribe":
             sub_id = params[0] if params else None
@@ -710,6 +808,28 @@ class RpcServer:
             # treat the entries as address strings and choke on a null.
             acct = self.store.default_account
             return [acct] if acct else []
+
+        if method == "eth_coinbase":
+            # The user's account, like Frame — NOT the node's. Proxied (as
+            # this was), a dapp asking who it's talking to got whatever
+            # address the RPC provider's own node reports, or an error.
+            # qeth's injected provider answers this in-page, so the leak
+            # only showed via the Frame extension or a direct HTTP caller.
+            return self.store.default_account or None
+
+        if method == "web3_clientVersion":
+            # Answered locally, like Frame ("Frame/v…"). The Frame extension
+            # polls this every 30 s as a liveness check on the wallet socket;
+            # proxied, that was a chain request every 30 s forever — and it
+            # reported the NODE's version as the wallet's.
+            return f"qeth/v{__version__}"
+
+        if method == "wallet_getEthereumChains":
+            # Frame's omnichain chain list. The Frame extension asks for it on
+            # every (re)connect to populate its chain menu, and dapps use it to
+            # learn which chains they may target. A node has no idea what the
+            # user configured, so this can only be answered here.
+            return self._ethereum_chains()
 
         if method == "wallet_getPermissions":
             return self._granted_permissions(origin)
@@ -882,14 +1002,16 @@ class RpcServer:
                 "eth_signTransaction not supported (use eth_sendTransaction)",
             )
 
-        if method in _UNSUPPORTED_WALLET_METHODS:
-            # Wallet-namespaced methods qeth doesn't implement. Without this
-            # they'd fall through to _proxy and hit the chain RPC — which also
-            # doesn't implement them, but answers with a provider-specific
-            # error (or a transport failure). Reply with a clean, deterministic
-            # -32601 so every dapp/connector sees "method not supported" and
-            # falls back (e.g. wallet_requestPermissions → eth_requestAccounts)
-            # instead of surfacing upstream noise.
+        if method.startswith(_WALLET_NAMESPACES):
+            # A wallet-namespaced method that fell through every handler above
+            # (wallet_watchAsset, wallet_getAssets, the EIP-5792 wallet_*Calls
+            # family, frame_summon, …). Without this it would reach _proxy and
+            # hit the chain RPC — which doesn't implement it either, but
+            # answers with a provider-specific error (or a transport failure,
+            # or a 4xx that walks every fallback). Reply with a clean,
+            # deterministic -32601 so every dapp/connector sees "method not
+            # supported" and falls back (e.g. wallet_requestPermissions →
+            # eth_requestAccounts) instead of surfacing upstream noise.
             raise RpcError(-32601, f"{method} is not supported by qeth")
 
         if method == "eth_sendRawTransaction":

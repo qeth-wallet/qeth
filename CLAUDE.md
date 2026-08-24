@@ -292,9 +292,32 @@ the index down.
 The JSON-RPC server listens on `127.0.0.1:1248` (HTTP + WebSocket on
 the same port, CORS open) so the Frame browser extension connects
 unchanged. Wallet methods (`eth_accounts`, `eth_chainId`,
-`wallet_switchEthereumChain`, `wallet_addEthereumChain`) are handled
-locally; everything else is proxied to the current chain's RPC URL.
+`wallet_switchEthereumChain`, `wallet_addEthereumChain`,
+`wallet_getEthereumChains`, `web3_clientVersion`, `eth_coinbase`) are
+handled locally; everything else is proxied to the current chain's RPC URL.
+`eth_coinbase` is the USER's account — proxied, it returned whatever
+address the RPC provider's node reports.
 Signing methods currently return `-32601 "Signing not implemented in MVP"`.
+
+**A wallet-namespaced method must NEVER reach `_proxy`.** `_dispatch`
+ends with a prefix guard (`_WALLET_NAMESPACES` = `wallet_` / `frame_` /
+`metamask_` / `personal_`) that turns anything unhandled into a clean
+`-32601`. `personal_` is in there because on a node it's the KEYSTORE
+admin namespace (`personal_unlockAccount`, `personal_newAccount`) — never
+something to forward to the user's provider; qeth's own `personal_sign`
+is handled well before the guard. A node
+can't serve these, so proxying buys nothing and costs a chain request —
+plus a walk of every fallback RPC on a 4xx. This replaced a name-by-name
+denylist that kept missing methods: the Frame Companion extension asks
+for `wallet_getEthereumChains` on every reconnect (MV3 service workers
+restart constantly) and pings `web3_clientVersion` on a 30-second
+`chrome.alarms` timer, so both were hitting the user's Ethereum RPC
+several times a minute. Same rule for `eth_subscribe`: only the four
+real node types (`newHeads`, `logs`, `newPendingTransactions`,
+`syncing`) are proxied, Frame's five wallet-event types
+(`accountsChanged`, `chainChanged`, `networkChanged`, `chainsChanged`,
+`assetsChanged`) register a local subscription, and anything else is
+refused rather than forwarded.
 
 `wallet_switchEthereumChain` from dapps changes the runtime chain
 only — the user's persisted default (set via the toolbar) survives

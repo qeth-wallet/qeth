@@ -313,6 +313,11 @@ class MainWindow(QMainWindow):
                 self.chain_combo.addItem(label, chain.chain_id)
                 self._chain_icon_cache.request(chain.chain_id, chain.name)
             idx = self.chain_combo.findData(chain_id)
+        # The set of available chains grew — tell subscribed dapps, so the
+        # Frame extension's chain menu updates without re-asking via
+        # wallet_getEthereumChains.
+        if self.rpc is not None:
+            self.rpc.broadcast_chains_changed()
         if idx >= 0 and idx != self.chain_combo.currentIndex():
             self.chain_combo.setCurrentIndex(idx)
 
@@ -412,6 +417,10 @@ class MainWindow(QMainWindow):
             self.status_message(
                 f"RPC for {chain.name} updated to {new_url}", 4000,
             )
+            # A chain entry changed — chainsChanged carries the whole list,
+            # so subscribers pick up the new endpoint's connected state.
+            if self.rpc is not None:
+                self.rpc.broadcast_chains_changed()
         elif key_changed:
             self.status_message(
                 "Etherscan API key updated"

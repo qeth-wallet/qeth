@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from contextlib import contextmanager
 from decimal import Decimal
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -2734,6 +2735,20 @@ class TokenListPanel(QWidget):
         re-populated. See ``render_full`` for the safe one-shot helper.
         """
         self._chain_id = chain.chain_id
+        # Every row is rewritten below and re-sorted at the end, so the
+        # selected row index stops meaning the selected token. Re-anchor it.
+        with self._selection_kept():
+            self._show_balances(chain, native_wei, tokens, list_entries)
+
+    def _show_balances(
+        self,
+        chain,
+        native_wei: int,
+        tokens: list[TokenBalance],
+        list_entries: dict,
+    ) -> None:
+        """The rebuild itself. Split out so ``show_balances`` can run it
+        inside ``_selection_kept()``."""
         # Disable sorting while populating; re-enabling at the end triggers
         # a single sort by the current header indicator.
         self.table.setSortingEnabled(False)
@@ -2850,6 +2865,53 @@ class TokenListPanel(QWidget):
             if it is not None and it.data(Qt.ItemDataRole.UserRole) == target:
                 it.setIcon(smooth_icon(pix))
                 return
+
+    def _row_for_key(self, key: tuple[int, str]) -> int | None:
+        """Row currently showing ``(chain_id, contract_lower)``, or None.
+        By UserRole, not row index — see ``update_native_icon``."""
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None and it.data(Qt.ItemDataRole.UserRole) == key:
+                return r
+        return None
+
+    @contextmanager
+    def _selection_kept(self) -> Iterator[None]:
+        """Keep the selected TOKEN selected across a rebuild or re-sort.
+
+        Qt tracks selection by row INDEX, but a token's row is not stable:
+        ``show_balances`` rewrites every row from scratch, and the sort that
+        follows (Value USD descending by default) moves tokens between rows
+        whenever a balance changes. So a selection left alone silently ends
+        up on a *different* token — which is what the user sees after a send
+        confirms and the sent token's value drops it down the list, or a
+        received token appears above the selection and shifts everything.
+
+        Anchor on the row's ``(chain_id, contract)`` identity instead. If
+        that token is no longer displayed (spent to zero, dust-filtered,
+        hidden), clear rather than leave the index pointing at whichever
+        token inherited the row.
+        """
+        key = self._selected_any()
+        try:
+            yield
+        finally:
+            if key is not None:
+                self._restore_selection(key)
+
+    def _restore_selection(self, key: tuple[int, str]) -> None:
+        row = self._row_for_key(key)
+        if row is None:
+            self.table.clearSelection()
+            model = self.table.selectionModel()
+            if model is not None:
+                model.clearCurrentIndex()
+            return
+        cell = self.table.item(row, 0)
+        if cell is not None and cell.isSelected() \
+                and self.table.currentRow() == row:
+            return    # already there — don't re-emit itemSelectionChanged
+        self.table.selectRow(row)
 
     def render_full(self, chain, native_wei: int, tokens: list[TokenBalance],
                     entries: dict, prices: dict,

@@ -162,13 +162,32 @@ live in [`extensions/`](extensions/) and are attached to the
   To load it unpacked instead, unzip the `.zip` from
   [`extensions/chrome/`](extensions/chrome/) and use `chrome://extensions` →
   Developer mode → Load unpacked.
-- **Firefox** — **not available yet.** Release Firefox installs only
+- **Firefox** — **no signed build available yet.** Release Firefox installs only
   Mozilla-signed extensions, and the current build is awaiting AMO review. The
   signed `.xpi` will appear in [`extensions/firefox/`](extensions/firefox/) and
-  on the release page as soon as it is issued; it is self-distributed, so
-  install it via *about:addons → gear → Install Add-on From File…*. Until then,
-  `extensions/webext/` can be loaded as a temporary add-on via `about:debugging`
-  (it disappears on restart).
+  on the release page as soon as it is issued; it is self-distributed, so it
+  installs via *about:addons → gear → Install Add-on From File…*. Until then,
+  build it yourself and use one of the two routes below.
+
+Building the Firefox package (the source `manifest.json` is Chrome-shaped, so
+Firefox needs the generated event-page variant — don't load `webext/` directly):
+
+```sh
+cd extensions/webext
+python build.py            # → out/qeth-<version>-firefox.zip
+```
+
+(That also regenerates the committed Chrome package next to it, so in a git
+clone `git checkout extensions/chrome` afterwards if you want a clean tree.)
+
+- **Any Firefox, until you restart it** — `about:debugging#/runtime/this-firefox`
+  → *Load Temporary Add-on…* → pick that zip. It works fully, but is dropped
+  when the browser closes.
+- **Developer Edition, Nightly, or unbranded ESR** — set
+  `xpinstall.signatures.required` to `false` in `about:config`, then install the
+  zip permanently via *about:addons → gear → Install Add-on From File…*. Release
+  and standard ESR builds ignore that pref by design, so this is not a way
+  around signing on a normal Firefox.
 
 The extension is a thin relay to `127.0.0.1:1248`, so a build older than the
 app still works; the two are versioned together, not locked together.

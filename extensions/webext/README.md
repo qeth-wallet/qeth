@@ -93,8 +93,11 @@ account and must stay stable — it's an identifier, not a real address, so it
 needn't be a domain you own (AMO validates only its shape). Changing it once
 users have installed breaks their auto-updates.
 
-Chrome Web Store publishing (optional, later) is a one-time \$5 registration;
-the store signs and hosts the same zip.
+Chrome Web Store publishing was a one-time \$5 registration; the store signs and
+hosts the same zip. qeth is live at
+<https://chromewebstore.google.com/detail/qeth/epgcgaelolincjdknocjebnenahjhoop>
+— upload a new zip in the [dashboard](https://chrome.google.com/webstore/devconsole/)
+to update it.
 
 ## Icons
 

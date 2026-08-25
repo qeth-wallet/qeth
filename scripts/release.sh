@@ -30,11 +30,15 @@
 # com.apple.quarantine. Optional — the release publishes without it (with a
 # warning), since it depends on a CI run finishing.
 #
-# Browser extensions are NOT part of this 10-asset set — they publish to AMO /
-# the Chrome Web Store separately, and their committed packages live in
+# Browser extensions are not BUILT by this script — they publish to AMO / the
+# Chrome Web Store separately, and their committed packages live in
 # extensions/{firefox,chrome}/. At release time regenerate + republish them per
 # extensions/README.md ("Releasing / publishing"): `build.py sign` produces the
-# AMO-signed Firefox .xpi; upload the chrome zip to the CWS dashboard (unlisted).
+# AMO-signed Firefox .xpi; upload the chrome zip to the CWS dashboard.
+# Their committed packages ARE attached to the GitHub release afterwards (a
+# plain `gh release upload`), so the README's "latest release" link reaches
+# them — Firefox self-distribution has no store to link to. They carry their
+# own version, which trails the app whenever AMO review is pending.
 #
 # Usage:
 #   scripts/release.sh              # build host assets + collect + verify (no publish)

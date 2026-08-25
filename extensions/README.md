@@ -13,7 +13,9 @@ extensions/
               (load unpacked, or upload to the Chrome Web Store)
   firefox/    committed Firefox distributable: qeth-<version>.xpi
               (AMO-signed, unlisted / self-distribution — install via
-              about:addons → Install Add-on From File…)
+              about:addons → Install Add-on From File…). Holds only a
+              README while no signed, unblocked build exists — see
+              firefox/README.md
   falkon/     Falkon connector — a native Python plugin (its own source), same
               role inside the Falkon browser
 ```
@@ -33,11 +35,36 @@ gate and `build.py` enforce the mirror. See each dir's README for details.
 
 ## Releasing / publishing
 
-The extension version always equals the app version, so a release is: bump
+The extension version is stamped from the app version, so a release is: bump
 `qeth/__init__.py` `__version__`, then regenerate + republish these packages.
-This is **separate** from `scripts/release.sh` (which builds the desktop
+Building them is **separate** from `scripts/release.sh` (which builds the desktop
 rpm/deb/flatpak/AppImage assets) — the extensions go to AMO / the Chrome Web
-Store, not the GitHub release asset set.
+Store. Their committed packages are then attached to the GitHub release
+(`gh release upload`), since Firefox self-distribution has no store link.
+
+A published package can **trail** the app version, and that's expected: an AMO
+review can sit for weeks, and only a Mozilla-signed `.xpi` installs in release
+Firefox. Ship the newest build that is both **signed and not blocked**, and
+leave it in place until a better one exists. Two ways a candidate fails:
+
+- **Unsigned** — an AMO upload is not a signed package. Check for
+  `META-INF/mozilla*` in the zip (`build.py`'s `_is_signed`); AMO's download URL
+  also ends `.zip` until signing renames it `.xpi`. An unsigned build only
+  side-loads via `about:debugging` and disappears on restart.
+- **Blocked** — a signed version can still be soft-blocked, which makes Firefox
+  disable it on install. Check before shipping, and note the endpoint's
+  **`?guid=…` query form answers `Not found` even for a blocked add-on** — use
+  the path form:
+
+  ```sh
+  curl -s https://addons.mozilla.org/api/v5/blocklist/block/wallet@qeth.eth/
+  ```
+
+  It is version-scoped (`is_all_versions: false`), so a fresh version clears a
+  block that covers the old ones.
+
+When nothing qualifies, ship no `.xpi` at all rather than a dead one, and say so
+in the README + release notes.
 
 1. **Rebuild + sign** (version auto-syncs from `__version__`):
 
@@ -52,11 +79,32 @@ Store, not the GitHub release asset set.
    Commit the refreshed `chrome/` + `firefox/` packages (build.py drops the
    prior `qeth-*` so only the current version stays tracked).
 
-2. **Firefox** — the `sign` step already uploaded + signed the version on AMO
-   (unlisted add-on `wallet@qeth.eth`). Distribute the committed
-   `firefox/qeth-<v>.xpi` as a file: host it / attach it to the GitHub release /
-   link it from the site. Users install via `about:addons → Install Add-on From
-   File…`.
+   Note that `sign` rebuilds the Chrome zip too — it runs the same
+   `_replace_dist(chrome)` as a bare `build`, so it **deletes the committed
+   Chrome package** before uploading anything to AMO. To sign without touching
+   it (e.g. re-signing a build whose Chrome zip is already published), drive
+   `build(out_dir, "firefox")` + `sign(zip, out_dir)` directly with scratch
+   dirs instead of going through `main()`.
+
+2. **Firefox** — the `sign` step uploaded the version to the unlisted channel of
+   add-on `wallet@qeth.eth`. Unlisted uploads are normally **auto-signed within
+   minutes**, in which case `sign` downloads the `.xpi` and you're done:
+   distribute it as a file — attach it to the GitHub release / link it from the
+   site — and users install via `about:addons → Install Add-on From File…`.
+
+   Since the 2026-07 review episode this account's uploads are routed to
+   **manual review instead**, so `sign` times out after its 5-minute poll with
+   the version left at `file.status: unreviewed`. That is not a failure: the
+   version is uploaded and queued. Don't re-upload (the version string is
+   consumed either way) — poll for the signature and fetch it when it lands:
+
+   ```sh
+   # status; url flips .zip → .xpi once signed
+   GET /api/v5/addons/addon/wallet@qeth.eth/versions/?filter=all_with_unlisted
+   ```
+
+   Unlisted versions are hidden from the default listing and from
+   `current_version`, hence `?filter=all_with_unlisted`.
 
 3. **Chrome** — Google signs at upload; there is no local signing (self-hosted
    `.crx` is blocked for normal users). Upload `chrome/qeth-<v>-chrome.zip` to

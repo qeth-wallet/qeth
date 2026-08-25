@@ -154,13 +154,24 @@ auto-detect a host Helios if you prefer to manage it yourself.
 
 qeth ships its own Chrome/Firefox extension (a Frame-compatible connector) that
 exposes the wallet to dapps through the local JSON-RPC server. Prebuilt packages
-live in [`extensions/`](extensions/):
+live in [`extensions/`](extensions/) and are attached to the
+[latest release](https://github.com/qeth-wallet/qeth/releases/latest).
 
-- **Firefox** — the AMO-signed `.xpi` in [`extensions/firefox/`](extensions/firefox/).
-  Install via *about:addons → gear → Install Add-on From File…*.
-- **Chrome** — the `.zip` in [`extensions/chrome/`](extensions/chrome/); load it
-  unpacked (`chrome://extensions` → Developer mode → Load unpacked) or from the
-  Chrome Web Store.
+- **Chrome** — install from the
+  [**Chrome Web Store**](https://chromewebstore.google.com/detail/qeth/epgcgaelolincjdknocjebnenahjhoop).
+  To load it unpacked instead, unzip the `.zip` from
+  [`extensions/chrome/`](extensions/chrome/) and use `chrome://extensions` →
+  Developer mode → Load unpacked.
+- **Firefox** — **not available yet.** Release Firefox installs only
+  Mozilla-signed extensions, and the current build is awaiting AMO review. The
+  signed `.xpi` will appear in [`extensions/firefox/`](extensions/firefox/) and
+  on the release page as soon as it is issued; it is self-distributed, so
+  install it via *about:addons → gear → Install Add-on From File…*. Until then,
+  `extensions/webext/` can be loaded as a temporary add-on via `about:debugging`
+  (it disappears on restart).
+
+The extension is a thin relay to `127.0.0.1:1248`, so a build older than the
+app still works; the two are versioned together, not locked together.
 
 ![qeth in Firefox](docs/images/firefox-extension-screenshot.png)
 

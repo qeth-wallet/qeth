@@ -885,16 +885,14 @@ class TokensPlugin(Plugin):
                 self._queue_targeted_balance(chain, account, token, block)
         if self._displayed_view != (chain.chain_id, account.lower()):
             return
-        # The discovery multicall set deliberately omits the full curated list
-        # (~5k contracts once aborted the balance thread), so a freshly-received
-        # token that's neither a top-N major nor yet indexed by Blockscout
-        # wouldn't surface from the refresh alone — it'd wait minutes for the
-        # indexer (or a receipt scan, which only fires for txs WE signed). We
-        # have the token's address from the Transfer log, so force a RECOGNISED
-        # one straight into the next discovery — same spam filter as the
-        # notification, so address-poisoning stays out and unknown tokens still
-        # wait for the indexer exactly as before. This is what makes a token
-        # received via a browser tx (or an airdrop) appear without a refresh.
+        # Discovery omits the full curated list (~5k contracts once aborted the
+        # balance thread), so a freshly-received token that's neither a top-N
+        # major nor yet indexed would wait minutes for the indexer — or for a
+        # receipt scan, which only fires for txs WE signed. The Transfer log
+        # gives us its address, so force a RECOGNISED one into the next
+        # discovery, behind the same spam filter as the notification (poisoning
+        # stays out, unknown tokens still wait). This is what makes a token
+        # received via a browser tx or an airdrop appear without a refresh.
         if token and self._worth_notifying_token(chain.chain_id, token):
             self._receipt_contracts.setdefault(
                 (chain.chain_id, account.lower()), set()).add(token.lower())
@@ -1576,22 +1574,13 @@ class TokensPlugin(Plugin):
                 self._displayed_view = view_key
             return
 
-        # Mark this view as the displayed one BEFORE kicking (or
-        # piggy-backing on) the async pipeline. Two reasons:
-        #
-        #  (1) ``_on_combined_ready`` drops stale results by
-        #  comparing against ``_displayed_view``; without setting
-        #  it here, fresh wallets (no cache → the early-render
-        #  branch above didn't run) would have their completed
-        #  discovery silently discarded.
-        #
-        #  (2) Must happen BEFORE the in_flight guard. Otherwise
-        #  the "click fresh wallet → click another → click fresh
-        #  again" sequence falls into the early return below
-        #  WITHOUT clearing the panel or updating
-        #  ``_displayed_view`` — leaving the previous wallet's
-        #  rows on screen and discarding the in-flight result
-        #  when it lands.
+        # Mark this view displayed BEFORE kicking (or piggy-backing on) the
+        # pipeline, and before the in_flight guard. ``_on_combined_ready``
+        # drops stale results by comparing against ``_displayed_view``, so a
+        # fresh wallet (no cache → the early-render branch above didn't run)
+        # would have its discovery silently discarded; and "fresh wallet →
+        # another → back again" would hit the early return below without
+        # clearing the panel, stranding the previous wallet's rows.
         if is_new_view:
             if cached is None:
                 # No cache yet — show a placeholder rather than the
@@ -1611,42 +1600,29 @@ class TokensPlugin(Plugin):
         pv = {"chain": chain, "address": address, "view_key": view_key}
 
         def on_discovered(blockscout_native_wei, blockscout_tokens: list) -> None:
-            # Discard Blockscout's balances — they're a few blocks behind
-            # chain head. The contract list is the only thing we keep;
-            # metadata (name/symbol/decimals) is fetched on-chain via
-            # multicall (immutable, cached), with Blockscout's values as
-            # a one-shot fallback for contracts whose multicall reverts.
-            # Build the multicall set as the union of three sources:
-            #   1. Blockscout's per-holder token list — holder-
-            #      specific but lags chain head by minutes.
-            #   2. Force-shown contracts (user pinned).
-            #   3. Sibling wallets' cached holdings — catches
-            #      intra-qeth transfers ahead of Blockscout.
+            # Keep only Blockscout's contract LIST — its balances lag chain
+            # head by minutes. Metadata comes from an on-chain multicall
+            # (immutable, cached), with Blockscout's values as a one-shot
+            # fallback for contracts whose multicall reverts. The multicall set
+            # is the union of: Blockscout's holder list, force-shown (pinned)
+            # contracts, and sibling wallets' cached holdings (which catches an
+            # intra-qeth transfer ahead of Blockscout).
             #
-            # Curated token lists (the Frame-style "balanceOf
-            # every known token") were briefly part of this union
-            # but caused Qt to abort the BalanceWorker QThread
-            # mid-flight under the ~5k-contract load (observed on
-            # mainnet: thread destroyed while running). The
-            # functional value the curated path provided — chain-
-            # head visibility on inbound transfers — is already
-            # covered by the receipt scan for transfers between
-            # our own wallets and by Blockscout for everything
-            # else (within minutes of indexing). The curated
-            # metadata cache prefill we did at startup still helps
-            # the receipt-credit path know how to label a fresh
-            # inbound USDT without a separate metadata fetch.
-            # Cold start (no cache): paint native + held recognised tokens
-            # immediately so the list is populated within the first explorer
-            # round-trip, instead of staying blank until the whole
-            # metadata→balance→risk→prices spine below finishes, and kick a
-            # small price fetch over just those holdings so their USD values
-            # land fast (not gated on the full-union price fetch). The spine
-            # still runs and reconciles balances + prices in
-            # _on_combined_ready. Gated on is_new_view so a forced re-refresh
-            # of the same view (own-token/vault discovery landing mid-pipeline)
-            # doesn't re-paint over — and momentarily un-price — the batch it
-            # already painted; the discovery round reconciles it in place.
+            # Curated token lists (Frame-style "balanceOf every known token")
+            # are deliberately NOT in that union: ~5k contracts made Qt abort
+            # the BalanceWorker QThread mid-flight (observed on mainnet). What
+            # they bought — chain-head visibility on inbound transfers — the
+            # receipt scan already covers between our own wallets, Blockscout
+            # covers elsewhere, and the startup metadata prefill still labels a
+            # fresh inbound USDT without its own fetch.
+            #
+            # Cold start (no cache): paint native + held recognised tokens now,
+            # rather than staying blank until the metadata→balance→risk→prices
+            # spine below finishes, and price just those holdings so their USD
+            # lands fast. The spine still reconciles in _on_combined_ready.
+            # is_new_view gates it: a forced re-refresh of the SAME view
+            # (discovery landing mid-pipeline) must not repaint — and
+            # momentarily un-price — the batch it already painted.
             if cached is None and is_new_view:
                 self._paint_priority_batch(
                     chain, blockscout_native_wei, blockscout_tokens,
@@ -2538,10 +2514,9 @@ class TokenListPanel(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        # Enter / Return on the focused tokens table opens the Send
-        # dialog for the highlighted row — same as clicking the
-        # Send button on the toolbar. Installed as an event filter
-        # rather than a keyPressEvent override to avoid subclassing.
+        # Enter/Return on the focused table opens Send for the highlighted row.
+        # An event filter rather than a keyPressEvent override, to avoid
+        # subclassing.
         self.table.installEventFilter(self)
         self.table.setSortingEnabled(True)
         # Default: by Value (USD) descending. setSortIndicator only sets the
@@ -2549,9 +2524,8 @@ class TokenListPanel(QWidget):
         # off-then-on around a populate/update cycle.
         h = self.table.horizontalHeader()
         h.setSortIndicator(2, Qt.SortOrder.DescendingOrder)
-        # Interactive = user can drag the column edge. The Name column
-        # stays Stretch so widening the window fills the gap instead
-        # of leaving a void to the right.
+        # Interactive = the user can drag the edge; Name stays Stretch so
+        # widening the window fills the gap instead of leaving a void.
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)  # Symbol
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # Balance
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)  # Value (USD)

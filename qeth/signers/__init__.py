@@ -1,11 +1,11 @@
 """Signer backends as plugins — one ``SignerPlugin`` per account ``source``, in
 a ``REGISTRY`` the signing dispatch consults instead of ``if source == …``.
 
-Step 1 of ``docs/signers.md``: the ``source`` → ``Signer`` mapping and the
-per-source metadata live here; ``ui.py`` looks a plugin up by ``source`` and
-drives it (prompting for an unlock secret when the plugin asks). Adding a
-backend (Keystone / Keycard Shell QR, …) becomes a new module + one registry
-entry. The interaction host and account-creation flows are later steps.
+Per ``docs/signers.md``: the ``source`` → ``Signer`` mapping and the per-source
+metadata live here; ``ui.py`` looks a plugin up by ``source`` and drives it
+through a ``SignerInteraction`` (see ``interaction.py``). Adding a backend
+(Keystone, Keycard Shell, …) is a new module + one registry entry. The
+account-creation flows are still per-source in the wallets plugin.
 """
 
 from __future__ import annotations

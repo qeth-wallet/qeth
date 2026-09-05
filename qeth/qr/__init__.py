@@ -6,8 +6,8 @@ text a QR carries, and parses an ``eth-signature`` back out. Layers:
 - ``bytewords`` — Blockchain Commons Bytewords (BCR-2020-012): bytes ⇄ QR-safe
   text, with a CRC32 tail.
 - ``ur`` — single-part Uniform Resources (BCR-2020-005): ``ur:<type>/<bytewords>``.
+- ``multipart`` / ``fountain`` — the rateless multi-part codec (BCR-2024-001)
+  behind the animated QR a big sign-request needs; a 65-byte signature back
+  still fits one part.
 - ``eth`` — the EIP-4527 registry (eth-sign-request / eth-signature / crypto-keypath).
-
-The fountain multi-part codec (animated QR for large payloads) is deferred — a
-single EVM sign-request and a 65-byte signature each fit one part.
 """

@@ -25,8 +25,8 @@ def encode(ur_type: str, payload: bytes) -> str:
 
 def decode(ur_string: str) -> tuple[str, bytes]:
     """``ur:<type>/<bytewords>`` → ``(type, cbor_payload)``. Raises ``ValueError``
-    on a malformed UR, an unknown type shape, or a multi-part UR (not yet
-    supported). UR is case-insensitive; we normalise to lowercase."""
+    on a malformed UR, an unknown type shape, or a multi-part one — those go
+    through :mod:`qeth.qr.multipart`. UR is case-insensitive; normalised here."""
     s = ur_string.strip().lower()
     if not s.startswith("ur:"):
         raise ValueError("not a UR (missing 'ur:' scheme)")

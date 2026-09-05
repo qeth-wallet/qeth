@@ -1268,16 +1268,13 @@ class TransactionsPlugin(Plugin):
         # close together (e.g. user clicks a new account while the tab
         # is open). Also coalesces repeated scroll-to-bottom triggers.
         self._in_flight: set[tuple[int, str]] = set()
-        # Per-key paging state for the load-on-scroll UX.
-        # next_page = page index to fetch on the next scroll-to-bottom.
-        # exhausted = we've fetched the last page (a partial page came
-        # back, OR the cached set now includes nonce 0) — further
-        # network scrolls are ignored for this account.
-        # displayed_count = how many of the cached rows are currently
-        # rendered on the table. Bounded growth via INITIAL_BATCH +
-        # scroll-driven appends keeps rendering O(visible), not
-        # O(cache) — critical for accounts with thousands of cached
-        # entries where rebuilding the whole table freezes the UI.
+        # Per-key paging state for load-on-scroll. next_page = the page to
+        # fetch on the next scroll-to-bottom; exhausted = the last page is in
+        # (a partial page came back, or the cache reached nonce 0), so further
+        # network scrolls are ignored; displayed_count = how many cached rows
+        # are rendered. INITIAL_BATCH + scroll-driven appends keep rendering
+        # O(visible), not O(cache) — rebuilding the whole table freezes the UI
+        # on an account with thousands of entries.
         self._exhausted: set[tuple[int, str]] = set()
         self._displayed_count: dict[tuple[int, str], int] = {}
         # Which (chain, addr) the panel's table currently shows. Used
@@ -2639,16 +2636,11 @@ class TransactionListPanel(QWidget):
             self._on_scroll_change
         )
         h = self.table.horizontalHeader()
-        # Status / Nonce / Time auto-fit content (no user-drag — there's
-        # nothing meaningful to widen them to). Hash stretches to fill
-        # the remaining space; its rendered text is the short
-        # 0x1234…abcd form, so the wider cell looks padded rather than
-        # full-bleed.
-        # Status is Fixed-width (not ResizeToContents) so its 16px icon
-        # column stays tight regardless of iconSize. Nonce/Time/Verb fit
-        # their text. The coins column stretches to fill — its icon is
-        # left-aligned, so the coins sit right after the verb with the
-        # spare space trailing.
+        # Status is Fixed-width (not ResizeToContents) so its 16px icon column
+        # stays tight regardless of iconSize; Nonce/Time/Verb fit their text
+        # (no user-drag — nothing meaningful to widen them to). The coins
+        # column stretches to fill, its icon left-aligned, so the coins sit
+        # right after the verb with the spare space trailing.
         h.setSectionResizeMode(_C_STATUS, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(_C_STATUS, _STATUS_COL_W)
         h.setSectionResizeMode(_C_NONCE, QHeaderView.ResizeMode.ResizeToContents)
@@ -4934,9 +4926,8 @@ class _CollapsibleSection(QWidget):
 
 
 class _TxComposerDialog(_EventPreviewMixin, Dialog):
-    """Reusable transaction-composer shell shared by the user-driven
-    ``SendTokenDialog`` (and, in later phases, the dapp ``SignTransactionDialog``
-    and the ENS write composers).
+    """Reusable transaction-composer shell shared by ``SendTokenDialog``, the
+    dapp ``SignTransactionDialog`` and the ENS write composer.
 
     Owns the common machinery: the tabbed Details/Events shell, the
     Network/From header, the decoded-call view, the collapsible gas

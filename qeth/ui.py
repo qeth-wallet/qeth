@@ -1149,20 +1149,18 @@ class MainWindow(QMainWindow):
             warn(dialog, "Cannot sign", str(e))
             return
 
-        # Pick the right Signer from the account's source via the registry.
-        # The interaction host owns the "signing…" spinner and any unlock
-        # prompt (a hot wallet asks for its passphrase up-front on the main
-        # thread, so the worker has the decrypted key by the time it calls
-        # signer.sign()); it also marshals a worker-side backend's UI (step 3's
-        # QR) onto the main loop. (None, None) means no signer or the user
-        # cancelled the unlock — _pick_signer_for already warned if needed.
+        # Pick the Signer for the account's source via the registry. The
+        # interaction host owns the "signing…" spinner and any unlock prompt (a
+        # hot wallet asks for its passphrase up-front on the main thread, so the
+        # worker holds the decrypted key by the time it calls signer.sign()) and
+        # marshals a worker-side backend's UI (the QR) onto the main loop.
+        # (None, None) = no signer or a cancelled unlock, already warned about.
         #
-        # When one address is held by two signers (Ledger + Air-gapped), the
-        # exact record is the SELECTED tree row (``signing_key``), captured at
-        # open time by the UI-driven opener. Use its path only when it matches
-        # the from-address; otherwise leave it None so account_for_signing falls
-        # back to the connected default (the dapp/RPC flow passes no key, so it
-        # always signs as the default).
+        # When one address is held by TWO signers (Ledger + air-gapped), the
+        # exact record is the selected tree row (``signing_key``). Use its path
+        # only when it matches the from-address; else leave it None so
+        # account_for_signing falls back to the connected default (the dapp/RPC
+        # flow passes no key, so it always signs as the default).
         interaction = DialogInteraction(dialog, title="Signing Transaction")
         signing_path = self._signing_path_for(signing_key, finalised.from_addr)
         signer, progress_text = self._pick_signer_for(
@@ -1487,16 +1485,12 @@ class MainWindow(QMainWindow):
         if cid is not None:
             self.store.set_current_chain(int(cid))
             self.right_slot.broadcast_chain_changed()
-            # The UI chain is the user's preferred chain — also
-            # update the dapp-facing RPC chain so connected dapps
-            # see it (eth_chainId, eth_signTypedData_v4 domain
-            # checks). Dapp-initiated wallet_switchEthereumChain
-            # is the only thing that can override this asymmetric
-            # link; UI ⇒ dapp, but dapp-switches stay session-only
-            # and don't pull the UI back. So a user can browse on
-            # Gnosis in the wallet, open Gnosis Pay, and have it
-            # see chainId 100 immediately instead of getting
-            # "provided 1" complaints.
+            # Push the UI chain to the dapp-facing RPC too (eth_chainId,
+            # signTypedData domain checks). The link is asymmetric: UI ⇒ dapp,
+            # while a dapp's own wallet_switchEthereumChain stays session-only
+            # and never pulls the UI back. So switching to Gnosis in the wallet
+            # makes Gnosis Pay see chainId 100 at once, instead of complaining
+            # that 1 was provided.
             if self.rpc is not None:
                 self.rpc.set_rpc_chain(int(cid))
             # Pre-warm the verified-state sidecar for the new chain so a
@@ -1876,17 +1870,13 @@ class _FocusAwareSelectionDelegate(QStyledItemDelegate):
             self._redraw_disclosure(painter, option, index)
             return
 
-        # Not selected: default paint, but never the per-cell focus
-        # rectangle. The view's *current* index (set by a row insert,
-        # rebuild, or an auto-switch that moves focus here) would
-        # otherwise draw a stray dotted outline on an unselected cell —
-        # e.g. the narrow status-icon cell of a freshly-prepended
-        # pending row, where it reads as a box in the empty space beside
-        # the icon. Selection, not the current cell, is what we surface.
-        # Also strip hover (State_MouseOver) so the wallet tree doesn't
-        # tint hovered rows when the token/tx tables (which kill hover via
-        # stylesheet) don't — keeping hover behaviour consistent across
-        # all three delegate-painted views.
+        # Not selected: default paint, minus the per-cell focus rectangle —
+        # the view's *current* index (moved by a row insert, rebuild or
+        # auto-switch) would otherwise draw a stray dotted outline on an
+        # unselected cell, e.g. the narrow status-icon cell of a freshly
+        # prepended pending row. Selection is what we surface, not the current
+        # cell. Hover goes too, so the wallet tree matches the token/tx tables
+        # (which kill hover via stylesheet).
         opt = QStyleOptionViewItem(option)
         opt.rect = text_rect
         opt.state &= ~QStyle.StateFlag.State_HasFocus

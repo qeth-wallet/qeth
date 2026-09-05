@@ -1,15 +1,17 @@
-"""Approvals plugin — progressive full-history scan → live tree of allowances.
+"""Approvals plugin — progressive scan → live tree of ERC-20 allowances, with
+modify/revoke.
 
-A ScanWorker pages the selected account's WHOLE tx history (explorer, block-
-cursor walk, resumable from the tx cache), emits each fetched batch for the
-plugin to merge into the tx cache on the MAIN thread (TransactionCache has no
-lock), and every few pages checks the newly discovered approve() (token,
-spender) pairs via multicall — so the tree fills in as the scan runs. A bottom
-progress bar tracks it and can be stopped. Side effect: when the scan completes,
-the account's full history is cached (the Transactions tab stops refetching).
-
-Modify/revoke actions land in later commits; this file is the read-only scan +
-tree.
+A ScanWorker windows the account's ``Approval`` EVENT LOGS (the explorer logs
+API, filtered by topic0 + owner), re-checking the discovered (token, spender)
+pairs by multicall every few windows so the tree fills in as the scan runs, and
+then patches the recent tail a logs indexer may lag behind by reading only the
+account's newest txs (never its full history), which the plugin merges into the
+shared tx cache on the MAIN thread — ``TransactionCache`` has no lock. Events,
+not the account's own ``approve`` calldata: that also catches an allowance set
+via permit/EIP-2612 or an internal router call, and doesn't under-count a
+high-activity account. A bottom progress bar tracks it and can be stopped;
+discovered state is cached (``cache.py``), so reopening paints instantly and
+rescans only the tail.
 """
 
 from __future__ import annotations

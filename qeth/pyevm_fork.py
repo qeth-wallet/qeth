@@ -1,7 +1,7 @@
 """Local transaction simulation on a py-evm fork of live chain state.
 
 This is the engine behind the event preview's fork fallback (see
-``qeth/simulate.py``): execute the prospective tx locally against the
+``qeth/plugins/transactions/simulate.py``): execute the prospective tx locally against the
 chain's *current* state and collect the logs it would emit. py-evm is
 pure Python — it ships on every platform/Python combination (unlike
 pyrevm, whose wheel matrix stops at Linux cp312), and, more importantly,

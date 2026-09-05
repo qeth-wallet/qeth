@@ -297,7 +297,12 @@ unchanged. Wallet methods (`eth_accounts`, `eth_chainId`,
 handled locally; everything else is proxied to the current chain's RPC URL.
 `eth_coinbase` is the USER's account — proxied, it returned whatever
 address the RPC provider's node reports.
-Signing methods currently return `-32601 "Signing not implemented in MVP"`.
+Signing is wired: `personal_sign` / `personal_signMessage`,
+`eth_signTypedData[_v3/_v4]` and `eth_sendTransaction` go through
+`signer_bridge` to the sign dialog. `eth_sign` is **refused** (it signs
+arbitrary 32-byte digests — a blind-signing footgun; the error tells the dapp
+to use `personal_sign`), and `eth_signTransaction` returns `-32601` (use
+`eth_sendTransaction`).
 
 **A wallet-namespaced method must NEVER reach `_proxy`.** `_dispatch`
 ends with a prefix guard (`_WALLET_NAMESPACES` = `wallet_` / `frame_` /
@@ -354,35 +359,26 @@ restarts. UI changes persist; RPC chain switches are session-only.
   `lookup_registrant_names`.
   **BENS also has outright GAPS** — verified 2026-09-05, it 404s
   `staging.curve.eth` (a two-day-old unwrapped subnode) by namehash AND by name
-  while serving its older siblings — so two more sources fill them in:
-  the **ENS subgraph** (`lookup_subgraph_names`) and the **NameWrapper sweep**
-  (`lookup_wrapped_names`).
-  The subgraph's *legacy hosted* endpoint
-  (`api.thegraph.com/subgraphs/name/ensdomains/ens`) is alive, **keyless** and at
-  chain head — it's the *decentralized gateway* that needs a paid key — and ONE
-  aliased query answers all three ownership roles (`owner` / `registrant` /
-  `wrappedDomains.owner`) with labels already healed. It is **hard rate-limited**
-  (429, no `Retry-After`), so: one request per account load, no retry, and any
-  failure arms a module-level cooldown (`reset_subgraph_cooldown()` in tests).
-  Names it can't heal come back as `[labelhash].parent.eth` and are skipped —
-  useless, since the writes take the *string*. Also skipped: a registration past
-  its grace period (the registrar NFT still reads as ours until re-registered).
-  The **NameWrapper sweep** enumerates the ERC-1155s held
-  (`/api/v2/addresses/{addr}/nft?type=ERC-1155`) and reads each one's name from
-  `NameWrapper.names(node)` (selector `0x20c38e2b`, DNS-encoded) — so a wrapped
-  **subname** is named with no indexer and no labelhash preimage at all, the only
-  path with no name-resolution dependency. It co-reads `ownerOf(node)` and keeps
-  only what the wrapper says the account holds *now*: the NFT index can be stale,
-  and an EXPIRED wrapped name still lists but reads owner 0 (verified for
-  os-deal.eth) — and a `source="registrant"` row is never dropped later, so it
-  has to be filtered there.
-  **Hash-healing has no keyless service today**: NameHash's ENSRainbow and
-  ENSNode hosts (`api.ensrainbow.io`, `*.ensnode.io`) resolve to deleted
-  deployments (wildcard `*.up.railway.app` cert → SSL hostname mismatch) even
-  though their docs still advertise them.
-  Under all four, `EnsPlugin._cached_names` merges the disk cache into every
-  render, so a name they ALL lose isn't forgotten — it just has to prove itself
-  on-chain (see the `cached` source).
+  while serving its older siblings — so two more sources fill them in.
+  The **ENS subgraph** (`lookup_subgraph_names`): its *legacy hosted* endpoint
+  `api.thegraph.com/subgraphs/name/ensdomains/ens` is alive, **keyless** and at
+  chain head (the *decentralized gateway* is the key-gated one), and ONE aliased
+  query answers all three roles (`owner` / `registrant` / `wrappedDomains.owner`)
+  with labels healed. **Hard rate-limited** (429, no `Retry-After`) → one request
+  per load, no retry, and a failure arms a cooldown (`reset_subgraph_cooldown()`
+  in tests). Skips unhealed `[labelhash].parent.eth` names (writes take the
+  *string*) and registrations past grace (the NFT reads as ours till re-registered).
+  The **NameWrapper sweep** (`lookup_wrapped_names`): enumerate the ERC-1155s held
+  (`nft?type=ERC-1155`), read each name from `NameWrapper.names(node)`
+  (`0x20c38e2b`, DNS-encoded) — so a wrapped **subname** is named with no indexer
+  and no labelhash preimage. Co-reads `ownerOf(node)` and keeps only what the
+  wrapper says is held *now*: the NFT index can be stale, an EXPIRED wrapped name
+  still lists but reads owner 0, and a `source="registrant"` row is never dropped
+  later. **Hash-healing has no keyless service today** — ENSRainbow / ENSNode
+  (`api.ensrainbow.io`, `*.ensnode.io`) resolve to deleted deployments despite
+  their docs. Under all four, `EnsPlugin._cached_names` merges the disk cache into
+  every render, so a name they ALL lose isn't forgotten — it just has to prove
+  itself on-chain (the `cached` source).
 - **Curve** — official domain is `curve.finance` (**not** `curve.fi`,
   which 404s on most paths I tried). API base
   `https://api.curve.finance/v1/`, OpenAPI spec at

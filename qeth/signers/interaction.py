@@ -1,9 +1,9 @@
 """``SignerInteraction`` — the UI a signer needs *while* producing a signature,
-abstracted so a backend never imports Qt. Step 2 of ``docs/signers.md``.
+abstracted so a backend never imports Qt. See ``docs/signers.md``.
 
 One host covers every backend's UX shape: a passive "working…" spinner
-(Ledger), a one-shot secret prompt (hot wallet), and — from step 3 — a
-bidirectional QR exchange (air-gapped). The concrete Qt implementation
+(Ledger), a one-shot secret prompt (hot wallet), and a bidirectional QR
+exchange (air-gapped). The concrete Qt implementation
 (``qeth.signer_interaction.DialogInteraction``) marshals any call made from a
 signing WORKER thread onto the main loop, so a signer can drive UI from
 ``sign()`` without knowing about threads.

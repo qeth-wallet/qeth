@@ -99,17 +99,15 @@ class ChainError(Exception):
 # Multicall3 is deployed at the same address on every EVM chain we support.
 MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
 
-# ArbSys precompile (Arbitrum chains). Inside the Arbitrum EVM,
-# ``block.number`` — which is what Multicall3's getBlockNumber() returns — is
-# the L1 *Ethereum* block (~25M), while receipts, logs and eth_blockNumber all
-# carry L2 numbers (~479M). Mixing the two breaks any consumer that orders
-# reads by block: a floor stamped from a receipt (L2) rejects every
-# multicall-stamped read (L1) as stale, forever — the Arbitrum stuck-balance
-# bug. ArbSys.arbBlockNumber() returns the L2 number. On every other chain
-# address 0x64 has no code, so an aggregate3 sub-call to it trivially
-# "succeeds" with EMPTY returndata (decoded → None by the length guard) and we
-# fall back to getBlockNumber — probed live on ETH/OP/Polygon/Base/Gnosis
-# (empty success) and BNB (failure); no chain list to maintain.
+# ArbSys precompile. Inside the Arbitrum EVM ``block.number`` — what
+# Multicall3's getBlockNumber() returns — is the L1 block (~25M), while
+# receipts, logs and eth_blockNumber carry L2 numbers (~479M). Mixing them
+# breaks any consumer ordering reads by block: a floor stamped from a receipt
+# (L2) rejects every multicall-stamped read (L1) as stale forever — the
+# Arbitrum stuck-balance bug. ArbSys.arbBlockNumber() gives the L2 number.
+# Elsewhere 0x64 has no code, so the aggregate3 sub-call trivially "succeeds"
+# with EMPTY returndata (→ None) and we fall back to getBlockNumber — probed on
+# ETH/OP/Polygon/Base/Gnosis and BNB; no chain list to maintain.
 _ARBSYS = "0x0000000000000000000000000000000000000064"
 
 # 4-byte function selectors. Pre-computed (Keccak isn't in stdlib hashlib).
@@ -193,19 +191,14 @@ def _rpc_urls(chain: Chain) -> list[str]:
 
 
 # JSON-RPC error objects that mean the PROVIDER is refusing/limiting rather
-# than answering this request — worth failing over, unlike a revert or an
-# invalid-params error (which every provider would answer identically).
-# -32005 is EIP-1474 "limit exceeded"; some gateways tunnel HTTP 429 into
-# the error code. The message check catches providers using generic codes
-# for their limiter (DRPC under load); kept narrow so nothing matches a
-# real node answer like "exceeds block gas limit".
-# -32005: common "limit exceeded" code. 429: HTTP-status-as-code.
-# -32001: DRPC's free-tier "usage limit" (observed 2026-06: HTTP 200 +
-# {"code":-32001,"message":"You've reached the usage limit for your current
-# plan…"} — its load balancer routes some eth_calls to a throttled upstream
-# like 1rpc.io). It arrives on a 200, so only this classification (not the
-# HTTP-error path) makes _failover_provider rotate off it; without it the
-# whole multicall batch was dropped and the token list flapped.
+# than answering — worth failing over, unlike a revert or invalid-params
+# (which every provider answers identically). -32005 is EIP-1474 "limit
+# exceeded"; 429 is HTTP-status-as-code. -32001 is DRPC's free-tier "usage
+# limit" (observed 2026-06), and it arrives on an HTTP 200 — so ONLY this
+# classification makes _failover_provider rotate off it; without it the whole
+# multicall batch was dropped and the token list flapped. The message check
+# catches providers using generic codes for their limiter, kept narrow so it
+# can't match a real node answer like "exceeds block gas limit".
 _LIMIT_CODES = frozenset({-32005, -32001, 429})
 _LIMIT_MSG_RE = re.compile(
     r"rate.?limit|too many request|request limit|usage limit|"
@@ -313,14 +306,11 @@ class EthClient:
         # PoA chains (BSC, Polygon-PoS, Avalanche C-Chain, …) put
         # validator signatures in the block header's extraData
         # field, which is 65–280 bytes instead of the 32 web3.py
-        # validates by default — and the validation runs on every
-        # ``eth_getBlockBy*`` response, including the raw
-        # ``rpc()`` path (web3.py 7 routes raw requests through
-        # the middleware onion too). The middleware truncates
-        # extraData to 32 bytes on the way back; harmless on
-        # non-PoA chains because qeth never reads extraData
-        # anyway, so we inject unconditionally instead of gating
-        # on a per-chain flag we'd have to maintain.
+        # validates by default, on every ``eth_getBlockBy*`` response —
+        # including the raw ``rpc()`` path, since web3.py 7 routes raw requests
+        # through the middleware onion too. The middleware truncates extraData
+        # to 32 bytes, harmless where qeth never reads it, so inject
+        # unconditionally rather than maintain a per-chain flag.
         for _w3 in (self._w3, self._broadcast_w3):
             _w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 

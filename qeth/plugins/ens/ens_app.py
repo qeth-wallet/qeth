@@ -345,40 +345,28 @@ def lookup_owned_names(
 
 # --- ENS subgraph (the canonical index) -----------------------------------
 #
-# BENS has GAPS: verified 2026-09-05, it 404s staging.curve.eth — a two-day-old
-# unwrapped subnode — by namehash AND by name, while its older siblings resolve;
-# the newest subnode it knew for that wallet was seven weeks old. A name it never
-# indexes is a name discovery can never return.
+# BENS has GAPS, not just lag: verified 2026-09-05 it 404s staging.curve.eth (a
+# two-day-old unwrapped subnode) by namehash AND by name while serving its older
+# siblings. A name it never indexes is one discovery can never return.
 #
-# The ENS subgraph is the canonical index and it HAS that name, with the label
-# already healed. Its legacy hosted endpoint is still live, keyless and at chain
-# head (``_meta.block`` == head, ``hasIndexingErrors`` false) — the decentralized
-# gateway (``gateway.thegraph.com``) needs a paid API key, and NameHash's ENSNode
-# / ENSRainbow successors are currently unreachable (their hosts resolve to
-# deleted deployments), so this is the one keyless option.
+# The subgraph HAS that name, label already healed. Its LEGACY HOSTED endpoint
+# is live, keyless and at chain head — the decentralized gateway needs a paid
+# key, and NameHash's ENSNode / ENSRainbow successors resolve to deleted
+# deployments — and one aliased query answers all three ownership roles:
+# ``owner`` (what BENS keys on), ``registrant`` (else rebuilt from Blockscout
+# NFTs) and ``wrappedDomains.owner``.
 #
-# It is also the ONLY source that answers all three ownership roles at once:
-# ``owner`` (registry controller — what BENS keys on), ``registrant`` (the .eth
-# NFT holder, which we otherwise reconstruct from Blockscout NFTs + the ENS
-# metadata service) and ``wrappedDomains.owner`` (the NameWrapper ERC-1155
-# holder). One aliased query covers all three.
-#
-# Caveat: it is HARD rate-limited — a handful of queries, then 429 with no
-# Retry-After, needing ~15-30 s of backoff. So: exactly ONE request per account
-# load, no retry, and a failure just returns [] (BENS, the NFT sweeps and the
-# disk cache all still stand). Single page per role, no cursor paging, for the
-# same reason.
+# It is HARD rate-limited (429, no Retry-After), hence: one request per account
+# load, no retry, one page per role, and a failure just returns [].
 ENS_SUBGRAPH_URL = "https://api.thegraph.com/subgraphs/name/ensdomains/ens"
 
 # Domains per role in the one query. graph-node caps ``first`` at 1000.
 _SUBGRAPH_PAGE = 500
 
-# Throttle guard. The 429 arrives with no Retry-After, and account-switching
-# fires a discovery per account — so after ANY failure we simply stop asking for
-# a while rather than hammering a service that's already refusing us. Module
-# level because this is a property of the remote service, not of one caller;
-# monotonic so neither the wall clock nor an injected ``now_ts`` can skew it.
-# Skipping costs nothing: BENS, the NFT sweeps and the disk cache all still run.
+# Throttle guard: after ANY failure, stop asking for a while rather than hammer
+# a service already refusing us (account-switching fires a discovery each time).
+# Module level — it's a property of the remote service, not of one caller — and
+# monotonic, so no wall clock or injected ``now_ts`` can skew it.
 _SUBGRAPH_COOLDOWN_S = 120.0
 _subgraph_retry_at = 0.0
 
@@ -408,12 +396,11 @@ def reset_subgraph_cooldown() -> None:
 def _parse_subgraph_domain(d: dict, now_ts: int) -> EnsName | None:
     """One subgraph ``Domain`` → ``EnsName``, or None to skip it.
 
-    Skips a name whose label the subgraph couldn't heal (it renders the
-    labelhash as ``[c6fb65…].curve.eth`` — unusable for the writes, which take
-    the *string*), and one whose registration lapsed past the grace period: the
-    registrar NFT still reads as ours until someone re-registers, so without
-    this a released name would surface as owned. A name still IN grace is kept
-    — that's exactly when its owner needs to see it and renew."""
+    Skipped: an unhealed label (rendered ``[c6fb65…].curve.eth``, useless when
+    the writes take the *string*), and a registration past its grace period —
+    the registrar NFT still reads as ours until someone re-registers, so a
+    RELEASED name would otherwise surface as owned. One still in grace is kept:
+    that's exactly when its owner needs to see it and renew."""
     name = d.get("name")
     if not name or "[" in name:
         return None
@@ -601,18 +588,16 @@ def lookup_wrapped_names(
 ) -> list[EnsName]:
     """Wrapped names ``address`` holds, named FROM THE CHAIN.
 
-    A wrapped name (``.eth`` 2LD *or* subname) is an ERC-1155 held by the
-    NameWrapper, keyed by ``uint256(namehash)``. Enumerate those (Blockscout's
-    NFT API, keyless) and read each one's name back with
-    ``NameWrapper.names(node)``, which stores the full DNS-encoded name — so
-    unlike an unwrapped subnode, whose label exists ONLY as a hash, a wrapped
-    subname can be named without an indexer or a preimage service at all. That
-    makes this the one discovery path with no name-resolution dependency: only
-    the *enumeration* leans on an indexer, and Blockscout's token-balance index
-    is its core product, not an ENS-specific side table like BENS's.
+    A wrapped name (2LD *or* subname) is a NameWrapper ERC-1155 keyed by
+    ``uint256(namehash)``. Enumerate those (Blockscout's NFT API) and read each
+    name back from ``NameWrapper.names(node)``, which holds it DNS-encoded — so
+    unlike an unwrapped subnode, whose label exists only as a hash, a wrapped
+    subname needs no indexer and no preimage service to NAME it. Only the
+    enumeration leans on an indexer, and token balances are Blockscout's core
+    product rather than an ENS-specific side table like BENS's.
 
-    ``skip_nodes`` are namehashes already discovered (so we don't re-read them).
-    Mainnet only; tolerant of every failure — a hint, never blocking."""
+    ``skip_nodes`` are namehashes already discovered. Mainnet only; tolerant of
+    every failure — a hint, never blocking."""
     if chain_id != 1:
         return []
     ids = _held_token_ids(address, ENS_NAME_WRAPPER, "ERC-1155",
@@ -632,11 +617,11 @@ def lookup_wrapped_names(
             pending = [
                 (mc.add(ENS_NAME_WRAPPER, _SEL_NAMES + n,
                         decoder=_decode_dns_name),
-                 # ...and who the wrapper says holds it RIGHT NOW. Two jobs: the
-                 # NFT index can be stale, and an EXPIRED wrapped name reads 0
-                 # here (verified on-chain for os-deal.eth) — without this it
-                 # would surface as owned and then sit badged "proof catching
-                 # up" forever, since a "registrant" row is never dropped.
+                 # ...and who the wrapper says holds it RIGHT NOW: the NFT
+                 # index can be stale, and an EXPIRED wrapped name reads 0 here
+                 # (verified for os-deal.eth). Without this it would surface as
+                 # owned and sit badged "proof catching up" forever, since a
+                 # "registrant" row is never dropped.
                  mc.add(ENS_NAME_WRAPPER, _SEL_OWNER_OF + n,
                         decoder=_decode_addr_word))
                 for n in nodes]

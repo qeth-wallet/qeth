@@ -283,26 +283,20 @@ def _record_rows(rec: EnsRecords) -> list[tuple[str, str, str]]:
 
 
 class EnsNamesWorker(QThread):
-    """Discover the names an address holds — from four independent sources, off
-    the Qt thread — plus details for any custom-pinned names. Emits
-    ``ready(address, names)``.
+    """Discover the names an address holds, off the Qt thread, plus details for
+    any custom-pinned name. Emits ``ready(address, names)``.
 
-    No single source is complete, and each fails differently, so they union:
+    No single source is complete and each fails differently, so four union
+    (every one tolerant — a source that's down just contributes nothing):
 
-    * **BENS** — fast, paginated, keyless; keyed on the registry controller.
-      Has GAPS (it never indexed staging.curve.eth; see ``lookup_subgraph_names``).
-    * **The ENS subgraph** — the canonical index, keyless, one query, all three
-      ownership roles, labels already healed. Hard rate-limited, so: one shot,
-      no retry.
-    * **BaseRegistrar ERC-721s held** — the .eth names held as the *registrant*
-      while the manager is delegated elsewhere (crv.eth), which a
-      controller-keyed sweep can't see. Named via the ENS metadata service.
-    * **NameWrapper ERC-1155s held** — wrapped names *including subnames*, named
-      straight from the chain (``names(node)``), so no indexer and no label
-      preimage is involved in naming them at all.
-
-    Each is individually tolerant; a source that's down just contributes
-    nothing."""
+    * **BENS** — fast, paginated, controller-keyed. Has GAPS (see
+      ``lookup_subgraph_names``).
+    * **ENS subgraph** — canonical, one query, all three ownership roles,
+      labels healed. Rate-limited, so one shot, no retry.
+    * **BaseRegistrar ERC-721s held** — names held as *registrant* with the
+      manager delegated elsewhere (crv.eth), invisible to a controller sweep.
+    * **NameWrapper ERC-1155s held** — wrapped names incl. subnames, named
+      from the chain, so no indexer or label preimage names them."""
 
     ready = Signal(str, object)        # (address, list[EnsName])
 
@@ -1265,14 +1259,12 @@ class EnsPanel(QWidget):
                         item.setToolTip(0, _PENDING_TIP)
                     continue
                 if src == "cached":
-                    # A name only our own DISK CACHE still claims — discovery
-                    # didn't return it. It has to earn its place: drop it on the
-                    # first DEFINITIVE read (proven or not) that says the account
-                    # doesn't own it. Unlike dropping a discovered name, this
-                    # hides nothing the indexer reported, and ``disowned_by`` is
-                    # never true on a failed/transient read — so a name you gave
-                    # away can't linger forever on a setup with no Helios (where
-                    # ``verified`` never comes).
+                    # Only our own disk cache still claims this one, so it has
+                    # to earn its place: drop it on the first DEFINITIVE read,
+                    # proven or not. That hides nothing an indexer reported, and
+                    # ``disowned_by`` is never true on a failed read — so a name
+                    # you gave away can't linger forever where Helios (and thus
+                    # ``verified``) never comes.
                     self._remove_item(item, name_l)
                     removed.append(name_l)
                     continue
@@ -2196,15 +2188,12 @@ class EnsPlugin(Plugin):
         # instead of waiting on BENS to index it. Self-drops once discovery
         # returns the name; reset per account. The additive twin of ``_denied``.
         self._pending_adds: dict[str, EnsName] = {}
-        # Names the DISK cache still remembers — merged into every render (as
-        # source "cached") so a name the indexer stops returning isn't silently
-        # forgotten. BENS never indexes some subdomains at all (verified: an
-        # unwrapped subnode created two days earlier is still a 404 there), and
-        # discovery REPLACES the render, so without this the name a previous
-        # session cached vanishes on the next refresh — and the re-save then
-        # erases it from disk for good. Unlike a pin, a cached name still has to
-        # prove itself: ``mark_verified`` drops it on the first DEFINITIVE
-        # on-chain read that says the account doesn't own it (see there).
+        # Names the DISK cache still remembers, merged into every render as
+        # source "cached" — discovery REPLACES the render and then re-saves, so
+        # without this a name every source lost vanishes on the next refresh and
+        # is erased from disk for good. Unlike a pin, a cached name must prove
+        # itself: ``mark_verified`` drops it on the first DEFINITIVE on-chain
+        # read that says the account doesn't own it.
         self._cached_names: dict[str, EnsName] = {}
         # Write state: the EnsName + on-chain ownership facts per name, so the
         # write actions know the resolver, wrapped flag, and parent expiry.
@@ -2343,12 +2332,11 @@ class EnsPlugin(Plugin):
                 log.debug("helios prewarm failed", exc_info=True)
         cached = self._cache.load(ENS_CHAIN_ID, address)
         if cached is not None:
-            # Remember them for the merge, not just for this first paint: the
-            # discovery result that lands next REPLACES the render, so a name
-            # only the cache knows would drop out again a second later.
-            # ("subnode" rows are re-derived from the other accounts' caches
-            # each load; "custom" ones are re-fetched from the pin list — and
-            # merging an UNpinned one back would undo the unpin.)
+            # Remember them for the MERGE, not just this first paint — the
+            # discovery result that lands next replaces the render. ("subnode"
+            # rows are re-derived from the other accounts' caches each load;
+            # "custom" ones come from the pin list, and merging an UNpinned one
+            # back would undo the unpin.)
             self._cached_names = {
                 n.name.lower(): replace(n, source="cached")
                 for n in cached if n.source not in ("subnode", "custom")
@@ -2609,13 +2597,11 @@ class EnsPlugin(Plugin):
         #   • set-manager (reclaim) → the registrant of an *unwrapped* name
         #     (a wrapped name's controller is managed through the NameWrapper).
         #
-        # Deliberately NOT gated on whether the account can sign. That check
-        # belongs at sign time (MainWindow._begin_sign warns "no known signer"),
-        # which is where the rest of qeth puts it — the Send button isn't gated
-        # on the source either. Building a tx is useful without broadcasting it:
-        # a watch-only or multisig-observer account can open the flow to read
-        # the simulated events. Gating here also silently excluded air-gapped
-        # (QR) accounts, which sign fine everywhere else, because the old check
+        # Deliberately NOT gated on whether the account can SIGN — that check
+        # belongs at sign time (MainWindow._begin_sign), like the Send button.
+        # Building a tx is useful without broadcasting it (a watch-only or
+        # multisig-observer account can read the simulated events), and gating
+        # here silently excluded air-gapped QR accounts, since the old check
         # hardcoded ("hot", "ledger") instead of asking the signer registry.
         # Subdomains whose PARENT this account controls (and both unwrapped) —
         # the owner of a name can (re)assign its subnodes' managers via

@@ -59,15 +59,14 @@ class BalanceLedger:
         # it); tokens are ordered individually above.
         self.native_block: dict[tuple[int, str], int] = {}
         # (chain_id, account_lower) -> highest block at which we OBSERVED an
-        # ERC-20 Transfer touching the account, either direction. NOT a read
+        # ERC-20 Transfer touching the account, either direction. NOT a read-
         # ordering stamp like the two above — nothing is rejected against it.
         # It records "this account's token state moved at block N" for the
         # verified-preview fork floor, so a simulation never forks BEFORE a
-        # token that just arrived (see TransactionsPlugin.fork_floor_block).
-        # Deliberately NOT cleared by reset_chain: it isn't a freshness floor,
-        # and a ws gap is exactly when we most want the last observed movement
-        # remembered. It can only be over-stamped by a reorg rewinding past it,
-        # which self-heals as the head re-passes (the fork clamps to the head).
+        # just-arrived token (see TransactionsPlugin.fork_floor_block).
+        # Deliberately NOT cleared by reset_chain — a ws gap is exactly when
+        # the last observed movement matters most. Only a reorg rewinding past
+        # it can over-stamp it, and that self-heals as the head re-passes.
         self.transfer_block: dict[tuple[int, str], int] = {}
 
     def reset_chain(self, chain_id: int) -> None:

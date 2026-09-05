@@ -9,8 +9,9 @@ call by decoding ``method_id`` against the contract's own ABI (disk-
 cached; 4byte/selector only as a fallback).
 
 Qt-free: the Transactions plugin wraps :func:`fetch_activities` in a
-worker and renders the result via ``tx_summary.activity_icon`` (the
-Activity cell's composited icon).
+worker and renders the result with ``tx_summary.paint_summary``, from a
+delegate — the Activity cell is drawn, not an icon (an item-view QIcon gets
+rescaled per row).
 """
 
 from __future__ import annotations

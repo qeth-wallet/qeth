@@ -1,11 +1,10 @@
 """``SignerPlugin`` — one account ``source`` (ledger / hot / watch_only / …)
 behind a small, uniform interface the signing UI dispatches through.
 
-Step 1 of ``docs/signers.md``: this holds the ``source`` → ``Signer`` mapping
-plus the per-source metadata the dispatch needs (display name, whether an unlock
-secret must be collected first). The interaction host (progress / secret / QR)
-and the account-creation flows are later steps — for now the secret is a
-declarative prompt the caller renders, and ``make_signer`` takes the result.
+Holds the per-source metadata the dispatch needs (display name, whether an
+unlock secret must be collected first) and builds the ``Signer``. Any UI a
+backend needs — progress, a secret prompt, a QR exchange — goes through the
+``SignerInteraction`` passed to ``make_signer``, so no backend imports Qt.
 """
 
 from __future__ import annotations
@@ -45,5 +44,5 @@ class SignerPlugin(ABC):
         """Build the ``Signer`` for ``account``, driving ``ui`` for any up-front
         interaction — a hot wallet prompts for its passphrase via
         ``ui.request_secret``. Returns ``None`` if the user cancelled that
-        prompt. ``ui`` is also what a worker-side backend (step 3's QR signer)
+        prompt. ``ui`` is also what a worker-side backend (the QR signer)
         holds to drive its exchange from ``sign()``."""

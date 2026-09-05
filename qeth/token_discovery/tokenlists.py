@@ -50,17 +50,16 @@ _CANONICAL_SYMBOLS = {
     "bnb", "avax", "frax", "crv", "uni", "aave",
 }
 
-# Legitimate non-transferable governance locks (vote-escrow / vote-locked).
-# These are non-transferable BY DESIGN — you lock a token to get voting weight,
-# you can't sell/move the receipt. GoPlus's honeypot/blacklist simulation can't
-# tell "non-transferable by design" from a real trap, so it false-flags them —
-# and inconsistently: vlSDT reads is_honeypot, vlAURA is_blacklisted, vlCVX is
-# clean (all the same Convex-style lock), and batch vs single fetches disagree.
-# That unpredictability is why a deterministic address allowlist beats trying to
-# reinterpret GoPlus. Keyed (chain_id, lower-address). EVERY entry was
-# identity-verified on-chain (name()/symbol()) before landing here; extend the
-# same way — never add an unverified address to a scam bypass. Scoped to the
-# scam check only (not is_known), so it can't change visibility/pricing.
+# Legitimate non-transferable governance locks (vote-escrow / vote-locked):
+# you lock a token for voting weight and can't move the receipt. GoPlus's
+# simulation can't tell that from a real trap and false-flags them
+# INCONSISTENTLY — vlSDT reads is_honeypot, vlAURA is_blacklisted, vlCVX is
+# clean (all the same Convex-style lock), and batch vs single fetches disagree
+# — which is why a deterministic allowlist beats reinterpreting GoPlus. Keyed
+# (chain_id, lower-address). EVERY entry was identity-verified on-chain
+# (name()/symbol()) first; extend the same way — never add an unverified
+# address to a scam bypass. Scoped to the scam check only (not is_known), so
+# it can't change visibility or pricing.
 _TRUSTED_LOCKS: frozenset[tuple[int, str]] = frozenset(
     (cid, addr.lower()) for cid, addr in (
         # --- Ethereum mainnet ---

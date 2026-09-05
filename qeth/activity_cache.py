@@ -27,18 +27,13 @@ log = logging.getLogger("qeth.activity_cache")
 
 ACTIVITIES_DIR = CONFIG_DIR / "activities"
 
-# Bump when the activity-build logic changes what a tx resolves to (e.g.
-# widening the transfer fetch so older rows gain coins). A cache written by
-# an older build is then ignored and those rows are rebuilt, rather than
-# pinning the stale result forever.
-# v3: clear rows cached with a one-sided result (a TOKEN->ETH swap whose
-# received native ETH was missing while Blockscout's internal-tx index lagged).
-# v4: rebuild so one-sided TOKEN->native swaps gain their received-ETH leg from
-# the node-trace fallback (Blockscout's internal-tx index stays behind on L2s,
-# so on Optimism etc. the row never self-healed from the index alone).
-# v5: the v4 trace ran against the user's configured RPC, which may refuse
-# debug_traceTransaction (mainnet.optimism.io → -32601), so those rows re-cached
-# one-sided; rebuild now that the trace routes to a trace-capable endpoint.
+# Bump when the build logic changes what a tx resolves to (e.g. widening the
+# transfer fetch so older rows gain coins): a cache written by an older build
+# is ignored and those rows rebuilt, rather than pinning a stale result. The
+# v3-v5 bumps were all one story — a TOKEN->native swap missing its received
+# leg, first because Blockscout's internal-tx index lags on L2s, then because
+# the debug_traceTransaction fallback ran against an RPC that refuses it
+# (mainnet.optimism.io → -32601). It now routes to a trace-capable endpoint.
 _BUILD_VERSION = 5
 
 

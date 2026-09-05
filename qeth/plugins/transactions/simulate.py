@@ -316,16 +316,14 @@ def _hexint(v):
     return int(v, 16)
 
 
-# Blocks to fork BEHIND the head for a verified (Helios) simulation. The
-# proof-verification failures we see ("root hash mismatch in account proof
-# trie") are a bleeding-edge artifact: behind a load balancer the backend
-# that answers eth_getProof can be a block or two off from the head Helios
-# verified, so its proof hashes to a different state root. A handful of
-# blocks back, the backends have converged and the proof matches. Sized in
-# WALL-CLOCK (~15-25s) per chain, not a fixed block count — small enough to
-# not fork before a just-landed tx (an approve-then-swap in the same
-# session), large enough to clear the disagreement window. Latest, not
-# finalized: finalized (~13 min on mainnet) is far too stale for a preview.
+# Blocks to fork BEHIND the head for a verified (Helios) simulation. "root hash
+# mismatch in account proof trie" is a load-balancer artifact: the backend
+# answering eth_getProof can be a block or two off the head Helios verified, so
+# its proof hashes to a different state root. A few blocks back they've
+# converged. Sized per chain in WALL-CLOCK (~15-25s), not blocks — small enough
+# not to fork before a just-landed tx (approve-then-swap in one session), large
+# enough to clear the window. Latest, not finalized: finalized (~13 min on
+# mainnet) is far too stale for a preview.
 _VERIFIED_FORK_LAG: dict[int, int] = {
     1:     2,     # mainnet, ~12s blocks  → ~24s
     10:    10,    # OP,      ~2s blocks   → ~20s

@@ -866,18 +866,15 @@ class WalletsPlugin(Plugin):
         add_btn.setMenu(self._add_menu)
         self._account_buttons.append(add_btn)
 
-        # Copy / Remove become icon-only flat buttons matching the Tokens /
-        # Transactions panels' utility buttons, so the two slots' bottom
-        # rows read the same: one labelled primary action (Add, like Send)
-        # followed by small icon-only ones. They still mirror their QActions
-        # (which carry the tree's Ctrl+C / Del shortcuts and the enabled
-        # state); the label moves to the tooltip since there's no text.
-        # Connect is checkable (pressed = this account is connected to
-        # the browser); Search is checkable (pressed = find bar visible);
-        # the rest are momentary. We keep a ref to the Connect button so
-        # _update_account_buttons can sync its checked state to the store's
-        # default. Search sits last — a view control, visually after the
-        # per-account actions.
+        # Icon-only flat buttons matching the Tokens / Transactions utility
+        # buttons, so both slots' bottom rows read the same: one labelled
+        # primary action (Add, like Send) then small icon-only ones. They
+        # mirror their QActions (which carry the tree's Ctrl+C / Del shortcuts
+        # and enabled state), with the label moving to the tooltip. Connect
+        # (pressed = connected to the browser) and Search (pressed = find bar
+        # visible) are checkable, the rest momentary; the Connect button is
+        # kept so _update_account_buttons can sync it to the store's default.
+        # Search sits last — a view control, after the per-account actions.
         for act in (self.act_copy, self.act_remove, self.act_sign,
                     self.act_qr, self.act_label, self.act_connect,
                     self.act_search):
@@ -1035,17 +1032,14 @@ class WalletsPlugin(Plugin):
         expanded = (dict(self._pre_filter_expansion)
                     if self._pre_filter_expansion is not None
                     else self._capture_expansion())
-        # Clearing + re-selecting the tree fires itemSelectionChanged (→
-        # _on_tree_selection → selected_address_changed) twice — emit(None) on
-        # clear, emit(addr) on restore — i.e. a spurious "selection changed" even
-        # though the selection is PRESERVED. Every mounted plugin then reloads
-        # that account; for ENS each reload bumps the verify generation and drops
-        # the in-flight Helios ownership proof, so on a rebuild-heavy startup
-        # (balances/tokens streaming in, a chain switch) the ✓ never lands ("no
-        # checkbox, not every start"). Block the churn during the rebuild, then
-        # re-broadcast once — and only if the selection actually moved (compared
-        # against the last address we broadcast, not the pre-rebuild tree state,
-        # so removing the selected account still propagates the change).
+        # Clear + re-select fires itemSelectionChanged twice (None on clear,
+        # addr on restore) — a spurious "selection changed" even though the
+        # selection is PRESERVED. Every mounted plugin then reloads the account;
+        # for ENS each reload bumps the verify generation and drops the in-flight
+        # Helios proof, so on a rebuild-heavy startup the ✓ never lands. Block
+        # the churn, then re-broadcast once, and only if the selection really
+        # moved — compared against the last address we BROADCAST, not the
+        # pre-rebuild tree, so removing the selected account still propagates.
         sel_addrs: list[str] = []      # the selection, captured pre-filter below
         self._tree.blockSignals(True)
         try:

@@ -42,25 +42,20 @@ _RPC_URL_SCHEMES = frozenset({"http", "https", "ws", "wss"})
 _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 
 # Method namespaces that address the WALLET, never the chain. Anything under
-# these prefixes that _dispatch doesn't handle itself is answered with a clean
-# -32601 instead of being proxied upstream (see the end of _dispatch).
+# these prefixes that _dispatch doesn't handle itself gets a clean -32601
+# instead of being proxied upstream (see the end of _dispatch).
 #
-# This is a prefix rule, not a list of known names, on purpose: an unhandled
-# wallet-namespaced method is a qeth gap by definition, and forwarding it to
-# an Ethereum node is always wrong. A node can't serve it, so the call buys
-# nothing — it just leaks the dapp's request (and, on a 4xx, walks every
-# fallback RPC for that chain) to answer with provider-specific noise a
-# connector then has to guess at. Frame's own extension made this concrete:
-# it asks the wallet for ``wallet_getEthereumChains`` on every reconnect, and
-# the old name-by-name denylist didn't cover it, so each one hit the chain.
+# A PREFIX rule, not a list of known names, on purpose: an unhandled
+# wallet-namespaced method is a qeth gap by definition, and a node can't serve
+# it — proxying just leaks the dapp's request (walking every fallback RPC on a
+# 4xx) to get provider-specific noise back. The old name-by-name denylist kept
+# missing methods: Frame's extension asks for ``wallet_getEthereumChains`` on
+# every reconnect, and each one hit the chain.
 #
-# ``personal_`` is in the list for a second reason: on a real node it's the
-# KEYSTORE admin namespace (personal_unlockAccount, personal_newAccount,
-# personal_listAccounts). Forwarding those to whichever provider the user
-# configured is never something qeth should do, and personal_ecRecover —
-# the one member a dapp actually calls — is pure signature recovery no
-# public RPC exposes anyway. qeth's own personal_sign / personal_signMessage
-# are handled well before this guard.
+# ``personal_`` is here for a second reason: on a node that's the KEYSTORE
+# ADMIN namespace (personal_unlockAccount / _newAccount), never something to
+# forward to the user's provider. qeth's own personal_sign is handled well
+# before this guard.
 _WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_")
 
 # eth_subscribe types a NODE can serve. Everything else is a wallet-level
@@ -199,27 +194,21 @@ class RpcServer:
         # Frame's protocol — without an active subscription the
         # extension simply ignores the push.
         #
-        # Keyed by SUB ID (not sub_type) and carrying the per-sub
-        # EFFECTIVE origin so a single multiplexed socket — a browser
-        # extension relaying every tab/frame over one WS — can hold
-        # many same-type subscriptions, each scoped to its own dapp
-        # origin. Keying by sub_type would let a second tab's
-        # chainChanged subscription overwrite the first, and scoping
-        # on the socket's handshake origin (the extension's) would
-        # mis-route every per-origin push. See _broadcast_event.
+        # Keyed by SUB ID (not sub_type) and carrying the per-sub EFFECTIVE
+        # origin, so one multiplexed socket — an extension relaying every
+        # tab over a single WS — can hold many same-type subscriptions, each
+        # scoped to its own dapp origin. Keying by sub_type would let a second
+        # tab's chainChanged overwrite the first; scoping on the socket's
+        # handshake origin (the extension's) would mis-route every push.
         self._ws_subscriptions: dict[
             web.WebSocketResponse, dict[str, tuple[str, str | None]]
         ] = {}
-        # Per-origin chain override. Each dapp (identified by its
-        # Origin header / Frame's ``__frameOrigin``) can call
-        # ``wallet_switchEthereumChain`` to pin itself to a chain;
-        # other dapps see the wallet UI's current chain.
-        # Previously this was a single global value, so 1inch
-        # switching to zkSync Era pulled every other open tab onto
-        # zkSync until the user restarted. Origins that haven't
-        # overridden fall back to ``store.current_chain()`` at
-        # read time, so a UI toolbar flip automatically reaches
-        # unscoped dapps.
+        # Per-origin chain override: each dapp (its Origin header / Frame's
+        # ``__frameOrigin``) can ``wallet_switchEthereumChain`` itself onto a
+        # chain without moving the others — as one global value did, where
+        # 1inch switching to zkSync Era dragged every open tab along until
+        # restart. An origin that hasn't overridden reads
+        # ``store.current_chain()`` live, so a toolbar flip still reaches it.
         self._rpc_chain_id_by_origin: dict[str, int] = {}
         # In-flight ws request handlers — one task per message, dispatched
         # concurrently (5a) so a long-running handler (an unbounded signing
@@ -728,21 +717,15 @@ class RpcServer:
             return {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": e.code, "message": e.message}}
         except Exception as e:
-            # Demote transient network blips from ERROR/traceback
-            # to a one-line WARNING. The dapp still gets a proper
-            # JSON-RPC error response; this is only about how
-            # loud the server log is. Suppress entirely when the
-            # aiohttp session is already closed — that means
-            # we're in app shutdown and the dozens of in-flight
-            # requests racing past the close are pure noise.
+            # Demote transient network blips to a one-line WARNING (the dapp
+            # still gets a proper JSON-RPC error; this is only log volume),
+            # and stay silent once the session is closed — that's shutdown,
+            # where the in-flight requests racing past the close are noise.
             #
-            # ``isinstance`` not ``type(e).__name__ in ...`` —
-            # ClientConnectorError has a family of more specific
-            # subclasses (ClientConnectorDNSError,
-            # ClientConnectorSSLError, ClientConnectorCertificateError, …)
-            # that the string check silently missed, so when DNS
-            # died for eth.drpc.org we dumped a 40-line traceback
-            # for every dapp poll → multiple per second.
+            # ``isinstance``, not a ``type(e).__name__`` string check:
+            # ClientConnectorError has more specific subclasses (DNS, SSL,
+            # Certificate…) the string form missed, so a dead DNS for
+            # eth.drpc.org dumped a 40-line traceback per dapp poll.
             shutting_down = (
                 self._client is None or self._client.closed
             )

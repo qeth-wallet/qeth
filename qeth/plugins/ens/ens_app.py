@@ -105,7 +105,10 @@ class EnsName:
     resolved_address: str | None = None    # the addr record (where it points)
     owner: str | None = None               # registry owner / controller
     expiry_ts: int | None = None           # unix seconds, or None
-    source: str = "owned"                     # owned | resolved | custom
+    # owned (indexer) | registrant (on-chain NFT read) | custom (pinned)
+    # | subnode (surfaced because we own the parent) | cached (only our
+    # own disk cache still claims it — must prove itself on-chain)
+    source: str = "owned"
 
     @property
     def label(self) -> str:

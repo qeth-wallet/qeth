@@ -1314,6 +1314,95 @@ class TestEnsPlugin:
         assert any(isinstance(w, EnsNamesWorker) for w in host.started_workers)
         assert any(isinstance(w, EnsTextKeysWorker) for w in host.started_workers)
 
+    def test_cached_name_survives_discovery_that_omits_it(self, qtbot, tmp_qeth):
+        """A name only the DISK CACHE knows must survive the discovery result
+        landing — and must stay on disk.
+
+        Verified live against BENS: an unwrapped subnode created two days
+        earlier (``staging.curve.eth``) is still a 404 there, by namehash AND by
+        name, while its older siblings resolve — so discovery can never return
+        it. Before this, the render replaced the cached set and the re-save then
+        erased the name for good: it vanished on the next restart."""
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._cache.save(1, ADDR, [EnsName("curve.eth"),
+                                     EnsName("staging.curve.eth")])
+        plugin.on_account_changed(ADDR)
+
+        plugin._on_names_ready(ADDR, [EnsName("curve.eth")])   # BENS: parent only
+
+        assert "staging.curve.eth" in plugin._names_by_l
+        assert (0, "curve.eth") in _tree_shape(plugin.widget())
+        assert (1, "staging.curve.eth") in _tree_shape(plugin.widget())
+        on_disk = {n.name for n in plugin._cache.load(1, ADDR) or []}
+        assert "staging.curve.eth" in on_disk
+        # …and it goes into the verify batch, so it still has to prove itself.
+        from qeth.plugins.ens import EnsVerifyWorker
+        verify = [w for w in host.started_workers
+                  if isinstance(w, EnsVerifyWorker)]
+        assert verify and "staging.curve.eth" in verify[-1]._names
+
+    def test_cached_name_dropped_on_a_definitive_disowning_read(
+            self, qtbot, tmp_qeth):
+        """A cache-only name needs POSITIVE on-chain confirmation, so one the
+        chain says isn't ours goes on the first definitive read — even the
+        UNVERIFIED one, which never drops a discovered name. Otherwise a name
+        given away would linger forever wherever Helios isn't installed."""
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._cache.save(1, ADDR, [EnsName("curve.eth"),
+                                     EnsName("gone.curve.eth")])
+        plugin.on_account_changed(ADDR)
+        plugin._on_names_ready(ADDR, [EnsName("curve.eth")])
+
+        plugin._on_verified(ADDR, {"gone.curve.eth": OwnershipCheck(
+            controller="0x" + "22" * 20, owner_known=True)}, False)
+
+        assert "gone.curve.eth" in plugin._denied
+        assert (1, "gone.curve.eth") not in _tree_shape(plugin.widget())
+        # …and off disk too, so it doesn't resurface (to be re-dropped) next run
+        on_disk = {n.name for n in plugin._cache.load(1, ADDR) or []}
+        assert "gone.curve.eth" not in on_disk
+        # A re-render can't bring it back either.
+        plugin._render([EnsName("curve.eth")])
+        assert (1, "gone.curve.eth") not in _tree_shape(plugin.widget())
+
+    def test_cached_name_kept_when_the_ownership_read_fails(
+            self, qtbot, tmp_qeth):
+        """A FAILED read (owner_known False) is not a disowning — an RPC hiccup
+        must never drop a remembered name."""
+        plugin = EnsPlugin(_StubStore())
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin._cache.save(1, ADDR, [EnsName("curve.eth"),
+                                     EnsName("staging.curve.eth")])
+        plugin.on_account_changed(ADDR)
+        plugin._on_names_ready(ADDR, [EnsName("curve.eth")])
+
+        plugin._on_verified(ADDR, {"staging.curve.eth": OwnershipCheck()},
+                            True)
+
+        assert "staging.curve.eth" not in plugin._denied
+        assert (1, "staging.curve.eth") in _tree_shape(plugin.widget())
+
+    def test_unpinned_cached_name_is_not_resurrected(self, qtbot, tmp_qeth):
+        """A pinned name that got unpinned must not come back through the cache
+        merge — the pin list is the authority on those."""
+        plugin = EnsPlugin(_StubStore())
+        plugin.attach(_StubHost(address=ADDR))
+        qtbot.addWidget(plugin.widget())
+        plugin._cache.save(1, ADDR, [EnsName("watched.eth", source="custom")])
+        plugin.on_account_changed(ADDR)
+
+        plugin._on_names_ready(ADDR, [])          # no pins, nothing discovered
+
+        assert "watched.eth" not in plugin._names_by_l
+
     def test_account_none_clears(self, qtbot):
         plugin = EnsPlugin(_StubStore())
         host = _StubHost(address=ADDR)

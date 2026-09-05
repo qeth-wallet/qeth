@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, ClassVar
 from collections.abc import Callable, Sequence
@@ -1208,7 +1208,9 @@ class EnsPanel(QWidget):
         registrant both someone else) is an indexer lie and is removed. Pinned
         (custom) names are never dropped; a freshly NFT-discovered
         (``registrant``) name whose proof is still catching up is kept and
-        badged "pending" instead."""
+        badged "pending" instead. The exception is a ``cached`` name (one only
+        our disk cache still claims): that one is dropped on the first
+        definitive read either pass makes."""
         removed: list[str] = []
         for name_l, st in states.items():
             item = self._items_by_name.get(name_l)
@@ -1227,6 +1229,18 @@ class EnsPanel(QWidget):
                     if verified:
                         self._set_status(item, "pending", _PENDING_TIP)
                         item.setToolTip(0, _PENDING_TIP)
+                    continue
+                if src == "cached":
+                    # A name only our own DISK CACHE still claims — discovery
+                    # didn't return it. It has to earn its place: drop it on the
+                    # first DEFINITIVE read (proven or not) that says the account
+                    # doesn't own it. Unlike dropping a discovered name, this
+                    # hides nothing the indexer reported, and ``disowned_by`` is
+                    # never true on a failed/transient read — so a name you gave
+                    # away can't linger forever on a setup with no Helios (where
+                    # ``verified`` never comes).
+                    self._remove_item(item, name_l)
+                    removed.append(name_l)
                     continue
                 if src not in ("custom", "subnode"):
                     # A real indexer lie (BENS over-reported). Drop it once PROVEN
@@ -2148,6 +2162,16 @@ class EnsPlugin(Plugin):
         # instead of waiting on BENS to index it. Self-drops once discovery
         # returns the name; reset per account. The additive twin of ``_denied``.
         self._pending_adds: dict[str, EnsName] = {}
+        # Names the DISK cache still remembers — merged into every render (as
+        # source "cached") so a name the indexer stops returning isn't silently
+        # forgotten. BENS never indexes some subdomains at all (verified: an
+        # unwrapped subnode created two days earlier is still a 404 there), and
+        # discovery REPLACES the render, so without this the name a previous
+        # session cached vanishes on the next refresh — and the re-save then
+        # erases it from disk for good. Unlike a pin, a cached name still has to
+        # prove itself: ``mark_verified`` drops it on the first DEFINITIVE
+        # on-chain read that says the account doesn't own it (see there).
+        self._cached_names: dict[str, EnsName] = {}
         # Write state: the EnsName + on-chain ownership facts per name, so the
         # write actions know the resolver, wrapped flag, and parent expiry.
         self._names_by_l: dict[str, EnsName] = {}
@@ -2254,6 +2278,7 @@ class EnsPlugin(Plugin):
         if address != self._loaded_for:
             self._denied.clear()              # denials are per-account
             self._pending_adds.clear()        # ...as are pending adds
+            self._cached_names.clear()        # ...and the cache merge
             self._owned.clear()
             self._wrapped.clear()
             self._registrant.clear()
@@ -2284,6 +2309,16 @@ class EnsPlugin(Plugin):
                 log.debug("helios prewarm failed", exc_info=True)
         cached = self._cache.load(ENS_CHAIN_ID, address)
         if cached is not None:
+            # Remember them for the merge, not just for this first paint: the
+            # discovery result that lands next REPLACES the render, so a name
+            # only the cache knows would drop out again a second later.
+            # ("subnode" rows are re-derived from the other accounts' caches
+            # each load; "custom" ones are re-fetched from the pin list — and
+            # merging an UNpinned one back would undo the unpin.)
+            self._cached_names = {
+                n.name.lower(): replace(n, source="cached")
+                for n in cached if n.source not in ("subnode", "custom")
+            }
             self._render(cached)
         self._on_refresh()
         self._scan_custom_text_keys(address, chain)
@@ -2349,15 +2384,21 @@ class EnsPlugin(Plugin):
         for nl in list(self._pending_adds):
             if nl in bens_have:
                 del self._pending_adds[nl]
-        self._render(names)                          # merges pending, sets _names_by_l
-        # Cache the account's OWN names — the discovery result plus any still-
-        # pending local adds (so a new subnode survives a reload before the
-        # indexer catches up), never a denied name or a derived cross-account
-        # subnode (source "subnode").
+        self._render(names)     # merges pending + cached, sets _names_by_l
+        self._save_own(address)
+        self._verify(address, list(self._names_by_l))  # verify the surfaced set too
+
+    def _save_own(self, address: str) -> None:
+        """Persist the account's OWN surfaced names — the discovery result plus
+        any still-pending local add (so a new subnode survives a reload before
+        the indexer catches up) and any remembered ``cached`` one, never a denied
+        name or a derived cross-account subnode (source "subnode").
+
+        Called after a drop too, so a name the chain disowned leaves the disk
+        cache instead of resurfacing (and being dropped again) every session."""
         own = [n for n in self._names_by_l.values()
                if n.source != "subnode" and n.name.lower() not in self._denied]
         self._cache.save(ENS_CHAIN_ID, address, own)
-        self._verify(address, list(self._names_by_l))  # verify the surfaced set too
 
     def _with_cross_account_subdomains(
             self, names: list[EnsName]) -> list[EnsName]:
@@ -2399,6 +2440,15 @@ class EnsPlugin(Plugin):
         for nl, pending in self._pending_adds.items():
             if nl not in have and nl not in self._denied:
                 names.append(pending)
+                have.add(nl)
+        # ...and names a previous session cached that discovery no longer
+        # returns, so an indexer gap can't quietly forget a name (the verify
+        # pass drops it the moment the chain says it isn't ours — see
+        # _cached_names).
+        for nl, remembered in self._cached_names.items():
+            if nl not in have and nl not in self._denied:
+                names.append(remembered)
+                have.add(nl)
         names = self._with_cross_account_subdomains(names)
         names = self._fill_intermediate_ancestors(names)
         self._names_by_l = {n.name.lower(): n for n in names}
@@ -2508,9 +2558,13 @@ class EnsPlugin(Plugin):
                 self._controller.add(name_l)
             else:
                 self._controller.discard(name_l)
-        self._denied.update(
-            self._panel.mark_verified(states, address, verified=verified,
-                                      block=block))
+        dropped = self._panel.mark_verified(states, address, verified=verified,
+                                            block=block)
+        if dropped:
+            self._denied.update(dropped)
+            for nl in dropped:
+                self._cached_names.pop(nl, None)
+            self._save_own(address)     # …and take it off disk as well
         self._refresh_writable(address)
 
     def _refresh_writable(self, address: str) -> None:
@@ -3645,6 +3699,7 @@ class EnsPlugin(Plugin):
         nl = name.lower()
         self._denied.add(nl)
         self._pending_adds.pop(nl, None)         # a re-created-then-deleted name
+        self._cached_names.pop(nl, None)         # …nor re-merged from the cache
         self._purge_name_from_caches(name)
         if self._panel is not None:
             self._panel.stamp_block(name, block)

@@ -92,35 +92,90 @@ class _StubStore:
 
 # --- EnsPanel --------------------------------------------------------------
 
+@pytest.fixture
+def stub_sources(monkeypatch):
+    """Stub every discovery source the worker unions, so a test opts INTO the
+    ones it exercises (and none of them reaches the network)."""
+    import qeth.plugins.ens.ens_app as ea
+    calls: dict = {}
+
+    def set_source(name, fn):
+        calls[name] = fn
+
+    monkeypatch.setattr("qeth.plugins.ens.lookup_owned_names",
+                        lambda cid, addr: list(calls.get("bens", lambda: [])()))
+    monkeypatch.setattr(
+        ea, "lookup_subgraph_names",
+        lambda cid, addr: list(calls.get("subgraph", lambda: [])()))
+    monkeypatch.setattr(
+        ea, "lookup_registrant_names",
+        lambda cid, addr, *, skip_labelhashes: list(
+            calls.get("registrant", lambda skip: [])(skip_labelhashes)))
+    monkeypatch.setattr(
+        ea, "lookup_wrapped_names",
+        lambda cid, addr, *, chain=None, skip_nodes=None: list(
+            calls.get("wrapped", lambda skip: [])(skip_nodes)))
+    return set_source
+
+
+def _run_worker(**kw):
+    from qeth.plugins.ens import EnsNamesWorker
+    worker = EnsNamesWorker("0xabc", [], **kw)
+    got: dict = {}
+    worker.ready.connect(lambda a, ns: got.update(addr=a, names=ns))
+    worker.run()
+    return got["names"]
+
+
 class TestEnsNamesWorker:
-    def test_merges_registrant_only_names(self, monkeypatch):
+    def test_merges_registrant_only_names(self, stub_sources):
         # BENS gives the controller-owned names; the registrant sweep adds the
         # ones it misses (crv.eth), deduped, with its skip-set excluding the
         # .eth labelhashes BENS already returned.
         import qeth.plugins.ens.ens_app as ea
-        from qeth.plugins.ens import EnsNamesWorker
-
-        monkeypatch.setattr(
-            "qeth.plugins.ens.lookup_owned_names",
-            lambda cid, addr: [EnsName("curvelend.eth"), EnsName("qeth.eth")])
         captured = {}
+        stub_sources("bens",
+                     lambda: [EnsName("curvelend.eth"), EnsName("qeth.eth")])
 
-        def fake_registrant(cid, addr, *, skip_labelhashes):
-            captured["skip"] = skip_labelhashes
+        def fake_registrant(skip):
+            captured["skip"] = skip
             # returns crv.eth (new) + curvelend.eth (dup, must be dropped)
             return [EnsName("crv.eth", source="owned"),
                     EnsName("curvelend.eth")]
-        monkeypatch.setattr(ea, "lookup_registrant_names", fake_registrant)
+        stub_sources("registrant", fake_registrant)
 
-        worker = EnsNamesWorker("0xabc", [])
-        got = {}
-        worker.ready.connect(lambda a, ns: got.update(addr=a, names=ns))
-        worker.run()
-        names = sorted(n.name for n in got["names"])
+        names = sorted(n.name for n in _run_worker())
         assert names == ["crv.eth", "curvelend.eth", "qeth.eth"]   # deduped
         # the skip-set held the labelhashes of the BENS .eth 2LDs
         assert int.from_bytes(ea._labelhash("curvelend"), "big") in captured["skip"]
         assert int.from_bytes(ea._labelhash("qeth"), "big") in captured["skip"]
+
+    def test_subgraph_fills_a_bens_gap(self, stub_sources):
+        """The real failure this closes: BENS never indexed staging.curve.eth,
+        so only the subgraph returns it."""
+        stub_sources("bens", lambda: [EnsName("curve.eth")])
+        stub_sources("subgraph", lambda: [EnsName("staging.curve.eth"),
+                                          EnsName("curve.eth")])   # dup
+        assert sorted(n.name for n in _run_worker()) == [
+            "curve.eth", "staging.curve.eth"]
+
+    def test_wrapped_sweep_skips_nodes_already_found(self, stub_sources):
+        """The on-chain NameWrapper read is the last resort — it must only be
+        asked about names no earlier source produced, and its own finds merge."""
+        from qeth.plugins.ens.ens_app import namehash
+        captured = {}
+        stub_sources("bens", lambda: [EnsName("curve.eth")])
+        stub_sources("subgraph", lambda: [EnsName("staging.curve.eth")])
+
+        def fake_wrapped(skip):
+            captured["skip"] = skip
+            return [EnsName("sub.wrapped.eth", source="registrant")]
+        stub_sources("wrapped", fake_wrapped)
+
+        names = sorted(n.name for n in _run_worker())
+        assert names == ["curve.eth", "staging.curve.eth", "sub.wrapped.eth"]
+        assert captured["skip"] == {namehash("curve.eth"),
+                                    namehash("staging.curve.eth")}
 
 
 class TestEnsPanel:

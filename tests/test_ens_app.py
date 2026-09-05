@@ -1,5 +1,7 @@
 """ENS data layer (qeth.plugins.ens.ens_app) — parsing, tree, expiry, contenthash, cache.
-No network: the BENS HTTP call is injected."""
+No network: every HTTP call and chain read is injected."""
+
+import pytest
 
 from qeth.plugins.ens import ens_app as ea
 from qeth.plugins.ens.ens_app import EnsName
@@ -83,6 +85,229 @@ def test_lookup_tolerates_errors():
     def boom(url):
         raise RuntimeError("BENS down")
     assert ea.lookup_owned_names(1, "0xabc", get_json=boom) == []
+
+
+@pytest.fixture(autouse=True)
+def _no_subgraph_cooldown():
+    """The subgraph throttle guard is module-level state; no test may inherit
+    another's backoff."""
+    ea.reset_subgraph_cooldown()
+    yield
+    ea.reset_subgraph_cooldown()
+
+
+# --- ENS subgraph ---------------------------------------------------------
+#
+# Shapes below are the LIVE ones, captured 2026-09-05 from
+# api.thegraph.com/subgraphs/name/ensdomains/ens for 0x312c…aa6a.
+
+def _sg(ctrl=(), reg=(), wrap=()):
+    return {"data": {"ctrl": list(ctrl), "reg": list(reg),
+                     "wrap": [{"domain": d} for d in wrap]}}
+
+
+def test_subgraph_unions_the_three_ownership_roles():
+    """One query, three keys: controller, registrant and NameWrapper holder —
+    the roles that otherwise need BENS plus two separate NFT sweeps."""
+    captured = {}
+
+    def fake_post(url, payload):
+        captured.update(url=url, payload=payload)
+        return _sg(
+            ctrl=[{"name": "staging.curve.eth",
+                   "resolvedAddress": None,
+                   "owner": {"id": "0x312c"}, "registration": None},
+                  {"name": "curve.eth",
+                   "resolvedAddress": {"id": "0x" + "d5" * 20},
+                   "owner": {"id": "0x312c"},
+                   "registration": {"expiryDate": "2015000000"}}],
+            reg=[{"name": "curve.eth", "owner": {"id": "0x312c"},
+                  "registration": {"expiryDate": "2015000000"}}],   # dup
+            wrap=[{"name": "wrapped.eth", "owner": {"id": ea.ENS_NAME_WRAPPER},
+                   "registration": {"expiryDate": "2015000000"}}])
+
+    names = ea.lookup_subgraph_names(1, "0xABC", post_json=fake_post,
+                                     now_ts=1_700_000_000)
+    assert sorted(n.name for n in names) == [
+        "curve.eth", "staging.curve.eth", "wrapped.eth"]         # deduped
+    # queried by lowercased address, via GraphQL variables (not interpolation)
+    assert captured["payload"]["variables"]["addr"] == "0xabc"
+    by = {n.name: n for n in names}
+    assert by["curve.eth"].expiry_ts == 2015000000
+    assert by["staging.curve.eth"].expiry_ts is None             # a subdomain
+    assert by["curve.eth"].resolved_address == "0x" + "d5" * 20
+
+
+def test_subgraph_skips_unhealed_labels_and_released_names():
+    now = 1_700_000_000
+    rows = [
+        {"name": "[c6fb65bf].curve.eth"},                # label not healed
+        {"name": "grace.eth",                            # expired, IN grace
+         "registration": {"expiryDate": str(now - 10)}},
+        {"name": "released.eth",                         # past grace → gone
+         "registration": {"expiryDate": str(now - ea.GRACE_PERIOD_S - 10)}},
+        {"name": "live.eth", "registration": {"expiryDate": str(now + 10)}},
+    ]
+    names = ea.lookup_subgraph_names(
+        1, "0xabc", post_json=lambda u, p: _sg(ctrl=rows), now_ts=now)
+    # the bracketed name is unusable (writes take the string, not the hash);
+    # a released name still reads as ours on-chain until someone re-registers.
+    assert sorted(n.name for n in names) == ["grace.eth", "live.eth"]
+
+
+def test_subgraph_backs_off_after_a_throttle():
+    """The 429 carries no Retry-After and account-switching fires a discovery
+    per account, so a failure must stop us asking again for a while."""
+    ea.reset_subgraph_cooldown()
+    calls = []
+
+    def boom(url, payload):
+        calls.append(url)
+        raise RuntimeError("429 Too Many Requests")
+
+    assert ea.lookup_subgraph_names(1, "0xabc", post_json=boom) == []
+    # the next load doesn't even reach the network
+    assert ea.lookup_subgraph_names(1, "0xabc", post_json=boom) == []
+    assert len(calls) == 1
+    ea.reset_subgraph_cooldown()
+    assert ea.lookup_subgraph_names(1, "0xabc", post_json=boom) == []
+    assert len(calls) == 2
+
+
+def test_subgraph_is_tolerant_and_mainnet_only():
+    def boom(url, payload):
+        raise RuntimeError("429 Too Many Requests")     # its usual failure
+    assert ea.lookup_subgraph_names(1, "0xabc", post_json=boom) == []
+    ea.reset_subgraph_cooldown()
+    # GraphQL errors come back 200 with an "errors" key and no data
+    assert ea.lookup_subgraph_names(
+        1, "0xabc", post_json=lambda u, p: {"errors": [{"message": "x"}]}) == []
+    # never queried off mainnet (ENS names live on L1)
+    assert ea.lookup_subgraph_names(
+        10, "0xabc", post_json=lambda u, p: 1 / 0) == []
+
+
+# --- wrapped names, read from the chain ------------------------------------
+
+class _WrapPending:
+    def __init__(self, value, success=True):
+        self.value, self.success = value, success
+
+
+class _WrapMC:
+    """Enough of chain.Multicall for the NameWrapper read: record each queued
+    call and answer it from ``answers`` — {node: (name, holder)}, a missing node
+    standing for a call that reverted."""
+
+    def __init__(self, answers):
+        self._answers = answers
+        self.queued: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def add(self, target, calldata, *, decoder=None):
+        self.queued.append((target, calldata))
+        name, holder = self._answers.get(calldata[4:], (None, None))
+        v = name if calldata[:4] == ea._SEL_NAMES else holder
+        return _WrapPending(v, success=v is not None)
+
+
+class _WrapClient:
+    def __init__(self, answers):
+        self.mc = _WrapMC(answers)
+
+    def multicall(self, **kw):
+        return self.mc
+
+
+def test_wrapped_names_read_the_name_from_the_chain():
+    """The point of this source: a wrapped subname's full name comes out of
+    NameWrapper.names(node), so no indexer and no labelhash preimage is needed
+    to NAME it — only to enumerate the ERC-1155s held."""
+    node = ea.namehash("os-deal.eth")
+    sub = ea.namehash("ops.swiss-stake.eth")
+    nft = {"items": [
+        {"id": str(int.from_bytes(node, "big")),
+         "token": {"address": ea.ENS_NAME_WRAPPER}},
+        {"id": str(int.from_bytes(sub, "big")),
+         "token": {"address": ea.ENS_NAME_WRAPPER.lower()}},
+        {"id": "5", "token": {"address": "0x" + "ee" * 20}},   # not the wrapper
+    ], "next_page_params": None}
+    client = _WrapClient({node: ("os-deal.eth", "0xABC"),
+                          sub: ("ops.swiss-stake.eth", "0xabc")})
+
+    names = ea.lookup_wrapped_names(1, "0xabc", client=client,
+                                    get_json=lambda u: nft)
+    assert sorted(n.name for n in names) == ["ops.swiss-stake.eth",
+                                             "os-deal.eth"]
+    # tagged like the other fresh on-chain NFT read, so a lagging verified
+    # ownership proof can't drop it
+    assert {n.source for n in names} == {"registrant"}
+    # only the wrapper's tokens were read — names() + ownerOf() for each
+    assert [t for t, _ in client.mc.queued] == [ea.ENS_NAME_WRAPPER] * 4
+    assert {cd[:4] for _, cd in client.mc.queued} == {ea._SEL_NAMES,
+                                                     ea._SEL_OWNER_OF}
+
+
+def test_wrapped_names_drops_one_the_wrapper_no_longer_holds():
+    """An EXPIRED wrapped name still shows in the NFT index but reads
+    ``ownerOf`` == 0 (verified on-chain for os-deal.eth), as does one the index
+    is simply stale about. Either way it isn't ours — and a "registrant" row is
+    never dropped later, so it has to be filtered HERE."""
+    expired = ea.namehash("os-deal.eth")
+    mine = ea.namehash("mine.eth")
+    stale = ea.namehash("sold.eth")
+    nft = {"items": [{"id": str(int.from_bytes(n, "big")),
+                      "token": {"address": ea.ENS_NAME_WRAPPER}}
+                     for n in (expired, mine, stale)],
+           "next_page_params": None}
+    client = _WrapClient({
+        expired: ("os-deal.eth", ea.ZERO_ADDRESS),       # lapsed → owner 0
+        mine: ("mine.eth", "0xabc"),
+        stale: ("sold.eth", "0x" + "ee" * 20),           # someone else's now
+    })
+    names = ea.lookup_wrapped_names(1, "0xabc", client=client,
+                                    get_json=lambda u: nft)
+    assert [n.name for n in names] == ["mine.eth"]
+
+
+def test_wrapped_names_skips_known_nodes_and_failed_reads():
+    known = ea.namehash("known.eth")
+    fresh = ea.namehash("fresh.eth")
+    dead = ea.namehash("dead.eth")
+    nft = {"items": [{"id": str(int.from_bytes(n, "big")),
+                      "token": {"address": ea.ENS_NAME_WRAPPER}}
+                     for n in (known, fresh, dead)],
+           "next_page_params": None}
+    client = _WrapClient({fresh: ("fresh.eth", "0xabc")})   # dead's read reverts
+
+    names = ea.lookup_wrapped_names(1, "0xabc", client=client,
+                                    get_json=lambda u: nft,
+                                    skip_nodes={known})
+    assert [n.name for n in names] == ["fresh.eth"]
+    assert len(client.mc.queued) == 4                # 2 calls × 2 unknown nodes
+
+
+def test_wrapped_names_tolerant_and_mainnet_only():
+    def boom(url):
+        raise RuntimeError("Blockscout down")
+    assert ea.lookup_wrapped_names(1, "0xabc", client=object(),
+                                   get_json=boom) == []
+    # no holdings → no chain read at all (and no client needed)
+    assert ea.lookup_wrapped_names(
+        1, "0xabc", get_json=lambda u: {"items": []}) == []
+    assert ea.lookup_wrapped_names(10, "0xabc", get_json=lambda u: 1 / 0) == []
+
+
+def test_dns_decode_round_trips_and_rejects_junk():
+    assert ea._dns_decode(ea._dns_encode("ops.swiss-stake.eth")) \
+        == "ops.swiss-stake.eth"
+    assert ea._dns_decode(b"") is None            # unwrapped node → empty
+    assert ea._dns_decode(b"\x08short") is None    # length runs off the end
 
 
 def test_registrar_token_ids_filters_and_paginates():

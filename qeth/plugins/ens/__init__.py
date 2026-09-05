@@ -283,8 +283,26 @@ def _record_rows(rec: EnsRecords) -> list[tuple[str, str, str]]:
 
 
 class EnsNamesWorker(QThread):
-    """Discover the names owned by an address (BENS) + pull details for any
-    custom-pinned names, off the Qt thread. Emits ``ready(address, names)``."""
+    """Discover the names an address holds — from four independent sources, off
+    the Qt thread — plus details for any custom-pinned names. Emits
+    ``ready(address, names)``.
+
+    No single source is complete, and each fails differently, so they union:
+
+    * **BENS** — fast, paginated, keyless; keyed on the registry controller.
+      Has GAPS (it never indexed staging.curve.eth; see ``lookup_subgraph_names``).
+    * **The ENS subgraph** — the canonical index, keyless, one query, all three
+      ownership roles, labels already healed. Hard rate-limited, so: one shot,
+      no retry.
+    * **BaseRegistrar ERC-721s held** — the .eth names held as the *registrant*
+      while the manager is delegated elsewhere (crv.eth), which a
+      controller-keyed sweep can't see. Named via the ENS metadata service.
+    * **NameWrapper ERC-1155s held** — wrapped names *including subnames*, named
+      straight from the chain (``names(node)``), so no indexer and no label
+      preimage is involved in naming them at all.
+
+    Each is individually tolerant; a source that's down just contributes
+    nothing."""
 
     ready = Signal(str, object)        # (address, list[EnsName])
 
@@ -292,27 +310,42 @@ class EnsNamesWorker(QThread):
     # the landing slot drops a result from a superseded generation.
     _epoch: int = 0
 
-    def __init__(self, address: str, custom_names: list[str], parent=None):
+    def __init__(self, address: str, custom_names: list[str], parent=None,
+                 *, chain=None):
         super().__init__(parent)
         self._address = address
         self._custom = list(custom_names)
+        # Mainnet, for the on-chain NameWrapper read. None → that source is
+        # skipped (the others still run).
+        self._chain = chain
 
     def run(self) -> None:
         from .ens_app import (
             _is_eth_2ld, _labelhash, lookup_registrant_names,
+            lookup_subgraph_names, lookup_wrapped_names, namehash,
         )
         names = lookup_owned_names(ENS_CHAIN_ID, self._address)
         have = {n.name.lower() for n in names}
+
+        def _merge(found: list[EnsName]) -> None:
+            for n in found:
+                if n.name.lower() not in have:
+                    have.add(n.name.lower())
+                    names.append(n)
+
+        # The canonical index — fills BENS's gaps (and covers all three roles).
+        _merge(lookup_subgraph_names(ENS_CHAIN_ID, self._address))
         # Names held as the registrant but managed elsewhere — BENS's
         # controller-keyed sweep misses these (e.g. crv.eth). Skip the .eth
-        # labelhashes BENS already returned so we only resolve the gap.
+        # labelhashes already found so we only resolve the gap.
         skip = {int.from_bytes(_labelhash(n.name.split(".")[0]), "big")
                 for n in names if _is_eth_2ld(n.name)}
-        for n in lookup_registrant_names(ENS_CHAIN_ID, self._address,
-                                         skip_labelhashes=skip):
-            if n.name.lower() not in have:
-                have.add(n.name.lower())
-                names.append(n)
+        _merge(lookup_registrant_names(ENS_CHAIN_ID, self._address,
+                                       skip_labelhashes=skip))
+        # Wrapped names, named on-chain. Skip the namehashes already found.
+        _merge(lookup_wrapped_names(
+            ENS_CHAIN_ID, self._address, chain=self._chain,
+            skip_nodes={namehash(n.name) for n in names}))
         for cn in self._custom:
             if cn.lower() in have:
                 continue
@@ -1207,8 +1240,9 @@ class EnsPanel(QWidget):
         you control gets the ✓; one it proves you DON'T own (controller and
         registrant both someone else) is an indexer lie and is removed. Pinned
         (custom) names are never dropped; a freshly NFT-discovered
-        (``registrant``) name whose proof is still catching up is kept and
-        badged "pending" instead. The exception is a ``cached`` name (one only
+        (``registrant`` — a BaseRegistrar ERC-721 or a NameWrapper ERC-1155)
+        name whose proof is still catching up is kept and badged "pending"
+        instead. The exception is a ``cached`` name (one only
         our disk cache still claims): that one is dropped on the first
         definitive read either pass makes."""
         removed: list[str] = []
@@ -2360,7 +2394,8 @@ class EnsPlugin(Plugin):
         # A post-write refresh waits for the verified head to catch up to the
         # change (so a lagging proof can't overwrite it); a normal load doesn't.
         self._verify_catchup = catchup
-        worker = EnsNamesWorker(addr, sorted(self._store.custom_ens_names))
+        worker = EnsNamesWorker(addr, sorted(self._store.custom_ens_names),
+                                chain=self._mainnet())
         # Tag the worker with its generation and connect a BOUND method (not a
         # lambda): a lambda isn't receiver-tracked, so a worker outliving a torn-
         # down plugin would fire into the deleted object (segfault). The slot

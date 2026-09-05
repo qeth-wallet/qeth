@@ -90,6 +90,7 @@ _SEL_CONTENTHASH = bytes.fromhex("bc1c58d1")  # resolver.contenthash(bytes32)
 _SEL_SUPPORTS = bytes.fromhex("01ffc9a7")   # supportsInterface(bytes4)
 _SEL_RESOLVE = bytes.fromhex("9061b923")    # resolve(bytes,bytes) — IExtendedResolver
 _SEL_RENT_PRICE = bytes.fromhex("83e7f6ff")  # controller.rentPrice(string,uint256)
+_SEL_NAMES = bytes.fromhex("20c38e2b")      # NameWrapper.names(bytes32)
 # ENSIP-10 IExtendedResolver interface id (== the resolve() selector). A resolver
 # that supports it answers via resolve()/CCIP rather than plain text()/addr().
 _IFACE_EXTENDED = bytes.fromhex("9061b923")
@@ -257,6 +258,16 @@ def _http_get_json(url: str, timeout: float = 20.0) -> dict:
         return json.load(f)
 
 
+def _http_post_json(url: str, payload: dict, timeout: float = 20.0) -> dict:
+    """Raw JSON POST → parsed JSON (the GraphQL shape). Same UA rule as
+    ``_http_get_json``; separated out so tests can stub it."""
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as f:
+        return json.load(f)
+
+
 ZERO_ADDRESS = "0x" + "00" * 20
 ZERO_ADDR_BYTES = b"\x00" * 20   # the zero address as a raw 20-byte word
 
@@ -332,6 +343,131 @@ def lookup_owned_names(
     return out
 
 
+# --- ENS subgraph (the canonical index) -----------------------------------
+#
+# BENS has GAPS: verified 2026-09-05, it 404s staging.curve.eth — a two-day-old
+# unwrapped subnode — by namehash AND by name, while its older siblings resolve;
+# the newest subnode it knew for that wallet was seven weeks old. A name it never
+# indexes is a name discovery can never return.
+#
+# The ENS subgraph is the canonical index and it HAS that name, with the label
+# already healed. Its legacy hosted endpoint is still live, keyless and at chain
+# head (``_meta.block`` == head, ``hasIndexingErrors`` false) — the decentralized
+# gateway (``gateway.thegraph.com``) needs a paid API key, and NameHash's ENSNode
+# / ENSRainbow successors are currently unreachable (their hosts resolve to
+# deleted deployments), so this is the one keyless option.
+#
+# It is also the ONLY source that answers all three ownership roles at once:
+# ``owner`` (registry controller — what BENS keys on), ``registrant`` (the .eth
+# NFT holder, which we otherwise reconstruct from Blockscout NFTs + the ENS
+# metadata service) and ``wrappedDomains.owner`` (the NameWrapper ERC-1155
+# holder). One aliased query covers all three.
+#
+# Caveat: it is HARD rate-limited — a handful of queries, then 429 with no
+# Retry-After, needing ~15-30 s of backoff. So: exactly ONE request per account
+# load, no retry, and a failure just returns [] (BENS, the NFT sweeps and the
+# disk cache all still stand). Single page per role, no cursor paging, for the
+# same reason.
+ENS_SUBGRAPH_URL = "https://api.thegraph.com/subgraphs/name/ensdomains/ens"
+
+# Domains per role in the one query. graph-node caps ``first`` at 1000.
+_SUBGRAPH_PAGE = 500
+
+# Throttle guard. The 429 arrives with no Retry-After, and account-switching
+# fires a discovery per account — so after ANY failure we simply stop asking for
+# a while rather than hammering a service that's already refusing us. Module
+# level because this is a property of the remote service, not of one caller;
+# monotonic so neither the wall clock nor an injected ``now_ts`` can skew it.
+# Skipping costs nothing: BENS, the NFT sweeps and the disk cache all still run.
+_SUBGRAPH_COOLDOWN_S = 120.0
+_subgraph_retry_at = 0.0
+
+
+_SUBGRAPH_QUERY = """
+query($addr: String!, $n: Int!) {
+  ctrl: domains(first: $n, where: {owner: $addr}) { ...D }
+  reg: domains(first: $n, where: {registrant: $addr}) { ...D }
+  wrap: wrappedDomains(first: $n, where: {owner: $addr}) { domain { ...D } }
+}
+fragment D on Domain {
+  name
+  resolvedAddress { id }
+  owner { id }
+  registration { expiryDate }
+}
+"""
+
+
+def reset_subgraph_cooldown() -> None:
+    """Clear the throttle guard — for tests, which must not inherit one
+    another's cooldown."""
+    global _subgraph_retry_at
+    _subgraph_retry_at = 0.0
+
+
+def _parse_subgraph_domain(d: dict, now_ts: int) -> EnsName | None:
+    """One subgraph ``Domain`` → ``EnsName``, or None to skip it.
+
+    Skips a name whose label the subgraph couldn't heal (it renders the
+    labelhash as ``[c6fb65…].curve.eth`` — unusable for the writes, which take
+    the *string*), and one whose registration lapsed past the grace period: the
+    registrar NFT still reads as ours until someone re-registers, so without
+    this a released name would surface as owned. A name still IN grace is kept
+    — that's exactly when its owner needs to see it and renew."""
+    name = d.get("name")
+    if not name or "[" in name:
+        return None
+    exp = (d.get("registration") or {}).get("expiryDate")
+    expiry = int(exp) if exp not in (None, "") else None
+    if expiry is not None and now_ts > expiry + GRACE_PERIOD_S:
+        return None
+    return EnsName(
+        name=str(name),
+        resolved_address=nonzero_addr((d.get("resolvedAddress") or {}).get("id")),
+        owner=(d.get("owner") or {}).get("id"),
+        expiry_ts=expiry,
+    )
+
+
+def lookup_subgraph_names(
+    chain_id: int, address: str, *,
+    url: str = ENS_SUBGRAPH_URL,
+    post_json: Callable[[str, dict], dict] = _http_post_json,
+    limit: int = _SUBGRAPH_PAGE,
+    now_ts: int | None = None,
+) -> list[EnsName]:
+    """The names ``address`` holds in any role, from the ENS subgraph (keyless,
+    one request — see the notes above). Mainnet only; tolerant of every failure,
+    including the 429 that a second query in quick succession earns."""
+    global _subgraph_retry_at
+    if chain_id != 1 or time.monotonic() < _subgraph_retry_at:
+        return []
+    now = int(time.time()) if now_ts is None else now_ts
+    payload = {"query": _SUBGRAPH_QUERY,
+               "variables": {"addr": address.lower(), "n": int(limit)}}
+    try:
+        d = post_json(url, payload)
+    except Exception as e:
+        _subgraph_retry_at = time.monotonic() + _SUBGRAPH_COOLDOWN_S
+        log.debug("ENS subgraph lookup failed (%s): %s — backing off %.0fs",
+                  address, e, _SUBGRAPH_COOLDOWN_S)
+        return []
+    if d.get("errors"):
+        log.debug("ENS subgraph errors (%s): %s", address, d["errors"])
+    data = d.get("data") or {}
+    rows = list(data.get("ctrl") or []) + list(data.get("reg") or [])
+    # wrappedDomains nests the Domain a level down.
+    rows += [w.get("domain") or {} for w in (data.get("wrap") or [])]
+    out: list[EnsName] = []
+    seen: set[str] = set()
+    for row in rows:
+        n = _parse_subgraph_domain(row, now) if isinstance(row, dict) else None
+        if n is not None and n.name.lower() not in seen:
+            seen.add(n.name.lower())
+            out.append(n)
+    return out
+
+
 # BENS's owned_by sweep is keyed on the registry *controller*, so a .eth name
 # you hold as the registrant (the NFT) but whose manager is delegated elsewhere
 # — a common DAO/multisig setup, e.g. crv.eth — never shows up there. We close
@@ -344,19 +480,20 @@ BLOCKSCOUT_MAINNET = "https://eth.blockscout.com"
 ENS_METADATA_BASE = "https://metadata.ens.domains/mainnet"
 
 
-def _registrar_token_ids(
-    address: str, *,
+def _held_token_ids(
+    address: str, contract: str, nft_type: str, *,
     base_url: str = BLOCKSCOUT_MAINNET,
     get_json: Callable[[str], dict] = _http_get_json,
     max_pages: int = 10,
 ) -> list[int]:
-    """The BaseRegistrar ERC-721 tokenIds (== uint256(labelhash)) ``address``
-    holds, via Blockscout's NFT-ownership API (keyless, paginated). Tolerant:
-    returns what it gathered on any error."""
+    """The ``contract`` tokenIds ``address`` holds, via Blockscout's
+    NFT-ownership API (keyless, paginated). ``nft_type`` is Blockscout's filter
+    (``ERC-721`` / ``ERC-1155``). Tolerant: returns what it gathered on any
+    error."""
     out: list[int] = []
-    reg = ENS_ETH_REGISTRAR.lower()
+    want = contract.lower()
     base = f"{base_url}/api/v2/addresses/{address}/nft"
-    url = f"{base}?" + urllib.parse.urlencode({"type": "ERC-721"})
+    url = f"{base}?" + urllib.parse.urlencode({"type": nft_type})
     for _ in range(max_pages):
         try:
             d = get_json(url)
@@ -366,7 +503,7 @@ def _registrar_token_ids(
         for it in d.get("items") or []:
             tok = it.get("token") or {}
             addr = tok.get("address") or tok.get("address_hash") or ""
-            if addr.lower() != reg:
+            if addr.lower() != want:
                 continue
             tid = it.get("id")
             try:
@@ -378,6 +515,19 @@ def _registrar_token_ids(
             break
         url = f"{base}?" + urllib.parse.urlencode(npp)
     return out
+
+
+def _registrar_token_ids(
+    address: str, *,
+    base_url: str = BLOCKSCOUT_MAINNET,
+    get_json: Callable[[str], dict] = _http_get_json,
+    max_pages: int = 10,
+) -> list[int]:
+    """The BaseRegistrar ERC-721 tokenIds (== uint256(labelhash)) ``address``
+    holds."""
+    return _held_token_ids(address, ENS_ETH_REGISTRAR, "ERC-721",
+                           base_url=base_url, get_json=get_json,
+                           max_pages=max_pages)
 
 
 def _ens_metadata(
@@ -439,6 +589,75 @@ def lookup_registrant_names(
             # lagging) ownership read still shows the previous registrant — a
             # just-transferred name would otherwise flicker in and vanish.
             out.append(EnsName(name, source="registrant", expiry_ts=expiry))
+    return out
+
+
+def lookup_wrapped_names(
+    chain_id: int, address: str, *,
+    client=None,
+    chain=None,
+    get_json: Callable[[str], dict] = _http_get_json,
+    skip_nodes: set[bytes] | None = None,
+) -> list[EnsName]:
+    """Wrapped names ``address`` holds, named FROM THE CHAIN.
+
+    A wrapped name (``.eth`` 2LD *or* subname) is an ERC-1155 held by the
+    NameWrapper, keyed by ``uint256(namehash)``. Enumerate those (Blockscout's
+    NFT API, keyless) and read each one's name back with
+    ``NameWrapper.names(node)``, which stores the full DNS-encoded name — so
+    unlike an unwrapped subnode, whose label exists ONLY as a hash, a wrapped
+    subname can be named without an indexer or a preimage service at all. That
+    makes this the one discovery path with no name-resolution dependency: only
+    the *enumeration* leans on an indexer, and Blockscout's token-balance index
+    is its core product, not an ENS-specific side table like BENS's.
+
+    ``skip_nodes`` are namehashes already discovered (so we don't re-read them).
+    Mainnet only; tolerant of every failure — a hint, never blocking."""
+    if chain_id != 1:
+        return []
+    ids = _held_token_ids(address, ENS_NAME_WRAPPER, "ERC-1155",
+                          get_json=get_json)
+    skip = skip_nodes or set()
+    nodes = [i.to_bytes(32, "big") for i in ids]
+    nodes = [n for n in nodes if n not in skip]
+    if not nodes:
+        return []
+    if client is None:
+        if chain is None:
+            return []
+        from ...chain import EthClient
+        client = EthClient(chain)
+    try:
+        with client.multicall(block="latest") as mc:
+            pending = [
+                (mc.add(ENS_NAME_WRAPPER, _SEL_NAMES + n,
+                        decoder=_decode_dns_name),
+                 # ...and who the wrapper says holds it RIGHT NOW. Two jobs: the
+                 # NFT index can be stale, and an EXPIRED wrapped name reads 0
+                 # here (verified on-chain for os-deal.eth) — without this it
+                 # would surface as owned and then sit badged "proof catching
+                 # up" forever, since a "registrant" row is never dropped.
+                 mc.add(ENS_NAME_WRAPPER, _SEL_OWNER_OF + n,
+                        decoder=_decode_addr_word))
+                for n in nodes]
+    except Exception as e:
+        log.debug("NameWrapper names() read failed (%s): %s", address, e)
+        return []
+    out: list[EnsName] = []
+    seen: set[str] = set()
+    me = address.lower()
+    for name_p, owner_p in pending:
+        name = name_p.value if name_p.success else None
+        holder = owner_p.value if owner_p.success else None
+        if not name or name.lower() in seen:
+            continue
+        if not holder or holder.lower() != me:
+            continue
+        seen.add(name.lower())
+        # source="registrant" for the same reason the NFT sweep uses it: this is
+        # a FRESH on-chain read, so the verify pass must not drop it while its
+        # (head-lagging) verified read still shows the previous holder.
+        out.append(EnsName(str(name), owner=address, source="registrant"))
     return out
 
 
@@ -796,6 +1015,30 @@ def _dns_encode(name: str) -> bytes:
         b = label.encode("utf-8")
         out += bytes([len(b)]) + b
     return out + b"\x00"
+
+
+def _dns_decode(raw: bytes) -> str | None:
+    """Inverse of ``_dns_encode`` — the wire form NameWrapper.names() stores
+    back to a dotted name. None when empty (an unwrapped/unknown node reads as
+    empty bytes) or malformed."""
+    labels: list[str] = []
+    i = 0
+    while i < len(raw) and raw[i]:
+        n = raw[i]
+        if i + 1 + n > len(raw):
+            return None                     # truncated → not a name
+        try:
+            labels.append(raw[i + 1:i + 1 + n].decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
+        i += 1 + n
+    return ".".join(labels) or None
+
+
+def _decode_dns_name(raw) -> str | None:
+    """Decode an ABI ``bytes`` return holding a DNS-encoded name."""
+    from eth_abi import decode as abi_decode
+    return _dns_decode(bytes(abi_decode(["bytes"], bytes(raw))[0]))
 
 
 def _read_records_ccip(

@@ -98,13 +98,30 @@ which under-reports ENS). Don't confuse the two.
 | Source (address → names) | Reliable for ENS? | Key required? | Reality (probed 2026-06-14) |
 |---|---|---|---|
 | **BENS** `addresses:lookup?address=&owned_by=&resolved_to=&only_active=` (`bens.services.blockscout.com`) | **Yes** — purpose-built ENS index | **No** — keyless | **Works.** `owned_by(0xd8dA)` → 47 names incl `vitalik.eth`; `resolved_to` → names pointing here. Both flags **required**. `owned_by` = registry **controller** (not NFT registrant — `owned_by(0x2208 vault)` missed `vitalik.eth`). Lists include poison subdomains → filter for scam + verify on-chain. |
-| **ENS subgraph** (`domains(where:{owner})`) | **Yes** — native, complete, fast | **Yes** — Graph key (hosted endpoint sunset 2024) | the "fuller/faster" upgrade, key-gated |
+| **ENS subgraph** (`domains(where:{owner})`) | **Yes** — native, complete, fast | **No** — see 2026-09-05 re-probe | **Shipped.** The *legacy hosted* endpoint `api.thegraph.com/subgraphs/name/ensdomains/ens` is alive, **keyless** and at chain head — the decentralized gateway is the key-gated one. One aliased query answers `owner` + `registrant` + `wrappedDomains.owner`, labels already healed. Hard rate-limited (429, no `Retry-After`). |
+| **NameWrapper `names(node)`** (after enumerating the ERC-1155s held) | **Yes**, for wrapped names — incl. **subnames** | **No** — keyless | **Shipped.** The wrapper stores the full DNS-encoded name on-chain, so the NAME needs no indexer and no labelhash preimage; only the enumeration does (Blockscout NFT API). Co-read `ownerOf(node)` — an expired wrapped name still shows in the NFT index but reads 0. |
 | **ENS metadata service** (`/.../{tokenId}`) | tokenId → name/avatar/**expiry** (NOT enum) | **No** — keyless (verified) | names a tokenId; not an enumerator |
 | **`eth_getLogs`** (BaseRegistrar/NameWrapper `Transfer`, tokenId in indexed topic) | on-chain truth | **No** — but needs a getLogs-friendly RPC | **DRPC 400'd every query**; impractical on DRPC, fine on a getLogs-capable RPC + chunking ([[reference_drpc_limit_shape]]) — the permanent fallback |
 | **Envio HyperRPC / HyperSync** | on-chain truth, *fast* | **Yes** — free API token (probed: public HyperRPC → 401) | the **best keyed pick**: HyperRPC is a drop-in fast `eth_getLogs` endpoint → makes the on-chain getLogs path practical, **lowest lock-in** (plain getLogs, swappable for any RPC) |
 | **Dune** (Query API over decoded ENS tables, or Sim APIs) | yes — very rich (registrant+controller+expiry+records) | **Yes** — API key (free tier) | SQL query API is async/slow + schema-coupled; Sim APIs are fast REST. Good for analytics-heavy needs; more lock-in |
 | Alchemy `getNFTsForOwner` / Reservoir / SimpleHash | yes (also getLogs-friendly RPCs) | **Yes** — API key (Alchemy free tier) | keyed; same rot risk as any hosted service |
 | **Blockscout** generic NFT-by-owner (`/addresses/{a}/nft`) | **No — verified gap** | **No** | under-reports ENS — use BENS, not this |
+
+> **Re-probed 2026-09-05 — what actually shipped, and why it's four sources.**
+> BENS turned out to have **gaps**, not just lag: it 404s `staging.curve.eth` (a
+> two-day-old unwrapped subnode) by namehash *and* by name while serving its
+> older siblings, and the newest subnode it knew for that wallet was seven weeks
+> old. A name it never indexes is a name discovery can never return, so
+> `EnsNamesWorker` now **unions four independent sources**, each individually
+> tolerant: BENS → the ENS subgraph (keyless after all, see the table) → the
+> BaseRegistrar ERC-721 sweep → the NameWrapper ERC-1155 sweep. Underneath,
+> `EnsPlugin._cached_names` merges the disk cache into every render, so a name
+> ALL of them lose isn't forgotten (it must still prove itself on-chain).
+> Meanwhile the successors that were meant to replace this — NameHash's ENSNode
+> and ENSRainbow — are **unreachable** (their hosts resolve to deleted
+> deployments), so hash-healing has no keyless service today; wrapped names get
+> their string from the chain instead, and an unhealed `[labelhash].parent.eth`
+> is skipped rather than shown.
 
 **Recommended v1 (keyless):** **BENS** as the default `NameSource`
 (`owned_by` + `resolved_to`), then per name: **scam-filter** the poison

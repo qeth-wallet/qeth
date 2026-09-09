@@ -1457,6 +1457,31 @@ class TokensPlugin(Plugin):
                 contracts.add(token.contract)
         return contracts
 
+    def _own_held_contracts(self, chain_id: int, address: str) -> set[str]:
+        """Every token contract in THIS wallet's own cache — everything the
+        view is currently showing (plus its hidden holdings).
+
+        Why this exists: the multicall/price set is otherwise assembled from
+        sources that can ALL legitimately miss a token we already hold. The
+        explorer's per-holder rows are filtered down to known-or-pinned by
+        TokenListWorker, and an unrecognised vault share (a yvCurve-… no
+        curated list carries) is neither known, pinned, custom, nor discovered;
+        it isn't in the top-N head either; and a sibling that sent it to us
+        dropped it from its own cache on the authoritative zero. Such a token
+        still SHOWS — _on_combined_ready merges the cache forward and the
+        ws/reconcile path keeps its balance honest — but it was never in
+        ``contracts``, so it was never re-PRICED. It kept whatever price
+        _ensure_prices_for_unpriced fetched the one time it was unpriced,
+        forever: a vault share frozen at its deposit-day value while the real
+        share price climbed. Feeding the cache back into the set closes that
+        loop (and re-reads those balances on the non-ws path for free).
+
+        Reads the cached snapshot only — no extra RPC."""
+        cached = self._wallet_cache.load(chain_id, address)
+        if cached is None:
+            return set()
+        return {t.contract for t in cached.tokens}
+
     def _maybe_scan_own_tokens(self, chain) -> None:
         """Once per chain per session, scan the local tx/activity caches for
         vault/LP tokens the user obtained via their OWN transactions and record
@@ -1642,6 +1667,9 @@ class TokensPlugin(Plugin):
             discovered = {a for (cid, a) in self._store.discovered_tokens
                           if cid == chain.chain_id}
             siblings = self._sibling_held_contracts(chain.chain_id, address)
+            # Our own cached holdings, so a held token the explorer row-filter
+            # dropped still gets re-read and RE-PRICED every round.
+            own = self._own_held_contracts(chain.chain_id, address)
             # Drain receipt-derived contracts for THIS view — popped
             # so they don't permanently inflate the multicall set
             # once we've already discovered them.
@@ -1660,7 +1688,7 @@ class TokensPlugin(Plugin):
             for c in (
                 [b.contract for b in blockscout_tokens]
                 + sorted(forced) + sorted(custom) + sorted(discovered)
-                + sorted(siblings) + sorted(receipt_extras)
+                + sorted(siblings) + sorted(own) + sorted(receipt_extras)
                 + top
             ):
                 cl = c.lower()

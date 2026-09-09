@@ -2400,6 +2400,111 @@ class TestSiblingHeldContracts:
         assert out == set()
 
 
+class TestOwnHeldContractsAreRepriced:
+    """A held token the explorer row-filter drops must still be re-priced.
+
+    TokenListWorker keeps only known-or-pinned rows, so an unrecognised vault
+    share (a yvCurve-… no curated list carries, not pinned/custom/discovered)
+    never reached the multicall/price set. It still SHOWED — the cache is
+    merged forward and the ws/reconcile path kept its balance honest — so its
+    price froze at whatever _ensure_prices_for_unpriced fetched the one time it
+    was unpriced. A vault share sat at its deposit-day value while the real
+    share price climbed, until the user re-added it as a custom token.
+    """
+
+    VAULT = "0x22c64f32b5fea40d7d387ca875d079d80415f988"   # yvCurve-OUSD-crvUSD-f
+
+    def _cache_vault_holding(self, plugin, *, price="1.01"):
+        from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet
+        plugin._wallet_cache.save(CachedWallet(
+            chain_id=1, address=ADDR.lower(), native_balance_wei=0,
+            tokens=[CachedToken(
+                contract=self.VAULT, symbol="yvCurve-OUSD-crvUSD-f",
+                name="Curve OUSD-crvUSD Factory yVault", decimals=18,
+                balance_raw=986_148_455_344_749_397_042,
+                # Already priced once, so _ensure_prices_for_unpriced skips it:
+                # the discovery round is the ONLY thing that can refresh it.
+                price_usd=price, price_updated=1,
+            )],
+        ))
+
+    def test_own_held_contracts_reads_the_cache(self, tokens_plugin):
+        self._cache_vault_holding(tokens_plugin)
+        out = tokens_plugin._own_held_contracts(1, ADDR)
+        assert {c.lower() for c in out} == {self.VAULT}
+
+    def test_own_held_contracts_scoped_to_chain_and_address(self, tokens_plugin):
+        self._cache_vault_holding(tokens_plugin)
+        assert tokens_plugin._own_held_contracts(137, ADDR) == set()
+        assert tokens_plugin._own_held_contracts(1, "0x" + "ab" * 20) == set()
+
+    def test_cached_holding_reaches_the_balance_and_price_workers(
+        self, tokens_plugin, monkeypatch,
+    ):
+        """Drive the discovery pipeline end to end: the explorer returns the
+        token filtered OUT (empty list), yet it must still land in the set the
+        BalanceWorker reads and the PricesWorker quotes."""
+        import time
+
+        from qeth.plugins import tokens as tp
+        from qeth.plugins.tokens.risk import RiskReport
+
+        plugin = tokens_plugin
+        self._cache_vault_holding(plugin)
+        host = _StubHost(chain=ETH, address=ADDR)
+        plugin.attach(host)
+        # Past the "loading token lists" early return, with an empty index —
+        # the vault share is in no curated list (that IS the bug's premise).
+        plugin._token_lists._loaded = True
+        # Trim the union to just our token: no top-N head, and pre-seed the
+        # metadata + risk caches so the pipeline runs straight through to
+        # prices instead of stopping at a neutralized MetadataWorker/RiskWorker.
+        monkeypatch.setattr(plugin._top_tokens, "contracts", lambda cid: [])
+        plugin._token_metadata.put_many(1, {self.VAULT: {
+            "symbol": "yvCurve-OUSD-crvUSD-f", "name": "yVault", "decimals": 18,
+        }})
+        plugin._risk_cache.put_many(
+            1, {self.VAULT: RiskReport(fetched_at=int(time.time()))})
+
+        plugin._refresh(ADDR)
+        tlw = next(w for w in host.started_workers
+                   if isinstance(w, tp.TokenListWorker))
+        # Everything from here is the DISCOVERY round. _refresh already
+        # started its own BalanceWorker over the cached set (the cold-render
+        # path); that one is not what regressed, so ignore what came before.
+        mark = len(host.started_workers)
+        # The explorer's row for the vault share was dropped by the
+        # known-or-pinned filter — discovery reports nothing.
+        tlw.fetched.emit(0, [])
+
+        bw = next(w for w in host.started_workers[mark:]
+                  if isinstance(w, tp.BalanceWorker))
+        assert [c.lower() for c in bw.contracts] == [self.VAULT]
+
+        bw.refreshed.emit(1, 0, {self.VAULT: 986_148_455_344_749_397_042},
+                          100, {self.VAULT: 100})
+        pw = next(w for w in host.started_workers[mark:]
+                  if isinstance(w, tp.PricesWorker))
+        assert self.VAULT in [c.lower() for c in pw.contracts]
+
+    def test_fresh_price_overwrites_the_frozen_cached_one(self, tokens_plugin):
+        """The other half: once a price DOES come back for it, it must replace
+        the stale cached value rather than the cache fallback winning."""
+        from decimal import Decimal
+
+        from qeth.pricing import Price
+
+        plugin = tokens_plugin
+        self._cache_vault_holding(plugin, price="1.01")
+        plugin._apply_fetched_prices(ETH, ADDR, {
+            self.VAULT: Price(Decimal("1.4216"), 1_700_000_000, "defillama"),
+        })
+        cached = plugin._wallet_cache.load(1, ADDR)
+        assert cached is not None
+        assert cached.tokens[0].price_usd == "1.4216"
+        assert cached.tokens[0].price_updated == 1_700_000_000
+
+
 class TestCuratedListAsDiscoverySource:
     """Token lists (Uniswap/CoinGecko/Curve/1inch) are exposed via
     ``TokenLists.addresses_for_chain`` and unioned into the

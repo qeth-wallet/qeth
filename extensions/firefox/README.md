@@ -1,33 +1,47 @@
 # Firefox package
 
-**No `.xpi` is shipped right now.** This directory holds the committed,
-Mozilla-signed Firefox distributable when there is one — self-distributed
-(unlisted), installed via *about:addons → gear → Install Add-on From File…*.
+`qeth-0.23.1.xpi` is the Mozilla-signed, self-distributed Firefox build.
+Release Firefox installs only signed extensions, so this is the file to use —
+install it via *about:addons → gear → Install Add-on From File…*. It is not on
+addons.mozilla.org: self-distribution means there is no public listing page to
+link to, only this file.
 
-Release Firefox installs only signed extensions, and every build has to be
-signed by Mozilla. The current build (`0.23.1`) is uploaded to the unlisted
-channel of `wallet@qeth.eth` and is **awaiting AMO review** — the account's
-uploads are routed to manual review rather than auto-signed, so the signature
-is not instant. The signed `.xpi` gets committed here, and attached to the
-GitHub release, as soon as it is issued.
-
-The previously shipped `qeth-0.22.0.xpi` was **removed**, not just superseded:
-Mozilla soft-blocked `0.20.0`, `0.21.0`, `0.22.0` and `0.22.1` (block record
-`1237064`, residue of a reversed false-positive ban), so Firefox disables those
-versions on install. Distributing one would hand users a dead extension. It
-remains in git history if it is ever needed.
-
-Check the block list — it is version-scoped (`is_all_versions: false`), so
-versions above `0.22.1` are unaffected:
+Verify it is genuinely signed before trusting a copy — a signed package carries
+Mozilla's signature block:
 
 ```sh
-curl -s https://addons.mozilla.org/api/v5/blocklist/block/wallet@qeth.eth/
+unzip -l qeth-0.23.1.xpi | grep META-INF
+# META-INF/cose.sig, META-INF/mozilla.rsa, …
 ```
 
-Note the `?guid=…` query form of that endpoint returns `Not found` even for a
-genuinely blocked add-on — use the path form above.
+An `.xpi` without those is an unsigned zip that only loads through
+`about:debugging` as a temporary add-on, and disappears on restart.
 
-In the meantime, Chrome users have the
-[Chrome Web Store listing](https://chromewebstore.google.com/detail/qeth/epgcgaelolincjdknocjebnenahjhoop),
-and Firefox developers can load `extensions/webext/` as a temporary add-on via
-`about:debugging` (gone on restart).
+## Why the add-on id is `firefox@qeth.eth`
+
+The extension was originally signed under `wallet@qeth.eth`. That id is dead
+for new builds: Mozilla rejected its `0.22.2`, `0.22.3` and `0.23.1` uploads on
+2026-09-07 (they remain unsigned), and its older signed versions — `0.20.0`,
+`0.21.0`, `0.22.0`, `0.22.1` — are soft-blocked under block record `1237064`,
+residue of a reversed false-positive ban, so Firefox disables them on install.
+`firefox@qeth.eth` is the id Mozilla actually signs, and it carries no block
+record. The source manifest's `browser_specific_settings.gecko.id` matches it,
+so `build.py sign` targets the right add-on.
+
+The id change costs nothing here: no working install of the old id exists, so
+there are no auto-updates to break. Check either id's block status with the
+**path** form of the endpoint — the `?guid=…` query form returns `Not found`
+even for a genuinely blocked add-on:
+
+```sh
+curl -s https://addons.mozilla.org/api/v5/blocklist/block/firefox@qeth.eth/
+# → {"detail":"Not found."}   (no block — the honest answer for this id)
+curl -s https://addons.mozilla.org/api/v5/blocklist/block/wallet@qeth.eth/
+# → {"id":1237064,"soft_blocked":["0.20.0","0.21.0","0.22.0","0.22.1"],…}
+```
+
+Blocks are version-scoped when `is_all_versions` is `false`, so the record
+above never reaches this build.
+
+Chrome users install from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/qeth/epgcgaelolincjdknocjebnenahjhoop).

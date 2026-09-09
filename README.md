@@ -162,12 +162,12 @@ live in [`extensions/`](extensions/) and are attached to the
   To load it unpacked instead, unzip the `.zip` from
   [`extensions/chrome/`](extensions/chrome/) and use `chrome://extensions` →
   Developer mode → Load unpacked.
-- **Firefox** — **no signed build available yet.** Release Firefox installs only
-  Mozilla-signed extensions, and the current build is awaiting AMO review. The
-  signed `.xpi` will appear in [`extensions/firefox/`](extensions/firefox/) and
-  on the release page as soon as it is issued; it is self-distributed, so it
-  installs via *about:addons → gear → Install Add-on From File…*. Until then,
-  build it yourself and use one of the two routes below.
+- **Firefox** — install the Mozilla-signed
+  [`extensions/firefox/qeth-0.23.1.xpi`](extensions/firefox/) via *about:addons
+  → gear → Install Add-on From File…*. It is self-distributed rather than
+  listed on addons.mozilla.org, so the file is the only way to get it — there
+  is no listing page to link to. To build and load it yourself instead, use one
+  of the two routes below.
 
 Building the Firefox package (the source `manifest.json` is Chrome-shaped, so
 Firefox needs the generated event-page variant — don't load `webext/` directly):

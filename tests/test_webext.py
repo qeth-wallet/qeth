@@ -321,3 +321,64 @@ class TestBuild:
             hmac.new(b"s3cr3t", signing_input, hashlib.sha256).digest()
         ).rstrip(b"=").decode()
         assert want == sig_b64
+
+
+class TestShippedFirefoxPackage:
+    """Gates on the committed, self-distributed .xpi.
+
+    Firefox self-distribution has no store to vouch for the file, so the repo
+    IS the distribution channel and these are the only checks between a bad
+    build and a user. Two failures are silent and both have happened here: an
+    unsigned AMO upload downloaded as a .zip and committed under an .xpi name
+    (it only side-loads via about:debugging and dies on restart), and a build
+    signed under an add-on id the source manifest no longer uses.
+
+    The version is deliberately NOT gated against ``__version__`` — a signed
+    build legitimately trails the app while AMO review is pending, which is
+    exactly what release.sh documents.
+    """
+
+    FIREFOX_DIR = ROOT / "extensions" / "firefox"
+
+    def _xpis(self):
+        return sorted(self.FIREFOX_DIR.glob("*.xpi"))
+
+    def test_at_most_one_xpi_is_committed(self):
+        # build.py drops the prior qeth-* before writing; two would leave the
+        # READMEs pointing at one of them and users guessing.
+        assert len(self._xpis()) <= 1, [p.name for p in self._xpis()]
+
+    def test_committed_xpi_is_mozilla_signed(self):
+        import zipfile
+        for xpi in self._xpis():
+            with zipfile.ZipFile(xpi) as z:
+                names = z.namelist()
+            assert any(n.startswith("META-INF/mozilla") for n in names), (
+                f"{xpi.name} carries no Mozilla signature block — it is an "
+                f"unsigned upload, not an installable add-on"
+            )
+
+    def test_committed_xpi_matches_the_source_add_on_id(self):
+        import json as _json
+        import zipfile
+        want = MANIFEST["browser_specific_settings"]["gecko"]["id"]
+        for xpi in self._xpis():
+            with zipfile.ZipFile(xpi) as z:
+                gecko = _json.loads(z.read("manifest.json"))
+                gecko = gecko["browser_specific_settings"]["gecko"]
+            assert gecko["id"] == want, (
+                f"{xpi.name} is signed under {gecko['id']!r} but the source "
+                f"manifest now says {want!r} — signing targets the manifest id, "
+                f"so one of the two is stale"
+            )
+
+    def test_readmes_name_an_xpi_that_exists(self):
+        # Both READMEs name the file by version, so a refreshed build that
+        # didn't update the prose leaves users clicking a 404.
+        named = set()
+        for doc in (ROOT / "README.md", self.FIREFOX_DIR / "README.md"):
+            named |= set(re.findall(r"qeth-[\w.]+\.xpi", doc.read_text()))
+        for name in named:
+            assert (self.FIREFOX_DIR / name).is_file(), (
+                f"docs reference {name}, which is not in extensions/firefox/"
+            )

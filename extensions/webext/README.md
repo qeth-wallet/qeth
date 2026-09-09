@@ -88,10 +88,13 @@ signs an **unlisted** package (free, not listed in the catalog — you host the
 
 Credentials are read only from the environment (never stored in the repo).
 Without them, `sign` just builds the zip. The `gecko.id` in the manifest
-(`wallet@qeth.eth`) binds every signed version to the add-on on your AMO
+(`firefox@qeth.eth`) binds every signed version to the add-on on your AMO
 account and must stay stable — it's an identifier, not a real address, so it
 needn't be a domain you own (AMO validates only its shape). Changing it once
-users have installed breaks their auto-updates.
+users have installed breaks their auto-updates. It moved off the original
+`wallet@qeth.eth` exactly once, in 2026-09, because Mozilla rejected that id's
+uploads while signing this one's — safe only because no working install of the
+old id existed to break.
 
 Chrome Web Store publishing was a one-time \$5 registration; the store signs and
 hosts the same zip. qeth is live at

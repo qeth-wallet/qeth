@@ -57,12 +57,12 @@ leave it in place until a better one exists. Two ways a candidate fails:
   the path form:
 
   ```sh
-  curl -s https://addons.mozilla.org/api/v5/blocklist/block/firefox@qeth.eth/
+  curl -s https://addons.mozilla.org/api/v5/blocklist/block/wallet@qeth.eth/
   ```
 
   It is version-scoped (`is_all_versions: false`), so a fresh version clears a
-  block that covers the old ones. The retired `wallet@qeth.eth` id carries
-  block `1237064` over `0.20.0`-`0.22.1`; `firefox@qeth.eth` carries none.
+  block that covers the old ones. `wallet@qeth.eth` carries block `1237064`
+  over `0.20.0`-`0.22.1`; `firefox@qeth.eth` carries none.
 
 When nothing qualifies, ship no `.xpi` at all rather than a dead one, and say so
 in the README + release notes.
@@ -87,35 +87,37 @@ in the README + release notes.
    `build(out_dir, "firefox")` + `sign(zip, out_dir)` directly with scratch
    dirs instead of going through `main()`.
 
-2. **Firefox** — the `sign` step uploaded the version to the unlisted channel of
-   add-on `firefox@qeth.eth` (the id comes from the source manifest's
-   `browser_specific_settings.gecko.id`, so there is nothing to pass). Unlisted
-   uploads are normally **auto-signed within minutes**, in which case `sign`
-   downloads the `.xpi` and you're done: distribute it as a file — attach it to
-   the GitHub release / link it from the site — and users install via
-   `about:addons → Install Add-on From File…`.
+2. **Firefox** — the `sign` step uploads to the **unlisted** channel of the
+   add-on named by the source manifest's `browser_specific_settings.gecko.id`
+   (currently `wallet@qeth.eth`), so there is nothing to pass. Unlisted uploads
+   are normally auto-signed within minutes, in which case `sign` downloads the
+   `.xpi` and you're done: distribute it as a file — attach it to the GitHub
+   release — and users install via `about:addons → Install Add-on From File…`.
 
    Since the 2026-07 review episode this account's uploads have instead been
-   routed to **manual review**, so `sign` can time out after its 5-minute poll
-   with the version left at `file.status: unreviewed`. That is not a failure:
-   the version is uploaded and queued. Don't re-upload (the version string is
+   routed to **manual review**, so `sign` can time out on its 5-minute poll with
+   the version left at `file.status: unreviewed`. That is not a failure: the
+   version is uploaded and queued. Don't re-upload (the version string is
    consumed either way) — poll for the signature and fetch it when it lands:
 
    ```sh
    # status; url flips .zip → .xpi once signed
-   GET /api/v5/addons/addon/firefox@qeth.eth/versions/?filter=all_with_unlisted
+   GET /api/v5/addons/addon/wallet@qeth.eth/versions/?filter=all_with_unlisted
    ```
 
    Unlisted versions are hidden from the default listing and from
-   `current_version`, hence `?filter=all_with_unlisted`. The 0.22.1 and 0.23.1
-   builds cleared that queue on 2026-09-07, so manual review is slow, not a
-   dead end.
+   `current_version`, hence `?filter=all_with_unlisted`.
 
-   **Do not sign under the retired `wallet@qeth.eth` id.** Mozilla rejected its
-   `0.22.2`/`0.22.3`/`0.23.1` uploads in that same review pass — they are still
-   unsigned — and its older signed versions are soft-blocked. Its listed
-   (public) submission was rejected with them, which is why the add-on reads
-   `status: incomplete` on AMO and has no listing page.
+   A **listed** (public) submission is a different flow and `sign` cannot do it
+   — it hardcodes `{"channel": "unlisted"}`, and AMO's write API throttles hard
+   enough that the version upload is worth doing in the dashboard anyway. Pick
+   "On this site" on the submission wizard's first screen ("On your own" is
+   unlisted; a version string is consumed by whichever channel gets it first).
+   A listed add-on must satisfy the
+   [data collection policy](https://extensionworkshop.com/documentation/publish/add-on-policies/#data-collection-and-transmission-disclosure-and-control):
+   the manifest declares `data_collection_permissions` and needs
+   `strict_min_version` ≥ `140.0` for Firefox's built-in consent prompt. See
+   `firefox/README.md` for what qeth declares and why `none` would be wrong.
 
 3. **Chrome** — Google signs at upload; there is no local signing (self-hosted
    `.crx` is blocked for normal users). Upload `chrome/qeth-<v>-chrome.zip` to

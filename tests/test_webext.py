@@ -104,7 +104,32 @@ class TestManifest:
     def test_firefox_gecko_id_and_min_version(self):
         gecko = MANIFEST["browser_specific_settings"]["gecko"]
         assert gecko["id"]                       # stable, AMO binds to it
-        assert gecko["strict_min_version"] == "128.0"   # world:MAIN support
+        # 128 is the floor for content_scripts world:MAIN; 140 is the floor for
+        # the built-in data-collection consent prompt we declare below. Firefox
+        # 139-and-older would show no prompt at all, which is the policy
+        # violation that got 0.22.3 rejected — so the min version and the
+        # declaration have to move together.
+        assert gecko["strict_min_version"] == "140.0"
+
+    def test_declares_data_collection_for_the_builtin_consent_prompt(self):
+        """Mozilla rejected 0.22.3 for collecting without consent
+        (`personallyIdentifyingInfo: provider.js:427`, `browsingActivity:
+        background.js:73`). Nothing leaves the machine — the CSP allows exactly
+        one destination, the loopback wallet — but the policy counts anything
+        handled "outside of the add-on or the local browser", and the qeth app
+        is a separate process. So we declare rather than claim `none`, and let
+        Firefox's built-in prompt get the user's consent.
+
+        These two strings are what the reviewer classified the code as; keeping
+        them pinned means a resubmission can't be rejected for under-declaring
+        the same findings again.
+        """
+        gecko = MANIFEST["browser_specific_settings"]["gecko"]
+        dcp = gecko["data_collection_permissions"]
+        assert dcp["required"] == ["browsingActivity", "personallyIdentifyingInfo"]
+        # "none" would be a false statement while the origin crosses to the app,
+        # and a false declaration is itself a policy violation.
+        assert "none" not in dcp["required"]
 
     def test_minimal_permissions(self):
         assert MANIFEST["permissions"] == ["alarms"]
@@ -358,19 +383,44 @@ class TestShippedFirefoxPackage:
                 f"unsigned upload, not an installable add-on"
             )
 
-    def test_committed_xpi_matches_the_source_add_on_id(self):
+    # The one id the committed .xpi may carry besides the manifest's own.
+    #
+    # qeth is mid-transition between two AMO add-ons and BOTH are legitimate
+    # right now: `firefox@qeth.eth` is where the working self-distributed build
+    # is signed (it is what users install today), while the manifest points at
+    # `wallet@qeth.eth`, which holds the listing metadata and the `qeth` slug
+    # and is where the public submission goes. Signing follows the manifest, so
+    # the two can't be the same id until the listing is approved.
+    #
+    # This is a hazard, not a feature: the ids are distinct add-ons, so a user
+    # who installs the self-distributed .xpi AND a future AMO listing gets two
+    # copies injecting two providers into every page. Collapse to one id the
+    # moment the listing is live — drop the .xpi and delete this constant.
+    SELF_DISTRIBUTION_ID = "firefox@qeth.eth"
+
+    def test_committed_xpi_is_signed_under_a_known_add_on_id(self):
         import json as _json
         import zipfile
-        want = MANIFEST["browser_specific_settings"]["gecko"]["id"]
+        manifest_id = MANIFEST["browser_specific_settings"]["gecko"]["id"]
+        allowed = {manifest_id, self.SELF_DISTRIBUTION_ID}
         for xpi in self._xpis():
             with zipfile.ZipFile(xpi) as z:
                 gecko = _json.loads(z.read("manifest.json"))
                 gecko = gecko["browser_specific_settings"]["gecko"]
-            assert gecko["id"] == want, (
-                f"{xpi.name} is signed under {gecko['id']!r} but the source "
-                f"manifest now says {want!r} — signing targets the manifest id, "
-                f"so one of the two is stale"
+            assert gecko["id"] in allowed, (
+                f"{xpi.name} is signed under {gecko['id']!r}, which is neither "
+                f"the manifest id ({manifest_id!r}) nor the declared "
+                f"self-distribution id ({self.SELF_DISTRIBUTION_ID!r})"
             )
+
+    def test_the_two_add_on_ids_are_documented_together(self):
+        # Two live ids is a state a reader must not have to reverse-engineer:
+        # the README has to name both, or the next person ships the wrong one.
+        readme = (self.FIREFOX_DIR / "README.md").read_text()
+        manifest_id = MANIFEST["browser_specific_settings"]["gecko"]["id"]
+        if manifest_id != self.SELF_DISTRIBUTION_ID:
+            assert self.SELF_DISTRIBUTION_ID in readme
+            assert manifest_id in readme
 
     def test_readmes_name_an_xpi_that_exists(self):
         # Both READMEs name the file by version, so a refreshed build that

@@ -338,6 +338,15 @@ restarts. UI changes persist; RPC chain switches are session-only.
   `optimism.blockscout.com`, etc.). Etherscan-compatible v1 API at
   `/api?module=account&action=tokenlist`; returns mixed ERC-20/721/1155
   so filter on `type`. Mainnet is slow for high-activity addresses.
+  **Keyless, the v1 `/api` is capped at 10 requests per clock hour per IP,
+  per instance** (all modules share it; probed 2026-09-13 via the
+  `x-ratelimit-*` headers — Blockscout is retiring the per-instance API for
+  its keyed PRO API). REST **v2** (`/api/v2/...`) still allows ~180 per 30 s,
+  so tx history uses `/api/v2/addresses/{addr}/transactions?filter=from`
+  (keyset-paged, 50 rows; `block_number=N+1&index=0` = at or below block N).
+  The remaining v1 callers (activity `tokentx`/`txlistinternal`, `getabi`,
+  `tokenlist`, the approvals/transfer `getLogs`) degrade to 429 without an
+  Etherscan key.
 - **Blockscout metadata service** (`metadata.services.blockscout.com/api/v1/metadata?addresses=…&chainId=…`)
   — the Open Labels Initiative dataset. Public address name-tags
   ("AladdinDAO: Deployer", "Binance: Hot Wallet"), **free + keyless**,

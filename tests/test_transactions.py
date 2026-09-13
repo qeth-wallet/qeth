@@ -17,6 +17,7 @@ from qeth.transactions import (
     TxDirection,
     UnsupportedChain,
     _parse_blockscout_tx,
+    _parse_blockscout_v2_tx,
 )
 
 
@@ -156,88 +157,158 @@ class TestDirection:
         assert tx.direction(ADDR) == TxDirection.UNRELATED
 
 
-# --- BlockscoutTransactionSource via injected transport -------------------
+# --- BlockscoutTransactionSource (REST v2) via injected transport ---------
 
-def _fake_transport(payload: dict, captured_urls: list[str]):
+# Real shape from `/api/v2/addresses/{addr}/transactions?filter=from`, trimmed
+# to the fields the parser reads (plus a nested `from`/`to` object as served).
+SAMPLE_V2 = {
+    "hash": "0xb4dcb99402c07b16b853f174f9f66c43a6c8048ed1838837c9aaca81b2b37610",
+    "block_number": 25966921,
+    "timestamp": "2026-09-13T07:09:23.000000Z",
+    "nonce": 18148,
+    "from": {"hash": "0x7a16fF8270133F063aAb6C9977183D9e72835428",
+             "is_contract": False},
+    "to": {"hash": "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E",
+           "is_contract": True},
+    "value": "0",
+    "gas_used": "46318",
+    "gas_price": "43360454",
+    "method": "transfer",
+    "raw_input": "0xa9059cbb000000000000000000000000b325c1ac788f02ff7997cf53c6ff40dd762897b30000000000000000000000000000000000000000000000b46b5d13682724d2c8",
+    "status": "ok",
+    "result": "success",
+}
+
+
+def _v2_row(i: int, **over) -> dict:
+    return {**SAMPLE_V2, "hash": "0x" + format(i, "064x"),
+            "block_number": 1_000_000 - i, "nonce": 5000 - i, **over}
+
+
+def _v2_pages(pages: list[list[dict]], captured_urls: list[str]):
+    """Serve ``pages`` in order, chaining them with a ``next_page_params``
+    keyset cursor (the last page carries ``null``) — as Blockscout does."""
     def transport(url: str, timeout: float) -> bytes:
+        n = len(captured_urls)
         captured_urls.append(url)
-        return json.dumps(payload).encode()
+        items = pages[n]
+        nxt = ({"block_number": items[-1]["block_number"], "index": 7,
+                "filter": "from", "items_count": 50 * (n + 1)}
+               if n + 1 < len(pages) else None)
+        return json.dumps({"items": items, "next_page_params": nxt}).encode()
     return transport
 
 
-class TestBlockscoutSource:
-    def test_happy_path(self):
-        urls = []
-        src = BlockscoutTransactionSource(
-            transport=_fake_transport(
-                {"status": "1", "message": "OK", "result": [SAMPLE_ROW]},
-                urls,
-            ),
-        )
-        out = src.list_transactions(ETH, ADDR, limit=1)
-        assert len(out) == 1
-        assert out[0].hash.startswith("0xec3decd")
-        # URL should hit the eth.blockscout.com instance with desc sort.
-        assert len(urls) == 1
-        assert "eth.blockscout.com" in urls[0]
-        assert "sort=desc" in urls[0]
-        assert "offset=1" in urls[0]
-        assert "endblock=" not in urls[0]   # no pagination cursor
+class TestParseBlockscoutV2Tx:
+    def test_full_row(self):
+        tx = _parse_blockscout_v2_tx(SAMPLE_V2, chain_id=1)
+        assert tx is not None
+        assert tx.hash.startswith("0xb4dcb994")
+        assert tx.block_number == 25966921
+        assert tx.timestamp == 1789283363
+        assert tx.nonce == 18148
+        assert tx.from_addr == ADDR                      # lower-cased
+        assert tx.to_addr == "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e"
+        assert tx.value_wei == 0
+        assert tx.gas_used == 46318
+        assert tx.gas_price_wei == 43360454
+        assert tx.method_id == "0xa9059cbb"
+        assert tx.success is True and tx.pending is False
 
-    def test_page_index_passes_through(self):
-        urls = []
+    def test_reverted(self):
+        tx = _parse_blockscout_v2_tx({**SAMPLE_V2, "status": "error"}, 1)
+        assert tx is not None and tx.success is False
+
+    def test_contract_creation_has_no_to(self):
+        tx = _parse_blockscout_v2_tx(
+            {**SAMPLE_V2, "to": None, "raw_input": "0x6080604052"}, 1)
+        assert tx is not None and tx.to_addr is None
+
+    def test_plain_send_has_no_method(self):
+        tx = _parse_blockscout_v2_tx(
+            {**SAMPLE_V2, "raw_input": "0x", "value": "1000"}, 1)
+        assert tx is not None
+        assert tx.method_id == "" and tx.value_wei == 1000
+
+    def test_pending_row_skipped(self):
+        # No block yet: our own broadcast already has a local pending row.
+        assert _parse_blockscout_v2_tx(
+            {**SAMPLE_V2, "block_number": None, "status": None}, 1) is None
+
+    def test_junk_row_skipped(self):
+        assert _parse_blockscout_v2_tx({"junk": "row"}, 1) is None
+
+
+class TestBlockscoutSource:
+    def test_happy_path_hits_v2_sent_filter(self):
+        urls: list[str] = []
         src = BlockscoutTransactionSource(
-            transport=_fake_transport({"status": "1", "result": []}, urls),
-        )
-        src.list_transactions(ETH, ADDR, page=3, limit=10)
-        # Walks page-by-page; the URL must carry the page index that
-        # the worker asked for.
-        assert "page=3" in urls[0]
-        assert "offset=10" in urls[0]
+            transport=_v2_pages([[SAMPLE_V2]], urls))
+        out = src.list_transactions(ETH, ADDR, limit=1)
+        assert [t.hash for t in out] == [SAMPLE_V2["hash"]]
+        assert len(urls) == 1
+        assert urls[0].startswith(
+            f"https://eth.blockscout.com/api/v2/addresses/{ADDR}/transactions?")
+        assert "filter=from" in urls[0]
+        assert "module=" not in urls[0]          # never the v1 /api
+        assert "block_number=" not in urls[0]    # no cursor
+
+    def test_limit_walks_keyset_pages(self):
+        # v2 pages are a fixed 50 rows: a 100-row page takes two requests,
+        # the second carrying the first's next_page_params verbatim.
+        urls: list[str] = []
+        pages = [[_v2_row(i) for i in range(50)],
+                 [_v2_row(i) for i in range(50, 100)],
+                 [_v2_row(i) for i in range(100, 150)]]
+        src = BlockscoutTransactionSource(transport=_v2_pages(pages, urls))
+        out = src.list_transactions(ETH, ADDR, limit=100)
+        assert [t.nonce for t in out] == [5000 - i for i in range(100)]
+        assert len(urls) == 2                    # stops once the page is full
+        assert f"block_number={pages[0][-1]['block_number']}" in urls[1]
+        assert "items_count=50" in urls[1]
+
+    def test_short_history_stops_at_null_cursor(self):
+        urls: list[str] = []
+        src = BlockscoutTransactionSource(
+            transport=_v2_pages([[_v2_row(i) for i in range(3)]], urls))
+        assert len(src.list_transactions(ETH, ADDR, limit=100)) == 3
+        assert len(urls) == 1
+
+    def test_page_index_skips_earlier_rows(self):
+        urls: list[str] = []
+        pages = [[_v2_row(i) for i in range(50)]]
+        src = BlockscoutTransactionSource(transport=_v2_pages(pages, urls))
+        out = src.list_transactions(ETH, ADDR, page=3, limit=10)
+        assert [t.nonce for t in out] == [5000 - i for i in range(20, 30)]
+
+    def test_pending_rows_do_not_shorten_the_page(self):
+        # A pending row is skipped, but the page still fills to `limit` — a
+        # short page would read as "end of history" and stop the older-walk.
+        urls: list[str] = []
+        first = [_v2_row(0, block_number=None)] + [_v2_row(i) for i in range(1, 50)]
+        pages = [first, [_v2_row(i) for i in range(50, 100)]]
+        src = BlockscoutTransactionSource(transport=_v2_pages(pages, urls))
+        out = src.list_transactions(ETH, ADDR, limit=50)
+        assert len(out) == 50 and len(urls) == 2
+
+    def test_before_block_is_inclusive_keyset_cursor(self):
+        urls: list[str] = []
+        src = BlockscoutTransactionSource(transport=_v2_pages([[]], urls))
+        src.list_transactions(ETH, ADDR, before_block=15_000_000)
+        # (block N+1, index 0) excludes nothing at block N — v1 endblock=N.
+        assert "block_number=15000001" in urls[0]
+        assert "index=0" in urls[0]
 
     def test_no_transactions_is_empty_not_error(self):
-        urls = []
-        src = BlockscoutTransactionSource(
-            transport=_fake_transport(
-                {"status": "0", "message": "No transactions found", "result": []},
-                urls,
-            ),
-        )
+        src = BlockscoutTransactionSource(transport=_v2_pages([[]], []))
         assert src.list_transactions(ETH, ADDR) == []
 
-    def test_non_ok_status_raises(self):
-        urls = []
-        src = BlockscoutTransactionSource(
-            transport=_fake_transport(
-                {"status": "0", "message": "Something broke"},
-                urls,
-            ),
-        )
-        with pytest.raises(TransactionSourceError):
+    def test_error_body_raises(self):
+        def transport(url, timeout):
+            return json.dumps({"message": "Invalid address hash"}).encode()
+        src = BlockscoutTransactionSource(transport=transport)
+        with pytest.raises(TransactionSourceError, match="Invalid address"):
             src.list_transactions(ETH, ADDR)
-
-    def test_before_block_adds_endblock_cursor(self):
-        urls = []
-        src = BlockscoutTransactionSource(
-            transport=_fake_transport({"status": "1", "result": []}, urls),
-        )
-        src.list_transactions(ETH, ADDR, before_block=15_000_000)
-        assert "endblock=15000000" in urls[0]
-        assert "page=1" in urls[0]              # cursor mode keeps page 1
-
-    def test_page_window_cap_is_end_not_error(self):
-        # The explorer's `page × offset ≤ 10000` cap: hitting it on a deep
-        # scroll is the end of pageable history, not a failure. The detail
-        # comes back in `result` (a string), message is just "NOTOK".
-        src = BlockscoutTransactionSource(
-            transport=_fake_transport(
-                {"status": "0", "message": "NOTOK",
-                 "result": "Result window is too large, PageNo x Offset "
-                           "size must be less than or equal to 10000"},
-                [],
-            ),
-        )
-        assert src.list_transactions(ETH, ADDR, page=300, limit=50) == []
 
     def test_unsupported_chain_raises(self):
         src = BlockscoutTransactionSource()
@@ -252,25 +323,15 @@ class TestBlockscoutSource:
         assert not src.supports(fake)
 
     def test_bad_row_skipped_not_fatal(self):
-        urls = []
         src = BlockscoutTransactionSource(
-            transport=_fake_transport(
-                {"status": "1", "result": [
-                    {"junk": "row"},          # unparseable
-                    SAMPLE_ROW,                # good
-                ]},
-                urls,
-            ),
-        )
+            transport=_v2_pages([[{"junk": "row"}, SAMPLE_V2]], []))
         out = src.list_transactions(ETH, ADDR)
-        assert len(out) == 1
-        assert out[0].hash.startswith("0xec3decd")
+        assert [t.hash for t in out] == [SAMPLE_V2["hash"]]
 
     def test_custom_instances_override(self):
-        urls = []
+        urls: list[str] = []
         src = BlockscoutTransactionSource(
             instances={1: "https://my-blockscout.example"},
-            transport=_fake_transport({"status": "1", "result": []}, urls),
-        )
+            transport=_v2_pages([[]], urls))
         src.list_transactions(ETH, ADDR)
-        assert urls[0].startswith("https://my-blockscout.example/api?")
+        assert urls[0].startswith("https://my-blockscout.example/api/v2/")

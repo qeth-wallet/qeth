@@ -3,8 +3,8 @@
 The wallet asks a ``TransactionSource`` for past transactions of an
 address on a chain. Sources are pluggable so we can stack fallbacks
 later (Etherscan v2, Otterscan ``ots_*`` against a user-supplied RPC,
-``trace_filter`` on an Erigon node). Today the only implementation is
-Blockscout's Etherscan-compatible ``/api?module=account&action=txlist``.
+``trace_filter`` on an Erigon node). Today: Etherscan v2 ``txlist`` (keyed)
+and Blockscout's REST v2 ``/api/v2/addresses/{addr}/transactions`` (keyless).
 
 The parsing logic is split out as a free function so it's unit-testable
 without HTTP, mirroring the ``qeth.plugins.tokens.risk._parse_report`` pattern.
@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from collections.abc import Callable
 
 from . import USER_AGENT
@@ -181,6 +182,48 @@ def _parse_blockscout_tx(entry: dict, chain_id: int) -> Transaction | None:
         return None
 
 
+def _iso_timestamp(value: object) -> int:
+    """Blockscout v2's ``2026-09-13T07:09:23.000000Z`` → unix seconds (0 when
+    absent/unparseable). The ``Z`` swap is for Python 3.10's fromisoformat."""
+    try:
+        return int(datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+
+def _parse_blockscout_v2_tx(entry: dict, chain_id: int) -> Transaction | None:
+    """One Blockscout REST v2 transaction item → ``Transaction``. ``None`` for a
+    row we can't use — unparseable, or still pending (no block yet: a tx we
+    broadcast already has its own local pending row, confirmed by receipt)."""
+    try:
+        block = entry.get("block_number")
+        if block is None:
+            return None
+        frm = entry.get("from") or {}
+        to = entry.get("to") or {}     # null for a contract creation
+        to_hash = to.get("hash") if isinstance(to, dict) else None
+        input_data = entry.get("raw_input") or "0x"
+        return Transaction(
+            chain_id=chain_id,
+            hash=entry["hash"],
+            block_number=int(block),
+            timestamp=_iso_timestamp(entry.get("timestamp")),
+            nonce=int(entry.get("nonce") or 0),
+            from_addr=str(frm.get("hash") or "").lower(),
+            to_addr=to_hash.lower() if to_hash else None,
+            value_wei=int(entry.get("value") or 0),
+            gas_used=int(entry.get("gas_used") or 0),
+            gas_price_wei=int(entry.get("gas_price") or 0),
+            method_id=input_data[:10] if len(input_data) >= 10 else "",
+            input_data=input_data,
+            # "ok" / "error"; missing on very old rows — assume success, as v1.
+            success=entry.get("status") != "error",
+        )
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return None
+
+
 class EtherscanV2TransactionSource(TransactionSource):
     """Etherscan v2 multichain ``module=account&action=txlist``.
 
@@ -289,12 +332,20 @@ class RoutedTransactionSource(TransactionSource):
 
 
 class BlockscoutTransactionSource(TransactionSource):
-    """Etherscan-compatible ``/api?module=account&action=txlist``.
+    """Blockscout REST v2 ``/api/v2/addresses/{addr}/transactions?filter=from``:
+    the address's SENT top-level transactions, newest first.
 
-    Returns top-level (external) transactions for an address, sorted
-    newest first. The address appears as either ``from`` or ``to`` on
-    each row — direction is determined by the caller via
-    ``Transaction.direction(viewer)``.
+    Not the Etherscan-compatible ``/api?module=account&action=txlist``: keyless,
+    that v1 API is capped at 10 requests per clock hour per IP per instance
+    (probed 2026-09-13 — Blockscout is retiring the per-instance API for its
+    keyed PRO API), so one tab open plus its activity lookups exhausted it and
+    the tab showed ``HTTP Error 429``. v2 allows ~180 requests per 30 s.
+
+    v2 pages are a fixed 50 rows chained by a ``next_page_params`` keyset
+    cursor, so a ``limit``-row page walks as many v2 pages as that takes, and
+    ``page`` N skips the first (N-1)×``limit`` rows. ``before_block`` maps onto
+    the keyset: ``block_number=N+1&index=0`` is everything at or below block N —
+    the same inclusive bound as v1's ``endblock``.
     """
 
     def __init__(
@@ -323,42 +374,31 @@ class BlockscoutTransactionSource(TransactionSource):
             raise UnsupportedChain(
                 f"No Blockscout instance configured for chain {chain.chain_id}"
             )
-        params = [
-            ("module", "account"),
-            ("action", "txlist"),
-            ("address", address),
-            ("sort", "desc"),
-            ("page", str(max(1, int(page)))),
-            ("offset", str(max(1, int(limit)))),
-        ]
+        limit = max(1, int(limit))
+        skip = (max(1, int(page)) - 1) * limit
+        endpoint = f"{base.rstrip('/')}/api/v2/addresses/{address}/transactions"
+        params: dict[str, object] = {"filter": "from"}
         if before_block is not None:
-            params.append(("endblock", str(int(before_block))))
-        url = f"{base.rstrip('/')}/api?" + urllib.parse.urlencode(params)
-        raw = self._transport(url, self.timeout)
-        data = json.loads(raw)
-
-        # Etherscan-compatible: status "0" with "No transactions found"
-        # is a valid empty result, not an error.
-        if data.get("status") != "1":
-            detail = (str(data.get("message") or "") + " "
-                      + str(data.get("result") or "")).lower()
-            if "no transactions" in detail or "not found" in detail:
-                return []
-            # Explorer page-window cap (page × offset ≤ 10000): we've paged
-            # as deep as txlist allows — treat as the end of history.
-            if ("result window is too large" in detail
-                    or "pageno x offset" in detail):
-                return []
-            raise TransactionSourceError(
-                data.get("result") or data.get("message") or "blockscout error"
-            )
-
+            params.update(block_number=int(before_block) + 1, index=0)
         out: list[Transaction] = []
-        for entry in data.get("result") or []:
-            tx = _parse_blockscout_tx(entry, chain.chain_id)
-            if tx is not None:
-                out.append(tx)
-        return out
+        while True:
+            raw = self._transport(
+                endpoint + "?" + urllib.parse.urlencode(params), self.timeout)
+            data = json.loads(raw)
+            items = data.get("items") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                detail = data.get("message") if isinstance(data, dict) else None
+                raise TransactionSourceError(detail or "blockscout error")
+            for entry in items:
+                tx = (_parse_blockscout_v2_tx(entry, chain.chain_id)
+                      if isinstance(entry, dict) else None)
+                if tx is not None:
+                    out.append(tx)
+            # Stop once the page is full, or the history has no more rows.
+            nxt = data.get("next_page_params")
+            if len(out) >= skip + limit or not isinstance(nxt, dict):
+                return out[skip:skip + limit]
+            params = nxt
 
 
 # keccak256("Approval(address,address,uint256)") — the ERC-20 Approval event.

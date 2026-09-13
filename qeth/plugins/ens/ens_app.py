@@ -1225,9 +1225,13 @@ def discover_custom_text_keys(
     except Exception:
         return set()
     keys: set[str] = set()
-    for page in range(1, max_pages + 1):
+    # Page older by block cursor, not page index: the Blockscout source reaches
+    # page N by re-walking every row above it.
+    cursor: int | None = None
+    for _ in range(max_pages):
         try:
-            txs = source.list_transactions(chain, address, page=page, limit=limit)
+            txs = source.list_transactions(chain, address, limit=limit,
+                                           before_block=cursor)
         except Exception:
             break
         for tx in txs:
@@ -1243,6 +1247,10 @@ def discover_custom_text_keys(
                 keys.add(key)
         if len(txs) < limit:
             break                      # last page reached
+        oldest = min(t.block_number for t in txs)
+        if cursor is not None and oldest >= cursor:
+            break                      # a whole page in one block — no progress
+        cursor = oldest
     return keys
 
 

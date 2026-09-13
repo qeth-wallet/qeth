@@ -734,6 +734,153 @@ class TestTransactionsPlugin:
         plugin._on_external_nonce(key, None)       # error result → no-op
         assert calls == [] and key not in plugin._nonce_in_flight
 
+    def test_failed_fetch_keeps_known_rows_on_screen(self, qtbot, tmp_qeth):
+        """A rate-limited explorer (HTTP 429) must not blank the history we
+        already hold — the rows stay, with a notice under them."""
+        from qeth.transactions_cache import TransactionCache
+        TransactionCache().save(
+            ETH.chain_id, ADDR, [_tx_send(nonce=n) for n in (7, 6, 5)])
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().show()
+        plugin.on_account_changed(ADDR)
+        panel = plugin.widget()
+        assert panel.table.rowCount() == 3
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._on_failed(key, "HTTP Error 429: Too Many Requests")
+        assert panel.table.rowCount() == 3
+        assert not panel.status_lbl.isHidden()
+        assert "429" in panel.status_lbl.text()
+
+    def test_failed_fetch_with_nothing_known_shows_error(self, qtbot, tmp_qeth):
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        plugin.widget().show()
+        plugin.on_account_changed(ADDR)
+        plugin._on_failed((ETH.chain_id, ADDR.lower()), "boom")
+        assert plugin.widget().status_lbl.text() == \
+            "Couldn't load transactions: boom"
+
+    def test_open_with_held_history_does_not_refetch_newest(
+            self, qtbot, tmp_qeth):
+        """Opening an account whose history we hold (not from nonce 0, so not
+        'full') must not re-read the explorer's newest page — the nonce check
+        decides that. Only an empty cache fetches on open."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [_tx_send(nonce=n)
+                              for n in range(200, 200 - plugin.INITIAL_BATCH, -1)]
+        calls: list = []
+        plugin._fetch_page = lambda k, a, page, **kw: calls.append(kw)
+        plugin._refresh(ADDR, force_fetch=True)
+        assert calls == []
+
+        plugin._cache.pop(key)                      # never loaded → fetch it
+        plugin._rendered_for = None
+        plugin._refresh(ADDR, force_fetch=True)
+        assert calls == [{}]
+
+    def test_short_partial_history_pages_older_past_pending_row(
+            self, qtbot, tmp_qeth):
+        """A short partial cache (too few rows to scroll) backfills OLDER from
+        its oldest MINED block — a pending row's block 0 must not become the
+        cursor, which would read as 'nothing older' and end the history."""
+        from dataclasses import replace
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        mined = [replace(_tx_send(nonce=n), block_number=1000 + n)
+                 for n in (9, 8)]
+        pending = replace(_tx_send(nonce=10), block_number=0, pending=True)
+        plugin._cache[key] = [pending, *mined]
+        calls: list = []
+        plugin._fetch_page = lambda k, a, page, **kw: calls.append(kw)
+        plugin._refresh(ADDR, force_fetch=True)
+        assert calls == [{"walk_on_overlap": True, "before_block": 1008}]
+
+    def test_nonce_refetch_backs_off_while_explorer_lags(self, qtbot, tmp_qeth):
+        """The chain is ahead but the explorer hasn't indexed the tx yet: one
+        fetch, then no re-fetch on every 30 s poll until the hold elapses; the
+        hold clears once the history catches up."""
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [_tx_send(nonce=n) for n in (4, 3)]
+        calls: list = []
+        plugin._fetch_page = lambda k, a, page, **kw: calls.append(1)
+        plugin._on_external_nonce(key, 6)
+        plugin._on_external_nonce(key, 6)          # next poll: still held
+        assert calls == [1]
+        strikes, _ = plugin._nonce_hold[key]
+        plugin._nonce_hold[key] = (strikes, 0.0)   # hold elapsed
+        plugin._on_external_nonce(key, 6)
+        assert calls == [1, 1]
+        plugin._cache[key] = [_tx_send(nonce=n) for n in (5, 4, 3)]
+        plugin._on_external_nonce(key, 6)          # caught up
+        assert key not in plugin._nonce_hold and calls == [1, 1]
+
+    def test_failed_fetch_holds_further_fetches(self, qtbot, tmp_qeth):
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        qtbot.addWidget(plugin.widget())
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._on_failed(key, "HTTP Error 429: Too Many Requests")
+        host.started_workers.clear()
+        plugin._fetch_page(key, ADDR, page=1)
+        assert host.started_workers == []          # backing off
+        first_deadline = plugin._fetch_hold[key][1]
+        plugin._fetch_hold[key] = (1, 0.0)         # elapsed
+        plugin._fetch_page(key, ADDR, page=1)
+        assert len(host.started_workers) == 1
+        plugin._on_failed(key, "HTTP Error 429: Too Many Requests")
+        assert plugin._fetch_hold[key][0] == 2     # doubled
+        assert plugin._fetch_hold[key][1] > first_deadline
+        plugin._on_page_fetched(ETH.chain_id, key[1], 1, [], False)
+        assert key not in plugin._fetch_hold       # success clears it
+
+    def test_dropped_row_nonce_is_not_known(self, qtbot, tmp_qeth):
+        """Our pending tx at nonce 5 was dropped — nonce 5 went to a tx sent
+        elsewhere that we don't hold, so the chain's count 6 is news."""
+        from dataclasses import replace
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        key = (ETH.chain_id, ADDR.lower())
+        plugin._cache[key] = [
+            replace(_tx_send(nonce=5), block_number=0, dropped=True),
+            *[_tx_send(nonce=n) for n in range(4, -1, -1)]]
+        calls: list = []
+        plugin._fetch_page = lambda k, a, page, **kw: calls.append(1)
+        plugin._on_external_nonce(key, 6)
+        assert calls == [1]
+
+    def test_nonce_check_reads_disk_history_before_first_render(
+            self, qtbot, tmp_qeth):
+        """The 30 s poll can land before the tab ever rendered this account:
+        compare against the saved history, not an empty memory cache (which
+        made every poll look like news and hit the explorer)."""
+        from qeth.transactions_cache import TransactionCache
+        TransactionCache().save(
+            ETH.chain_id, ADDR, [_tx_send(nonce=n) for n in (9, 8)])
+        plugin = TransactionsPlugin()
+        host = _StubHost(address=ADDR)
+        plugin.attach(host)
+        calls: list = []
+        plugin._fetch_page = lambda k, a, page, **kw: calls.append(1)
+        plugin._on_external_nonce((ETH.chain_id, ADDR.lower()), 10)
+        assert calls == []
+
     def test_render_decoded_lays_out_python_signature(self, qtbot, tmp_qeth):
         """Decoded calls render with type annotations and the function
         name bold — the Python-flavoured ``name: type = value`` form."""
@@ -1346,7 +1493,7 @@ class TestTransactionsPlugin:
 
         host.start_worker = _start
 
-        plugin.on_activated()                  # refresh: newest (cursor None)
+        plugin.on_activated()
         key = (ETH.chain_id, ADDR.lower())
         # Reveal cached rows, then scroll → block-cursor fetches older,
         # walking endblock down until the start of history (nonce 0).
@@ -1355,8 +1502,10 @@ class TestTransactionsPlugin:
                 break
             plugin._on_scroll_bottom()
         assert min(t.nonce for t in plugin._cache[key]) == 0
-        assert None in source.cursors                      # the refresh-newest
-        assert any(c is not None for c in source.cursors)  # the cursor fetches
+        # Opening a held history never re-reads the newest page (only the
+        # nonce check does, when the chain is ahead) — every fetch is older.
+        assert source.cursors and None not in source.cursors
+        assert source.cursors[0] == 100                    # oldest cached block
 
     def test_scroll_bottom_walks_block_cursor(self, qtbot, tmp_qeth):
         """The scrolled_to_bottom signal drives load-on-scroll: once the

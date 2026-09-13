@@ -959,6 +959,13 @@ def _is_full_history(txs: list[Transaction]) -> bool:
     return 0 in nonces and len(nonces) == max(nonces) + 1
 
 
+def _oldest_mined_block(txs: list[Transaction]) -> int | None:
+    """Lowest block among mined rows — the page-older cursor. A pending or
+    dropped row carries block 0, and a cursor of 0 pages "older than
+    genesis": nothing comes back and the history reads as exhausted."""
+    return min((t.block_number for t in txs if t.block_number), default=None)
+
+
 class NonceCheckWorker(QThread):
     """Fetch the sender's on-chain transaction count (its next nonce).
     When that exceeds the highest nonce in our recorded history, a tx was
@@ -1170,6 +1177,14 @@ class TransactionsPlugin(Plugin):
     # txs sent from another wallet client (NonceCheckWorker). One cheap
     # RPC call; on a hit it re-fetches page 1 to pull the new tx in.
     NONCE_POLL_INTERVAL_MS = 30_000
+    # Explorer back-off, per (chain, account). A failed fetch (a 429 above all)
+    # holds further automatic fetches for 30 s, doubling per consecutive failure
+    # up to 10 min — so the nonce poll and tab opens don't keep re-hitting a
+    # rate limit. The same schedule spaces re-fetches for an on-chain nonce the
+    # explorer still hasn't shown us (indexer lag, or a nonce spent by an
+    # EIP-7702 authorization that no tx of ours will ever fill).
+    EXPLORER_RETRY_BASE_S = 30.0
+    EXPLORER_RETRY_MAX_S = 600.0
     # A pending tx looks "dropped" when its nonce is spent but we can't fetch
     # its receipt. That single reading is unreliable behind a load-balanced RPC
     # (a backend can miss a mined tx's receipt), so only believe it after this
@@ -1325,6 +1340,11 @@ class TransactionsPlugin(Plugin):
         # Keys with a NonceCheckWorker in flight (coalesce polls).
         self._nonce_in_flight: set[tuple[int, str]] = set()
         self._nonce_timer: QTimer | None = None
+        # Explorer back-off holds, key → (strikes, monotonic not-before): one
+        # for failed fetches (gates every fetch), one for nonce-triggered
+        # re-fetches that haven't closed the gap yet. See EXPLORER_RETRY_*.
+        self._fetch_hold: dict[tuple[int, str], tuple[int, float]] = {}
+        self._nonce_hold: dict[tuple[int, str], tuple[int, float]] = {}
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -1972,9 +1992,12 @@ class TransactionsPlugin(Plugin):
     def _on_external_nonce(self, key, count) -> None:
         """``count`` = the chain's tx-sent count (next nonce), so the last
         sent nonce is ``count - 1``. If that's beyond the highest nonce we
-        hold, a tx was sent elsewhere — drop the ``exhausted`` flag (our
-        'full history' assumption is now stale) and re-fetch page 1, which
-        merges + prepends the new row."""
+        hold, a tx was sent elsewhere (or while we were offline) — drop the
+        ``exhausted`` flag (our 'full history' assumption is now stale) and
+        re-fetch page 1, which merges + prepends the new rows. This is the
+        ONLY way a history we already hold goes back to the explorer: a tx we
+        broadcast ourselves is in the cache before it mines, so it never
+        triggers a fetch."""
         self._nonce_in_flight.discard(key)
         if count is None or self.host is None:
             return
@@ -1983,11 +2006,45 @@ class TransactionsPlugin(Plugin):
             return
         if key != (self.host.current_chain().chain_id, addr.lower()):
             return   # account/chain moved on since the poll started
-        cached = self._cache.get(key) or []
-        our_max = max((t.nonce for t in cached), default=-1)
-        if count - 1 > our_max:
-            self._exhausted.discard(key)
-            self._fetch_page(key, addr, page=1)
+        # A dropped row's nonce went to a tx we DON'T hold (it replaced ours),
+        # so it doesn't count as known.
+        known = [t for t in self._hydrated(key) if not t.dropped]
+        our_max = max((t.nonce for t in known), default=-1)
+        if count - 1 <= our_max:
+            self._nonce_hold.pop(key, None)
+            return
+        if not self._hold_elapsed(self._nonce_hold, key):
+            return   # already fetched for this gap; the explorer lags behind
+        self._strike(self._nonce_hold, key)
+        self._exhausted.discard(key)
+        self._fetch_page(key, addr, page=1)
+
+    def _hold_elapsed(self, holds: dict, key) -> bool:
+        hold = holds.get(key)
+        return hold is None or time.monotonic() >= hold[1]
+
+    def _strike(self, holds: dict, key) -> None:
+        """Arm (or lengthen) a back-off hold — see EXPLORER_RETRY_*."""
+        strikes = holds.get(key, (0, 0.0))[0] + 1
+        delay = min(self.EXPLORER_RETRY_BASE_S * 2 ** (strikes - 1),
+                    self.EXPLORER_RETRY_MAX_S)
+        holds[key] = (strikes, time.monotonic() + delay)
+
+    def _hydrated(self, key: tuple[int, str]) -> list[Transaction]:
+        """The in-memory history for ``key``, loaded from the disk cache the
+        first time it's touched this session. Received txs an old (pre-filter)
+        build wrote to disk are dropped — they'd break the nonce-desc sort."""
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        addr_l = key[1]
+        disk = [t for t in self._disk_cache.load(key[0], addr_l) or []
+                if t.from_addr.lower() == addr_l]
+        if disk:
+            # Only a real history is pinned in memory: an absent key is what
+            # tells _refresh "never loaded" (Loading…) from "known empty".
+            self._cache[key] = disk
+        return disk
 
     # --- core --------------------------------------------------------------
 
@@ -2240,21 +2297,11 @@ class TransactionsPlugin(Plugin):
         self._panel.set_activity_kicker(self._kick_activities)
         cached = self._cache.get(key)
         if cached is None:
-            # First time this (chain, addr) is seen this session — try
-            # the disk cache. Confirmed txs don't change, so cached
-            # bytes from a prior run are always safe to render. Also
-            # drop any received txs that an earlier (pre-filter) build
-            # may have written to disk — keeping them would break the
-            # nonce-monotonic sort.
-            disk = self._disk_cache.load(chain.chain_id, address)
-            if disk:
-                addr_l = address.lower()
-                disk = [t for t in disk if t.from_addr.lower() == addr_l]
-                self._cache[key] = disk
-                cached = disk
-                # No page cursor to seed: "load older" resumes from the
-                # cache's oldest block (_oldest_block), so a big cache picks
-                # up exactly where it left off with no page-walk.
+            # First time this (chain, addr) is seen this session — try the
+            # disk cache. Confirmed txs don't change, so cached bytes from a
+            # prior run are always safe to render. No page cursor to seed:
+            # "load older" resumes from the cache's oldest block.
+            cached = self._hydrated(key) or None
         # Re-render only when the panel currently shows a *different*
         # view. If it's the same (chain, addr) we already painted
         # (e.g. user just toggled away to Tokens and back), leaving
@@ -2303,27 +2350,31 @@ class TransactionsPlugin(Plugin):
             return
         # Check the on-chain nonce *now*, not just on the 30s timer — so
         # opening / switching to an account immediately catches a tx sent
-        # from another client, even when the cache looks complete and the
-        # short-circuit below would otherwise skip the fetch.
+        # from another client (or while qeth was closed). That check is what
+        # re-fetches the newest page, and only when the chain is ahead of us.
         self._poll_external_nonce()
         # If we already hold the wallet's full sent history (nonce 0
-        # present + contiguous), there's nothing newer to refresh and
-        # nothing older to scroll for. Skip the network call. (The nonce
-        # check above re-opens this if a send happened elsewhere.)
+        # present + contiguous), there's nothing older to scroll for.
         if _is_full_history(cached or []):
             self._exhausted.add(key)
             return
-        # Always (re-)fetch page 1 on open: cheapest way to pick up
-        # txs the user might have sent from another wallet client
-        # since the last visit. Older pages come from scroll.
-        self._fetch_page(key, address, page=1)
+        # Otherwise the explorer is only for history we DON'T have: never
+        # loaded → fetch it; a short partial history (an interrupted earlier
+        # load, which leaves too few rows to scroll) → page older from its
+        # oldest row. A longer one pages older when scrolled past. Re-reading
+        # the newest page on every open is what spent the keyless explorer's
+        # rate limit (and re-read the tx we had just sent ourselves).
+        if not cached:
+            self._fetch_page(key, address, page=1)
+        elif len(cached) < self.INITIAL_BATCH:
+            self._fetch_page(key, address, page=1, walk_on_overlap=True,
+                             before_block=self._oldest_block(key))
 
     def _oldest_block(self, key) -> int | None:
         """Block of the oldest loaded tx for this view — the cursor for
         paging older (explorer ``endblock``), which sidesteps the
         ``page × offset ≤ 10000`` window."""
-        txs = self._cache.get(key) or []
-        return min((t.block_number for t in txs), default=None)
+        return _oldest_mined_block(self._cache.get(key) or [])
 
     def _fetch_page(self, key, address: str, page: int,
                     walk_on_overlap: bool = False,
@@ -2334,8 +2385,8 @@ class TransactionsPlugin(Plugin):
         ``walk_on_overlap`` distinguishes the two fetch reasons:
           - False (default): "refresh newest" — fetch page 1 to pick up
             anything new, but if the page returns only entries already
-            cached, stop. Used on _refresh (tab activation / account
-            select). Tab switching costs at most one HTTP call.
+            cached, stop. Used for a never-loaded view and when the
+            on-chain nonce shows txs we don't hold.
           - True: "load older" — the user has scrolled past the cache
             and wants more history. If the page returns only overlap
             (typical when resuming an interrupted backfill), advance
@@ -2345,6 +2396,8 @@ class TransactionsPlugin(Plugin):
             return
         if key in self._in_flight or key in self._exhausted:
             return
+        if not self._hold_elapsed(self._fetch_hold, key):
+            return   # backing off after a failure (e.g. rate-limited)
         chain = self.host.current_chain()
         self._in_flight.add(key)
         worker = TransactionsWorker(
@@ -2401,6 +2454,7 @@ class TransactionsPlugin(Plugin):
         cheap refresh-newest path."""
         key = (chain_id, address_lower)
         self._in_flight.discard(key)
+        self._fetch_hold.pop(key, None)
         if self._panel is None:
             return
         existing = self._cache.get(key)
@@ -2426,7 +2480,7 @@ class TransactionsPlugin(Plugin):
             self._saver.submit(chain_id, address_lower, merged)
 
         new_rows = [t for t in page if t.hash not in existing_hashes]
-        oldest = min((t.block_number for t in merged), default=None)
+        oldest = _oldest_mined_block(merged)
         # The older-walk cursor follows the RAW oldest block fetched (incl.
         # received txs the sent filter strips) so a receive-heavy account
         # doesn't stall on a window that held only received txs. Fall back to
@@ -2470,6 +2524,7 @@ class TransactionsPlugin(Plugin):
                 or self.host.selected_address.lower() != address_lower
                 or self.host.current_chain().chain_id != chain_id):
             return
+        self._panel.clear_notice()   # the explorer is answering again
         if not new_rows:
             # Empty page + empty cache = brand-new account with
             # zero history. Flip the panel from "Loading…" to the
@@ -2503,6 +2558,7 @@ class TransactionsPlugin(Plugin):
 
     def _on_failed(self, key: tuple[int, str], msg: str) -> None:
         self._in_flight.discard(key)
+        self._strike(self._fetch_hold, key)
         log.warning("transactions fetch failed for %s/%s: %s",
                     key[0], key[1], msg)
         if self.host is None or self._panel is None:
@@ -2514,7 +2570,13 @@ class TransactionsPlugin(Plugin):
             return
         if not self._is_active():
             return
-        self._panel.show_error(msg)
+        # The explorer only ADDS to what we know — a failed fetch must never
+        # blank the history (and pending txs) already on screen.
+        if self._rendered_for == key and self._panel.table.rowCount():
+            self._panel.show_notice(
+                f"Couldn't update from the block explorer: {msg}")
+        else:
+            self._panel.show_error(msg)
 
 
 # --- panel ----------------------------------------------------------------
@@ -3019,6 +3081,17 @@ class TransactionListPanel(QWidget):
         self._row_of.clear()
         self.status_lbl.setText(f"Couldn't load transactions: {msg}")
         self.status_lbl.setVisible(True)
+
+    def show_notice(self, msg: str) -> None:
+        """A status line under the rows, leaving the table as it is."""
+        self.status_lbl.setText(msg)
+        self.status_lbl.setVisible(True)
+
+    def clear_notice(self) -> None:
+        """Drop a notice shown over rows; an empty table keeps its
+        loading / empty / error text."""
+        if self.table.rowCount():
+            self.status_lbl.setVisible(False)
 
     def show_empty(self) -> None:
         self.table.setRowCount(0)

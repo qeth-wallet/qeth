@@ -585,7 +585,7 @@ class MainWindow(QMainWindow):
     _STATUS_HINTS = (
         "Hold Alt to reveal each button's underlined shortcut letter.",
         "Tab moves between the Wallets list and the right panel; "
-        "←/→ cycle the Tokens / Transactions / ENS tabs.",
+        "←/→ cycle the tabs on the right.",
         "In a dialog, Tab / Shift+Tab move between fields; Enter confirms.",
         "Ctrl+C copies the selected address, token, or tx hash.",
         "Del removes the selected account.",
@@ -606,7 +606,8 @@ class MainWindow(QMainWindow):
         "Switch networks with the chain selector in the toolbar.",
         "Point any network at your own RPC — edit it beside the chain selector.",
         "Right-click an address or hash to copy it or open it in the explorer.",
-        "Connect dapps — qeth serves a Frame-compatible wallet on 127.0.0.1:1248.",
+        "Connect dapps with the qeth browser extension for Chrome and Firefox "
+        "(Frame works too).",
         "Select a token to Hide it from this wallet, or pin ★ to keep it shown.",
         "Toggle 'Show all' to reveal hidden tokens and dust-value balances.",
         "Sign an arbitrary message: pick an account, then Sign Message… "
@@ -614,6 +615,21 @@ class MainWindow(QMainWindow):
         "The QR button shows an account's address as a scannable code.",
         "Track any address read-only: Add → Watch-only Address.",
         "Add → Air-gapped signs with a QR hardware wallet (Keystone / Keycard).",
+        "Add → Ledger or Trezor Account scans a hardware wallet for your used "
+        "addresses.",
+        "Trezor passphrase wallets each get their own branch — Scan again with "
+        "the other passphrase to add one.",
+        "The Approvals tab lists every token allowance you've granted, riskiest "
+        "first — tick several to Revoke them back to back.",
+        "In Approvals, +/−/* select all / none / invert; Ctrl+F filters by "
+        "token or spender.",
+        "Approving a token? The Spender row shows who gets the allowance and "
+        "whether you've approved them before.",
+        "Batched calls, like a Safe multiSend, are decoded one call at a time.",
+        "Add an Etherscan key beside the chain selector for faster, fuller "
+        "history, token and approval discovery.",
+        "Turn tabs on or off with the gear by the tabs (or the tray's Plugins "
+        "menu); it applies on restart.",
         "In the ENS tab, set a name's ETH address, text and IPFS records, and "
         "add or remove subdomains.",
         "Renew or transfer your .eth names from the ENS tab — Extend one before "

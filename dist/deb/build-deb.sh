@@ -28,7 +28,11 @@ echo ">> qeth $VERSION  (venv: $VENV  out: $OUT)"
 
 # 1. PySide6 6.4 from source into the venv — skipped if already built (the abi3
 #    bindings are Python-version-portable + reusable). The slow step (~15 min).
-if ! "$VENV/bin/$PY" -c "import PySide6, shiboken6" 2>/dev/null; then
+#    "Already built" means EVERY module qeth imports: a cache made before the
+#    subset grew (Network + Multimedia, 2026-07) still imports PySide6, and
+#    reusing it produced a .deb that died at startup on PySide6.QtNetwork.
+if ! "$VENV/bin/$PY" -c "import shiboken6, PySide6.QtWidgets, PySide6.QtNetwork, PySide6.QtMultimedia" 2>/dev/null; then
+    rm -rf "$VENV"
     "$HERE/build-pyside.sh" "$VENV"
 fi
 

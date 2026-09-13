@@ -40,6 +40,10 @@ dnf install -y -q \
     xcb-util-keysyms xcb-util-renderutil xcb-util-wm libX11 libXext libXrender \
     libXrandr libXi libSM libICE fontconfig freetype mesa-libGL pulseaudio-libs \
     >/dev/null 2>&1 || echo "WARN: some packages unavailable — refine for the target"
+# libusb-1.0 for the Trezor signer (python-libusb1 dlopens it). The package is
+# libusbx on the AlmaLinux 9 base of manylinux_2_34, libusb1 on newer Fedoras.
+dnf install -y -q libusbx >/dev/null 2>&1 || dnf install -y -q libusb1 >/dev/null 2>&1 \
+    || { echo "FATAL: no libusb-1.0 package in the container"; exit 1; }
 
 # 2. A relocatable CPython from the container ($ORIGIN-relative RPATH, so it
 #    runs from anywhere once PYTHONHOME points at it).
@@ -79,7 +83,7 @@ tar -C "$SRC" \
 # [qr] = the air-gapped QR signer decode stack (cbor2 + zxing-cpp + Pillow),
 # from manylinux wheels — pairs with the QtMultimedia camera kept in 3b.
 "$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
-    "${BUILD_SRC}[bundled,simulate,qr]"
+    "${BUILD_SRC}[bundled,simulate,qr,trezor]"
 # Fail loudly if Qt didn't actually land in the bundle, rather than shipping a
 # tiny empty AppImage.
 if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&1; then
@@ -88,6 +92,15 @@ if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&
     exit 1
 fi
 echo "DIAG: AppDir after install = $(du -sh "$APPDIR" | cut -f1)"
+
+# 3a. Trezor: put libusb-1.0 BESIDE python-libusb1 — its loader tries its own
+#     package dir first, so this works without LD_LIBRARY_PATH. Then prove the
+#     library actually loads (getVersion calls into it; no device or udev needed,
+#     so it's safe in the container), or Trezor would silently find nothing.
+USB1="$(echo "$APPDIR"/usr/python/lib/python*/site-packages/usb1)"
+cp -L "$(ls /usr/lib64/libusb-1.0.so.0 2>/dev/null || ls /usr/lib/libusb-1.0.so.0)" "$USB1/libusb-1.0.so.0"
+PYTHONHOME="$APPDIR/usr/python" "$PY" -c "import usb1, trezorlib; print('DIAG: libusb OK', usb1.getVersion())" \
+    || { echo "FATAL: libusb-1.0 does not load for trezorlib"; exit 1; }
 
 # "verify" variant: bundle a Helios light client (path in QETH_BUNDLE_HELIOS)
 # so previews are proof-verified out of the box; AppRun points

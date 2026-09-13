@@ -151,6 +151,11 @@ jobs:
           echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           echo "signing identity: $IDENTITY"
 
+      # Trezor support talks USB through libusb; qeth.spec bundles this dylib
+      # into the app (users can't be assumed to have Homebrew).
+      - name: Install libusb (Trezor)
+        run: brew install libusb
+
       - name: Build qeth-macos.app
         run: ./dist/macos/build.sh
 
@@ -206,13 +211,16 @@ jobs:
             || { echo "::error::zxingcpp missing"; exit 1; }
           find "$APP" -name 'top_tokens.json' | grep -q . \
             || { echo "::error::bundled top-tokens seed missing"; exit 1; }
+          # Trezor: without the bundled libusb, trezorlib finds no device.
+          find "$APP" -name 'libusb-1.0*.dylib' | grep -q . \
+            || { echo "::error::libusb (Trezor) missing"; exit 1; }
 
           # Pure-Python packages live in the embedded PYZ, not on disk, so
           # check the archive rather than the filesystem: `eth` is py-evm,
           # whose absence would silently cost the pre-broadcast preview.
           uv run --with pyinstaller python -m PyInstaller.utils.cliutils.archive_viewer \
             --list --recursive "$APP/Contents/MacOS/qeth" > /tmp/pyz.txt
-          for mod in web3 "eth\." ledgereth; do
+          for mod in web3 "eth\." ledgereth trezorlib; do
             grep -q "'$mod" /tmp/pyz.txt \
               || { echo "::error::$mod not in the bundle"; exit 1; }
           done

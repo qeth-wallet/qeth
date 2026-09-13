@@ -76,7 +76,9 @@ modules:
       # [simulate] = pure-Python py-evm fork engine (previews on simV1-less
       # RPCs; Helios-verified previews when a helios binary is on the host).
       # [qr] = the air-gapped QR signer decode stack (cbor2 + zxing-cpp + Pillow).
-      - pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location '.[simulate,qr]'
+      # [trezor] = trezorlib (Trezor hardware wallets); its libusb-1.0 comes from
+      # the org.kde.Platform runtime, USB access from --device=all.
+      - pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location '.[simulate,qr,trezor]'
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.desktop ${FLATPAK_DEST}/share/applications/io.github.michwill.qeth.desktop
       - install -Dm644 qeth/assets/logos/qeth-icon-rounded.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.michwill.qeth.metainfo.xml

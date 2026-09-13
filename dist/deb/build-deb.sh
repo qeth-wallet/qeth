@@ -38,7 +38,7 @@ fi
 #    without eth_simulateV1, and Helios-verified previews when the user has
 #    a helios binary installed. [qr] = the air-gapped QR signer decode stack
 #    (cbor2 + zxing-cpp reader + Pillow), vendored as PyPI wheels.
-"$VENV/bin/$PY" -m pip install --no-warn-script-location --no-compile "$REPO[simulate,qr]"
+"$VENV/bin/$PY" -m pip install --no-warn-script-location --no-compile "$REPO[simulate,qr,trezor]"
 
 # 3. Assemble the .deb tree.
 STAGE="$(mktemp -d)/qeth"
@@ -81,7 +81,7 @@ Package: qeth
 Version: $VERSION
 Architecture: amd64
 Maintainer: Michael Egorov <michwill@yieldbasis.com>
-Depends: python3.11, libqt6widgets6, libqt6gui6, libqt6core6, libqt6svg6, libqt6network6, libqt6dbus6, libqt6multimedia6, gstreamer1.0-plugins-good
+Depends: python3.11, libqt6widgets6, libqt6gui6, libqt6core6, libqt6svg6, libqt6network6, libqt6dbus6, libqt6multimedia6, gstreamer1.0-plugins-good, libusb-1.0-0
 Installed-Size: $INSTALLED_KB
 Section: utils
 Priority: optional

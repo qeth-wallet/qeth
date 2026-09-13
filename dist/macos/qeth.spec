@@ -24,6 +24,15 @@ _helios = os.environ.get("QETH_BUNDLE_HELIOS", "").strip()
 if _helios and not Path(_helios).is_file():
     raise SystemExit(f"QETH_BUNDLE_HELIOS is not a file: {_helios}")
 _binaries = [(_helios, ".")] if _helios else []
+# Trezor: python-libusb1 dlopens libusb-1.0 and looks beside its own package
+# first, so bundle Homebrew's dylib into usb1/ (the app can't rely on Homebrew
+# being installed). `brew install libusb` in CI.
+_libusb = next((p for p in ("/opt/homebrew/opt/libusb/lib/libusb-1.0.dylib",
+                            "/usr/local/opt/libusb/lib/libusb-1.0.dylib")
+                if Path(p).is_file()), None)
+if _libusb is None:
+    raise SystemExit("libusb not found — brew install libusb (needed for Trezor)")
+_binaries.append((_libusb, "usb1"))
 _name = "qeth-verify-macos" if _helios else "qeth-macos"
 
 analysis = Analysis(

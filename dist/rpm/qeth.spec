@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.23.1
+Version:        0.24.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -45,6 +45,9 @@ BuildRequires:  python3-ckzg
 # reader. Fedora ships both, so pip vendors nothing extra for it.
 BuildRequires:  python3-cbor2
 BuildRequires:  python3-zxing-cpp
+# Trezor signer (the [trezor] extra): trezorlib talks USB through python-libusb1,
+# which dlopens the system libusb-1.0.
+BuildRequires:  libusb1
 
 # Runtime: pull the same stack from the distro (system Qt -> native theming).
 Requires:       python3
@@ -69,6 +72,8 @@ Requires:       python3-ckzg
 Requires:       python3-cbor2
 Requires:       python3-zxing-cpp
 Requires:       qt6-qtmultimedia
+# Trezor signer: python-libusb1 (vendored with trezorlib) dlopens libusb-1.0.
+Requires:       libusb1
 # qt6ct bridges the user's Qt theme to the app; not strictly required.
 Recommends:     qt6ct
 
@@ -94,8 +99,8 @@ python3 -m venv --system-site-packages %{_builddir}/qeth-venv
 # RPCs without eth_simulateV1, and Helios-verified previews when the user
 # has a helios binary installed. [qr] adds the air-gapped QR signer decode
 # stack (cbor2 + zxing-cpp) — both satisfied by the system BuildRequires, so
-# nothing extra is vendored.
-%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile '.[simulate,qr]'
+# nothing extra is vendored. [trezor] adds trezorlib (Trezor hardware wallets).
+%{_builddir}/qeth-venv/bin/python -m pip install --no-warn-script-location --no-compile '.[simulate,qr,trezor]'
 
 VENDOR=%{buildroot}%{_prefix}/lib/%{name}/vendor
 install -d "$VENDOR"
@@ -130,6 +135,21 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Sep 13 2026 Michael Egorov <michwill@yieldbasis.com> - 0.24.0-1
+- Trezor hardware wallets: add accounts (BIP44 / Ledger Live / Legacy) and sign
+  transactions, messages and EIP-712 typed data; passphrase wallets get their
+  own branch. Adds the [trezor] extra (trezorlib) and Requires libusb1
+- Transaction history and token discovery use Blockscout's REST v2 API when no
+  Etherscan key is set — the keyless v1 API now allows only 10 requests an hour
+- Transactions tab keeps known history on screen when the explorer fails, and
+  only asks it for history it doesn't have (new sends are found by nonce)
+- ENS: names are discovered from four sources, and a gap in one indexer no
+  longer forgets a name
+- Tokens: held tokens are re-priced even when discovery misses them; the
+  selected token stays selected across a refresh
+- JSON-RPC: wallet-namespaced methods are never proxied to the chain RPC
+- Long status messages wrap instead of squeezing the Wallets column
+
 * Sun Aug 09 2026 Michael Egorov <michwill@yieldbasis.com> - 0.23.1-1
 - ENS: record/transfer/subdomain buttons were greyed out for accounts that
   can sign — the gate keyed on a hardcoded signer allowlist that omitted

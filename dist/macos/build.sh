@@ -13,9 +13,10 @@ cd "$qeth_repo_root"
 # the pre-broadcast event preview on RPCs without eth_simulateV1 — dropping it
 # would silently cost Mac users that check. `frame` stays out, as it does
 # there: it's only the Frame-export import path, and it drags in Rust-built
-# cryptography.
+# cryptography. `trezor` is trezorlib for Trezor hardware wallets; its libusb
+# dylib is bundled by qeth.spec (from Homebrew's libusb).
 exec uv run --isolated --no-dev \
-    --extra bundled --extra simulate --extra qr --group macos-build \
+    --extra bundled --extra simulate --extra qr --extra trezor --group macos-build \
     pyinstaller --noconfirm --clean \
     --distpath=dist/macos/out --workpath=dist/macos/out/build \
     "$@" dist/macos/qeth.spec

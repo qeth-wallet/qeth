@@ -1,8 +1,8 @@
 # qeth
 
-A Qt (PySide6) Ethereum wallet for the Linux desktop — hardware-wallet (Ledger)
-support and a Frame-compatible JSON-RPC server on `127.0.0.1:1248`, so the Frame
-browser extension and dapps connect unchanged.
+A Qt (PySide6) Ethereum wallet for the Linux desktop — hardware-wallet (Ledger,
+Trezor, air-gapped QR) support and a Frame-compatible JSON-RPC server on
+`127.0.0.1:1248`, so the Frame browser extension and dapps connect unchanged.
 
 ![qeth wallet](docs/images/app-screenshot.png)
 
@@ -118,6 +118,8 @@ Optional feature extras (append to the `uv sync` line):
   signing, works without it.
 - `--extra simulate` — transaction-preview simulation on RPCs that lack
   `eth_simulateV1` (pure-Python py-evm). Degrades to "no preview" if absent.
+- `--extra trezor` — Trezor hardware wallets (trezorlib; needs the system
+  `libusb-1.0`). Without it the Trezor add/sign flows say how to install it.
 
 Contributors: drop `--no-dev` to also get the test/lint/type toolchain
 (pytest, mypy, ruff, ty) — see CLAUDE.md.
@@ -199,6 +201,9 @@ app still works; the two are versioned together, not locked together.
 ## Notes
 
 - Config and caches live in `~/.qeth/`.
+- Hardware wallets need USB access for your user: on Linux install the vendor's
+  udev rules — [Trezor](https://data.trezor.io/udev/51-trezor.rules), and
+  Ledger's `20-hw1.rules` — if your distro doesn't already ship them.
 - The native `.rpm`/`.deb` give native theming because they use the system Qt;
   the Flatpak/AppImage are portable but ship their own Qt.
 - Packaging recipes: [`dist/rpm/`](dist/rpm/), [`dist/deb/`](dist/deb/),

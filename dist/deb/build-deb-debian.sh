@@ -44,7 +44,7 @@ echo ">> qeth $VERSION  LMDE/Debian-13 build  (venv: $VENV  out: $OUT)"
 #    QR signer decode stack (cbor2 + zxing-cpp reader + Pillow).
 "$PY" -m venv "$VENV"
 "$VENV/bin/python" -m pip install -q --upgrade pip
-"$VENV/bin/python" -m pip install --no-warn-script-location --no-compile "$REPO[simulate,qr]"
+"$VENV/bin/python" -m pip install --no-warn-script-location --no-compile "$REPO[simulate,qr,trezor]"
 # The venv's real site-packages (lib/python3.13/..., not lib/python3/...) —
 # ask the venv rather than constructing it from $PY.
 SITE="$("$VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
@@ -94,7 +94,7 @@ Package: qeth
 Version: $VERSION
 Architecture: amd64
 Maintainer: Michael Egorov <michwill@yieldbasis.com>
-Depends: python3 (>= 3.13), python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, python3-pyside6.qtmultimedia, gstreamer1.0-plugins-good
+Depends: python3 (>= 3.13), python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, python3-pyside6.qtmultimedia, gstreamer1.0-plugins-good, libusb-1.0-0
 Installed-Size: $INSTALLED_KB
 Section: utils
 Priority: optional

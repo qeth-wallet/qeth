@@ -76,7 +76,7 @@ emaint sync -r qeth-gentoo
 emerge --autounmask-write -av net-p2p/qeth   # apply the printed USE/keyword changes, then re-run
 ```
 
-Optional features are USE flags (`simulate helios qr frame ledger` default on;
+Optional features are USE flags (`simulate helios qr frame ledger trezor` default on;
 `falkon chromium firefox` default off) — details in the
 [overlay README](https://github.com/qeth-wallet/qeth-gentoo#readme).
 

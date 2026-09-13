@@ -47,3 +47,6 @@ dist/flatpak/helios
 dist/flatpak/.qeth-verify.yml
 
 /resume
+
+# coverage.py data file (pytest --cov)
+.coverage

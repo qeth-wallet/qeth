@@ -232,3 +232,106 @@ class TestRoutedTokenSourceCooldown:
         r = RoutedTokenSource(primary, secondary, cooldown=2.0, clock=clk)
         assert r.list_balances(ETH, ADDR) == ["blockscout"]
         assert primary.calls == 1 and secondary.calls == 1
+
+
+# --- Blockscout REST v2 (keyless) -----------------------------------------
+
+def _v2_token_row(i: int, **token_over) -> dict:
+    """One `/api/v2/addresses/{addr}/tokens` item, as served (trimmed)."""
+    return {
+        "token": {"address_hash": f"0x{i:040X}", "symbol": f"T{i}",
+                  "name": f"Token {i}", "decimals": "18", "type": "ERC-20",
+                  **token_over},
+        "token_id": None, "token_instance": None,
+        "value": str(10**18 + i),
+    }
+
+
+def _install_v2_pages(monkeypatch, pages, capture):
+    """Serve ``pages`` in order, chained by a ``next_page_params`` cursor that
+    (like the real /tokens one) carries a null ``fiat_value``."""
+    def _fake_urlopen(req, timeout=None):
+        n = len(capture)
+        capture.append(req.full_url)
+        nxt = ({"id": 1000 + n, "value": "5", "fiat_value": None,
+                "items_count": 50 * (n + 1)}
+               if n + 1 < len(pages) else None)
+        return _FakeResp(json.dumps(
+            {"items": pages[n], "next_page_params": nxt}).encode())
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+
+class TestBlockscoutV2Source:
+    def test_walks_every_page_on_v2(self, monkeypatch):
+        from qeth.token_discovery import BlockscoutSource
+        urls: list[str] = []
+        pages = [[_v2_token_row(i) for i in range(50)],
+                 [_v2_token_row(i) for i in range(50, 73)]]
+        _install_v2_pages(monkeypatch, pages, urls)
+        out = BlockscoutSource().list_balances(ETH, ADDR)
+        assert len(out) == 73
+        assert out[0].contract == f"0x{0:040X}"
+        assert out[0].symbol == "T0" and out[0].decimals == 18
+        assert out[0].balance_raw == 10**18
+        assert urls[0] == (f"https://eth.blockscout.com/api/v2/addresses/"
+                           f"{ADDR}/tokens?type=ERC-20")
+        # The cursor rides along with the filter; its null field is dropped
+        # (the API 422s on fiat_value=None).
+        assert "type=ERC-20" in urls[1] and "id=1000" in urls[1]
+        assert "fiat_value" not in urls[1]
+
+    def test_skips_non_erc20_and_bad_rows(self, monkeypatch):
+        from qeth.token_discovery import BlockscoutSource
+        pages = [[_v2_token_row(1, type="ERC-721"),
+                  {"token": None, "value": "1"},
+                  _v2_token_row(2, decimals="oops"),
+                  _v2_token_row(3, decimals=None)]]
+        _install_v2_pages(monkeypatch, pages, [])
+        out = BlockscoutSource().list_balances(ETH, ADDR)
+        assert [b.symbol for b in out] == ["T3"]
+        assert out[0].decimals == 18                  # null → 18, as v1 did
+
+    def test_page_cap_stops_and_warns(self, monkeypatch, caplog):
+        from qeth.token_discovery import BlockscoutSource
+        urls: list[str] = []
+        pages = [[_v2_token_row(p * 50 + i) for i in range(50)]
+                 for p in range(4)]
+        _install_v2_pages(monkeypatch, pages, urls)
+        src = BlockscoutSource()
+        src.MAX_PAGES = 2
+        with caplog.at_level(logging.WARNING,
+                             logger="qeth.token_discovery.sources"):
+            out = src.list_balances(ETH, ADDR)
+        assert len(out) == 100 and len(urls) == 2
+        assert any("page cap" in r.message for r in caplog.records)
+
+    def test_error_body_raises_source_error(self, monkeypatch):
+        from qeth.token_discovery import BlockscoutSource, TokenSourceError
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda req, timeout=None: _FakeResp(
+                json.dumps({"message": "Invalid address hash"}).encode()))
+        with pytest.raises(TokenSourceError, match="Invalid address"):
+            BlockscoutSource().list_balances(ETH, ADDR)
+
+    def test_empty_holder(self, monkeypatch):
+        from qeth.token_discovery import BlockscoutSource
+        _install_v2_pages(monkeypatch, [[]], [])
+        assert BlockscoutSource().list_balances(ETH, ADDR) == []
+
+
+class TestBlockscoutV2Items:
+    def test_pages_are_fetched_lazily(self):
+        from qeth.token_discovery import blockscout_v2_items
+        urls: list[str] = []
+
+        def fetch(url):
+            urls.append(url)
+            return json.dumps({"items": [{"n": len(urls)}],
+                               "next_page_params": {"k": len(urls)}}).encode()
+        it = blockscout_v2_items(fetch, "https://x/api/v2/l", {"f": "a"},
+                                 error=ValueError)
+        assert next(it) == {"n": 1}
+        assert len(urls) == 1                 # page 2 not fetched until pulled
+        assert next(it) == {"n": 2}
+        assert urls[1] == "https://x/api/v2/l?f=a&k=1"

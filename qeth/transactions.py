@@ -22,7 +22,10 @@ from collections.abc import Callable
 
 from . import USER_AGENT
 from .chains import Chain
-from .token_discovery import BLOCKSCOUT_INSTANCES, ETHERSCAN_V2_CHAINS, ETHERSCAN_V2_BASE
+from .token_discovery import (
+    BLOCKSCOUT_INSTANCES, ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS,
+    blockscout_v2_items,
+)
 
 
 class TxDirection(enum.Enum):
@@ -381,24 +384,15 @@ class BlockscoutTransactionSource(TransactionSource):
         if before_block is not None:
             params.update(block_number=int(before_block) + 1, index=0)
         out: list[Transaction] = []
-        while True:
-            raw = self._transport(
-                endpoint + "?" + urllib.parse.urlencode(params), self.timeout)
-            data = json.loads(raw)
-            items = data.get("items") if isinstance(data, dict) else None
-            if not isinstance(items, list):
-                detail = data.get("message") if isinstance(data, dict) else None
-                raise TransactionSourceError(detail or "blockscout error")
-            for entry in items:
-                tx = (_parse_blockscout_v2_tx(entry, chain.chain_id)
-                      if isinstance(entry, dict) else None)
-                if tx is not None:
-                    out.append(tx)
-            # Stop once the page is full, or the history has no more rows.
-            nxt = data.get("next_page_params")
-            if len(out) >= skip + limit or not isinstance(nxt, dict):
-                return out[skip:skip + limit]
-            params = nxt
+        for entry in blockscout_v2_items(
+                lambda url: self._transport(url, self.timeout),
+                endpoint, params, error=TransactionSourceError):
+            tx = _parse_blockscout_v2_tx(entry, chain.chain_id)
+            if tx is not None:
+                out.append(tx)
+                if len(out) >= skip + limit:
+                    break            # page full — fetch no further v2 page
+        return out[skip:]
 
 
 # keccak256("Approval(address,address,uint256)") — the ERC-20 Approval event.

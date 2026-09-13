@@ -2,11 +2,10 @@
 
 The wallet asks a ``TokenSource`` to enumerate the ERC-20 tokens an
 address holds (with current balances). Sources are pluggable so we can
-mix providers per chain or stack them with fallbacks; today the only
-implementation is Blockscout's Etherscan-compatible v1 API.
+mix providers per chain or stack them with fallbacks: Etherscan v2 (keyed)
+in front of Blockscout's REST v2 API (keyless).
 
-Future sources to add: Etherscan V2 multichain (account/tokentx +
-multicall3 balanceOf), Alchemy ``alchemy_getTokenBalances``, Covalent.
+Future sources to add: Alchemy ``alchemy_getTokenBalances``, Covalent.
 """
 
 import json
@@ -16,6 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -82,6 +82,40 @@ BLOCKSCOUT_INSTANCES: dict[int, str] = {
     239:   "https://explorer.tac.build",
 }
 
+# Keyless, Blockscout's Etherscan-compatible v1 ``/api`` allows 10 requests per
+# clock hour per IP per instance (probed 2026-09-13) — too few for even one
+# discovery sweep — while REST v2 ``/api/v2/...`` allows ~180 per 30 s. So the
+# recurring keyless reads (token list, tx history) go through v2.
+
+
+def blockscout_v2_items(fetch: Callable[[str], bytes], url: str,
+                        params: dict[str, object], *,
+                        error: type[Exception],
+                        max_pages: int | None = None) -> Iterator[dict]:
+    """Yield the rows of a Blockscout REST v2 list endpoint, page after page.
+
+    v2 pages are a fixed 50 rows chained by a ``next_page_params`` keyset
+    cursor, sent back alongside the caller's own ``params`` — minus its null
+    fields, which the API rejects as a literal "None" (``fiat_value`` on
+    ``/tokens``). Pages are fetched lazily, so a caller that stops pulling
+    fetches no further page. Stops at the last page or after ``max_pages``; a
+    body without an ``items`` list raises ``error``."""
+    query = dict(params)
+    pages = 0
+    while True:
+        data = json.loads(fetch(url + "?" + urllib.parse.urlencode(query)))
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            detail = data.get("message") if isinstance(data, dict) else None
+            raise error(detail or "blockscout error")
+        yield from (row for row in items if isinstance(row, dict))
+        pages += 1
+        cursor = data.get("next_page_params")
+        if not isinstance(cursor, dict) or (
+                max_pages is not None and pages >= max_pages):
+            return
+        query = {**params, **{k: v for k, v in cursor.items() if v is not None}}
+
 
 # Chains whose tokenlist endpoint Etherscan v2 services. The
 # unified API covers ~50 chains under one key
@@ -106,9 +140,7 @@ ETHERSCAN_PAGE_CAP = 10000
 class EtherscanV2Source(TokenSource):
     """Etherscan v2 unified-multichain tokenlist endpoint.
 
-    Same Etherscan v1 response schema as Blockscout, so the parsing
-    block below mirrors ``BlockscoutSource.list_balances`` line for
-    line — only the URL shape differs. Requires a global API key
+    Requires a global API key
     (one key covers every chain Etherscan v2 supports); the key is
     fetched dynamically via ``get_api_key`` so the user can paste
     it at runtime without re-instantiating the plugin.
@@ -292,10 +324,16 @@ class RoutedTokenSource(TokenSource):
 
 
 class BlockscoutSource(TokenSource):
-    """Etherscan-compatible ``/api?module=account&action=tokenlist`` endpoint.
+    """Blockscout REST v2 ``/api/v2/addresses/{addr}/tokens?type=ERC-20`` —
+    the ERC-20s an address holds (NFTs are filtered out server-side for the
+    wallet's fungible-balances view).
 
-    Filters the result to ERC-20 tokens (NFTs/ERC-721/1155 are skipped for
-    the wallet's fungible-balances view)."""
+    v2, not v1 ``tokenlist``: see ``blockscout_v2_items``. It pages 50 rows at a
+    time (a ~470-token account is 10 requests, ~6 s), priced holdings first by
+    USD value, then the rest by raw balance — so ``MAX_PAGES`` only ever cuts an
+    unpriced, spam-flooded tail, and says so in the log."""
+
+    MAX_PAGES = 50
 
     def __init__(
         self,
@@ -314,39 +352,44 @@ class BlockscoutSource(TokenSource):
             raise UnsupportedChain(
                 f"No Blockscout instance configured for chain {chain.chain_id}"
             )
-        url = (
-            f"{base.rstrip('/')}/api?module=account&action=tokenlist"
-            f"&address={urllib.parse.quote(address)}"
-        )
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            data = json.loads(r.read())
-
-        # Etherscan-compatible: status "0" / "No tokens found" is a valid
-        # empty result, not an error.
-        if data.get("status") != "1":
-            msg = (data.get("message") or "").lower()
-            if "no tokens" in msg or "not found" in msg:
-                return []
-            raise TokenSourceError(data.get("message") or "blockscout error")
+        def fetch(url: str) -> bytes:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return r.read()
 
         out: list[TokenBalance] = []
-        for entry in data.get("result") or []:
-            t_type = (entry.get("type") or "").upper().replace("-", "")
-            if t_type and t_type != "ERC20":
-                continue  # skip ERC-721 / ERC-1155 for the fungible view
-            try:
-                decimals_raw = entry.get("decimals") or "18"
-                out.append(TokenBalance(
-                    contract=entry["contractAddress"],
-                    symbol=entry.get("symbol") or "?",
-                    name=entry.get("name") or "",
-                    decimals=int(decimals_raw) if decimals_raw != "" else 18,
-                    balance_raw=int(entry.get("balance") or 0),
-                ))
-            except (KeyError, ValueError):
+        rows = 0
+        for entry in blockscout_v2_items(
+                fetch,
+                f"{base.rstrip('/')}/api/v2/addresses/"
+                f"{urllib.parse.quote(address)}/tokens",
+                {"type": "ERC-20"},
+                error=TokenSourceError, max_pages=self.MAX_PAGES):
+            rows += 1
+            token = entry.get("token")
+            if not isinstance(token, dict):
                 continue
+            t_type = (token.get("type") or "").upper().replace("-", "")
+            if t_type and t_type != "ERC20":
+                continue  # belt-and-braces: the query already asks for ERC-20
+            try:
+                decimals_raw = token.get("decimals") or "18"
+                out.append(TokenBalance(
+                    contract=token["address_hash"],
+                    symbol=token.get("symbol") or "?",
+                    name=token.get("name") or "",
+                    decimals=int(decimals_raw),
+                    balance_raw=int(entry.get("value") or 0),
+                ))
+            except (KeyError, ValueError, TypeError):
+                continue
+        if rows >= self.MAX_PAGES * 50:
+            log.warning(
+                "blockscout token list hit the %d-page cap for %s on chain %d "
+                "— the least valuable holdings beyond it are truncated",
+                self.MAX_PAGES, address, chain.chain_id,
+            )
         return out

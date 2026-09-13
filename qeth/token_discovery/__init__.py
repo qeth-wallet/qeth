@@ -23,6 +23,7 @@ from .sources import (
     TokenSource,
     TokenSourceError,
     UnsupportedChain,
+    blockscout_v2_items,
 )
 from .tokenlists import (
     CoinGeckoPerChain,
@@ -43,7 +44,7 @@ __all__ = [
     "TokenSource", "TokenBalance", "TokenSourceError", "RateLimited",
     "UnsupportedChain", "RoutedTokenSource", "EtherscanV2Source",
     "BlockscoutSource", "BLOCKSCOUT_INSTANCES", "ETHERSCAN_V2_BASE",
-    "ETHERSCAN_V2_CHAINS", "ETHERSCAN_PAGE_CAP",
+    "ETHERSCAN_V2_CHAINS", "ETHERSCAN_PAGE_CAP", "blockscout_v2_items",
     # tokenlists
     "TokenLists", "TokenListEntry", "TokenListSource", "CoinGeckoPerChain",
     "Curve", "OneInch", "UniswapDefault",

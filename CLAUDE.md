@@ -342,11 +342,13 @@ restarts. UI changes persist; RPC chain switches are session-only.
   per instance** (all modules share it; probed 2026-09-13 via the
   `x-ratelimit-*` headers — Blockscout is retiring the per-instance API for
   its keyed PRO API). REST **v2** (`/api/v2/...`) still allows ~180 per 30 s,
-  so tx history uses `/api/v2/addresses/{addr}/transactions?filter=from`
-  (keyset-paged, 50 rows; `block_number=N+1&index=0` = at or below block N).
-  The remaining v1 callers (activity `tokentx`/`txlistinternal`, `getabi`,
-  `tokenlist`, the approvals/transfer `getLogs`) degrade to 429 without an
-  Etherscan key.
+  so the recurring reads use it via `token_discovery.blockscout_v2_items`
+  (keyset-paged 50 rows; null cursor fields must be dropped): tx history
+  `/api/v2/addresses/{addr}/transactions?filter=from`
+  (`block_number=N+1&index=0` = at or below block N) and token discovery
+  `/api/v2/addresses/{addr}/tokens?type=ERC-20`. The remaining v1 callers
+  (activity `tokentx`/`txlistinternal`, `getabi`, the approvals/vault-
+  provenance `getLogs`) degrade to 429 without an Etherscan key.
 - **Blockscout metadata service** (`metadata.services.blockscout.com/api/v1/metadata?addresses=…&chainId=…`)
   — the Open Labels Initiative dataset. Public address name-tags
   ("AladdinDAO: Deployer", "Binance: Hot Wallet"), **free + keyless**,

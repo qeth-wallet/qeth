@@ -305,6 +305,48 @@ def parse_typed_data_params(
     )
 
 
+def signed_eip1559_tx(
+    req: SigningRequest, chain_id: int, v: int, r: int, s: int,
+) -> bytes:
+    """The raw EIP-2718 type-2 tx for ``req`` carrying a device's signature, for
+    a signer that returns ``(v, r, s)`` rather than the encoded tx (QR, Trezor).
+    ``v`` may come as the 0/1 y-parity or 27/28; both are normalised. eth-account's
+    encoder yields bytes identical to a locally-signed tx."""
+    from eth_account.typed_transactions import TypedTransaction
+    from eth_utils import to_bytes
+    return TypedTransaction.from_dict({
+        "type": 2,
+        "chainId": chain_id,
+        "nonce": req.nonce,
+        "maxPriorityFeePerGas": req.max_priority_fee_per_gas,
+        "maxFeePerGas": req.max_fee_per_gas,
+        "gas": req.gas,
+        # eth-account rejects a non-checksummed recipient; qeth may hold one
+        # lowercased. "" = contract creation.
+        "to": to_checksum_address(req.to_addr) if req.to_addr else "",
+        "value": req.value_wei,
+        "data": to_bytes(hexstr=req.data or "0x"),
+        "accessList": [],
+        "v": v - 27 if v >= 27 else v,
+        "r": r, "s": s,
+    }).encode()
+
+
+def signed_legacy_tx(req: SigningRequest, v: int, r: int, s: int) -> bytes:
+    """The raw legacy (pre-2718) tx ``rlp([nonce, gasPrice, gas, to, value,
+    data, v, r, s])``. ``v`` must already carry the EIP-155 chain offset
+    (``chain_id * 2 + 35/36``) — it's part of what was signed."""
+    import rlp
+    from eth_utils import to_bytes
+    if req.nonce is None or req.gas is None or req.gas_price is None:
+        raise SignerError("gas, nonce and gas price must be set before signing")
+    return rlp.encode([
+        req.nonce, req.gas_price, req.gas,
+        to_bytes(hexstr=req.to_addr) if req.to_addr else b"",
+        req.value_wei, to_bytes(hexstr=req.data or "0x"), v, r, s,
+    ])
+
+
 class Signer(ABC):
     """Backend that can produce a signed payload for a given
     request. Three flavours of request:

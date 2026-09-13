@@ -23,6 +23,7 @@ from .signing import (
     SignerError,
     SigningRequest,
     TypedDataSigningRequest,
+    signed_eip1559_tx,
 )
 
 if TYPE_CHECKING:
@@ -156,30 +157,15 @@ class QRSigner(Signer):
     def _assemble_eip1559(
         req: SigningRequest, chain_id: int, signature: bytes,
     ) -> bytes:
-        """Combine the unsigned tx fields with the device's (r, s, v) into the
-        signed EIP-2718 raw tx. eth-account's encoder produces bytes identical to
-        a locally-signed tx (verified in the probe)."""
+        """Combine the unsigned tx fields with the device's 65-byte ``r‖s‖v``
+        into the signed EIP-2718 raw tx."""
         if len(signature) != 65:
             raise SignerError(
                 f"expected a 65-byte signature, got {len(signature)}")
-        r = int.from_bytes(signature[0:32], "big")
-        s = int.from_bytes(signature[32:64], "big")
-        v = signature[64]
-        y_parity = v - 27 if v >= 27 else v   # normalise 27/28 → 0/1
-        from eth_account.typed_transactions import TypedTransaction
-        return TypedTransaction.from_dict({
-            "type": 2,
-            "chainId": chain_id,
-            "nonce": req.nonce,
-            "maxPriorityFeePerGas": req.max_priority_fee_per_gas,
-            "maxFeePerGas": req.max_fee_per_gas,
-            "gas": req.gas,
-            "to": req.to_addr or "",
-            "value": req.value_wei,
-            "data": _data_bytes(req.data),
-            "accessList": [],
-            "v": y_parity, "r": r, "s": s,
-        }).encode()
+        return signed_eip1559_tx(
+            req, chain_id, v=signature[64],
+            r=int.from_bytes(signature[0:32], "big"),
+            s=int.from_bytes(signature[32:64], "big"))
 
     def sign_message(self, req: MessageSigningRequest) -> bytes:
         """personal_sign — the device applies the EIP-191 prefix and hashes the

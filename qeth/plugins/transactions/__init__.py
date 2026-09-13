@@ -2740,9 +2740,13 @@ class TransactionListPanel(QWidget):
         v.addWidget(self.table, 1)
 
         # The empty-state / loading / error label sits stacked under the
-        # table; we toggle visibility based on state.
+        # table; we toggle visibility based on state. Word-wrapped: an
+        # unwrapped QLabel's minimum width is its whole text, so one long
+        # explorer error widened the right column and squeezed the Wallets
+        # column to nothing.
         self.status_lbl = QLabel("")
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_lbl.setWordWrap(True)
         self.status_lbl.setVisible(False)
         v.addWidget(self.status_lbl)
 

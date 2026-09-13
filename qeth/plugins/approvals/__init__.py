@@ -699,6 +699,8 @@ class ApprovalsPanel(QWidget):
         self.addAction(self.act_find)
 
         self.status_lbl = QLabel("")
+        # Wrapped, so a long status line can't set the pane's minimum width.
+        self.status_lbl.setWordWrap(True)
         self.status_lbl.setVisible(False)
         v.addWidget(self.status_lbl)
 

@@ -122,11 +122,16 @@ class FakeEthereum:
 
 
 class FakeSession:
-    def __init__(self, model: str = "Safe 3") -> None:
-        self.client = SimpleNamespace(features=SimpleNamespace(model=model))
+    def __init__(self, model: str = "Safe 3", passphrase: bool = False) -> None:
+        self.client = SimpleNamespace(features=SimpleNamespace(
+            model=model, passphrase_protection=passphrase))
+        self.closed = False
 
     def get_root_fingerprint(self) -> bytes:
         return bytes.fromhex("9bd26194")
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @pytest.fixture
@@ -136,10 +141,13 @@ def device(monkeypatch):
     eth = FakeEthereum()
     eth.opened = 0
     eth.model = "Safe 3"
+    eth.passphrase = False
+    eth.sessions = []
 
     def open_session(conn):
         eth.opened += 1
-        return FakeSession(eth.model)
+        eth.sessions.append(FakeSession(eth.model, eth.passphrase))
+        return eth.sessions[-1]
 
     monkeypatch.setattr(trezor_mod, "_ethereum", lambda: eth)
     monkeypatch.setattr(trezor_mod, "_open_session", open_session)
@@ -210,6 +218,21 @@ def test_refuses_when_the_device_holds_a_different_address(device):
     with pytest.raises(SignerError, match="doesn't hold"):
         TrezorSigner(_account(other)).sign(_req(from_addr=other), _chain())
     assert [c[0] for c in device.calls] == ["get_address"]   # never signed
+
+
+def test_wrong_passphrase_wallet_ends_the_session_so_a_retry_asks_again(device):
+    """A typo'd passphrase opens a different wallet: the holds-check refuses,
+    and must END that session — else every retry reuses the wrong wallet until
+    the device is re-plugged."""
+    device.passphrase = True
+    other = "0x" + "ee" * 20
+    with pytest.raises(SignerError, match="enter that passphrase"):
+        TrezorSigner(_account(other)).sign(_req(from_addr=other), _chain())
+    assert device.sessions[0].closed
+
+    raw = TrezorSigner(_account()).sign(_req(), _chain())    # the retry
+    assert device.opened == 2                  # a new session → passphrase re-asked
+    assert Account.recover_transaction(raw) == _address(N_PATH)
 
 
 def test_missing_fees_or_nonce_fail_before_touching_the_device(device):
@@ -390,6 +413,16 @@ def test_ledger_live_discovery_asks_the_device_per_address(qtbot, device):
     assert [d.address for d in found] == [
         _address([44 | HARDENED, 60 | HARDENED, i | HARDENED, 0, 0]) for i in range(3)]
     assert [c[0] for c in device.calls] == ["get_address"] * 3
+
+
+@pytest.mark.parametrize("scheme", ["BIP44 Standard", "Ledger Live"])
+def test_each_scan_starts_a_fresh_session(qtbot, device, scheme):
+    """The scan is where the user picks which passphrase wallet to import, so
+    it must not reuse whatever wallet a signature last opened."""
+    TrezorSigner(_account()).sign(_req(), _chain())          # session #1 open
+    _discover(scheme, 1)
+    assert device.sessions[0].closed
+    assert device.opened == 2
 
 
 def test_auto_detect_stops_after_consecutive_unused(qtbot, device):

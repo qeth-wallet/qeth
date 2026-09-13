@@ -112,7 +112,15 @@ class _Connection:
         return self.session
 
     def reset(self) -> None:
+        """Drop a session that went stale with the transport (nothing to close)."""
         self.session = None
+
+    def forget(self) -> None:
+        """End the open wallet session — the device forgets its passphrase —
+        so the next job opens a new one and asks for the passphrase again."""
+        if self.session is not None:
+            self.session.close()      # trezorlib swallows a failed EndSession
+            self.session = None
 
     # trezorlib callbacks — run on the Trezor thread, mid-exchange.
 
@@ -184,13 +192,17 @@ def run_trezor_job(
     ui: SignerInteraction | None = None,
     *,
     timeout: float = DEFAULT_DEVICE_TIMEOUT_S,
+    fresh_session: bool = False,
 ) -> T:
     """Run ``fn(session)`` on the Trezor thread with the cached session,
-    reconnecting once if it went stale. Every failure comes back as a
-    ``SignerError`` with a user-facing message."""
+    reconnecting once if it went stale. ``fresh_session`` ends the cached one
+    first, so a passphrase wallet is asked for again. Every failure comes back
+    as a ``SignerError`` with a user-facing message."""
     def job() -> T:
         _CONNECTION.ui = ui
         try:
+            if fresh_session:
+                _CONNECTION.forget()
             try:
                 return fn(_CONNECTION.get())
             except Exception as e:
@@ -308,14 +320,25 @@ def _fingerprint(session: Any) -> str:
 def _require_holds(session: Any, address: str, path: str) -> None:
     """Refuse to sign unless the connected Trezor derives ``address`` at
     ``path`` — a different device, seed or passphrase wallet would otherwise
-    produce a valid signature for the wrong account."""
+    produce a valid signature for the wrong account.
+
+    On a mismatch the cached session is ENDED: it may be the wrong passphrase
+    wallet (a typo opens a different, empty one), and keeping it would refuse
+    every retry until the device was re-plugged. The next attempt asks for the
+    passphrase again."""
     ethereum = _ethereum()
     derived = ethereum.get_address(session, _address_n(path))
-    if derived.lower() != address.lower():
-        raise SignerError(
-            f"This Trezor doesn't hold {address} — it derives {derived} at "
-            f"{path}. Connect the device (and passphrase wallet) that owns "
-            f"{address} and try again.")
+    if derived.lower() == address.lower():
+        return
+    _CONNECTION.forget()
+    if session.client.features.passphrase_protection:
+        hint = ("If it's in a passphrase wallet, try again and enter that "
+                "passphrase — a typo opens a different wallet.")
+    else:
+        hint = f"Connect the Trezor that owns {address} and try again."
+    raise SignerError(
+        f"This Trezor wallet doesn't hold {address} — it derives {derived} "
+        f"at {path}. {hint}")
 
 
 def _signature_v27(signature: bytes) -> bytes:
@@ -440,7 +463,9 @@ class TrezorWorker(QThread):
     ``DiscoveredAccount`` so the add dialog is shared.
 
     BIP44 / Legacy export ONE public node and derive addresses on the host;
-    Ledger Live asks the device for each batch. ``count == 0`` scans until
+    Ledger Live asks the device for each batch. Each scan starts a fresh
+    session, so a passphrase device asks which wallet to read — the one the user
+    means to import, not whichever was open. ``count == 0`` scans until
     ``AUTO_STOP_CONSECUTIVE_ZEROS`` consecutive unused (nonce-0) accounts.
     ``fingerprint`` carries the wallet's root fingerprint before any account."""
 
@@ -480,12 +505,14 @@ class TrezorWorker(QThread):
                 node = ethereum.get_public_node(session, _address_n(parent)).node
                 return _fingerprint(session), bytes(node.public_key), bytes(node.chain_code)
 
-            xfp, pubkey, chain_code = run_trezor_job(read_node, self._ui)
+            xfp, pubkey, chain_code = run_trezor_job(
+                read_node, self._ui, fresh_session=True)
             self.fingerprint.emit(xfp)
             return lambda indices: [
                 derive_address(pubkey, chain_code, [i]) for i in indices]
 
-        self.fingerprint.emit(run_trezor_job(_fingerprint, self._ui))
+        self.fingerprint.emit(
+            run_trezor_job(_fingerprint, self._ui, fresh_session=True))
 
         def on_device(indices: list[int]) -> list[str]:
             def read_addresses(session: Any) -> list[str]:

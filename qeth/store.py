@@ -56,9 +56,9 @@ def _merge_chain(persisted: dict) -> Chain:
 
 
 # Sources whose accounts are grouped into per-device subtrees in the wallet UI
-# (a Ledger/Keystone/Keycard produces many derived addresses). "hot" and
+# (a Ledger/Trezor/Keystone/Keycard produces many derived addresses). "hot" and
 # "watch_only" are flat — a single address each — and never carry a tree.
-_GROUPED_SOURCES = ("ledger", "qr")
+_GROUPED_SOURCES = ("ledger", "trezor", "qr")
 
 
 def _default_tree_label(address: str) -> str:

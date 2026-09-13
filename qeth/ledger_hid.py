@@ -15,110 +15,27 @@ handle never carries between operations.
 
 from __future__ import annotations
 
-import queue
 import sys
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future, TimeoutError
-from dataclasses import dataclass
-from typing import Any, TypeVar, cast
+from concurrent.futures import Future
+from typing import TypeVar
+
+from .device_thread import DEFAULT_DEVICE_TIMEOUT_S, DeviceJobService
 
 T = TypeVar("T")
 
 # Generous: a job can include a human confirming a tx on the device.
-DEFAULT_LEDGER_HID_TIMEOUT_S = 180.0
+DEFAULT_LEDGER_HID_TIMEOUT_S = DEFAULT_DEVICE_TIMEOUT_S
 
 
-@dataclass
-class _QueuedJob:
-    future: Future[Any]
-    fn: Callable[[], Any]
-
-
-class LedgerHidService:
-    """Runs Ledger/HID jobs on one process-lifetime worker thread."""
+class LedgerHidService(DeviceJobService):
+    """Runs Ledger/HID jobs on one process-lifetime worker thread, clearing
+    ledgereth's dongle cache after every job."""
 
     def __init__(self, *, name: str = "qeth-ledger-hid") -> None:
-        self._name = name
-        self._queue: queue.Queue[_QueuedJob | None] = queue.Queue()
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._stopped = False
-
-    def submit(self, fn: Callable[[], T]) -> Future[T]:
-        """Queue ``fn`` for execution on the Ledger HID thread."""
-        future: Future[T] = Future()
-        with self._lock:
-            if self._stopped:
-                raise RuntimeError("Ledger HID service has been stopped")
-            self._ensure_started_locked()
-            # Enqueue INSIDE the lock: shutdown_for_tests also holds it while
-            # setting _stopped and putting the sentinel, so a job can't be
-            # queued after the sentinel (which the worker never drains → the
-            # caller would block for the full timeout).
-            self._queue.put(_QueuedJob(future=cast("Future[Any]", future), fn=fn))
-        return future
-
-    def call(
-        self,
-        fn: Callable[[], T],
-        *,
-        timeout: float = DEFAULT_LEDGER_HID_TIMEOUT_S,
-    ) -> T:
-        """Run ``fn`` on the HID thread and wait for its result.
-
-        The timeout is caller-side only: on timeout we raise but the HID
-        thread keeps running the job to completion (and clears the cache
-        before taking the next), so the device isn't left mid-exchange."""
-        future = self.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError as exc:
-            from .signing import SignerError
-
-            raise SignerError(
-                "Ledger operation timed out. Check the device prompt and "
-                "try again.",
-            ) from exc
-
-    def shutdown_for_tests(self, timeout: float = 5.0) -> None:
-        """Stop the worker thread. Runtime code should not call this — the
-        service lives for the whole process."""
-        with self._lock:
-            self._stopped = True
-            thread = self._thread
-            if thread is not None:
-                self._queue.put(None)
-        if thread is not None:
-            thread.join(timeout=timeout)
-
-    def _ensure_started_locked(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            name=self._name,
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _run(self) -> None:
-        while True:
-            job = self._queue.get()
-            if job is None:
-                return
-            if job.future.cancelled():
-                continue
-            try:
-                result = job.fn()
-            except BaseException as exc:
-                _clear_ledgereth_cache()
-                if not job.future.cancelled():
-                    job.future.set_exception(exc)
-            else:
-                _clear_ledgereth_cache()
-                if not job.future.cancelled():
-                    job.future.set_result(result)
+        super().__init__(
+            name=name, device_label="Ledger", after_job=_clear_ledgereth_cache)
 
 
 def _clear_ledgereth_cache() -> None:

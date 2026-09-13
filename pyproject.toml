@@ -69,6 +69,13 @@ frame = ["cryptography>=42"]
 # PySide6 the flatpak/appimage use). See docs/signers-qr.md. Install with:
 #   uv pip install -e '.[qr]'
 qr = ["cbor2>=5.4", "zxing-cpp>=2", "Pillow>=10"]
+# Trezor hardware-wallet signer (qeth/trezor.py). trezorlib is SatoshiLabs' own
+# library (LGPL-3.0); it talks USB via libusb1 (the system libusb-1.0) and brings
+# a heavy tree (cryptography, construct, noiseprotocol for THP, mnemonic libs),
+# so it's opt-in. Without it the Trezor add/sign flows fail with a clear
+# "install qeth[trezor]" message. Install with:
+#   uv pip install -e '.[trezor]'
+trezor = ["trezor>=0.20.2"]
 
 [dependency-groups]
 dev = [
@@ -88,6 +95,8 @@ dev = [
     "cbor2>=5.4",
     "zxing-cpp>=2",
     "Pillow>=10",
+    # The trezor extra, mirrored so the Trezor signer tests import real trezorlib.
+    "trezor>=0.20.2",
 ]
 
 # Browser-extension dev/test tooling — a SEPARATE opt-in group, deliberately NOT
@@ -202,6 +211,8 @@ files = [
     "qeth/notify.py",
     "qeth/ledger.py",
     "qeth/ledger_hid.py",
+    "qeth/device_thread.py",
+    "qeth/trezor.py",
     "qeth/signing.py",
     "qeth/signers/__init__.py",
     "qeth/signers/base.py",
@@ -210,6 +221,7 @@ files = [
     "qeth/signers/hot.py",
     "qeth/signers/watch_only.py",
     "qeth/signers/qr.py",
+    "qeth/signers/trezor.py",
     "qeth/signer_interaction.py",
     "qeth/qr_signer.py",
     "qeth/qr_scan.py",
@@ -334,6 +346,7 @@ web3 = ["web3", "ens"]
 # zxing-cpp's import name drops the hyphen; Pillow imports as PIL.
 zxing-cpp = ["zxingcpp"]
 Pillow = ["PIL"]
+trezor = ["trezorlib"]
 
 [tool.deptry.per_rule_ignores]
 # DEP001 = imported but undeclared; DEP002 = declared but unused.

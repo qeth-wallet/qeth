@@ -14,6 +14,7 @@ from .base import SignerPlugin
 from .hot import HotWalletSignerPlugin
 from .ledger import LedgerSignerPlugin
 from .qr import QRSignerPlugin
+from .trezor import TrezorSignerPlugin
 from .watch_only import WatchOnlySignerPlugin
 
 # source_id → the singleton plugin. Stateless, so one instance each.
@@ -21,6 +22,7 @@ REGISTRY: dict[str, SignerPlugin] = {
     p.source_id: p
     for p in (
         LedgerSignerPlugin(),
+        TrezorSignerPlugin(),
         HotWalletSignerPlugin(),
         QRSignerPlugin(),
         WatchOnlySignerPlugin(),

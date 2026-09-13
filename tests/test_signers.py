@@ -40,7 +40,7 @@ def _acct(source):
 
 
 def test_registry_has_the_known_sources():
-    assert set(REGISTRY) == {"ledger", "hot", "qr", "watch_only"}
+    assert set(REGISTRY) == {"ledger", "trezor", "hot", "qr", "watch_only"}
     assert all(isinstance(p, SignerPlugin) for p in REGISTRY.values())
     assert all(sid == p.source_id for sid, p in REGISTRY.items())
 
@@ -62,6 +62,20 @@ def test_ledger_plugin_builds_a_ledger_signer():
     signer = p.make_signer(STORE, _acct("ledger"), ui)
     assert isinstance(signer, LedgerSigner)
     assert ui.secret_calls == []                    # no up-front secret
+
+
+def test_trezor_plugin_builds_a_trezor_signer_driving_the_ui():
+    from qeth.trezor import TrezorSigner
+    p = signer_for_source("trezor")
+    assert p is not None
+    assert p.can_sign() is True
+    assert p.display_name == "Trezor"
+    assert p.progress_text                          # a spinner label
+    ui = FakeInteraction()
+    signer = p.make_signer(STORE, {**_acct("trezor"), "path": "44'/60'/0'/0/0"}, ui)
+    assert isinstance(signer, TrezorSigner)
+    assert signer.can_sign(ADDR)
+    assert ui.secret_calls == []                    # nothing asked up front
 
 
 def test_hot_plugin_prompts_then_builds_a_hot_signer():

@@ -69,4 +69,17 @@ DEFAULT_CHAINS: list[Chain] = [
     Chain("BNB Smart Chain", 56, "https://bsc.drpc.org",   "BNB",   "https://bscscan.com",             "binancecoin",
           fallback_rpcs=("https://bsc-rpc.publicnode.com",),
           ws_url=("wss://bsc-rpc.publicnode.com",)),
+    # Robinhood Chain — an Arbitrum Orbit rollup paying gas in ETH. The
+    # ArbSys block-height path in chain.py needs no chain list and the
+    # precompile is present here, so the Orbit heritage is handled already;
+    # Multicall3 is at the canonical address, so token balances work.
+    # Named "Robinhood" (not "Robinhood Chain") deliberately: the chain-icon
+    # fallback derives a Curve slug from the display name, and
+    # curve-assets/chains/robinhood.png exists — so it gets a logo with no
+    # bundled PNG. Reading it needs an Etherscan key: its Blockscout API is
+    # behind a Cloudflare challenge (see ETHERSCAN_V2_CHAINS).
+    Chain("Robinhood", 4663, "https://robinhood.drpc.org", "ETH",   "https://robin.etherscan.io",      "ethereum",
+          fallback_rpcs=("https://robinhood-rpc.publicnode.com",
+                         "https://rpc.mainnet.chain.robinhood.com"),
+          ws_url=("wss://robinhood.drpc.org", "wss://robinhood-rpc.publicnode.com")),
 ]

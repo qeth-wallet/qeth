@@ -190,6 +190,10 @@ class CoinGeckoPerChain(TokenListSource):
         42161: "arbitrum-one",
         8453:  "base",
         43114: "avalanche",
+        # Robinhood Chain. This map is what feeds ``is_known`` — the gate a
+        # token must pass to be shown at all — so without an entry the chain's
+        # tokens stay invisible even once discovery returns them.
+        4663:  "robinhood",
     }
 
     def fetch_entries(self, cache_dir, ttl, timeout):

@@ -41,6 +41,9 @@ DEFILLAMA_CHAIN_SLUGS: dict[int, str] = {
     8453:  "base",
     42161: "arbitrum",
     43114: "avax",
+    # Robinhood Chain (chain id 4663) — slug verified against coins.llama.fi
+    # on 2026-09-20 (it quotes USDG, the chain's main stablecoin).
+    4663:  "robinhood",
 }
 
 

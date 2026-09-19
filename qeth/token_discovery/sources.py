@@ -125,6 +125,14 @@ def blockscout_v2_items(fetch: Callable[[str], bytes], url: str,
 # checked. Extend as new defaults land.
 ETHERSCAN_V2_CHAINS: frozenset[int] = frozenset({
     1, 10, 56, 100, 137, 8453, 42161, 43114,
+    # Robinhood Chain (Arbitrum Orbit, ETH for gas). Not a DEFAULT_CHAIN —
+    # added via chainlist — but Etherscan v2 routes it (its /v2/chainlist
+    # reports status 1, and a keyless call answers "Missing/Invalid API Key"
+    # rather than "unsupported chainid"), verified 2026-09-20. It has NO usable
+    # Blockscout: robinhoodchain.blockscout.com serves every API path behind a
+    # Cloudflare JS challenge (403 cf-mitigated: challenge), so a key is the
+    # only way to get history / discovery / approvals on this chain.
+    4663,
 })
 ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 

@@ -45,6 +45,7 @@ COINGECKO_PLATFORMS: dict[int, str] = {
     8453:  "base",
     100:   "xdai",
     56:    "binance-smart-chain",
+    4663:  "robinhood",
 }
 
 _MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"

@@ -34,6 +34,9 @@ from eth_utils import to_checksum_address
 from PySide6.QtCore import QObject, QThread, Signal
 
 from . import QULONGLONG
+from .tron.client import TronClient, TronError, TronTransportError
+from .tron.fees import build_tx
+from .tron.tx import Contract as TronContract, TronTx, recover_signer, signed_transaction
 
 log = logging.getLogger("qeth.signing")
 
@@ -224,6 +227,19 @@ class TypedDataSigningRequest:
     origin: str | None = None
 
 
+@dataclass
+class TronSigningRequest:
+    """A Tron transaction to sign: the fully assembled ``TronTx`` (qeth.tron),
+    TaPoS reference included. The signature is over ``tx.txid()`` —
+    sha256 of the exact ``raw_data`` bytes that get broadcast."""
+    chain_id: int
+    tx: TronTx
+
+    @property
+    def from_addr(self) -> str:
+        return self.tx.owner
+
+
 def parse_personal_sign_params(
     params: list, *, origin: str | None = None,
 ) -> MessageSigningRequest:
@@ -377,6 +393,11 @@ class Signer(ABC):
     @abstractmethod
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
         """Return the 65-byte EIP-712 signature."""
+
+    def sign_tron(self, req: TronSigningRequest) -> bytes:
+        """Return the 65-byte ``r‖s‖v`` signature (v = 27/28) over the Tron
+        txid. Backends that can't sign Tron keep this default."""
+        raise SignerError(f"{type(self).__name__} can't sign Tron transactions")
 
 
 class SignerBridge(QObject):
@@ -574,6 +595,77 @@ class SignAndBroadcastWorker(QThread):
             tx_hash = "0x" + keccak(bytes.fromhex(raw_hex[2:])).hex()
             first_push_ok = False
         self.broadcast.emit(tx_hash, raw_hex, first_push_ok)
+
+
+class TronSignAndBroadcastWorker(QThread):
+    """Tron's counterpart of ``SignAndBroadcastWorker``: assemble the
+    transaction with a fresh TaPoS reference (so a long review or a slow
+    device confirmation can't let it expire), sign, check the signature
+    recovers to the sender, broadcast.
+
+    The txid is sha256 of the raw_data, known before broadcast — so a
+    transport failure still records the transaction as pending (the watcher
+    re-broadcasts it until its expiration), exactly like the EVM path."""
+
+    # (txid 0x-prefixed, signed Transaction hex 0x-prefixed, first push
+    # reached a node) — the same shape as SignAndBroadcastWorker.broadcast.
+    broadcast = Signal(str, object, bool)
+    failed = Signal(str)
+    # The assembled request, emitted before signing — the pending row needs
+    # its expiration and decoded contract.
+    built = Signal(object)
+
+    def __init__(self, signer: Signer, contract: TronContract, chain, *,
+                 fee_limit: int = 0, parent=None):
+        super().__init__(parent)
+        self._signer = signer
+        self._contract = contract
+        self._chain = chain
+        self._fee_limit = fee_limit
+
+    def run(self) -> None:
+        try:
+            client = TronClient(self._chain)
+            tx = build_tx(client, self._contract, fee_limit=self._fee_limit)
+        except TronError as e:
+            self.failed.emit(f"Couldn't prepare the transaction: {e}")
+            return
+        req = TronSigningRequest(chain_id=self._chain.chain_id, tx=tx)
+        self.built.emit(req)
+        try:
+            sig = self._signer.sign_tron(req)
+        except SignerError as e:
+            self.failed.emit(str(e))
+            return
+        except Exception as e:
+            log.exception("tron signer raised unexpectedly")
+            self.failed.emit(f"Signing failed: {e}")
+            return
+        tx_id = tx.txid()
+        try:
+            signer_addr = recover_signer(tx_id, sig)
+        except Exception as e:
+            self.failed.emit(f"The signer returned an invalid signature: {e}")
+            return
+        if signer_addr.lower() != tx.owner.lower():
+            # A device holding a different key, or signing different bytes,
+            # yields a valid-looking signature from the wrong account.
+            self.failed.emit(
+                "The signature doesn't match the sending account — nothing "
+                "was broadcast.")
+            return
+        signed = signed_transaction(tx.raw_data(), [sig])
+        first_push_ok = True
+        try:
+            client.broadcast(signed)
+        except TronTransportError as e:
+            log.warning("first tron broadcast push failed (%s) — recording "
+                        "the tx as pending for watcher re-broadcast", e)
+            first_push_ok = False
+        except TronError as e:
+            self.failed.emit(f"Broadcast failed: {e}")
+            return
+        self.broadcast.emit("0x" + tx_id.hex(), "0x" + signed.hex(), first_push_ok)
 
 
 class SignMessageWorker(QThread):

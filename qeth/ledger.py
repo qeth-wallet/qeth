@@ -159,7 +159,11 @@ class DiscoveredAccount:
     # a wallet that received funds but never signed anything still
     # has nonce 0, and from the user's perspective is effectively
     # uncreated (they've never controlled it from this device).
+    # Tron has no nonce: there it's 1 for an activated account, else 0.
     nonce: int = 0
+    # The chain family the account was derived for (qeth.chains) — Tron
+    # accounts come from coin type 195 and are stored with ``family``.
+    family: str = "evm"
 
 
 class LedgerWorker(QThread):

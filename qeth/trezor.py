@@ -19,6 +19,8 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import io
+
 import requests
 from eth_utils import to_bytes, to_checksum_address
 
@@ -36,16 +38,23 @@ from .ledger import (
     LEGACY,
     DiscoveredAccount,
 )
+from .address import tron_from_hex, tron_to_hex
 from .qr.derive import derive_address
 from .signing import (
     MessageSigningRequest,
     Signer,
     SignerError,
     SigningRequest,
+    TronSigningRequest,
     TypedDataSigningRequest,
     signed_eip1559_tx,
     signed_legacy_tx,
 )
+from .tron.client import TronClient, TronError
+from .tron.paths import PATH_SCHEMES as TRON_PATH_SCHEMES
+from .tron.tx import TYPE_URL_PREFIX, signature_v27
+
+from .chains import EVM, TRON
 
 if TYPE_CHECKING:
     from .chains import Chain
@@ -74,6 +83,11 @@ _SHARED_PARENT: dict[str, str] = {
     "BIP44 Standard": "44'/60'/0'/0",
     "Legacy": "44'/60'/0'",
 }
+
+# Tron accounts (qeth.tron.paths). The device's Tron app exports no public
+# node, so each Tron address is one device call.
+# Tron needs the core firmware's Tron app — Model T / Safe 3/5/7 on 2.11+.
+_TRON_MIN_FIRMWARE = (2, 11, 0)
 
 
 _SERVICE: DeviceJobService | None = None
@@ -306,6 +320,66 @@ def _ethereum() -> Any:
     return ethereum
 
 
+def _tron() -> Any:
+    """``trezorlib.tron``, typed ``Any`` for the same ParamSpec reason as
+    ``_ethereum``."""
+    from trezorlib import tron
+    return tron
+
+
+def _require_tron_support(session: Any) -> None:
+    """Refuse up front on a device without the Tron app, with a reason the
+    user can act on (instead of the device's bare "unknown message")."""
+    f = session.client.features
+    if f.model == "1":
+        raise SignerError("The Trezor One doesn't support Tron — it needs a "
+                          "Trezor Model T or Safe.")
+    version = (f.major_version, f.minor_version, f.patch_version)
+    if version < _TRON_MIN_FIRMWARE:
+        raise SignerError(
+            "Tron needs Trezor firmware 2.11.0 or newer (this device runs "
+            f"{'.'.join(map(str, version))}). Update it in Trezor Suite.")
+
+
+def _trezor_tron_encoding(tx: Any, contract: Any) -> bytes:
+    """The raw_data bytes the firmware will build and sign from ``tx`` +
+    ``contract`` (it re-serializes; it never signs the host's bytes). Reuses
+    trezorlib's own protobuf encoder, which matches the firmware's."""
+    from trezorlib import messages, protobuf
+    kind = {
+        messages.TronTransferContract: "TransferContract",
+        messages.TronTriggerSmartContract: "TriggerSmartContract",
+    }.get(type(contract))
+    if kind is None:
+        raise SignerError(f"unsupported Tron contract {type(contract).__name__}")
+    value = io.BytesIO()
+    protobuf.dump_message(value, contract)
+    raw = messages.TronRawTransaction(
+        ref_block_bytes=tx.ref_block_bytes, ref_block_hash=tx.ref_block_hash,
+        expiration=tx.expiration, timestamp=tx.timestamp,
+        fee_limit=tx.fee_limit, data=tx.data,
+        contract=[messages.TronRawContract(
+            type=getattr(messages.TronRawContractType, kind),
+            parameter=messages.TronRawParameter(
+                type_url=TYPE_URL_PREFIX + kind, value=value.getvalue()))])
+    out = io.BytesIO()
+    protobuf.dump_message(out, raw)
+    return out.getvalue()
+
+
+def _require_holds_tron(session: Any, address: str, path: str) -> None:
+    """``_require_holds`` for a Tron account: the device must derive
+    ``address`` at ``path`` through its Tron app."""
+    derived = _tron().get_address(session, _address_n(path))
+    if (tron_to_hex(derived) or "").lower() == address.lower():
+        return
+    _CONNECTION.forget()
+    raise SignerError(
+        f"This Trezor wallet doesn't hold {tron_from_hex(address)} — it derives "
+        f"{derived} at {path}. If it's in a passphrase wallet, try again and "
+        f"enter that passphrase.")
+
+
 def _address_n(path: str) -> list[int]:
     from trezorlib.tools import parse_path
     return parse_path(path if path.startswith("m/") else f"m/{path}")
@@ -453,6 +527,30 @@ class TrezorSigner(Signer):
 
         return _signature_v27(self._run(job))
 
+    def sign_tron(self, req: TronSigningRequest) -> bytes:
+        """A Tron transaction, via the firmware's Tron app. The device shows
+        and signs ITS OWN re-encoding of the fields it's sent, so the fields
+        are taken from our raw_data and the device's encoding is checked
+        against it first: a field the firmware would drop (``call_value``
+        before 2.12.5) is refused here instead of producing a signature over
+        some other transaction."""
+        path = self._path()
+        raw = req.tx.raw_data()
+
+        def job(session: Any) -> bytes:
+            tron = _tron()
+            _require_tron_support(session)
+            _require_holds_tron(session, req.from_addr, path)
+            tx, contract = tron.from_raw_data(raw)
+            if _trezor_tron_encoding(tx, contract) != raw:
+                raise SignerError(
+                    "This Trezor can't sign this Tron transaction exactly as "
+                    "built (a field its firmware doesn't support).")
+            return bytes(tron.sign_tx(
+                session, tx, contract, _address_n(path)).signature)
+
+        return signature_v27(self._run(job))
+
 
 # --- account discovery -------------------------------------------------------
 
@@ -483,7 +581,7 @@ class TrezorWorker(QThread):
         self._ui = ui
 
     def run(self) -> None:
-        template = PATH_SCHEMES.get(self._scheme)
+        template = PATH_SCHEMES.get(self._scheme) or TRON_PATH_SCHEMES.get(self._scheme)
         if template is None:
             self.failed.emit(f"Unknown derivation scheme: {self._scheme}")
             return
@@ -495,9 +593,36 @@ class TrezorWorker(QThread):
             return
         self.finished_ok.emit()
 
+    @property
+    def _is_tron(self) -> bool:
+        return self._scheme in TRON_PATH_SCHEMES
+
     def _address_source(self, template: str) -> Callable[[list[int]], list[str]]:
         """Read the fingerprint (and the shared node, when the scheme has one)
         in one device job; return how to get the addresses for some indices."""
+        if self._is_tron:
+            def tron_fingerprint(session: Any) -> str:
+                _require_tron_support(session)
+                return _fingerprint(session)
+
+            self.fingerprint.emit(
+                run_trezor_job(tron_fingerprint, self._ui, fresh_session=True))
+
+            def tron_addresses(indices: list[int]) -> list[str]:
+                def read(session: Any) -> list[str]:
+                    tron = _tron()
+                    out = []
+                    for i in indices:
+                        t = tron.get_address(session, _address_n(template.format(i=i)))
+                        addr = tron_to_hex(t)
+                        if addr is None:
+                            raise SignerError(f"The Trezor returned a bad Tron address {t!r}")
+                        out.append(addr)
+                    return out
+                return run_trezor_job(read, self._ui)
+
+            return tron_addresses
+
         parent = _SHARED_PARENT.get(self._scheme)
         if parent is not None:
             def read_node(session: Any) -> tuple[str, bytes, bytes]:
@@ -525,7 +650,14 @@ class TrezorWorker(QThread):
 
     def _scan(self, template: str,
               addresses_for: Callable[[list[int]], list[str]]) -> None:
-        client = EthClient(self._chain) if self._chain is not None else None
+        if self._is_tron:
+            used = self._tron_used_probe()
+        else:
+            client = EthClient(self._chain) if self._chain is not None else None
+
+            def used(address: str) -> int:
+                return self._nonce(client, address)
+        family = TRON if self._is_tron else EVM
         auto = self._count == 0
         cap = AUTO_DETECT_HARD_CAP if auto else self._count
         unused = 0
@@ -533,15 +665,31 @@ class TrezorWorker(QThread):
         while start < cap:
             indices = list(range(start, min(start + AUTO_DETECT_BATCH_SIZE, cap)))
             for index, address in zip(indices, addresses_for(indices)):
-                nonce = self._nonce(client, address)
+                nonce = used(address)
                 self.discovered.emit(DiscoveredAccount(
                     address=address, path=template.format(i=index),
-                    index=index, nonce=nonce))
+                    index=index, nonce=nonce, family=family))
                 if auto:
                     unused = unused + 1 if nonce == 0 else 0
                     if unused >= AUTO_STOP_CONSECUTIVE_ZEROS:
                         return
             start += len(indices)
+
+    def _tron_used_probe(self) -> Callable[[str], int]:
+        """Tron has no nonce: an account counts as used once it's activated
+        (has an on-chain record). Needs a Tron chain to ask; without one every
+        row reads unused rather than failing the scan."""
+        chain = self._chain
+        if chain is None or chain.family != TRON:
+            return lambda address: 0
+        client = TronClient(chain)
+
+        def used(address: str) -> int:
+            try:
+                return 1 if client.get_account(address) else 0
+            except TronError:
+                return 0   # a lookup hiccup shouldn't drop the row
+        return used
 
     @staticmethod
     def _nonce(client: EthClient | None, address: str) -> int:

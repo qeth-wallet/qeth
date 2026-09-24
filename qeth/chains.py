@@ -45,9 +45,12 @@ class Chain:
     # Decimals of the native asset: 18 on every EVM chain (wei), 6 on Tron
     # (sun per TRX).
     native_decimals: int = 18
-    # Base URL of the family's own HTTP API where it has one (TronGrid for
-    # Tron); EVM chains read everything over ``rpc_url``.
+    # Base URL of the family's own HTTP API where it has one (Tron's full-node
+    # /wallet/* API), plus backups tried in order when it fails at the
+    # transport level or rate-limits. EVM chains read everything over
+    # ``rpc_url``.
     api_url: str = ""
+    api_fallbacks: tuple[str, ...] = ()
 
     @property
     def is_evm(self) -> bool:

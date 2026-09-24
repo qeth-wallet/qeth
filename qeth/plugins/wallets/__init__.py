@@ -43,8 +43,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread
 
-from ...address import codec_for
-from ...chains import EVM, Chain
+from ...address import codec_for, parse_any
+from ...chains import EVM, TRON, Chain
+from ...tron.paths import PATH_SCHEMES as TRON_PATH_SCHEMES
 from ...store import account_families
 from ...alerts import confirm, error, info, warn
 from ...dialog import (
@@ -99,7 +100,7 @@ _SECTIONS: list[tuple[str, str, str, bool]] = [
 def _ledger_scheme_label(name: str) -> str:
     """A Ledger scheme name suffixed with its full path template (``i`` = the
     address index) — ``Legacy (m/44'/60'/0'/i)``. Unknown name → unchanged."""
-    template = PATH_SCHEMES.get(name)
+    template = PATH_SCHEMES.get(name) or TRON_PATH_SCHEMES.get(name)
     return f"{name} (m/{template.format(i='i')})" if template else name
 
 
@@ -1692,6 +1693,7 @@ class WalletsPlugin(Plugin):
         discovered = [(d.address, d.path) for d in dlg.discovered_accounts()]
         tid = self._store.resolve_tree("trezor", scheme, discovered, xfp=xfp)
         added_addrs: list[str] = []
+        tron = scheme in TRON_PATH_SCHEMES
         for d in dlg.selected_accounts():
             if tid is None:
                 tid = d.address.lower()
@@ -1703,6 +1705,8 @@ class WalletsPlugin(Plugin):
                 "tree": tid,
                 "label": "",
             }
+            if tron:
+                record["family"] = TRON
             if xfp:
                 record["xfp"] = xfp
             if self._store.add_account(record):
@@ -1714,7 +1718,8 @@ class WalletsPlugin(Plugin):
         if added_addrs and self.host is not None:
             self.host.status_message(
                 f"Added {len(added_addrs)} account(s)", 3000)
-            self._kick_ens_label_lookups(added_addrs)
+            if not tron:     # ENS names EVM addresses only
+                self._kick_ens_label_lookups(added_addrs)
 
     def _add_qr(self) -> None:
         """Import an air-gapped (QR) wallet: scan its account-export QR, derive
@@ -1964,11 +1969,17 @@ class WalletsPlugin(Plugin):
         dlg = AddWatchOnlyDialog(existing, self._container)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        if self._store.add_account(dlg.result_account()):
+        account = dlg.result_account()
+        if self._store.add_account(account):
             self._rebuild_tree()
             self.default_account_changed.emit()
             if self.host is not None:
-                self.host.status_message("Watch-only address added", 3000)
+                shown_here = (self._store.current_chain().family
+                              in account_families(account))
+                self.host.status_message(
+                    "Watch-only address added" if shown_here else
+                    "Watch-only Tron address added — switch to the Tron "
+                    "network to see it", 5000)
 
     def _sign_selected(self) -> None:
         """Sign button → open the compose/sign flow for the selected
@@ -2278,12 +2289,15 @@ class AddLedgerDialog(Dialog):
         # still tick / untick to override.
         if acct.nonce == 0:
             usage = "unused"
+        elif acct.family != EVM:
+            usage = "used"          # Tron: activated (it has no nonce)
         elif acct.nonce == 1:
             usage = "1 tx"
         else:
             usage = f"{acct.nonce} txs"
         already = acct.address.lower() in self._existing
-        label = f"#{acct.index:<3} {acct.address}   {usage}"
+        shown = codec_for(acct.family).display(acct.address)
+        label = f"#{acct.index:<3} {shown}   {usage}"
         if already:
             label += "   (already added)"
         item = QListWidgetItem(label)
@@ -2306,7 +2320,7 @@ class AddLedgerDialog(Dialog):
         # before they tick which to add. Quietly drops if nothing
         # resolves. Skipped for already-added rows: they're in the wallet
         # already, with their own resolved label, and can't be re-added.
-        if not already:
+        if not already and acct.family == EVM:
             self._kick_ens_for_row(item, acct.address)
 
     def _kick_ens_for_row(self, item, address: str) -> None:
@@ -2400,9 +2414,13 @@ class AddTrezorDialog(AddLedgerDialog):
         self.setWindowTitle("Add Trezor Accounts")
         self.fingerprint = ""
         self._interaction = None
-        # BIP44 first — Trezor Suite's (and MetaMask's) layout.
+        # BIP44 first — Trezor Suite's (and MetaMask's) layout. On a Tron
+        # chain the Tron (coin type 195) schemes instead: adding from a Tron
+        # view means adding Tron accounts.
+        schemes = (TRON_PATH_SCHEMES if chain is not None and chain.family == TRON
+                   else TREZOR_SCHEMES)
         self.scheme_combo.clear()
-        for name in TREZOR_SCHEMES:
+        for name in schemes:
             self.scheme_combo.addItem(_ledger_scheme_label(name), name)
 
     def _scan(self) -> None:
@@ -2522,7 +2540,7 @@ class AddWatchOnlyDialog(Dialog):
         form = QFormLayout()
         self.address_edit = QLineEdit()
         self.address_edit.setPlaceholderText(
-            "0x… address or ENS name (e.g. vitalik.eth)")
+            "0x… or Tron T… address, or ENS name (e.g. vitalik.eth)")
         self.address_edit.setFont(QFont("monospace"))
         # Wide enough that a full 0x address shows without scrolling.
         self.address_edit.setMinimumWidth(address_field_min_width(self))
@@ -2576,14 +2594,15 @@ class AddWatchOnlyDialog(Dialog):
         checksum normalisation happens on accept (lower-case paste OK)."""
         text = self.address_edit.text().strip()
         self._ens_forward_addr = None
-        is_addr = text.startswith("0x") and len(text) == 42
-        if is_addr:
-            try:
-                int(text, 16)
-            except ValueError:
-                is_addr = False
+        parsed = parse_any(text)
+        is_addr = parsed is not None and parsed[0] == EVM
         is_name = "." in text and not text.startswith("0x") and len(text) >= 5
-        if is_addr:
+        if parsed is not None and parsed[0] != EVM:
+            # A Tron address: nothing for ENS to say about it.
+            self.add_btn.setEnabled(True)
+            self._set_resolved(None)
+            self._ens_timer.stop()
+        elif is_addr:
             self.add_btn.setEnabled(True)
             self._set_resolved(None)
             self._ens_timer.start()           # reverse → Label
@@ -2678,15 +2697,15 @@ class AddWatchOnlyDialog(Dialog):
             self.add_btn.setEnabled(False)
 
     def _on_accept(self) -> None:
-        from eth_utils import to_checksum_address
-        # An ENS name that forward-resolved → use the resolved address.
+        # An ENS name that forward-resolved → use the resolved address. The
+        # address form decides the family: a T… address watches on Tron.
         text = self._ens_forward_addr or self.address_edit.text().strip()
-        try:
-            checksum = to_checksum_address(text)
-        except Exception as e:
-            self.error_lbl.setText(f"Invalid address: {e}")
+        parsed = parse_any(text)
+        if parsed is None:
+            self.error_lbl.setText(f"Invalid address: {text}")
             self.error_lbl.setVisible(True)
             return
+        self._family, checksum = parsed
         if checksum.lower() in self._existing:
             self.error_lbl.setText(
                 "That address is already in the wallet."
@@ -2700,11 +2719,14 @@ class AddWatchOnlyDialog(Dialog):
     def result_account(self) -> dict:
         """The new account dict, ready to hand to Store.add_account.
         Call only after the dialog returned Accepted."""
-        return {
+        account = {
             "address": self._checksum,
             "source": "watch_only",
             "label": self._label,
         }
+        if self._family != EVM:
+            account["family"] = self._family
+        return account
 
 
 class AddHotWalletDialog(Dialog):

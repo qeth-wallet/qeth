@@ -95,6 +95,20 @@ def test_hot_plugin_returns_none_when_unlock_cancelled():
     assert p.make_signer(STORE, _acct("hot"), ui) is None
 
 
+def test_hot_plugin_skips_the_prompt_while_unlocked():
+    from qeth.hot_wallet import UNLOCKED, HotWalletSigner
+    p = signer_for_source("hot")
+    UNLOCKED.put(ADDR, b"\x01" * 32)
+    ui = FakeInteraction(secret="pw")
+    signer = p.make_signer(STORE, _acct("hot"), ui)
+    assert isinstance(signer, HotWalletSigner)
+    assert ui.secret_calls == []
+    # Another hot account is still locked: it prompts.
+    assert p.make_signer(STORE, {**_acct("hot"), "address": "0x" + "cd" * 20},
+                         ui) is not None
+    assert len(ui.secret_calls) == 1
+
+
 def test_watch_only_is_registered_but_cannot_sign():
     from qeth.signing import SignerError
     p = signer_for_source("watch_only")
@@ -149,6 +163,47 @@ class TestDispatchThroughMainWindow:
             mainwindow, addr, FakeInteraction())
         assert signer is None
         assert warned
+
+
+class TestHotWalletLocksOnAccountSwitch:
+    """MainWindow keeps an unlocked hot wallet only while it's the selected or
+    the dapp-connected account."""
+
+    HOT = "0x" + "22" * 20
+    OTHER = "0x" + "44" * 20
+
+    def _setup(self, win):
+        for addr, source in ((self.HOT, "hot"), (self.OTHER, "watch_only")):
+            win.store.accounts.append(
+                {"address": addr, "source": source, "label": ""})
+        win.wallets_plugin.rebuild_tree()
+        assert win.wallets_plugin.select_address(self.HOT)
+
+    def test_selecting_another_account_locks_it(self, mainwindow):
+        from qeth.hot_wallet import UNLOCKED
+        self._setup(mainwindow)
+        UNLOCKED.put(self.HOT, b"\x01" * 32)
+        assert mainwindow.wallets_plugin.select_address(self.OTHER)
+        assert UNLOCKED.get(self.HOT) is None
+
+    def test_stays_unlocked_while_connected_to_dapps(self, mainwindow):
+        from qeth.hot_wallet import UNLOCKED
+        self._setup(mainwindow)
+        mainwindow.wallets_plugin._set_default(self.HOT)
+        UNLOCKED.put(self.HOT, b"\x01" * 32)
+        assert mainwindow.wallets_plugin.select_address(self.OTHER)
+        assert UNLOCKED.get(self.HOT) == b"\x01" * 32
+        # ...until the dapp connection moves to another account too.
+        mainwindow.wallets_plugin._set_default(self.OTHER)
+        assert UNLOCKED.get(self.HOT) is None
+
+    def test_connecting_another_account_keeps_the_selected_one(self, mainwindow):
+        from qeth.hot_wallet import UNLOCKED
+        self._setup(mainwindow)
+        UNLOCKED.put(self.HOT, b"\x01" * 32)
+        mainwindow.wallets_plugin._set_default(self.OTHER)
+        assert mainwindow.wallets_plugin.selected_address == self.HOT
+        assert UNLOCKED.get(self.HOT) == b"\x01" * 32
 
 
 class TestBeginSignWiring:

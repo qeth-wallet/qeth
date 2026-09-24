@@ -18,6 +18,7 @@ import atexit
 import os
 import shutil
 import socket
+import sys
 import tempfile
 from pathlib import Path
 
@@ -262,6 +263,18 @@ def _dispose_plugins(monkeypatch):
             plugin.shutdown()
         except RuntimeError:
             pass          # C++ side already gone
+
+
+@pytest.fixture(autouse=True)
+def _lock_hot_wallets():
+    """The unlocked hot wallet (``hot_wallet.UNLOCKED``) is process-wide: a test
+    that signs would otherwise leave its key unlocked — and its expiry timer
+    running — for the next one, which then skips its passphrase prompt. Only
+    reset it if something imported the module, to keep non-UI tests Qt-free."""
+    yield
+    hw = sys.modules.get("qeth.hot_wallet")
+    if hw is not None:
+        hw.UNLOCKED.forget()
 
 
 class _FakeRpc:

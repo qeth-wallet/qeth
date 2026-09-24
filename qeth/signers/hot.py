@@ -1,6 +1,7 @@
 """Hot-wallet signer plugin. Wraps ``hot_wallet.HotWalletSigner``, which decrypts
 a passphrase-protected keystore. The passphrase is collected up front (main
-thread) via ``secret_prompt`` so the slow scrypt decrypt runs on the worker."""
+thread) via ``secret_prompt`` so the slow scrypt decrypt runs on the worker.
+An account unlocked within ``hot_wallet.UNLOCK_TTL_S`` signs without a prompt."""
 
 from __future__ import annotations
 
@@ -22,12 +23,15 @@ class HotWalletSignerPlugin(SignerPlugin):
     def make_signer(
         self, store: Store, account: dict[str, Any], ui: SignerInteraction,
     ) -> Signer | None:
+        from ..hot_wallet import UNLOCKED, HotWalletSigner
+        address = account["address"]
+        priv = UNLOCKED.get(address)
+        if priv is not None:
+            return HotWalletSigner(store, unlocked=(address, priv))
         # Collect the passphrase up front (main thread) so the worker's slow
         # scrypt decrypt has it when sign() runs. A cancel returns None.
-        address = account["address"]
         secret = ui.request_secret(
             prompt=f"Passphrase for {address}:", title=self.display_name)
         if secret is None:
             return None
-        from ..hot_wallet import HotWalletSigner
-        return HotWalletSigner(store, passphrase=secret)
+        return HotWalletSigner(store, passphrase=secret, cache=UNLOCKED)

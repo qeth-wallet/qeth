@@ -282,3 +282,161 @@ class TestHotWalletSigner:
         from qeth.chains import DEFAULT_CHAINS
         with pytest.raises(SignerError, match="gas and nonce"):
             signer.sign(req, DEFAULT_CHAINS[0])
+
+
+class TestUnlockCache:
+    """The in-memory unlocked hot wallet: one account at a time, for the TTL,
+    dropped on switch / removal."""
+
+    A = "0x" + "aa" * 20
+    B = "0x" + "bb" * 20
+    KEY_A = b"\x01" * 32
+    KEY_B = b"\x02" * 32
+
+    def test_get_returns_the_key_for_the_unlocked_address_only(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        assert c.get(self.A) == self.KEY_A
+        assert c.get("0x" + "AA" * 20) == self.KEY_A
+        assert c.get(self.B) is None
+        c.forget()
+
+    def test_unlocking_another_account_locks_the_first(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        c.put(self.B, self.KEY_B)
+        assert c.get(self.A) is None
+        assert c.get(self.B) == self.KEY_B
+        c.forget()
+
+    def test_expires_after_the_ttl(self, monkeypatch):
+        import qeth.hot_wallet as hw
+        now = [1000.0]
+        monkeypatch.setattr(hw.time, "time", lambda: now[0])
+        c = hw.UnlockCache(ttl_s=300)
+        c.put(self.A, self.KEY_A)
+        now[0] += 299
+        assert c.get(self.A) == self.KEY_A
+        now[0] += 1
+        assert c.get(self.A) is None
+        now[0] -= 1                       # expiry dropped it for good
+        assert c.get(self.A) is None
+
+    def test_a_clock_stepped_backwards_expires_it(self, monkeypatch):
+        """Wall clock, so suspend counts toward the TTL; the price is that a
+        backwards step must read as expired rather than extend the unlock."""
+        import qeth.hot_wallet as hw
+        now = [1000.0]
+        monkeypatch.setattr(hw.time, "time", lambda: now[0])
+        c = hw.UnlockCache(ttl_s=300)
+        c.put(self.A, self.KEY_A)
+        now[0] -= 1
+        assert c.get(self.A) is None
+
+    def test_the_timer_drops_the_key_at_expiry(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache(ttl_s=0.01)
+        c.put(self.A, self.KEY_A)
+        timer = c._timer
+        assert timer is not None
+        timer.join(5)
+        assert c._entry is None and c._timer is None
+
+    def test_a_stale_timer_does_not_clear_a_newer_unlock(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        stale = c._entry
+        assert stale is not None
+        c.put(self.A, self.KEY_A)         # re-unlocked: new entry, new timer
+        c._expire(stale)                  # the old timer firing late
+        assert c.get(self.A) == self.KEY_A
+        c.forget()
+
+    def test_forget_an_address_leaves_another_unlocked(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        c.forget(self.B)
+        assert c.get(self.A) == self.KEY_A
+        c.forget(self.A)
+        assert c.get(self.A) is None
+
+    def test_forget_cancels_the_timer(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        timer = c._timer
+        assert timer is not None
+        c.forget()
+        timer.join(5)
+        assert not timer.is_alive()
+
+    def test_retain_locks_unless_the_account_is_still_in_use(self):
+        from qeth.hot_wallet import UnlockCache
+        c = UnlockCache()
+        c.put(self.A, self.KEY_A)
+        c.retain([None, "0x" + "AA" * 20])
+        assert c.get(self.A) == self.KEY_A
+        c.retain([self.B, None])
+        assert c.get(self.A) is None
+
+
+class TestHotWalletSignerUnlock:
+    def _signer(self, addr, **kw):
+        return HotWalletSigner(
+            _fake_store({"address": addr, "source": "hot", "label": ""}), **kw)
+
+    def test_a_successful_decrypt_unlocks_the_account(self, tmp_qeth):
+        from qeth.hot_wallet import UnlockCache
+        from qeth.signing import MessageSigningRequest
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        cache = UnlockCache()
+        self._signer(addr, passphrase=PASSPHRASE, cache=cache).sign_message(
+            MessageSigningRequest(from_addr=addr, raw=b"hi"))
+        assert cache.get(addr) == _TEST_PRIV
+        cache.forget()
+
+    def test_a_wrong_passphrase_unlocks_nothing(self, tmp_qeth):
+        from qeth.hot_wallet import UnlockCache
+        from qeth.signing import MessageSigningRequest
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        cache = UnlockCache()
+        with pytest.raises(SignerError, match="Wrong passphrase"):
+            self._signer(addr, passphrase="nope", cache=cache).sign_message(
+                MessageSigningRequest(from_addr=addr, raw=b"hi"))
+        assert cache.get(addr) is None
+
+    def test_an_unlocked_key_signs_without_a_passphrase(self, tmp_qeth):
+        from eth_account import Account
+        from qeth.chains import DEFAULT_CHAINS
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        signer = self._signer(addr, unlocked=(addr.lower(), _TEST_PRIV))
+        req = SigningRequest(
+            chain_id=1, from_addr=addr, to_addr="0x" + "11" * 20,
+            value_wei=0, data="0x", gas=21000, nonce=0,
+            max_fee_per_gas=10**9, max_priority_fee_per_gas=10**8,
+        )
+        raw = signer.sign(req, DEFAULT_CHAINS[0])
+        assert Account.recover_transaction(raw).lower() == addr.lower()
+
+    def test_an_unlocked_key_for_another_address_is_not_used(self, tmp_qeth):
+        from qeth.signing import MessageSigningRequest
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        signer = self._signer(addr, unlocked=("0x" + "ee" * 20, b"\x03" * 32))
+        with pytest.raises(SignerError, match="locked"):
+            signer.sign_message(MessageSigningRequest(from_addr=addr, raw=b"hi"))
+
+    def test_deleting_the_keystore_locks_it(self, tmp_qeth):
+        from qeth.hot_wallet import UNLOCKED
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        UNLOCKED.put(addr, _TEST_PRIV)
+        delete_keystore(addr)
+        assert UNLOCKED.get(addr) is None

@@ -10,6 +10,11 @@ callers.
 The keystore file + the passphrase are BOTH required to recover
 the funds. Lose either and the key is gone. The application
 never transmits either anywhere.
+
+After a successful decrypt the key stays unlocked in memory
+(``UNLOCKED``) for ``UNLOCK_TTL_S`` or until the user switches to
+another account, so a burst of signatures asks for the passphrase
+once rather than per signature.
 """
 
 from __future__ import annotations
@@ -17,6 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from .chains import Chain
@@ -120,7 +128,8 @@ def delete_keystore(address: str) -> bool:
     """Remove the keystore file for ``address``. Returns True if
     a file was removed, False if it didn't exist. Used by the
     wallets plugin's Remove flow so the on-disk key dies with the
-    account record."""
+    account record — and so does its unlocked copy in memory."""
+    UNLOCKED.forget(address)
     p = keystore_path(address)
     if not p.exists():
         return False
@@ -128,16 +137,110 @@ def delete_keystore(address: str) -> bool:
     return True
 
 
+# How long a hot wallet stays unlocked after its passphrase is entered.
+# Counted from the unlock, not refreshed by each signature.
+UNLOCK_TTL_S = 300.0
+
+
+class UnlockCache:
+    """The unlocked hot wallet: at most ONE decrypted key plus its unlock time.
+    Filled by the sign worker after a successful decrypt; read and cleared from
+    the main thread — hence the lock.
+
+    We hold the decrypted KEY, not the passphrase: the key only ever unlocks
+    this one account (which is what we're caching), while a passphrase is often
+    reused elsewhere. It also skips the slow scrypt on a cached signature.
+
+    Expiry reads the WALL clock, not ``time.monotonic``: CLOCK_MONOTONIC stops
+    across suspend, so a laptop that slept right after an unlock would wake with
+    the key still live. A clock stepped backwards expires it too. A timer drops
+    the key at expiry rather than leaving it until the next access (best effort
+    — Python can't zero ``bytes``, it just releases them)."""
+
+    def __init__(self, ttl_s: float = UNLOCK_TTL_S) -> None:
+        self._ttl_s = ttl_s
+        self._lock = threading.Lock()
+        # (lower-cased address, private key, time.time() at unlock)
+        self._entry: tuple[str, bytes, float] | None = None
+        self._timer: threading.Timer | None = None
+
+    def put(self, address: str, priv: bytes) -> None:
+        """Unlock ``address`` for the TTL, replacing any other unlocked
+        account."""
+        entry = (address.lower(), priv, time.time())
+        timer = threading.Timer(self._ttl_s, self._expire, args=(entry,))
+        timer.daemon = True
+        with self._lock:
+            self._clear()
+            self._entry = entry
+            self._timer = timer
+        timer.start()
+
+    def get(self, address: str) -> bytes | None:
+        """The unlocked key for ``address``, or None if it's locked or
+        expired."""
+        with self._lock:
+            entry = self._entry
+            if entry is None or entry[0] != address.lower():
+                return None
+            if not 0 <= time.time() - entry[2] < self._ttl_s:
+                self._clear()
+                return None
+            return entry[1]
+
+    def forget(self, address: str | None = None) -> None:
+        """Lock ``address`` (or whatever is unlocked, when None)."""
+        with self._lock:
+            if self._entry is not None and (
+                    address is None or self._entry[0] == address.lower()):
+                self._clear()
+
+    def retain(self, addresses: Iterable[str | None]) -> None:
+        """Lock the unlocked account unless it's one of ``addresses`` — the
+        accounts still in use. None entries are ignored."""
+        keep = {a.lower() for a in addresses if a}
+        with self._lock:
+            if self._entry is not None and self._entry[0] not in keep:
+                self._clear()
+
+    def _expire(self, entry: tuple[str, bytes, float]) -> None:
+        # Identity check: a timer that fired while ``put`` was replacing its
+        # entry must not clear the new one.
+        with self._lock:
+            if self._entry is entry:
+                self._clear()
+
+    def _clear(self) -> None:
+        # Caller holds the lock.
+        self._entry = None
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+
+UNLOCKED = UnlockCache()
+
+
 class HotWalletSigner(Signer):
     """``Signer`` backed by a passphrase-encrypted keystore on
     disk. The passphrase is collected on the main thread by the
     host (so the user sees the prompt before the worker starts)
     and passed in at construction; sign() then runs on the worker
-    thread where the scrypt KDF doesn't block the UI."""
+    thread where the scrypt KDF doesn't block the UI.
 
-    def __init__(self, store, passphrase: str):
+    A successful decrypt unlocks the account in ``cache``. For an
+    account that's already unlocked, the host passes the cached key
+    as ``unlocked=(address, key)`` instead of a passphrase. It's held
+    here so the TTL running out between the pick and the worker's
+    sign can't strand the request."""
+
+    def __init__(self, store, passphrase: str | None = None, *,
+                 cache: UnlockCache | None = None,
+                 unlocked: tuple[str, bytes] | None = None):
         self._store = store
         self._passphrase = passphrase
+        self._cache = cache
+        self._unlocked = unlocked
 
     def can_sign(self, address: str) -> bool:
         addr = address.lower()
@@ -148,17 +251,28 @@ class HotWalletSigner(Signer):
         return keystore_path(address).exists()
 
     def _load_priv(self, address: str) -> bytes:
-        """Shared decrypt path for sign / sign_message /
-        sign_typed_data — scrypt + AES + the friendly
-        ``Wrong passphrase`` re-raise."""
+        """Shared key path for sign / sign_message /
+        sign_typed_data: the already-unlocked key if we were handed
+        one, else scrypt + AES + the friendly ``Wrong passphrase``
+        re-raise."""
         if not self.can_sign(address):
             raise SignerError(
                 f"No hot wallet keystore for {address}"
             )
+        if (self._unlocked is not None
+                and self._unlocked[0].lower() == address.lower()):
+            return self._unlocked[1]
+        if self._passphrase is None:
+            raise SignerError(f"Hot wallet {address} is locked.")
         keystore = load_keystore(address)
+        # eth_account validates EVERYTHING; bad passphrase raises
+        # ValueError with a fixed message. Map that to a friendly
+        # SignerError so the dialog popup the host parents to the
+        # sign dialog reads as "wrong passphrase" rather than the
+        # raw exception text.
         try:
             from eth_account import Account
-            return Account.decrypt(keystore, self._passphrase)
+            priv = Account.decrypt(keystore, self._passphrase)
         except ValueError as e:
             msg = str(e).lower()
             if "mac" in msg or "password" in msg or "decryption" in msg:
@@ -166,6 +280,9 @@ class HotWalletSigner(Signer):
             raise SignerError(f"Failed to decrypt keystore: {e}") from e
         except Exception as e:
             raise SignerError(f"Failed to decrypt keystore: {e}") from e
+        if self._cache is not None:
+            self._cache.put(address, bytes(priv))
+        return priv
 
     def sign_message(self, req: MessageSigningRequest) -> bytes:
         """personal_sign — EIP-191 prefixed bytes, 65-byte ECDSA."""
@@ -211,26 +328,7 @@ class HotWalletSigner(Signer):
         return r + s + v
 
     def sign(self, req: SigningRequest, chain: Chain) -> bytes:
-        if not self.can_sign(req.from_addr):
-            raise SignerError(
-                f"No hot wallet keystore for {req.from_addr}"
-            )
-        keystore = load_keystore(req.from_addr)
-        # eth_account validates EVERYTHING; bad passphrase raises
-        # ValueError with a fixed message. Map that to a friendly
-        # SignerError so the dialog popup the host parents to the
-        # sign dialog reads as "wrong passphrase" rather than the
-        # raw exception text.
-        try:
-            from eth_account import Account
-            priv = Account.decrypt(keystore, self._passphrase)
-        except ValueError as e:
-            msg = str(e).lower()
-            if "mac" in msg or "password" in msg or "decryption" in msg:
-                raise SignerError("Wrong passphrase.") from e
-            raise SignerError(f"Failed to decrypt keystore: {e}") from e
-        except Exception as e:
-            raise SignerError(f"Failed to decrypt keystore: {e}") from e
+        priv = self._load_priv(req.from_addr)
 
         if req.gas is None or req.nonce is None:
             raise SignerError("gas and nonce must be set before signing")

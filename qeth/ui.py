@@ -55,6 +55,7 @@ _STICKY_PAD_V = 1
 _STICKY_GAP = 8
 _STICKY_MARGIN = 4
 from .alerts import warn
+from .hot_wallet import UNLOCKED
 from .signer_interaction import DialogInteraction
 from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
 
@@ -168,6 +169,13 @@ class MainWindow(QMainWindow):
         )
         self.wallets_plugin.default_account_changed.connect(
             self._push_accounts_changed
+        )
+        # An unlocked hot wallet stays unlocked only while it's still in use.
+        self.wallets_plugin.selected_address_changed.connect(
+            self._lock_unused_hot_wallet
+        )
+        self.wallets_plugin.default_account_changed.connect(
+            self._lock_unused_hot_wallet
         )
         # Replay the current selection. _build_central() above mounted
         # the plugins, which built their widgets, which rebuilt the
@@ -1524,6 +1532,15 @@ class MainWindow(QMainWindow):
             return
         accounts = [self.store.default_account] if self.store.default_account else []
         self.rpc.broadcast_accounts_changed(accounts)
+
+    def _lock_unused_hot_wallet(self, *_args) -> None:
+        """Slot for selection / default-account changes: lock the unlocked hot
+        wallet (``hot_wallet.UNLOCKED``) once the user has moved off it, i.e.
+        it's neither the selected account nor the dapp-connected one. Checking
+        both means browsing another account while a dapp is connected to the
+        hot wallet doesn't re-prompt that dapp's next signature."""
+        UNLOCKED.retain(
+            (self.wallets_plugin.selected_address, self.store.default_account))
 
 
 class _TabCycleFilter(QObject):

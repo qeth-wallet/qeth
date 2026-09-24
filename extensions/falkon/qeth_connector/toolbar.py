@@ -64,8 +64,9 @@ class StatusPoller(QObject):
             st = probe.Status(error=str(err).split(".")[-1])
         else:
             st = probe.parse_status(data)
-        if (st.connected, st.chain, st.account) != (
-                self.status.connected, self.status.chain, self.status.account):
+        if (st.connected, st.chain, st.account, st.tron_account) != (
+                self.status.connected, self.status.chain, self.status.account,
+                self.status.tron_account):
             self.status = st
             self.changed.emit(st)
         else:
@@ -102,8 +103,10 @@ class QethStatusButton(Falkon.AbstractButtonInterface):
         self.setIcon(self._icon_on if st.connected else self._icon_off)
         if st.connected:
             acct = st.account or "no account selected"
-            self.setToolTip(f"qeth — connected ({probe.chain_name(st.chain)})"
-                            f"\n{acct}")
+            tip = f"qeth — connected ({probe.chain_name(st.chain)})\n{acct}"
+            if st.tron_account:
+                tip += f"\nTron: {st.tron_account}"
+            self.setToolTip(tip)
         else:
             self.setToolTip("qeth wallet — not running (127.0.0.1:1248)")
 
@@ -123,6 +126,12 @@ class QethStatusButton(Falkon.AbstractButtonInterface):
                     lambda: QGuiApplication.clipboard().setText(addr))
             else:
                 self._info(menu, "No account selected in qeth")
+            if st.tron_account:
+                tron = st.tron_account
+                act = menu.addAction(f"Tron: {tron[:6]}…{tron[-4:]}")
+                act.setToolTip("Copy address")
+                act.triggered.connect(
+                    lambda: QGuiApplication.clipboard().setText(tron))
         else:
             self._info(menu, "qeth not connected")
             self._info(menu, "Start qeth — it serves 127.0.0.1:1248")

@@ -33,12 +33,14 @@ def chain_name(hex_id):
 
 
 def batch_body() -> bytes:
-    """One batched JSON-RPC request carrying both the chain id (id 1) and the
-    account (id 2). A single round-trip is more robust than two separate
-    requests through Qt's connection-reusing network manager."""
+    """One batched JSON-RPC request carrying the chain id (id 1), the account
+    (id 2) and the connected Tron account (id 3). A single round-trip is more
+    robust than separate requests through Qt's connection-reusing network
+    manager."""
     return json.dumps([
         {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
         {"jsonrpc": "2.0", "id": 2, "method": "eth_accounts", "params": []},
+        {"jsonrpc": "2.0", "id": 3, "method": "tron_accounts", "params": []},
     ]).encode("utf-8")
 
 
@@ -47,6 +49,7 @@ class Status(NamedTuple):
     chain: object = None       # 0x-hex chain id, or None
     account: object = None     # 0x address, or None (none selected)
     error: object = None       # short failure detail, or None
+    tron_account: object = None  # T… address Tron dapps get, or None
 
 
 def parse_status(text) -> Status:
@@ -60,7 +63,7 @@ def parse_status(text) -> Status:
         return Status(error=str(e))
     if not isinstance(envs, list):
         envs = [envs]
-    chain = account = error = None
+    chain = account = error = tron_account = None
     for env in envs:
         if not isinstance(env, dict):
             continue
@@ -74,5 +77,9 @@ def parse_status(text) -> Status:
             chain = result
         elif rid == 2 and isinstance(result, list) and result:
             account = result[0]
+        elif rid == 3 and isinstance(result, list) and result:
+            # Absent (an error) from a qeth without Tron — that's fine.
+            tron_account = result[0]
     return Status(connected=error is None and chain is not None,
-                  chain=chain, account=account, error=error)
+                  chain=chain, account=account, error=error,
+                  tron_account=tron_account)

@@ -130,6 +130,7 @@ class StatusDialog(QDialog):
         self._recheck.setEnabled(False)
         self._chain = None
         self._account = None
+        self._tron_account = None
         self._error = None
         self._set_icon("view-refresh", "content-loading",
                        fallback=QStyle.StandardPixmap.SP_BrowserReload)
@@ -157,6 +158,7 @@ class StatusDialog(QDialog):
             st = probe.parse_status(data)
             self._chain, self._account, self._error = (
                 st.chain, st.account, st.error)
+            self._tron_account = st.tron_account
         self._render()
 
     # --- render -------------------------------------------------------
@@ -171,9 +173,11 @@ class StatusDialog(QDialog):
             # Don't wrap the address — let the window widen to keep it on
             # one line (nicer than breaking a 0x… hash mid-line).
             self._detail.setWordWrap(False)
+            tron = (f"<br>Tron: {self._tron_account}"
+                    if self._tron_account else "")
             self._detail.setText(
                 f"Network: <b>{_chain_name(self._chain)}</b><br>"
-                f"Account: {account}"
+                f"Account: {account}{tron}"
             )
         else:
             self._set_icon("network-offline", "dialog-warning",

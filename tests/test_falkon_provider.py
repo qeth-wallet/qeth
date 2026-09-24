@@ -139,8 +139,22 @@ class TestProbe:
         import json
         p = self._probe()
         body = json.loads(p.batch_body())
-        assert [e["method"] for e in body] == ["eth_chainId", "eth_accounts"]
-        assert [e["id"] for e in body] == [1, 2]
+        assert [e["method"] for e in body] == ["eth_chainId", "eth_accounts",
+                                               "tron_accounts"]
+        assert [e["id"] for e in body] == [1, 2, 3]
+
+    def test_parse_the_tron_account(self):
+        import json
+        p = self._probe()
+        st = p.parse_status(json.dumps([
+            {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
+            {"id": 3, "result": ["TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"]}]))
+        assert st.connected and st.tron_account == "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"
+        # A qeth without Tron errors on id 3: still connected, just no Tron line.
+        old = p.parse_status(json.dumps([
+            {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
+            {"id": 3, "error": {"code": -32601, "message": "no such method"}}]))
+        assert old.connected and old.error is None and old.tron_account is None
 
 
 def test_bridge_forwards_only_http_origins():
@@ -202,11 +216,19 @@ class _Page:
         return self._main
 
 
+class _View:
+    def __init__(self, page):
+        self._page = page
+
+    def page(self):
+        return self._page
+
+
 def _tron_bridge(tmp_path, pages):
     mod = _load_module("bridge.py")
     tw = tmp_path / "TronWeb.js"
     tw.write_text("/* tronweb */")
-    b = mod.QethBridge(pages=lambda: pages, tronweb_path=str(tw))
+    b = mod.QethBridge(views=lambda: [_View(p) for p in pages], tronweb_path=str(tw))
     got = []
     b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
     return b, got
@@ -235,7 +257,7 @@ def test_bridge_reports_a_frame_it_cant_find(qapp, tmp_path):
 
 def test_bridge_reports_a_missing_bundle(qapp, tmp_path):
     mod = _load_module("bridge.py")
-    b = mod.QethBridge(pages=lambda: [], tronweb_path=str(tmp_path / "nope.js"))
+    b = mod.QethBridge(views=lambda: [], tronweb_path=str(tmp_path / "nope.js"))
     got = []
     b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
     b.loadTronWeb("cid", "tok", "")
@@ -261,3 +283,96 @@ def test_falkon_ships_the_same_tronweb_as_the_extension():
     webext = FALKON.parent.parent / "webext" / "tronweb"
     for name in ("TronWeb.js", "TronWeb.js.LICENSE.txt", "LICENSE", "SOURCE.txt"):
         assert (FALKON / "tronweb" / name).read_bytes() == (webext / name).read_bytes(), name
+
+
+class _DeadPage:
+    """A page whose C++ side Qt already deleted — what a real Falkon's view
+    list hands back for a replaced page / a closed tab awaiting deleteLater."""
+
+    def mainFrame(self):  # noqa: N802
+        raise RuntimeError(
+            "libshiboken: Internal C++ object (PyFalkon.WebPage) already deleted.")
+
+
+def test_bridge_skips_pages_qt_already_deleted(qapp, tmp_path):
+    """The real-Falkon failure: one dead page made loadTronWeb raise — and an
+    exception in a web-channel slot is swallowed, so the dapp spun forever."""
+    asking = _Frame(_Url("https", "sun.io"), token="tok")
+    b, got = _tron_bridge(tmp_path, [_DeadPage(), _Page(asking)])
+    b.loadTronWeb("cid", "tok", "https://sun.io")
+    assert got == [("cid", True, "")] and asking.main_world == ["/* tronweb */"]
+
+
+class _SilentFrame(_Frame):
+    def runJavaScript(self, src, world, callback):  # noqa: N802
+        pass                                        # torn down: never calls back
+
+
+def test_bridge_answers_even_when_a_frame_never_does(qtbot, tmp_path):
+    mod = _load_module("bridge.py")
+    mod._PROBE_TIMEOUT_MS = 50
+    tw = tmp_path / "TronWeb.js"
+    tw.write_text("x")
+    page = _Page(_SilentFrame(_Url("https", "sun.io")))
+    b = mod.QethBridge(views=lambda: [_View(page)], tronweb_path=str(tw))
+    got = []
+    b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok)))
+    b.loadTronWeb("cid", "tok", "https://sun.io")
+    qtbot.waitUntil(lambda: got == [("cid", False)], timeout=2000)
+
+
+def test_bridge_turns_any_error_into_an_answer(qapp, tmp_path):
+    def boom():
+        raise ValueError("surprise")
+    mod = _load_module("bridge.py")
+    tw = tmp_path / "TronWeb.js"
+    tw.write_text("x")
+    b = mod.QethBridge(views=boom, tronweb_path=str(tw))
+    got = []
+    b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
+    b.loadTronWeb("cid", "tok", "")
+    assert got == [("cid", False, "qeth couldn't load TronWeb: surprise")]
+
+
+class _LateFrame(_Frame):
+    """Answers the token probe LATER (as QtWebEngine does), and — PyFalkon's
+    quirk — reads as deleted once its view's wrapper has been collected."""
+
+    def __init__(self, url, token):
+        super().__init__(url, token)
+        self.pending: list = []
+        self.view = None
+
+    def runJavaScript(self, src, world, callback):  # noqa: N802
+        if self.view() is None:
+            raise RuntimeError("Internal C++ object (PyFalkon.WebPage) already deleted.")
+        if world == 1:
+            self.pending.append(lambda: callback(src.endswith('"%s"' % self.token)))
+        else:
+            self.main_world.append(src)
+            callback(None)
+
+
+def test_bridge_keeps_the_views_alive_until_it_answers(qapp, tmp_path):
+    """The live-Falkon bug: holding only the PAGES let their views' wrappers be
+    collected, which killed the page wrappers mid-load."""
+    import gc
+    import weakref
+    mod = _load_module("bridge.py")
+    tw = tmp_path / "TronWeb.js"
+    tw.write_text("x")
+    frame = _LateFrame(_Url("https", "sun.io"), token="tok")
+
+    def views():
+        view = _View(_Page(frame))
+        frame.view = weakref.ref(view)
+        return [view]
+    b = mod.QethBridge(views=views, tronweb_path=str(tw))
+    got = []
+    b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
+    b.loadTronWeb("cid", "tok", "https://sun.io")
+    gc.collect()                      # nothing but the bridge holds the view now
+    frame.pending.pop()()             # the probe's answer arrives
+    assert got == [("cid", True, "")] and frame.main_world == ["x"]
+    gc.collect()                      # …and it lets go once it has answered
+    assert frame.view() is None

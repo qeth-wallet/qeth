@@ -284,8 +284,8 @@ function askLocal(method, cb) {
 }
 
 function queryStatus(sendResponse) {
-  var res = { connected: true, chainId: null, account: null };
-  var left = 2, done = false;
+  var res = { connected: true, chainId: null, account: null, tronAccount: null };
+  var left = 3, done = false;
   function finish() { if (!done) { done = true; sendResponse(res); } }
   var t = setTimeout(finish, 2000);
   function got() { if (--left <= 0) { clearTimeout(t); finish(); } }
@@ -294,6 +294,9 @@ function queryStatus(sendResponse) {
   });
   askLocal("eth_accounts", function (m) {
     if (m && m.result && m.result[0]) res.account = m.result[0]; got();
+  });
+  askLocal("tron_accounts", function (m) {       // an error from a qeth without Tron
+    if (m && m.result && m.result[0]) res.tronAccount = m.result[0]; got();
   });
 }
 

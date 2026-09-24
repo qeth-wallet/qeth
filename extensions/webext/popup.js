@@ -40,7 +40,7 @@ function setVersion() {
   catch (e) {}
 }
 
-function showConnected(chainId, account) {
+function showConnected(chainId, account, tronAccount) {
   $("status").className = "status ok";
   $("status").textContent = "Connected to qeth";
   var detail = $("detail");
@@ -55,6 +55,13 @@ function showConnected(chainId, account) {
     detail.appendChild(addr);
   } else {
     detail.appendChild(text("No account selected in qeth"));
+  }
+  if (tronAccount) {              // what Tron dapps are handed
+    detail.appendChild(document.createElement("br"));
+    detail.appendChild(text("Tron: "));
+    var tron = el("span", tronAccount);
+    tron.className = "addr";
+    detail.appendChild(tron);
   }
 }
 
@@ -76,7 +83,7 @@ function probe() {
   $("detail").textContent = "";
   chrome.runtime.sendMessage({ type: "status" }, function (res) {
     if (chrome.runtime.lastError || !res || !res.connected) { showDisconnected(); return; }
-    showConnected(res.chainId, res.account);
+    showConnected(res.chainId, res.account, res.tronAccount);
   });
 }
 

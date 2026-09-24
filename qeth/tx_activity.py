@@ -30,9 +30,11 @@ from collections.abc import Callable, Iterable, Mapping
 from . import USER_AGENT
 from .abi import AnyAbiSource, BlockscoutAbiSource, selector_names
 from .abi_cache import AbiCache
-from .chains import DEFAULT_CHAINS, Chain
+from .address import tron_from_hex, tron_to_hex
+from .chains import DEFAULT_CHAINS, TRON, Chain
 from .token_discovery import BLOCKSCOUT_INSTANCES
 from .transactions import Transaction
+from .tron.client import TronClient, TronError
 
 if TYPE_CHECKING:
     from .chain import EthClient
@@ -382,6 +384,76 @@ def _make_activity(verb: str, out_legs: list[AssetLeg],
     return Activity(verb, tuple(out_legs), tuple(in_legs), muted=muted)
 
 
+# Tron has no ABI source, so contract calls get these few names; anything
+# else shows its selector.
+_TRON_VERBS = {"0xa9059cbb": "transfer", "0x095ea7b3": "approve",
+               "0x23b872dd": "transferFrom"}
+# Pages (≤200 rows each) of TRC-20 transfers read per window.
+_TRON_TRC20_PAGES = 5
+
+
+def _tron_transfer_rows(chain: Chain, address: str, txs: list[Transaction],
+                        timeout: float) -> list[dict]:
+    """TRC-20 transfers touching ``address`` within the time span of ``txs``
+    (TronGrid's ``/transactions/trc20`` — Tron's ``tokentx``), reshaped into
+    the explorers' tokentx rows (hex addresses) so ``_coins`` reads them."""
+    stamps = [t.timestamp for t in txs if t.timestamp]
+    if not stamps:
+        return []
+    client = TronClient(chain, timeout=timeout)
+    path = f"/v1/accounts/{tron_from_hex(address)}/transactions/trc20"
+    params: dict[str, Any] = {"limit": 200, "min_timestamp": min(stamps) * 1000,
+                              "max_timestamp": max(stamps) * 1000 + 999}
+    rows: list[dict] = []
+    for _ in range(_TRON_TRC20_PAGES):
+        resp = client.index_get(path, params)
+        for r in resp.get("data") or []:
+            info = r.get("token_info") or {}
+            contract = tron_to_hex(str(info.get("address") or ""))
+            if contract is None:
+                continue
+            rows.append({
+                "hash": "0x" + str(r.get("transaction_id") or "").lower(),
+                "contractAddress": contract.lower(),
+                "tokenSymbol": str(info.get("symbol") or "?"),
+                "from": (tron_to_hex(str(r.get("from") or "")) or "").lower(),
+                "to": (tron_to_hex(str(r.get("to") or "")) or "").lower(),
+            })
+        fingerprint = (resp.get("meta") or {}).get("fingerprint")
+        if not fingerprint:
+            break
+        params = {**params, "fingerprint": fingerprint}
+    return rows
+
+
+def _tron_activities(chain: Chain, address: str, txs: list[Transaction], *,
+                     timeout: float,
+                     on_batch: Callable[[dict[str, Activity]], None] | None,
+                     ) -> dict[str, Activity]:
+    """``fetch_activities`` for Tron: verbs from the method selector, coins
+    from the tx's own TRX value + TronGrid's TRC-20 transfer index."""
+    viewer = address.lower()
+    try:
+        transfers = _tron_transfer_rows(chain, address, txs, timeout)
+    except TronError as e:
+        log.debug("tron activity fetch failed: %s", e)
+        transfers = []
+    tok_by_hash: dict[str, list[dict]] = defaultdict(list)
+    sym_of: dict[str, str] = {}
+    for t in transfers:
+        tok_by_hash[t["hash"]].append(t)
+        sym_of[t["contractAddress"]] = t["tokenSymbol"]
+    out: dict[str, Activity] = {}
+    for tx in txs:
+        sel = (tx.method_id or "").lower()
+        verb = "send" if sel in ("", "0x") else _TRON_VERBS.get(sel, sel)
+        out_legs, in_legs = _coins(tx, viewer, chain.symbol or "TRX", tok_by_hash, {})
+        out[tx.hash] = _make_activity(verb, out_legs, in_legs, sel, tx, sym_of)
+    if on_batch and out:
+        on_batch(out)
+    return out
+
+
 def fetch_activities(
     chain: Chain,
     address: str,
@@ -402,6 +474,9 @@ def fetch_activities(
     one-sided TOKEN->native swap that Blockscout's internal-tx index hasn't
     indexed (see :func:`_wants_native_trace`); it defaults to a node
     ``callTracer`` read over the chain's RPC and is injectable for tests."""
+    if chain.family == TRON:
+        return _tron_activities(chain, address, txs, timeout=timeout,
+                                on_batch=on_batch)
     base = BLOCKSCOUT_INSTANCES.get(chain.chain_id)
     if base is None:
         return {}

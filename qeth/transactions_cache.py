@@ -90,7 +90,7 @@ def merge_txs(
     for t in old:
         if t.hash not in new_hashes:
             merged.append(t)
-    merged.sort(key=lambda t: t.nonce, reverse=True)
+    merged.sort(key=lambda t: t.order_key, reverse=True)
     return merged
 
 

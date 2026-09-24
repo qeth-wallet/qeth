@@ -48,6 +48,8 @@ class Transaction:
     hash: str
     block_number: int
     timestamp: int            # unix seconds
+    # The sender's nonce. -1 on a chain without nonces (Tron) — there, rows
+    # order by time instead (``order_key``).
     nonce: int
     from_addr: str            # lowercased
     to_addr: str | None    # lowercased; None for contract creations
@@ -77,6 +79,17 @@ class Transaction:
     # it (DRPC sometimes acks a tx it never propagates). Public data (no
     # key material); cleared once the tx confirms or is dropped.
     raw_signed: str | None = None
+    # The total fee paid, in the native smallest unit, when the chain reports
+    # it directly rather than as gas × price — Tron's burned bandwidth +
+    # energy (+ activation). None on EVM rows (fee = gas_used × gas_price).
+    fee: int | None = None
+
+    @property
+    def order_key(self) -> int:
+        """Newest-first sort key within one chain's list: the nonce where the
+        chain has one, else the timestamp (a pending Tron tx carries its
+        broadcast time, so it still sorts on top)."""
+        return self.nonce if self.nonce >= 0 else self.timestamp
 
     def direction(self, viewer: str) -> TxDirection:
         v = viewer.lower()

@@ -38,7 +38,8 @@ from qeth.plugins.transactions import TransactionsPlugin
 from qeth.transactions import Transaction
 
 CID = 1
-ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH", eip1559=True)
+ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH", eip1559=True,
+                      is_evm=True, family="evm", native_decimals=18)
 A = "0x" + "a1" * 20
 B = "0x" + "b2" * 20
 ACCTS = [A, B]

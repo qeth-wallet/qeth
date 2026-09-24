@@ -61,6 +61,8 @@ from .contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
 from ...chain import EthClient, native_amount, wei_to_ether
+from ...address import codec_for
+from ...tron.history import TronGridTransactionSource
 from ...explorer import explorer_url
 from .live_watcher import LiveWatcher, PendingTx
 from ...signing import ReplacementFloor, SignerError, SigningRequest
@@ -957,6 +959,8 @@ def _is_full_history(txs: list[Transaction]) -> bool:
     if not txs:
         return False
     nonces = {t.nonce for t in txs}
+    if min(nonces) < 0:
+        return False      # no nonces (Tron): completeness can't be proven
     return 0 in nonces and len(nonces) == max(nonces) + 1
 
 
@@ -1226,6 +1230,8 @@ class TransactionsPlugin(Plugin):
                 )
             else:
                 source = blockscout
+            # Tron has neither explorer; TronGrid indexes its history.
+            source = RoutedTransactionSource(source, TronGridTransactionSource())
         self._source: TransactionSource = source
         self._disk_cache = disk_cache if disk_cache is not None else TransactionCache()
         # Persist tx-cache writes off the main thread — a 10k-tx save is ~40 ms
@@ -1452,7 +1458,7 @@ class TransactionsPlugin(Plugin):
             t.nonce
             for (cid, _acct), txs in self._cache.items() if cid == chain_id
             for t in txs
-            if not t.dropped and t.nonce is not None
+            if not t.dropped and t.nonce is not None and t.nonce >= 0
             and (t.from_addr or "").lower() == addr
         ]
         return max(nonces) + 1 if nonces else None
@@ -1982,6 +1988,8 @@ class TransactionsPlugin(Plugin):
         if not address:
             return
         chain = self.host.current_chain()
+        if not chain.is_evm:
+            return        # no nonce to compare (Tron's history is refetched)
         key = (chain.chain_id, address.lower())
         if key in self._nonce_in_flight:
             return
@@ -2539,11 +2547,11 @@ class TransactionsPlugin(Plugin):
         # older entries (scroll case) append. Both grow the visible
         # window without re-rendering the rest of the table.
         shown = self._displayed_count.get(key, 0)
-        top_nonce = existing[0].nonce if existing else -1
-        newer = [t for t in new_rows if t.nonce > top_nonce]
-        older = [t for t in new_rows if t.nonce <= top_nonce]
+        top_key = existing[0].order_key if existing else -1
+        newer = [t for t in new_rows if t.order_key > top_key]
+        older = [t for t in new_rows if t.order_key <= top_key]
         if newer:
-            newer.sort(key=lambda t: t.nonce, reverse=True)
+            newer.sort(key=lambda t: t.order_key, reverse=True)
             self._panel.prepend_transactions(newer)
             shown += len(newer)
         # Append older rows only if the user has already scrolled
@@ -2552,7 +2560,7 @@ class TransactionsPlugin(Plugin):
         # entries below, which would look weird. We just save them
         # to the cache and let the next scroll-to-bottom reveal them.
         if older and shown >= len(existing):
-            older.sort(key=lambda t: t.nonce, reverse=True)
+            older.sort(key=lambda t: t.order_key, reverse=True)
             self._panel.append_transactions(older)
             shown += len(older)
         self._displayed_count[key] = shown
@@ -3228,7 +3236,7 @@ class TransactionListPanel(QWidget):
         status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         status.setToolTip(tip)
 
-        nonce = QTableWidgetItem(str(tx.nonce))
+        nonce = QTableWidgetItem(str(tx.nonce) if tx.nonce >= 0 else "")
         nonce.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         time_item = QTableWidgetItem(_format_datetime(tx.timestamp))
@@ -4293,7 +4301,8 @@ class TransactionDetailsDialog(Dialog):
         else:
             status_text = "✗ Reverted"
         form.addRow("Status:", self._value_label(status_text))
-        form.addRow("Nonce:", self._value_label(str(tx.nonce)))
+        if tx.nonce >= 0:          # a Tron tx has no nonce
+            form.addRow("Nonce:", self._value_label(str(tx.nonce)))
         dt = datetime.datetime.fromtimestamp(tx.timestamp)
         form.addRow("Date:", self._value_label(dt.strftime("%c")))
         form.addRow("Timestamp:", self._value_label(f"{tx.timestamp} (unix)"))
@@ -4302,10 +4311,9 @@ class TransactionDetailsDialog(Dialog):
                     self._link_label(tx.hash,
                                      self._explorer_url("tx", tx.hash),
                                      monospace=True))
-        from_cs = to_checksum_address(tx.from_addr)
         form.addRow("From:",
-                    self._link_label(from_cs,
-                                     self._explorer_url("address", from_cs),
+                    self._link_label(codec_for(chain).display(tx.from_addr),
+                                     self._explorer_url("address", tx.from_addr),
                                      monospace=True))
         form.addRow(
             "To:", self._build_to_row(tx.to_addr, tx.from_addr, chain, mono),
@@ -4337,7 +4345,8 @@ class TransactionDetailsDialog(Dialog):
         # estimate matches the fee row below (at the current native price).
         if tx.value_wei:
             value_text = _native_value_with_usd(
-                tx.value_wei, chain.symbol, self._native_price_usd)
+                tx.value_wei, chain.symbol, self._native_price_usd,
+                decimals=chain.native_decimals)
         else:
             value_text = "0"
         form.addRow("Value:", self._value_label(value_text))
@@ -4351,7 +4360,13 @@ class TransactionDetailsDialog(Dialog):
         # arrives. The pending row's gas_price_wei reflects the user's
         # signed maxFeePerGas, not what the chain will actually
         # charge, so showing it as the realised rate would be wrong.
-        if not tx.pending and tx.gas_used > 0:
+        if tx.fee is not None and not tx.pending:
+            # The chain reported the fee itself (Tron: burned bandwidth +
+            # energy) — there's no gas / gas price to show.
+            form.addRow("Fee paid:", self._value_label(_native_value_with_usd(
+                tx.fee, chain.symbol, self._native_price_usd,
+                decimals=chain.native_decimals)))
+        elif not tx.pending and tx.gas_used > 0:
             form.addRow("Gas used:",
                         self._value_label(f"{tx.gas_used:,}"))
             gwei = wei_to_ether(tx.gas_price_wei) * Decimal(10**9)
@@ -4612,6 +4627,7 @@ class TransactionDetailsDialog(Dialog):
         # insensitive, so the rebinding is safe.
         addr = to_checksum_address(to_addr)
         from_cs = to_checksum_address(from_addr)
+        shown = codec_for(chain).display(addr)     # T… on Tron
 
         entry = (self._token_info(chain.chain_id, addr)
                  if self._token_info is not None else None)
@@ -4639,12 +4655,12 @@ class TransactionDetailsDialog(Dialog):
                     f'style="color: {self._link_color}; '
                     f'text-decoration: underline; '
                     f'font-family: monospace;">'
-                    f"{_escape_html(addr)}</a>"
+                    f"{_escape_html(shown)}</a>"
                 )
             else:
                 addr_html = (
                     f'<span style="font-family: monospace;">'
-                    f"{_escape_html(addr)}</span>"
+                    f"{_escape_html(shown)}</span>"
                 )
             label = QLabel(
                 f"{_escape_html(entry.symbol)} ({addr_html})"
@@ -4654,7 +4670,7 @@ class TransactionDetailsDialog(Dialog):
             label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            _install_copy_menu(label, addr, token_url)
+            _install_copy_menu(label, shown, token_url)
             row.addWidget(label, 1)
 
             if self._icon_cache is not None:
@@ -4668,7 +4684,7 @@ class TransactionDetailsDialog(Dialog):
                     )
         else:
             row.addWidget(
-                self._link_label(addr,
+                self._link_label(shown,
                                  self._explorer_url("address", addr),
                                  monospace=True),
                 1,
@@ -4747,12 +4763,14 @@ def _format_usd(usd) -> str:
     return f"{usd:.6f} USD"
 
 
-def _native_value_with_usd(wei: int, symbol: str, price) -> str:
+def _native_value_with_usd(wei: int, symbol: str, price, *,
+                           decimals: int = 18) -> str:
     """A native amount as ``X SYMBOL  (≈$Y)`` — the USD parenthetical matches
     the Expected-fee line; dropped when no price is known. Used for the
     Value / Total rows so they read like the fee instead of trailing a raw
-    ``(… wei)`` (which the exact ether Decimal already conveys)."""
-    ether = wei_to_ether(wei)
+    ``(… wei)`` (which the exact ether Decimal already conveys). ``decimals``
+    is the chain's native decimals (6 for TRX)."""
+    ether = Decimal(int(wei)) / (Decimal(10) ** decimals)
     text = f"{ether} {symbol}"
     if price is not None:
         text += f"  ({_format_usd(ether * price)})"

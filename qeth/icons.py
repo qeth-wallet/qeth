@@ -114,6 +114,7 @@ _TRUSTWALLET_CHAIN_SLUGS: dict[int, str] = {
     1: "ethereum", 10: "optimism", 56: "smartchain", 100: "xdai",
     137: "polygon", 324: "zksync",
     8453: "base", 42161: "arbitrum", 43114: "avalanchec",
+    728126428: "tron",
 }
 
 

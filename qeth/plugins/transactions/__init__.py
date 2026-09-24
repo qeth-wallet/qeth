@@ -58,12 +58,14 @@ from ...abi import (
 )
 from ...abi_cache import AbiCache
 from .contract_identity import (
-    ContractIdentityCache, ContractIdentitySource, describe_identity,
+    ContractIdentityCache, ContractIdentitySource, TronIdentitySource,
+    describe_identity,
 )
 from ...chain import EthClient, native_amount, wei_to_ether
 from ...address import codec_for
 from ...tron.client import TronClient, TronError
 from ...tron.history import TronGridTransactionSource
+from .tron_send import _TronFeesMixin
 from ...tron.tx import TransferContract as TronTransferContract
 from ...tron.tx import decode_raw as decode_tron_raw
 from ...tron.tx import read_fields as read_tron_fields
@@ -883,6 +885,29 @@ def _render_decoded(text_edit, decoded: dict,
     text_edit.setHtml("".join(parts))
 
 
+def _family_known(known: dict[str, str], chain) -> dict[str, str]:
+    """The own-wallet label map keyed the way ``chain`` writes addresses —
+    ``T…`` (lower-cased, for the renderers' case-insensitive lookup) on
+    Tron — so an address rendered in that form still finds its label."""
+    if chain is None or chain.is_evm:
+        return known
+    codec = codec_for(chain)
+    return {codec.display(a).lower(): lbl for a, lbl in known.items()}
+
+
+def _render_decoded_on(chain, text_edit, decoded: dict,
+                       token_context: dict | None = None,
+                       known_addresses=None) -> None:
+    """``_render_decoded`` with addresses in ``chain``'s own form: the
+    decoder speaks 0x hex, a Tron user reads T… — and so does the own-wallet
+    annotation that has to match them."""
+    known = _own_address_labels(known_addresses)
+    if chain is not None and not chain.is_evm:
+        decoded = _addresses_in_family_form(decoded, chain)
+        known = _family_known(known, chain)
+    _render_decoded(text_edit, decoded, token_context, known_addresses=known)
+
+
 def _arg_html(arg: dict, *, indent: int, last: bool,
               token_context: dict | None = None,
               known_addresses: dict[str, str] | None = None) -> str:
@@ -1347,7 +1372,8 @@ class TransactionsPlugin(Plugin):
         self._identity_source: ContractIdentitySource | None = (
             ContractIdentitySource(
                 lambda: store.etherscan_api_key,
-                get_code=_make_identity_get_code(store))
+                get_code=_make_identity_get_code(store),
+                tron=TronIdentitySource(_make_identity_get_code(store)))
             if store is not None else None
         )
         self._identity_cache = ContractIdentityCache()
@@ -3517,11 +3543,15 @@ class ContractIdentityWorker(QThread):
     def __init__(self, source: ContractIdentitySource | None,
                  cache: ContractIdentityCache, chain_id: int, address: str,
                  my_addresses, tx_cache: TransactionCache | None = None,
-                 mode: str = "interact", parent=None):
+                 mode: str = "interact",
+                 short: Callable[[str], str] | None = None, parent=None):
         super().__init__(parent)
         self._source = source
         self._cache = cache
         self._chain_id = chain_id
+        # How the badge abbreviates an address (a deployer) — the chain's own
+        # form, T… on Tron; None = the default 0x form.
+        self._short = short
         self._address = address
         self._my = list(my_addresses or [])
         self._tx_cache = tx_cache
@@ -3568,7 +3598,7 @@ class ContractIdentityWorker(QThread):
         badge = describe_identity(
             idy, my_addresses=self._my, deployer_count=count,
             interaction_count=interactions, approval_count=approvals,
-            context=self._mode, now_ts=time.time())
+            context=self._mode, now_ts=time.time(), short=self._short)
         self.ready.emit(badge)
 
 
@@ -3938,8 +3968,11 @@ class _EventsView(QWidget):
 
     def _event_html(self, decoded, lg, doc) -> str:
         contract = (decoded or lg).get("contract") or lg.get("address") or "?"
+        # Shown in the chain's form (T… on Tron); lookups below stay on hex.
+        shown = (codec_for(self.chain).display(contract)
+                 if contract.startswith("0x") else contract)
         contract_span = (
-            f'<span style="color:{_TYPE_COLOR};">{_escape_html(contract)}</span>'
+            f'<span style="color:{_TYPE_COLOR};">{_escape_html(shown)}</span>'
         )
         prefix = self._token_prefix_html(doc, contract)
         if decoded is None:
@@ -3951,10 +3984,13 @@ class _EventsView(QWidget):
         head = f"{prefix}{contract_span}.<b>{_escape_html(decoded['event'])}</b>(\n"
         args = decoded.get("args") or []
         token_context = self._event_token_context(contract, decoded)
+        known = self._known_addresses
+        if not self.chain.is_evm:
+            args = _addresses_in_family_form(args, self.chain)
+            known = _family_known(known, self.chain)
         body = "".join(
             _arg_html(a, indent=1, last=(j == len(args) - 1),
-                       token_context=token_context,
-                       known_addresses=self._known_addresses)
+                       token_context=token_context, known_addresses=known)
             for j, a in enumerate(args)
         )
         return head + body + ")\n"
@@ -4663,8 +4699,6 @@ class TransactionDetailsDialog(Dialog):
             self._render_decoded_call(self._decoded_tree)
 
     def _render_decoded_call(self, decoded) -> None:
-        if not self.chain.is_evm:
-            decoded = _addresses_in_family_form(decoded, self.chain)
         self._resolve_batch_targets(decoded)
         # If the called contract is on the curated whitelist, pass
         # its (symbol, decimals) so the renderer can annotate token-
@@ -4677,8 +4711,8 @@ class TransactionDetailsDialog(Dialog):
                     "symbol": entry.symbol,
                     "decimals": entry.decimals,
                 }
-        _render_decoded(
-            self.decoded_view, decoded, token_context,
+        _render_decoded_on(
+            self.chain, self.decoded_view, decoded, token_context,
             known_addresses=self._known_addresses,
         )
 
@@ -5256,7 +5290,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         # binding a generation into a lambda: a lambda isn't receiver-tracked,
         # so a worker that outlives a closed dialog would fire into the deleted
         # dialog (segfault). A bound-method connection auto-disconnects.
-        self._gas_worker: GasSuggestionWorker | None = None
+        self._gas_worker: QThread | None = None
         self._base_fee_wei = 0
         self._estimated_gas = 0
         self._suggested_nonce: int | None = None
@@ -5320,7 +5354,8 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         from_url = self._explorer_url("address", self._from_addr)
         header.addRow(
             "From:",
-            self._link_label(self._from_addr, from_url, monospace=True),
+            self._link_label(self._display(self._from_addr), from_url,
+                             monospace=True),
         )
         # Subclass-specific header rows (recipient / amount / identity …).
         self._build_header_rows(header, outer)
@@ -5390,14 +5425,6 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
 
         root.addWidget(self.revert_banner())
         root.addWidget(self.buttons)
-
-        # Recompute the "Expected fee" line whenever the user touches an
-        # input that affects it: gas limit and either (1559) priority tip or
-        # (legacy) gas price. spin_max_fee is excluded — it caps the upper
-        # bound but doesn't change the expected effective rate (base + tip).
-        for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
-            if sp is not None:
-                sp.valueChanged.connect(self._update_max_total)
 
         # Debounced gas re-estimate scaffold — subclasses decide when to
         # start the timer (Send: on a valid recipient).
@@ -5477,6 +5504,13 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         gas_form.addRow("Network base fee:", self.base_fee_lbl)
         self._gas_section.set_content_layout(gas_form)
         outer.addWidget(self._gas_section)
+        # Recompute the "Expected fee" line whenever the user touches an
+        # input that affects it: gas limit and either (1559) priority tip or
+        # (legacy) gas price. spin_max_fee is excluded — it caps the upper
+        # bound but doesn't change the expected effective rate (base + tip).
+        for sp in (self.spin_gas, self.spin_priority, self.spin_gas_price):
+            if sp is not None:
+                sp.valueChanged.connect(self._update_max_total)
 
     # --- shared widget helpers -------------------------------------
 
@@ -5513,6 +5547,10 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
                        *, ref_addr: str | None = None) -> str | None:
         return explorer_url(self.chain, kind, addr, ref_addr=ref_addr)
 
+    def _display(self, addr: str) -> str:
+        """``addr`` as the user reads it on this chain (EIP-55, or T…)."""
+        return codec_for(self.chain).display(addr)
+
     def _build_token_header_row(self, asset: dict, mono: QFont) -> QWidget:
         """Icon + "SYMBOL (linked-contract-addr)" — same treatment
         the rest of the app uses for known ERC-20s."""
@@ -5535,12 +5573,12 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
                 f'style="color: {self._link_color}; '
                 f'text-decoration: underline; '
                 f'font-family: monospace;">'
-                f"{_escape_html(addr)}</a>"
+                f"{_escape_html(self._display(addr))}</a>"
             )
         else:
             addr_html = (
                 f'<span style="font-family: monospace;">'
-                f"{_escape_html(addr)}</span>"
+                f"{_escape_html(self._display(addr))}</span>"
             )
         label = QLabel(f"{_escape_html(asset['symbol'])} ({addr_html})")
         label.setTextFormat(Qt.TextFormat.RichText)
@@ -5548,7 +5586,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         label.setTextInteractionFlags(
             Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        _install_copy_menu(label, addr, token_url)
+        _install_copy_menu(label, self._display(addr), token_url)
         row.addWidget(label, 1)
 
         if self._icon_cache is not None:
@@ -5612,12 +5650,12 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
                     f'style="color: {self._link_color}; '
                     f'text-decoration: underline; '
                     f'font-family: monospace;">'
-                    f"{_escape_html(addr)}</a>"
+                    f"{_escape_html(self._display(addr))}</a>"
                 )
             else:
                 addr_html = (
                     f'<span style="font-family: monospace;">'
-                    f"{_escape_html(addr)}</span>"
+                    f"{_escape_html(self._display(addr))}</span>"
                 )
             label = QLabel(
                 f"{_escape_html(entry.symbol)} ({addr_html})"
@@ -5627,7 +5665,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
             label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            _install_copy_menu(label, addr, token_url)
+            _install_copy_menu(label, self._display(addr), token_url)
             row.addWidget(label, 1)
 
             if self._icon_cache is not None:
@@ -5641,7 +5679,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
                     )
         else:
             row.addWidget(
-                self._link_label(addr,
+                self._link_label(self._display(addr),
                                  self._explorer_url("address", addr),
                                  monospace=True),
                 1,
@@ -5687,7 +5725,8 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         model = QStandardItemModel(self)
         for low, label in sorted(self._address_book.items(),
                                  key=lambda kv: (kv[1] or "￿").lower()):
-            addr = to_checksum_address(low)
+            # The chain's own form — what the recipient field parses back.
+            addr = self._display(low)
             disp = f"{label} — {addr}" if label else addr
             item = QStandardItem(disp)
             item.setData(addr, Qt.ItemDataRole.UserRole)
@@ -5798,7 +5837,8 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
     def _native_value_text(self, wei: int) -> str:
         """A native amount with a USD estimate, like the fee line."""
         return _native_value_with_usd(wei, self.chain.symbol,
-                                      self._native_price_usd)
+                                      self._native_price_usd,
+                                      decimals=self.chain.native_decimals)
 
     def set_signing_in_progress(self, busy: bool) -> None:
         """Lock / unlock the dialog while the host runs the
@@ -5814,15 +5854,38 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
         for btn in self.buttons.buttons():
             if btn is not self.confirm_btn:
                 btn.setEnabled(not busy)
-        self.spin_gas.setEnabled(not busy and self._gas_ready)
+        self._set_fee_controls_enabled(not busy and self._gas_ready)
+        self._set_inputs_enabled(not busy)
+
+    def _set_fee_controls_enabled(self, enabled: bool) -> None:
+        """Enable / disable the editable fee controls — on EVM the gas limit
+        and the fee spinners of the chain's fee mode."""
+        self.spin_gas.setEnabled(enabled)
         if self.chain.eip1559:
             assert self.spin_max_fee is not None and self.spin_priority is not None
-            self.spin_max_fee.setEnabled(not busy and self._gas_ready)
-            self.spin_priority.setEnabled(not busy and self._gas_ready)
+            self.spin_max_fee.setEnabled(enabled)
+            self.spin_priority.setEnabled(enabled)
         else:
             assert self.spin_gas_price is not None
-            self.spin_gas_price.setEnabled(not busy and self._gas_ready)
-        self._set_inputs_enabled(not busy)
+            self.spin_gas_price.setEnabled(enabled)
+
+    def _native_fee_reserve(self) -> int:
+        """What a native "Max" send must leave behind for the fee: the UPPER
+        bound the chain may charge — ``gas × maxFeePerGas`` (EIP-1559) or
+        ``gas × gasPrice`` (legacy), maxFeePerGas being the ceiling the user
+        authorised — bumped 50 % to absorb an estimate undershoot, the user
+        nudging the fee up before sending, or a basefee burst. The user
+        explicitly preferred 'too much margin' over 'too little': dust left
+        in the wallet is fine, an 'insufficient funds' reject is not."""
+        gas = max(self._estimated_gas or self.spin_gas.value(),
+                  self.spin_gas.value())
+        if self.chain.eip1559:
+            assert self.spin_max_fee is not None
+            ceiling = _gwei_to_wei(self.spin_max_fee.value())
+        else:
+            assert self.spin_gas_price is not None
+            ceiling = _gwei_to_wei(self.spin_gas_price.value())
+        return (gas * ceiling * 3) // 2
 
     def _update_state(self) -> None:
         ok = self._gas_ready and self._inputs_valid()
@@ -6255,8 +6318,8 @@ class SignTransactionDialog(_TxComposerDialog):
                     "symbol": entry.symbol,
                     "decimals": entry.decimals,
                 }
-        _render_decoded(
-            self.decoded_view, decoded, token_context,
+        _render_decoded_on(
+            self.chain, self.decoded_view, decoded, token_context,
             known_addresses=self._known_addresses,
         )
 
@@ -6443,7 +6506,9 @@ class SendTokenDialog(_TxComposerDialog):
         # can paste partial text without seeing intermediate errors. The
         # ▾ button pops the address-book completer over the user's wallets.
         to_row, self.recipient_edit = self._make_address_field()
-        self.recipient_edit.setPlaceholderText("0x… address or name.eth")
+        self.recipient_edit.setPlaceholderText(
+            "0x… address or name.eth" if self.chain.is_evm
+            else f"{codec_for(self.chain).placeholder} address")
         header.addRow("&To:", to_row)
         # ENS: when the recipient is a name (name.eth), forward-resolve it
         # and show the 0x address here (highlighted) so the user verifies
@@ -6583,7 +6648,8 @@ class SendTokenDialog(_TxComposerDialog):
         worker = ContractIdentityWorker(
             self._identity_source, self._identity_cache, self.chain.chain_id,
             addr, self._known_addresses, tx_cache=self._tx_cache,
-            mode="send")
+            mode="send",
+            short=None if self.chain.is_evm else codec_for(self.chain).short)
         worker.ready.connect(
             lambda badge, a=addr: self._on_identity_ready(a, badge))
         self._start_worker(worker)
@@ -6649,18 +6715,7 @@ class SendTokenDialog(_TxComposerDialog):
         code path for native."""
         raw = self._asset["balance_raw"]
         if self._asset["is_native"] and self._gas_ready:
-            gas = max(
-                self._estimated_gas or self.spin_gas.value(),
-                self.spin_gas.value(),
-            )
-            if self.chain.eip1559:
-                assert self.spin_max_fee is not None and self.spin_priority is not None
-                ceiling = _gwei_to_wei(self.spin_max_fee.value())
-            else:
-                assert self.spin_gas_price is not None
-                ceiling = _gwei_to_wei(self.spin_gas_price.value())
-            gas_cost = (gas * ceiling * 3) // 2
-            raw = max(0, raw - gas_cost)
+            raw = max(0, raw - self._native_fee_reserve())
         bal = (
             Decimal(raw) / (Decimal(10) ** self._asset["decimals"])
         )
@@ -6678,7 +6733,8 @@ class SendTokenDialog(_TxComposerDialog):
         the source of truth for _parsed_recipient(), so Send stays disabled
         until a name resolves."""
         text = self.recipient_edit.text().strip()
-        if not self._looks_like_ens(text):
+        # ENS names Ethereum addresses; on Tron a dotted string is no name.
+        if not self.chain.is_evm or not self._looks_like_ens(text):
             if self._ens_input:        # was a name, now a plain address/empty
                 self._ens_input = ""
                 self._ens_resolved = None
@@ -6753,11 +6809,10 @@ class SendTokenDialog(_TxComposerDialog):
 
     def _parsed_recipient(self) -> str | None:
         text = self.recipient_edit.text().strip()
-        if text.startswith("0x") and len(text) == 42:
-            try:
-                return to_checksum_address(text)
-            except Exception:
-                return None
+        # An address in the chain's own form (0x…, or T… on Tron) → hex.
+        addr = codec_for(self.chain).parse(text)
+        if addr is not None:
+            return addr
         # An ENS name is a valid recipient only once it has resolved.
         if text and text.lower() == self._ens_input and self._ens_resolved:
             return self._ens_resolved
@@ -6874,11 +6929,10 @@ class SendTokenDialog(_TxComposerDialog):
         if self.total_lbl is None:
             return
         amount_raw = self._parsed_amount_raw() or 0
-        total_wei = fee_wei + amount_raw
-        text = f"{wei_to_ether(total_wei)} {self.chain.symbol}"
+        total = native_amount(fee_wei + amount_raw, self.chain)
+        text = f"{total} {self.chain.symbol}"
         if self._native_price_usd is not None:
-            usd = wei_to_ether(total_wei) * self._native_price_usd
-            text += f"  ({_format_usd(usd)})"
+            text += f"  ({_format_usd(total * self._native_price_usd)})"
         self.total_lbl.setText(text)
 
     def _refresh_decoded_view(self) -> None:
@@ -6901,7 +6955,8 @@ class SendTokenDialog(_TxComposerDialog):
         amount_raw = self._parsed_amount_raw_unchecked()
         # Use sentinels for missing inputs so the user sees the
         # shape of the call as they type, rather than an empty box.
-        recipient_str = recipient if recipient is not None else "0x…"
+        recipient_str = (recipient if recipient is not None
+                         else codec_for(self.chain).placeholder)
         amount_str = str(amount_raw) if amount_raw is not None else "?"
         decoded = {
             "function": "transfer",
@@ -6916,8 +6971,8 @@ class SendTokenDialog(_TxComposerDialog):
                 "symbol": self._asset["symbol"],
                 "decimals": self._asset["decimals"],
             }
-        _render_decoded(
-            self.decoded_view, decoded, token_context,
+        _render_decoded_on(
+            self.chain, self.decoded_view, decoded, token_context,
             known_addresses=self._known_addresses,
         )
 
@@ -6982,3 +7037,11 @@ class SendTokenDialog(_TxComposerDialog):
             value_wei=0,
             data=_erc20_transfer_calldata(recipient, amount_raw),
         )
+
+
+class TronSendTokenDialog(_TronFeesMixin, SendTokenDialog):
+    """``SendTokenDialog`` on Tron: the same dialog — recipient, amount, Max,
+    USD value, identity, decoded call, Events preview, revert banner — with
+    Tron's fee half (``tron_send._TronFeesMixin``): the network resources a
+    transaction burns instead of gas, and ``finalised_tron`` instead of an
+    EVM request."""

@@ -1,64 +1,63 @@
-"""``TronSendDialog`` — send TRX or a TRC-20 token on Tron.
+"""Tron's half of the transaction composer.
 
-The EVM composer's machinery (nonce, gas price, simulation) doesn't apply to
-Tron, so this is its own small dialog: recipient (a ``T…`` address), amount,
-and the fee as Tron charges it — the TRX a transaction will BURN for the
-bandwidth / energy its sender's staked + free resources don't cover (plus
-activating a brand-new recipient), estimated live by ``TronFeeWorker``
-(``qeth.tron.fees``). A TRC-20 transfer also shows its ``fee_limit``, the most
-it may burn.
+Send on Tron is the SAME dialog as on an EVM chain — ``SendTokenDialog``:
+recipient + amount + Max + USD value, the recipient's identity row, the
+decoded call, the Events preview (the node's own simulation), the revert
+banner, the signing lock. Only how a transaction PAYS differs, and that is
+what ``_TronFeesMixin`` swaps in over ``_TxComposerDialog``'s EVM fee hooks:
 
-Confirm emits ``send_requested(contract, fee_limit)``; the host signs and
-broadcasts through ``TronSignAndBroadcastWorker``, which assembles the
-transaction (fresh TaPoS) right before signing.
+- no gas / fee spinners and no nonce: a "Network resources" section shows
+  the bandwidth, energy and account activation the transaction will use
+  and what it BURNS in TRX for whatever staked + free resources don't
+  cover (``qeth.tron.fees``), plus a contract call's ``fee_limit``;
+- the dialog still describes the transaction as a ``SigningRequest``
+  (to / value / data) — ``finalised_tron`` turns that into the Tron
+  contract + fee_limit the host signs (the TaPoS reference is added at
+  signing time by ``TronSignAndBroadcastWorker``).
 """
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QStringListModel, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (
-    QCompleter, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QVBoxLayout, QWidget,
-)
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtWidgets import QFormLayout
 
-from ...address import codec_for
-from ...dialog import Dialog, address_field_min_width
-from ...formatting import format_balance
+from ...chain import native_amount
+from ...signing import SignerError, SigningRequest
 from ...tron.client import TronClient, TronError
-from ...tron.fees import TronFee, estimate_fee, trc20_transfer_data
+from ...tron.fees import TronFee, estimate_fee
 from ...tron.tx import Contract, TransferContract, TriggerSmartContract
 
-# Debounce between an edit and the fee estimate it triggers.
-_ESTIMATE_DELAY_MS = 400
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QLabel
 
 
-def _amount(raw: int, decimals: int) -> Decimal:
-    return Decimal(raw) / (Decimal(10) ** decimals)
-
-
-def _trx(sun: int, decimals: int = 6) -> str:
-    """A fee in TRX, exact (sun has 6 decimals, so nothing is rounded away —
-    a fee cap should read as what it is)."""
-    return f"{_amount(sun, decimals).normalize():f}"
+def tron_contract(owner: str, req: SigningRequest) -> Contract:
+    """The Tron contract a composer's request describes: no calldata → a
+    TRX ``TransferContract``; calldata → a ``TriggerSmartContract`` (a
+    TRC-20 transfer, …) carrying the request's value as ``call_value``."""
+    if not req.to_addr:
+        raise SignerError("a Tron transaction needs a recipient")
+    data = bytes.fromhex(req.data[2:]) if req.data and len(req.data) > 2 else b""
+    if not data:
+        return TransferContract(owner, req.to_addr, int(req.value_wei))
+    return TriggerSmartContract(owner, req.to_addr, data, int(req.value_wei or 0))
 
 
 class TronFeeWorker(QThread):
     """Estimate ``contract``'s fee and read the sender's TRX balance (the fee
-    is always burned in TRX, whichever asset is sent). ``estimated`` carries
-    ``(seq, TronFee, trx_balance_sun)``; ``failed`` ``(seq, reason)`` — the
-    seq lets the dialog drop answers to an edit it has since superseded."""
+    is burned in TRX whatever is sent). ``estimated(TronFee, balance_sun)``
+    or ``failed(reason)``; the dialog drops a superseded worker's answer."""
 
-    estimated = Signal(int, object, object)
-    failed = Signal(int, str)
+    estimated = Signal(object, object)
+    failed = Signal(str)
 
-    def __init__(self, chain, contract: Contract, seq: int, parent=None):
+    def __init__(self, chain, contract: Contract, parent=None):
         super().__init__(parent)
         self._chain = chain
         self._contract = contract
-        self._seq = seq
 
     def run(self) -> None:
         try:
@@ -66,245 +65,157 @@ class TronFeeWorker(QThread):
             fee = estimate_fee(client, self._contract)
             balance = client.get_balance(self._contract.owner)
         except TronError as e:
-            self.failed.emit(self._seq, str(e))
+            self.failed.emit(str(e))
             return
         except Exception as e:
-            self.failed.emit(self._seq, f"Couldn't estimate the fee: {e}")
+            self.failed.emit(f"couldn't estimate the fee: {e}")
             return
-        self.estimated.emit(self._seq, fee, balance)
+        self.estimated.emit(fee, balance)
 
 
-class TronSendDialog(Dialog):
-    send_requested = Signal(object, object)    # (Contract, fee_limit sun)
+def _trx(sun: int) -> str:
+    """A TRX amount, exact (sun has 6 decimals — nothing rounds away)."""
+    return f"{(Decimal(sun) / 10**6).normalize():f}"
 
-    def __init__(self, asset: dict, chain, from_addr: str, *, start_worker,
-                 address_book: list[tuple[str, str]] | None = None,
-                 label: str = "", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.chain = chain
-        self._asset = asset
-        self._from = from_addr
-        self._start_worker = start_worker
-        self._codec = codec_for(chain)
-        self._is_native = bool(asset.get("is_native"))
-        self._decimals = int(asset.get("decimals") or 0)
-        self._balance_raw = int(asset.get("balance_raw") or 0)
-        self._symbol = str(asset.get("symbol") or "?")
-        self._fee: TronFee | None = None
+
+class _TronFeesMixin:
+    """The Tron fee hooks over ``_TxComposerDialog`` (mixed in FIRST)."""
+
+    if TYPE_CHECKING:
+        chain: Any
+        _from_addr: Any
+        _gas_ready: bool
+        _gas_worker: QThread | None
+        _native_price_usd: Any
+        _start_worker: Any
+        max_total_lbl: QLabel
+
+        def _value_label(self, text: str, *, monospace: bool = False) -> QLabel: ...
+        def _is_stale_gas(self) -> bool: ...
+        def _on_gas_ready(self) -> None: ...
+        def _update_state(self) -> None: ...
+        def _update_extra_totals(self, fee_wei: int) -> None: ...
+        def _build_request(self) -> SigningRequest: ...
+
+    def _build_gas_section(self, outer, *, base_fee_text: str) -> None:
+        # Package-level helpers are imported here, not at the top: the
+        # transactions package imports THIS module while it initialises.
+        from . import _CollapsibleSection
+        self._tron_fee: TronFee | None = None
         self._trx_balance: int | None = None
-        self._seq = 0
-        self._max_mode = False
-        self._signing = False
-        self.setWindowTitle(f"Send {self._symbol} on {chain.name}")
-
-        v = QVBoxLayout(self)
+        self._gas_section = _CollapsibleSection("Network resources")
         form = QFormLayout()
-        mono = QFont("monospace")
-        from_lbl = QLabel(self._codec.display(from_addr)
-                          + (f"  ({label})" if label else ""))
-        from_lbl.setFont(mono)
-        from_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("From:", from_lbl)
-        form.addRow("Asset:", QLabel(
-            f"{self._symbol} — balance "
-            f"{format_balance(_amount(self._balance_raw, self._decimals))}"))
+        form.setHorizontalSpacing(16)
+        self._bandwidth_lbl = self._value_label("—")
+        form.addRow("Bandwidth:", self._bandwidth_lbl)
+        self._energy_lbl = self._value_label("—")
+        form.addRow("Energy:", self._energy_lbl)
+        self._activation_lbl = self._value_label("—")
+        form.addRow("Account activation:", self._activation_lbl)
+        self._fee_limit_lbl = self._value_label("—")
+        form.addRow("Fee limit:", self._fee_limit_lbl)
+        # The estimate's status line — the EVM base-fee row's slot.
+        self.base_fee_lbl = self._value_label(base_fee_text)
+        form.addRow("Estimate:", self.base_fee_lbl)
+        self._resources_form = form
+        for lbl in (self._activation_lbl, self._fee_limit_lbl):
+            form.setRowVisible(lbl, False)
+        self._gas_section.set_content_layout(form)
+        outer.addWidget(self._gas_section)
 
-        self.to_edit = QLineEdit()
-        self.to_edit.setFont(mono)
-        self.to_edit.setPlaceholderText(f"{self._codec.placeholder} address")
-        self.to_edit.setMinimumWidth(address_field_min_width(self))
-        book = [(self._codec.display(a), lab) for a, lab in (address_book or [])
-                if a.lower() != from_addr.lower()]
-        self._book_labels = {shown: lab for shown, lab in book}
-        if book:
-            comp = QCompleter(QStringListModel([shown for shown, _ in book], self), self)
-            comp.setCaseSensitivity(Qt.CaseSensitivity.CaseSensitive)
-            self.to_edit.setCompleter(comp)
-        form.addRow("&To:", self.to_edit)
-
-        amount_row = QHBoxLayout()
-        self.amount_edit = QLineEdit()
-        self.amount_edit.setPlaceholderText("0.0")
-        self.max_btn = QPushButton("&Max")
-        self.max_btn.setAutoDefault(False)
-        amount_row.addWidget(self.amount_edit, 1)
-        amount_row.addWidget(self.max_btn)
-        # A row built from a layout gets no buddy, so its label's & mnemonic
-        # would show literally — make the label and buddy it by hand.
-        amount_lbl = QLabel("&Amount:")
-        amount_lbl.setBuddy(self.amount_edit)
-        form.addRow(amount_lbl, amount_row)
-        v.addLayout(form)
-
-        # The fee paragraph: what this burns, and (contract calls) the cap.
-        self.fee_lbl = QLabel("")
-        self.fee_lbl.setWordWrap(True)
-        self.fee_lbl.setVisible(False)
-        v.addWidget(self.fee_lbl)
-        self.status_lbl = QLabel("")
-        self.status_lbl.setWordWrap(True)
-        self.status_lbl.setVisible(False)
-        v.addWidget(self.status_lbl)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        self.send_btn = buttons.addButton("&Send", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.send_btn.setEnabled(False)
-        buttons.rejected.connect(self.reject)
-        self.send_btn.clicked.connect(self._on_send)
-        v.addWidget(buttons)
-
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(_ESTIMATE_DELAY_MS)
-        self._timer.timeout.connect(self._kick_estimate)
-        self.to_edit.textChanged.connect(self._on_edited)
-        self.amount_edit.textEdited.connect(self._on_amount_typed)
-        self.max_btn.clicked.connect(self._on_max)
-
-    # --- input ------------------------------------------------------------
-
-    def recipient(self) -> str | None:
-        return self._codec.parse(self.to_edit.text())
-
-    def amount_raw(self) -> int | None:
-        """The typed amount in the asset's smallest unit, or None if it
-        isn't a positive number with at most the asset's decimals."""
-        text = self.amount_edit.text().strip().replace(",", "")
+    def _kick_gas(self, probe: SigningRequest) -> None:
         try:
-            value = Decimal(text)
-        except InvalidOperation:
-            return None
-        raw = value * (Decimal(10) ** self._decimals)
-        if value <= 0 or raw != raw.to_integral_value():
-            return None
-        return int(raw)
-
-    def contract(self) -> Contract | None:
-        """What Send would sign, from the current fields — or None."""
-        to, amount = self.recipient(), self.amount_raw()
-        if to is None or amount is None:
-            return None
-        if self._is_native:
-            return TransferContract(self._from, to, amount)
-        token = str(self._asset["contract"])
-        return TriggerSmartContract(self._from, token, trc20_transfer_data(to, amount))
-
-    def _on_amount_typed(self, _text: str) -> None:
-        self._max_mode = False
-        self._on_edited()
-
-    def _on_max(self) -> None:
-        """All of the asset. For TRX, less what this transfer burns — once
-        the estimate lands (``_on_estimated`` re-applies it)."""
-        self._max_mode = True
-        self._apply_max()
-        self._on_edited()
-
-    def _apply_max(self) -> None:
-        raw = self._balance_raw
-        if self._is_native and self._fee is not None:
-            raw = max(0, raw - self._fee.total_burn)
-        self.amount_edit.setText(str(_amount(raw, self._decimals).normalize()
-                                     if raw else "0"))
-
-    def _on_edited(self, *_args) -> None:
-        self._fee = None
-        self.send_btn.setEnabled(False)
-        self._set_status("")
-        text = self.to_edit.text().strip()
-        if text and self.recipient() is None:
-            self._set_status(f"That isn't a valid {self.chain.name} address.")
-        if self.contract() is None:
-            self._set_fee("")
-            self._timer.stop()
+            contract = tron_contract(self._from_addr, probe)
+        except SignerError:
             return
-        self._set_fee("Estimating the network fee…")
-        self._timer.start()
-
-    # --- the fee estimate ---------------------------------------------------
-
-    def _kick_estimate(self) -> None:
-        contract = self.contract()
-        if contract is None:
-            return
-        self._seq += 1
-        worker = TronFeeWorker(self.chain, contract, self._seq)
-        worker.estimated.connect(self._on_estimated)
-        worker.failed.connect(self._on_estimate_failed)
+        worker = TronFeeWorker(self.chain, contract)
+        self._gas_worker = worker
+        # Bound-method connections (receiver-tracked), and _is_stale_gas drops
+        # a superseded worker's answer — same discipline as the EVM gas probe.
+        worker.estimated.connect(self._on_tron_estimated)
+        worker.failed.connect(self._on_tron_failed)
+        self.base_fee_lbl.setText("estimating…")
         self._start_worker(worker)
 
-    def _on_estimated(self, seq: int, fee: TronFee, trx_balance: int) -> None:
-        if seq != self._seq:
-            return
-        self._fee = fee
+    def _on_tron_estimated(self, fee: TronFee, trx_balance: int) -> None:
+        if self._is_stale_gas():
+            return                    # a newer probe (recipient edit) supersedes
+        self._tron_fee = fee
         self._trx_balance = trx_balance
-        if self._max_mode and self._is_native:
-            self._apply_max()      # textChanged isn't textEdited: no re-kick
-        # What gets burned, item by item (what staked / free resources don't
-        # cover): "burns ≈ 1.1 TRX — 1 TRX to activate …, 0.1 TRX bandwidth".
-        items = []
-        if fee.activation:
-            items.append(f"{_trx(fee.activation)} TRX to activate the "
-                         "recipient's new account")
-        if fee.bandwidth_burn:
-            items.append(f"{_trx(fee.bandwidth_burn)} TRX for bandwidth")
-        if fee.energy_burn:
-            items.append(f"{_trx(fee.energy_burn)} TRX for {fee.energy:,} energy")
-        if fee.memo_fee:
-            items.append(f"{_trx(fee.memo_fee)} TRX for the memo")
-        if fee.total_burn:
-            text = (f"Network fee: burns ≈ {_trx(fee.total_burn)} TRX — "
-                    + ", ".join(items) + ".")
+        form = self._resources_form
+
+        def burn(sun: int) -> str:
+            return f" — burns {_trx(sun)} TRX" if sun else " — covered"
+        self._bandwidth_lbl.setText(
+            f"{fee.bandwidth:,} bytes{burn(fee.bandwidth_burn)}")
+        self._energy_lbl.setText(
+            f"{fee.energy:,}{burn(fee.energy_burn)}" if fee.energy else "none")
+        form.setRowVisible(self._activation_lbl, bool(fee.activation))
+        self._activation_lbl.setText(
+            f"{_trx(fee.activation)} TRX — the recipient's account is new")
+        form.setRowVisible(self._fee_limit_lbl, bool(fee.fee_limit))
+        self._fee_limit_lbl.setText(
+            f"{_trx(fee.fee_limit)} TRX — the most the call may burn")
+        self.base_fee_lbl.setText("ready")
+        self._gas_ready = True
+        self._on_gas_ready()
+        self._update_state()
+
+    def _on_tron_failed(self, msg: str) -> None:
+        if self._is_stale_gas():
+            return
+        self._tron_fee = None
+        self._gas_ready = False
+        self.base_fee_lbl.setText(f"(failed: {msg})")
+        self.max_total_lbl.setText(f"— {msg}")
+        self._update_state()
+
+    def _update_max_total(self) -> None:
+        fee = self._tron_fee
+        if not self._gas_ready or fee is None:
+            return
+        from . import _format_usd
+        burn = fee.total_burn
+        if burn:
+            text = f"≈ {_trx(burn)} TRX burned"
+            if self._native_price_usd is not None:
+                usd = native_amount(burn, self.chain) * self._native_price_usd
+                text += f"  ({_format_usd(usd)})"
         else:
-            text = ("Network fee: none — your free / staked bandwidth"
-                    + (" and energy" if fee.energy else "") + " covers it.")
-        if fee.fee_limit:
-            text += f"\nFee limit: {_trx(fee.fee_limit)} TRX (the most it may burn)."
-        self._set_fee(text)
-        self._validate_funds()
+            text = "none — staked / free resources cover it"
+        # The fee is paid in TRX whatever is sent — say so when the account
+        # can't cover it (warn, like a predicted revert: the node refuses a
+        # tx it can't charge at broadcast, so nothing is lost).
+        need = burn + self._native_outflow()
+        if self._trx_balance is not None and need > self._trx_balance:
+            text += (f"   ⚠ needs {_trx(need)} TRX, the account holds "
+                     f"{_trx(self._trx_balance)}")
+        self.max_total_lbl.setText(text)
+        self._update_extra_totals(burn)
 
-    def _on_estimate_failed(self, seq: int, reason: str) -> None:
-        if seq != self._seq:
-            return
-        self._set_fee("")
-        self._set_status(reason)
+    def _native_outflow(self) -> int:
+        """TRX leaving with the transaction itself (a TRX send's amount)."""
+        try:
+            return int(self._build_request().value_wei or 0)
+        except SignerError:
+            return 0
 
-    def _validate_funds(self) -> None:
-        fee, amount = self._fee, self.amount_raw()
-        if fee is None or amount is None or self._trx_balance is None:
-            return
-        trx_needed = fee.total_burn + (amount if self._is_native else 0)
-        if not self._is_native and amount > self._balance_raw:
-            self._set_status(f"That's more {self._symbol} than this account holds.")
-        elif trx_needed > self._trx_balance:
-            self._set_status(
-                f"Not enough TRX: this needs {_trx(trx_needed)} TRX, the "
-                f"account holds {_trx(self._trx_balance)}.")
-        else:
-            self._set_status("")
-            self.send_btn.setEnabled(not self._signing)
+    def _set_fee_controls_enabled(self, enabled: bool) -> None:
+        """Nothing to edit: a Tron fee is what the resources cost."""
 
-    # --- send ------------------------------------------------------------
+    def _native_fee_reserve(self) -> int:
+        """A TRX "Max" leaves exactly what the transfer burns — Tron fees are
+        deterministic, there's no fee market to bump into."""
+        return self._tron_fee.total_burn if self._tron_fee is not None else 0
 
-    def _on_send(self) -> None:
-        contract = self.contract()
-        if contract is None or self._fee is None:
-            return
-        self.send_requested.emit(contract, self._fee.fee_limit)
+    def finalised_request(self) -> SigningRequest:
+        raise SignerError("a Tron transaction is finalised by finalised_tron")
 
-    def set_signing_in_progress(self, busy: bool) -> None:
-        self._signing = busy
-        for w in (self.to_edit, self.amount_edit, self.max_btn):
-            w.setEnabled(not busy)
-        self.send_btn.setEnabled(not busy and self._fee is not None
-                                 and self.contract() is not None)
-
-    # --- labels --------------------------------------------------------------
-
-    def _set_fee(self, text: str) -> None:
-        self.fee_lbl.setText(text)
-        self.fee_lbl.setVisible(bool(text))
-
-    def _set_status(self, text: str) -> None:
-        self.status_lbl.setText(text)
-        self.status_lbl.setVisible(bool(text))
+    def finalised_tron(self) -> tuple[Contract, int]:
+        """The contract to sign and its fee_limit (0 for a TRX transfer)."""
+        if not self._gas_ready or self._tron_fee is None:
+            raise SignerError("fee estimate did not complete")
+        contract = tron_contract(self._from_addr, self._build_request())
+        fee_limit = (self._tron_fee.fee_limit
+                     if isinstance(contract, TriggerSmartContract) else 0)
+        return contract, fee_limit

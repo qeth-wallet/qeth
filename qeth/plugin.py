@@ -108,8 +108,9 @@ class Host(Protocol):
     def account_addresses(self) -> list[str]:
         """Every wallet address the app knows, lowercased."""
 
-    def account_book(self) -> list[tuple[str, str]]:
-        """(address, label) pairs for the send-dialog address completer."""
+    def account_book(self, family: str | None = None) -> list[tuple[str, str]]:
+        """(address, label) pairs for the send-dialog address completer —
+        limited to a chain family's accounts when ``family`` is given."""
 
     def chain_icon(self, chain_id: int):
         """The (cached) QIcon for a chain, or a null icon."""

@@ -228,8 +228,21 @@ What's Tron-specific:
     there's no nonce.
   - The paging block cursor maps to `max_timestamp`.
   - Activities come from the TRC-20 transfer index (`tx_activity`).
-- **Send.** `plugins/transactions/tron_send.TronSendDialog` →
-  `MainWindow._begin_tron_sign` → `TronSignAndBroadcastWorker`.
+- **Send.** The SAME composer as on EVM. `TronSendTokenDialog` =
+  `tron_send._TronFeesMixin` + `SendTokenDialog`, so it shares:
+  - recipient, amount, Max and USD value;
+  - the recipient identity row (Tronscan, via `TronIdentitySource`);
+  - the decoded call and the Events preview (the node's own simulation,
+    `simulate._simulate_tron` over `triggerconstantcontract`);
+  - the revert banner and the signing lock.
+
+  Only the fee half differs:
+  - a "Network resources" section (bandwidth, energy, activation,
+    fee_limit, and what gets burned) in place of gas / fee / nonce;
+  - `finalised_tron()` in place of an EVM request.
+
+  `MainWindow._begin_sign` routes a Tron chain to `_begin_tron_sign` →
+  `TronSignAndBroadcastWorker`.
 - **Pending transactions.** `add_tron_pending`. `PendingProbeWorker`'s Tron
   branch confirms via `gettransactioninfobyid`, re-pushes the signed bytes,
   and drops a transaction once it's past its expiration.

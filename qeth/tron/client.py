@@ -22,6 +22,8 @@ import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
+
+from eth_abi import decode as abi_decode
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,6 +126,25 @@ def _message(resp: dict) -> str:
     return msg
 
 
+def call_reverted(resp: dict) -> bool:
+    """Whether a ``triggerconstantcontract`` answer is a revert."""
+    ret = ((resp.get("transaction") or {}).get("ret") or [{}])[0]
+    return ret.get("ret") == "FAILED"
+
+
+def revert_reason(resp: dict) -> str:
+    """The human reason for a reverted constant call: the ``Error(string)``
+    message when the contract gave one, else the node's text ("REVERT
+    opcode executed")."""
+    out = (resp.get("constant_result") or [""])[0] or ""
+    if out.startswith("08c379a0") and len(out) >= 8 + 128:
+        try:
+            return str(abi_decode(["string"], bytes.fromhex(out[8:]))[0])
+        except Exception:      # malformed revert data — fall back to the text
+            pass
+    return _message(resp.get("result") or {}) or "reverted"
+
+
 class TronClient:
     def __init__(self, chain: Chain, *, timeout: float = DEFAULT_TIMEOUT) -> None:
         self.chain = chain
@@ -198,12 +219,14 @@ class TronClient:
         defaults to (a head reference can hit a fork and fail TaPoS)."""
         return _block_ref(self._post("/walletsolidity/getblock", {"detail": False}))
 
-    def trigger_constant(self, owner: str, contract: str, data: bytes,
-                         call_value: int = 0) -> dict:
-        """Simulate a contract call (read-only). ``energy_used`` includes the
-        dynamic-energy penalty, which makes it the energy estimate
-        (``/wallet/estimateenergy`` is disabled on public nodes). Raises
-        ``TronError`` when the node refuses the call."""
+    def constant_call(self, owner: str, contract: str, data: bytes,
+                      call_value: int = 0) -> dict:
+        """Simulate a contract call (read-only) and return the node's whole
+        answer: ``energy_used`` (dynamic penalty included — the energy
+        estimate, since ``/wallet/estimateenergy`` is off on public nodes),
+        ``constant_result`` (return or revert data), ``logs`` (the events it
+        emits) and ``transaction.ret`` — ``FAILED`` when the call reverts
+        (``result.result`` only says the node ran it)."""
         body: dict[str, Any] = {
             "owner_address": tron_hex41(owner),
             "contract_address": tron_hex41(contract),
@@ -211,10 +234,20 @@ class TronClient:
         }
         if call_value:
             body["call_value"] = call_value
-        resp = self._post("/wallet/triggerconstantcontract", body)
+        return self._post("/wallet/triggerconstantcontract", body)
+
+    def trigger_constant(self, owner: str, contract: str, data: bytes,
+                         call_value: int = 0) -> dict:
+        """``constant_call`` for callers that need a SUCCESSFUL run (the
+        energy estimate, reads): raises ``TronError`` when the node refuses
+        the call or the call reverts — a reverting call's energy prices
+        nothing real."""
+        resp = self.constant_call(owner, contract, data, call_value)
         result = resp.get("result") or {}
         if not result.get("result"):
             raise TronError(_message(result) or "constant call failed")
+        if call_reverted(resp):
+            raise TronError(revert_reason(resp))
         return resp
 
     def call(self, contract: str, data: bytes) -> bytes:

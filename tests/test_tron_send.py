@@ -23,115 +23,137 @@ USDT_ASSET = {"is_native": False, "contract": USDT, "symbol": "USDT", "decimals"
               "balance_raw": 50_000_000}
 
 
-@pytest.fixture
-def dialog(qtbot):
-    from qeth.plugins.transactions.tron_send import TronSendDialog
-    started = []
+def _tron_dialog(qtbot, asset=TRX_ASSET, *, address_book=None):
+    """The shared Send dialog on Tron, with workers captured, not run."""
+    import qeth.plugins.transactions as tx
+    from unittest.mock import MagicMock
+    started: list = []
+    d = tx.TronSendTokenDialog(
+        asset, CHAIN, OWNER, abi_source=MagicMock(), abi_cache=MagicMock(),
+        start_worker=started.append, address_book=address_book,
+        known_addresses=[(OWNER, "me")])
+    qtbot.addWidget(d)
+    d.started = started
+    return d
 
-    def make(asset=TRX_ASSET):
-        d = TronSendDialog(asset, CHAIN, OWNER, start_worker=started.append)
-        qtbot.addWidget(d)
-        d.started = started
-        return d
-    return make
 
-
-def _fill(d, to=TO, amount="1.5"):
-    d.to_edit.setText(tron_from_hex(to) if to.startswith("0x") else to)
+def _type(d, to=TO, amount="1.5"):
+    d.recipient_edit.setText(tron_from_hex(to) if to.startswith("0x") else to)
     d.amount_edit.setText(amount)
-    d._on_amount_typed(amount)
 
 
-def test_invalid_recipient_is_flagged(dialog):
-    d = dialog()
-    _fill(d, to="TNotAnAddress")
-    assert "isn't a valid Tron address" in d.status_lbl.text()
-    assert d.contract() is None and not d.send_btn.isEnabled()
+def _estimate(d, fee, trx_balance=10**9):
+    """Land a fee estimate as the (latest) TronFeeWorker would."""
+    d._reestimate_gas()
+    from qeth.plugins.transactions.tron_send import TronFeeWorker
+    assert isinstance(d._gas_worker, TronFeeWorker)
+    d._on_tron_estimated(fee, trx_balance)
 
 
-def test_trx_and_trc20_contracts(dialog):
-    d = dialog()
-    _fill(d)
-    assert d.contract() == TransferContract(OWNER, d.recipient(), 1_500_000)
-    t = dialog(USDT_ASSET)
-    _fill(t, amount="2")
-    c = t.contract()
-    assert isinstance(c, TriggerSmartContract) and c.contract == USDT
-    assert c.data == trc20_transfer_data(t.recipient(), 2_000_000)
+def test_it_is_the_shared_send_dialog(qtbot):
+    from qeth.plugins.transactions import SendTokenDialog
+    d = _tron_dialog(qtbot)
+    assert isinstance(d, SendTokenDialog)
+    assert d.recipient_edit.placeholderText() == "T… address"
+    assert d._gas_section is not None            # "Network resources"
+    assert not hasattr(d, "spin_gas")            # no gas / nonce on Tron
 
 
-def test_too_many_decimals_is_not_an_amount(dialog):
-    d = dialog()
-    _fill(d, amount="0.0000001")
-    assert d.amount_raw() is None
+def test_recipient_parses_tron_form_only(qtbot):
+    d = _tron_dialog(qtbot)
+    d.recipient_edit.setText(tron_from_hex(TO))
+    assert d._parsed_recipient().lower() == TO
+    for bad in (TO, "TNotAnAddress", "vitalik.eth"):   # hex / junk / ENS
+        d.recipient_edit.setText(bad)
+        assert d._parsed_recipient() is None
 
 
-def test_estimate_enables_send_and_explains_the_burn(dialog):
-    d = dialog()
-    _fill(d)
-    d._kick_estimate()
-    assert d.started, "an estimate worker was started"
+def test_trx_send_estimates_and_finalises(qtbot):
+    d = _tron_dialog(qtbot)
+    _type(d)
+    assert not d.confirm_btn.isEnabled()          # no estimate yet
     fee = TronFee(bandwidth=268, bandwidth_burn=100_000, activation=1_000_000)
-    d._on_estimated(d._seq, fee, 10_000_000)
-    assert "burns ≈ 1.1 TRX" in d.fee_lbl.text()
-    assert "activate the recipient" in d.fee_lbl.text()
-    assert d.send_btn.isEnabled()
-    got = []
-    d.send_requested.connect(lambda c, lim: got.append((c, lim)))
-    d.send_btn.click()
-    assert got == [(d.contract(), 0)]
+    _estimate(d, fee)
+    assert d.confirm_btn.isEnabled()
+    assert "1.1 TRX burned" in d.max_total_lbl.text()
+    assert "account is new" in d._activation_lbl.text()
+    contract, fee_limit = d.finalised_tron()
+    assert contract == TransferContract(d._from_addr, d._parsed_recipient(), 1_500_000)
+    assert fee_limit == 0
 
 
-def test_a_stale_estimate_is_ignored(dialog):
-    d = dialog()
-    _fill(d)
-    d._kick_estimate()
-    stale = d._seq
-    d._kick_estimate()
-    d._on_estimated(stale, TronFee(bandwidth=1, bandwidth_burn=0), 10**9)
-    assert d._fee is None
-
-
-def test_not_enough_trx_for_amount_plus_burn(dialog):
-    d = dialog()
-    _fill(d, amount="9.5")
-    d._kick_estimate()
-    d._on_estimated(d._seq, TronFee(bandwidth=268, bandwidth_burn=600_000), 10_000_000)
-    assert "Not enough TRX" in d.status_lbl.text()
-    assert not d.send_btn.isEnabled()
-
-
-def test_trc20_fee_needs_trx_even_with_tokens(dialog):
-    d = dialog(USDT_ASSET)
-    _fill(d, amount="1")
-    d._kick_estimate()
+def test_trc20_send_is_a_contract_call_with_a_fee_limit(qtbot):
+    d = _tron_dialog(qtbot, USDT_ASSET)
+    _type(d, amount="2")
     fee = TronFee(bandwidth=345, bandwidth_burn=0, energy=64285,
                   energy_burn=6_428_500, fee_limit=9_642_751)
-    d._on_estimated(d._seq, fee, 1_000_000)        # 1 TRX < 6.43 burn
-    assert "Not enough TRX" in d.status_lbl.text()
-    assert "Fee limit: 9.642751 TRX" in d.fee_lbl.text()
+    _estimate(d, fee)
+    contract, fee_limit = d.finalised_tron()
+    assert isinstance(contract, TriggerSmartContract)
+    assert contract.contract.lower() == USDT
+    assert contract.data == trc20_transfer_data(d._parsed_recipient(), 2_000_000)
+    assert fee_limit == 9_642_751
+    assert "9.642751 TRX" in d._fee_limit_lbl.text()
+    # The decoded call shows the recipient as a T… address.
+    assert tron_from_hex(TO) in d.decoded_view.toPlainText()
 
 
-def test_max_trx_leaves_room_for_the_burn(dialog):
-    d = dialog()
-    _fill(d)
-    d._on_max()
-    d._kick_estimate()
-    d._on_estimated(d._seq, TronFee(bandwidth=268, bandwidth_burn=268_000), 10_000_000)
-    assert d.amount_raw() == 10_000_000 - 268_000
-    assert d.send_btn.isEnabled()
+def test_not_enough_trx_is_flagged(qtbot):
+    d = _tron_dialog(qtbot, USDT_ASSET)
+    _type(d, amount="1")
+    fee = TronFee(bandwidth=345, bandwidth_burn=0, energy=64285,
+                  energy_burn=6_428_500, fee_limit=9_642_751)
+    _estimate(d, fee, trx_balance=1_000_000)       # 1 TRX < 6.43 burn
+    assert "⚠ needs 6.4285 TRX" in d.max_total_lbl.text()
+
+
+def test_max_trx_leaves_the_burn(qtbot):
+    d = _tron_dialog(qtbot)
+    _type(d)
+    _estimate(d, TronFee(bandwidth=268, bandwidth_burn=268_000))
+    d._on_max_clicked()
+    assert d._parsed_amount_raw() == 10_000_000 - 268_000
+
+
+def test_a_failed_estimate_blocks_send(qtbot):
+    d = _tron_dialog(qtbot)
+    _type(d)
+    d._reestimate_gas()
+    d._on_tron_failed("This address has never received TRX")
+    assert not d.confirm_btn.isEnabled()
+    assert "never received TRX" in d.max_total_lbl.text()
+    with pytest.raises(Exception, match="fee estimate"):
+        d.finalised_tron()
+
+
+def test_address_book_offers_tron_forms(qtbot):
+    d = _tron_dialog(qtbot, address_book=[(OWNER, "me"), (TO, "cold")])
+    model = d._book_completer.model()
+    shown = [model.index(i, 0).data() for i in range(model.rowCount())]
+    assert f"cold — {tron_from_hex(TO)}" in shown
+
+
+def test_tron_contract_mapping():
+    from qeth.plugins.transactions.tron_send import tron_contract
+    from qeth.signing import SigningRequest
+    trx = SigningRequest(chain_id=1, from_addr=OWNER, to_addr=TO, value_wei=7)
+    assert tron_contract(OWNER, trx) == TransferContract(OWNER, TO, 7)
+    call = SigningRequest(chain_id=1, from_addr=OWNER, to_addr=USDT,
+                          value_wei=3, data="0xa9059cbb")
+    assert tron_contract(OWNER, call) == TriggerSmartContract(
+        OWNER, USDT, bytes.fromhex("a9059cbb"), 3)
 
 
 # --- MainWindow ---------------------------------------------------------------
 
 class TestMainWindow:
-    def test_send_on_tron_opens_the_tron_dialog(self, mainwindow, monkeypatch):
-        from qeth.plugins.transactions import tron_send
+    def test_send_on_tron_opens_the_shared_dialog(self, mainwindow, monkeypatch):
+        import qeth.plugins.transactions as tx
         opened = []
-        monkeypatch.setattr(tron_send.TronSendDialog, "show",
+        monkeypatch.setattr(tx.TronSendTokenDialog, "show",
                             lambda self: opened.append(self))
         mainwindow.open_send_dialog(TRX_ASSET, CHAIN, OWNER)
-        assert len(opened) == 1 and isinstance(opened[0], tron_send.TronSendDialog)
+        assert len(opened) == 1 and isinstance(opened[0], tx.TronSendTokenDialog)
 
     def test_a_signer_that_cant_sign_tron_is_refused(self, mainwindow, monkeypatch):
         import qeth.ui as ui

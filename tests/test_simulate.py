@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from qeth.pyevm_fork import StateReader
 from qeth.plugins.transactions.simulate import simulate_logs
 
-CHAIN = SimpleNamespace(chain_id=1, rpc_url="https://rpc.example/eth")
+CHAIN = SimpleNamespace(is_evm=True, chain_id=1, rpc_url="https://rpc.example/eth")
 FROM = "0x7a16ff8270133f063aab6c9977183d9e72835428"
 USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -193,7 +193,7 @@ def test_rpc_reader_prefetch_seeds_the_memo(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake)
 
     reader = RpcStateReader(
-        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+        SimpleNamespace(is_evm=True, chain_id=1, rpc_url="https://rpc.example"), "0x10")
     reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
     assert seen[0] == "debug_traceCall"          # prestate hint went first
     # sender (3) + token (3) account calls + 1 slot = 7 seed fetches
@@ -249,7 +249,7 @@ def test_prefetch_falls_back_to_access_list(monkeypatch):
     monkeypatch.setattr("qeth.chain.EthClient", _Client)
     monkeypatch.setattr("urllib.request.urlopen", fake)
     reader = RpcStateReader(
-        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+        SimpleNamespace(is_evm=True, chain_id=1, rpc_url="https://rpc.example"), "0x10")
     reader.prefetch(from_addr=FROM, to_addr=TOKEN, data="0xa9059cbb", value=0)
     assert "debug_traceCall" in seen and "eth_createAccessList" in seen
 
@@ -270,7 +270,7 @@ def test_static_accounts_never_hit_the_network():
     import unittest.mock as mock
     with mock.patch("qeth.chain.EthClient", _Exploding):
         reader = RpcStateReader(
-            SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x1")
+            SimpleNamespace(is_evm=True, chain_id=1, rpc_url="https://rpc.example"), "0x1")
     for addr in ("0x" + "00" * 19 + "04",                       # identity
                  "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02",  # 4788
                  "0x0000F90827F1C53a10cb7A02335B175320002935"): # 2935
@@ -298,7 +298,7 @@ def test_rpc_reader_prefetch_failure_is_silent(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _down)
     reader = RpcStateReader(
-        SimpleNamespace(chain_id=1, rpc_url="https://rpc.example"), "0x10")
+        SimpleNamespace(is_evm=True, chain_id=1, rpc_url="https://rpc.example"), "0x10")
     reader.prefetch(from_addr=FROM, to_addr=USDC, data="0xdead", value=0)
     # …and the lazy path still works afterwards.
     assert reader.get_account(USDC)[1] == 1

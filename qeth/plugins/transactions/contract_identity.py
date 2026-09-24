@@ -30,8 +30,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
+from typing import ClassVar
 
 from ...abi import _urllib_transport
+from ...address import tron_from_hex, tron_to_hex
 from ...fsatomic import atomic_write_text
 from ...token_discovery import ETHERSCAN_V2_BASE, ETHERSCAN_V2_CHAINS
 
@@ -196,13 +198,66 @@ class ContractIdentityCache:
         return count
 
 
+class TronIdentitySource:
+    """Contract identity on Tron, keyless: contract-vs-account from the node
+    (``eth_getCode`` over Tron's JSON-RPC), and a contract's name, verified
+    status, creator, creation time and public tag ("USDT Token") from
+    Tronscan's contract API. Tronscan's account-label endpoint needs a key,
+    so a regular account gets no exchange name-tag here (unlike EVM's
+    Blockscout labels). Same ``fetch`` contract as ContractIdentitySource,
+    which delegates Tron chains to it."""
+
+    # chain id → Tronscan API base.
+    TRONSCAN: ClassVar[dict[int, str]] = {728126428: "https://apilist.tronscanapi.com"}
+
+    def __init__(self, get_code: Callable[[int, str], str | None] | None,
+                 timeout: float = 15.0, transport=None):
+        self._get_code = get_code
+        self.timeout = timeout
+        self._transport = transport or _urllib_transport
+
+    def supports(self, chain_id: int) -> bool:
+        return chain_id in self.TRONSCAN
+
+    def fetch(self, chain_id: int, address: str) -> ContractIdentity | None:
+        if self._get_code is None or not self.supports(chain_id):
+            return None
+        try:
+            code = self._get_code(chain_id, address)
+        except Exception:
+            return None
+        if code is None:
+            return None
+        if not (code[2:] if code.startswith("0x") else code).strip("0"):
+            return ContractIdentity(address=address, is_contract=False)
+        try:
+            raw = self._transport(
+                f"{self.TRONSCAN[chain_id]}/api/contract?contract="
+                f"{tron_from_hex(address)}", self.timeout)
+            rows = json.loads(raw).get("data") or []
+        except Exception:
+            return None          # transient — don't cache, retry next time
+        d = rows[0] if rows and isinstance(rows[0], dict) else {}
+        creator = (d.get("creator") or {}).get("address") or ""
+        created = int(d.get("date_created") or 0)
+        return ContractIdentity(
+            address=address, is_contract=True,
+            name=(d.get("name") or None),
+            verified=d.get("verify_status") == 2,
+            deployer=tron_to_hex(creator) if creator else None,
+            deployed_at=created // 1000 or None,
+            name_tag=(d.get("tag1") or None))
+
+
 class ContractIdentitySource:
     """Fetches identity from Etherscan v2 (multichain). Reuses the same
-    endpoint/key plumbing as the ABI source."""
+    endpoint/key plumbing as the ABI source. Tron chains are delegated to
+    ``tron`` (a ``TronIdentitySource``) when given."""
 
     def __init__(self, get_api_key: Callable[[], str | None],
                  timeout: float = 15.0, transport=None,
-                 get_code: Callable[[int, str], str | None] | None = None):
+                 get_code: Callable[[int, str], str | None] | None = None,
+                 tron: TronIdentitySource | None = None):
         self._get_api_key = get_api_key
         self.timeout = timeout
         self._transport = transport or _urllib_transport
@@ -211,6 +266,7 @@ class ContractIdentitySource:
         # Lets an EOA recipient be identified with no Etherscan key — the
         # key is only needed for a *contract's* name/verified/deployer.
         self._get_code = get_code
+        self._tron = tron
 
     def supports(self, chain_id: int) -> bool:
         return chain_id in self._supported and bool(self._get_api_key())
@@ -253,6 +309,8 @@ class ContractIdentitySource:
         transient error (so the caller leaves the cache untouched and can
         retry). A definitive "not a contract" comes back as a populated
         ``ContractIdentity(is_contract=False)``, which IS cached."""
+        if self._tron is not None and self._tron.supports(chain_id):
+            return self._tron.fetch(chain_id, address)
         if not self.supports(chain_id):
             # No Etherscan key (or a non-Etherscan-v2 chain): we can still
             # recognise an EOA recipient without one. See _fetch_keyless.
@@ -353,7 +411,8 @@ def describe_identity(identity: ContractIdentity, *,
                       interaction_count: int | None = None,
                       approval_count: int | None = None,
                       context: str = "interact",
-                      now_ts: float) -> IdentityBadge:
+                      now_ts: float,
+                      short: Callable[[str], str] | None = None) -> IdentityBadge:
     """Render a contract identity as a human badge. ``deployer_count`` is
     how many of *your* cached contracts share this deployer (including
     this one); ``interaction_count`` is your prior usage of this address in
@@ -361,7 +420,9 @@ def describe_identity(identity: ContractIdentity, *,
     ``"interact"`` ("you've interacted N×", for a contract you call),
     ``"send"`` ("sent here N×", for a transfer destination), or ``"approve"``
     (the SPENDER of an approve: "approved to this spender N× before", from
-    ``approval_count``). ``now_ts`` is the current unix time (for testability)."""
+    ``approval_count``). ``now_ts`` is the current unix time (for testability).
+    ``short`` abbreviates an address the way its chain writes it (T… on Tron);
+    the default is the 0x form."""
     mine = {a.lower() for a in my_addresses}
     if not identity.is_contract:
         who = identity.name_tag or "Regular account (not a contract)"
@@ -425,7 +486,8 @@ def describe_identity(identity: ContractIdentity, *,
         if others > 0:
             provenance.append(f"same deployer as {others} of your contracts")
         else:
-            provenance.append(f"deployer {deployer[:8]}…{deployer[-4:]}")
+            provenance.append(
+                f"deployer {short(deployer) if short else f'{deployer[:8]}…{deployer[-4:]}'}")
 
     lines = [headline]
     if provenance:

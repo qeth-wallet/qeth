@@ -140,7 +140,10 @@ def simulation_available(chain) -> bool:
     """True if *some* route can simulate on ``chain``'s current RPC: the
     local fork (py-evm installed), or ``eth_simulateV1`` unless we've
     already learned this endpoint lacks it. Lets the UI show an accurate
-    'no preview available' note only when nothing can work."""
+    'no preview available' note only when nothing can work. A Tron node
+    simulates natively (``_simulate_tron``)."""
+    if not chain.is_evm:
+        return True
     if fork_available():
         return True
     return _SIMV1_SUPPORT.get(chain.rpc_url) is not False
@@ -523,6 +526,35 @@ def _simulate_via_fork(chain, from_addr, to_addr, data, value,
 _TIME_BUDGET_S = 40.0
 
 
+def _simulate_tron(chain, from_addr: str, to_addr, data, value):
+    """Tron: the node itself simulates a contract call —
+    ``triggerconstantcontract`` returns the events it would emit (and the
+    energy). No eth_simulateV1 there, no local fork (the TVM isn't the EVM)
+    and no Helios (no Tron light client), so the preview is unverified.
+    A plain TRX transfer runs no contract and emits nothing. Returns logs
+    in the EVM receipt shape (0x hex; Tron omits the prefix), a
+    ``RevertNote``, or ``None`` when the node can't be reached."""
+    from ...tron.client import (
+        TronClient, TronError, call_reverted, revert_reason)
+    raw = bytes.fromhex(data[2:]) if data and data not in ("0x", "0X") else b""
+    if not raw:
+        return []
+    try:
+        resp = TronClient(chain).constant_call(
+            from_addr, to_addr, raw, int(value or 0))
+    except TronError as e:
+        log.info("tron simulation failed: %s", e)
+        return None
+    result = resp.get("result") or {}
+    if not result.get("result") or call_reverted(resp):
+        return RevertNote(revert_reason(resp))
+    return [{
+        "address": "0x" + str(lg.get("address") or ""),
+        "topics": ["0x" + str(t) for t in lg.get("topics") or []],
+        "data": "0x" + str(lg.get("data") or ""),
+    } for lg in resp.get("logs") or []]
+
+
 def simulate_logs(chain, from_addr: str, to_addr, data, value,
                   *, fork_reader=None, fork_block=None, floor_block=None,
                   retries=4, sleep=None, budget_s=_TIME_BUDGET_S):
@@ -539,6 +571,8 @@ def simulate_logs(chain, from_addr: str, to_addr, data, value,
     don't actually wait."""
     if not to_addr:
         return None   # contract creation — not previewed
+    if not chain.is_evm:
+        return _simulate_tron(chain, from_addr, to_addr, data, value)
     import time as _time
     deadline = _time.monotonic() + budget_s if budget_s else None
     # Set when a Helios sidecar exists but is behind our fork floor, so we serve

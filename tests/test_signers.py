@@ -244,7 +244,7 @@ class TestBeginSignWiring:
             set_signing_in_progress=sip.append)
 
         mainwindow._begin_sign(
-            dialog, SimpleNamespace(chain_id=1),
+            dialog, SimpleNamespace(chain_id=1, is_evm=True),
             on_broadcast=lambda h: None, on_fail=lambda m: None)
 
         assert sip == [True]                          # entered signing state

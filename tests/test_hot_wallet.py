@@ -433,6 +433,33 @@ class TestHotWalletSignerUnlock:
         with pytest.raises(SignerError, match="locked"):
             signer.sign_message(MessageSigningRequest(from_addr=addr, raw=b"hi"))
 
+    def test_each_signature_restarts_the_ttl(self, tmp_qeth, monkeypatch):
+        """Through the plugin: a prompt-less signature with the unlocked key
+        pushes the expiry out to TTL after IT, not after the unlock."""
+        import qeth.hot_wallet as hw
+        from qeth.signers import signer_for_source
+        from qeth.signing import MessageSigningRequest
+        now = [1000.0]
+        monkeypatch.setattr(hw.time, "time", lambda: now[0])
+        addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)
+        save_keystore(addr, ks)
+        acct = {"address": addr, "source": "hot", "label": ""}
+        hw.UNLOCKED.put(addr, _TEST_PRIV)
+
+        class _NoPrompt:
+            def request_secret(self, prompt, *, title=""):
+                raise AssertionError("unlocked: must not prompt")
+
+        now[0] += 200
+        signer = signer_for_source("hot").make_signer(
+            _fake_store(acct), acct, _NoPrompt())
+        assert signer is not None
+        signer.sign_message(MessageSigningRequest(from_addr=addr, raw=b"hi"))
+        now[0] += 299                     # 499s after the unlock
+        assert hw.UNLOCKED.get(addr) == _TEST_PRIV
+        now[0] += 1                       # 300s after the signature
+        assert hw.UNLOCKED.get(addr) is None
+
     def test_deleting_the_keystore_locks_it(self, tmp_qeth):
         from qeth.hot_wallet import UNLOCKED
         addr, ks = encrypt_keystore(_TEST_PRIV, PASSPHRASE)

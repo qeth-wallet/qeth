@@ -12,9 +12,9 @@ the funds. Lose either and the key is gone. The application
 never transmits either anywhere.
 
 After a successful decrypt the key stays unlocked in memory
-(``UNLOCKED``) for ``UNLOCK_TTL_S`` or until the user switches to
-another account, so a burst of signatures asks for the passphrase
-once rather than per signature.
+(``UNLOCKED``) until ``UNLOCK_TTL_S`` passes without a signature or
+the user switches to another account, so a burst of signatures asks
+for the passphrase once rather than per signature.
 """
 
 from __future__ import annotations
@@ -137,13 +137,14 @@ def delete_keystore(address: str) -> bool:
     return True
 
 
-# How long a hot wallet stays unlocked after its passphrase is entered.
-# Counted from the unlock, not refreshed by each signature.
+# How long a hot wallet stays unlocked without being used. Each signature
+# restarts it.
 UNLOCK_TTL_S = 300.0
 
 
 class UnlockCache:
-    """The unlocked hot wallet: at most ONE decrypted key plus its unlock time.
+    """The unlocked hot wallet: at most ONE decrypted key plus when it was last
+    used.
     Filled by the sign worker after a successful decrypt; read and cleared from
     the main thread — hence the lock.
 
@@ -160,13 +161,13 @@ class UnlockCache:
     def __init__(self, ttl_s: float = UNLOCK_TTL_S) -> None:
         self._ttl_s = ttl_s
         self._lock = threading.Lock()
-        # (lower-cased address, private key, time.time() at unlock)
+        # (lower-cased address, private key, time.time() at the last use)
         self._entry: tuple[str, bytes, float] | None = None
         self._timer: threading.Timer | None = None
 
     def put(self, address: str, priv: bytes) -> None:
-        """Unlock ``address`` for the TTL, replacing any other unlocked
-        account."""
+        """Unlock ``address`` for a fresh TTL — restarting it if already
+        unlocked, replacing any other unlocked account."""
         entry = (address.lower(), priv, time.time())
         timer = threading.Timer(self._ttl_s, self._expire, args=(entry,))
         timer.daemon = True
@@ -228,11 +229,11 @@ class HotWalletSigner(Signer):
     and passed in at construction; sign() then runs on the worker
     thread where the scrypt KDF doesn't block the UI.
 
-    A successful decrypt unlocks the account in ``cache``. For an
-    account that's already unlocked, the host passes the cached key
-    as ``unlocked=(address, key)`` instead of a passphrase. It's held
-    here so the TTL running out between the pick and the worker's
-    sign can't strand the request."""
+    Every signature (re)unlocks the account in ``cache`` for a fresh
+    TTL. For an account that's already unlocked, the host passes the
+    cached key as ``unlocked=(address, key)`` instead of a
+    passphrase. It's held here so the TTL running out between the
+    pick and the worker's sign can't strand the request."""
 
     def __init__(self, store, passphrase: str | None = None, *,
                  cache: UnlockCache | None = None,
@@ -261,7 +262,15 @@ class HotWalletSigner(Signer):
             )
         if (self._unlocked is not None
                 and self._unlocked[0].lower() == address.lower()):
-            return self._unlocked[1]
+            priv = self._unlocked[1]
+        else:
+            priv = self._decrypt(address)
+        # Each signature restarts the unlock TTL.
+        if self._cache is not None:
+            self._cache.put(address, bytes(priv))
+        return priv
+
+    def _decrypt(self, address: str) -> bytes:
         if self._passphrase is None:
             raise SignerError(f"Hot wallet {address} is locked.")
         keystore = load_keystore(address)
@@ -272,7 +281,7 @@ class HotWalletSigner(Signer):
         # raw exception text.
         try:
             from eth_account import Account
-            priv = Account.decrypt(keystore, self._passphrase)
+            return Account.decrypt(keystore, self._passphrase)
         except ValueError as e:
             msg = str(e).lower()
             if "mac" in msg or "password" in msg or "decryption" in msg:
@@ -280,9 +289,6 @@ class HotWalletSigner(Signer):
             raise SignerError(f"Failed to decrypt keystore: {e}") from e
         except Exception as e:
             raise SignerError(f"Failed to decrypt keystore: {e}") from e
-        if self._cache is not None:
-            self._cache.put(address, bytes(priv))
-        return priv
 
     def sign_message(self, req: MessageSigningRequest) -> bytes:
         """personal_sign — EIP-191 prefixed bytes, 65-byte ECDSA."""

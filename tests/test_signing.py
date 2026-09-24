@@ -144,6 +144,7 @@ class TestRpcOriginExtraction:
 
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         return RpcServer(store, signer_bridge=bridge), captured
 
     def test_frame_origin_overrides_http_origin(self, qtbot):
@@ -1331,6 +1332,7 @@ class TestRpcDispatchSendTransaction:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         return RpcServer(store, signer_bridge=bridge)
 
     def test_dispatch_without_bridge_returns_method_not_found(self):
@@ -1395,6 +1397,7 @@ class TestRpcDispatchAddChain:
         chains = list(known if known is not None else [])
         store.chains = chains
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
 
         def _add(chain):   # mirror store.add_chain's id-dedupe
             if not any(c.chain_id == chain.chain_id for c in chains):
@@ -1567,6 +1570,7 @@ class TestRpcProxyFailFast:
         store.chains = list(DEFAULT_CHAINS)
         # origin=None routes to current_chain (no per-origin override).
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         return RpcServer(store), DEFAULT_CHAINS[0].rpc_url
 
     def _client(self, mode: str, result=None):
@@ -1743,6 +1747,7 @@ class TestRpcDispatchMessageSigning:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         store.chains = DEFAULT_CHAINS
         return RpcServer(store, signer_bridge=bridge)
 
@@ -1837,6 +1842,7 @@ class TestRpcEventBroadcast:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         store.chains = DEFAULT_CHAINS
         return RpcServer(store)
 
@@ -1937,6 +1943,7 @@ class TestRpcEventBroadcast:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         store.chains = DEFAULT_CHAINS
         server = RpcServer(store)
         ws = MagicMock(closed=False, send_str=AsyncMock())
@@ -1979,6 +1986,7 @@ class TestRpcEventBroadcast:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         store.chains = DEFAULT_CHAINS
         server = RpcServer(store)
         ws = MagicMock(closed=False, send_str=AsyncMock())
@@ -2016,6 +2024,7 @@ class TestRpcEventBroadcast:
         eth = next(c for c in DEFAULT_CHAINS if c.chain_id == 1)
         store = MagicMock()
         store.current_chain.return_value = eth
+        store.dapp_chain.return_value = eth
         store.chains = DEFAULT_CHAINS
         server = RpcServer(store)
         # Initial: any origin sees the store's current chain.
@@ -2053,6 +2062,7 @@ class TestRpcEventBroadcast:
         from qeth.chains import DEFAULT_CHAINS
         store = MagicMock()
         store.current_chain.return_value = DEFAULT_CHAINS[0]
+        store.dapp_chain.return_value = DEFAULT_CHAINS[0]
         store.chains = DEFAULT_CHAINS
         server = RpcServer(store)
         ws = MagicMock(closed=False, send_str=AsyncMock())

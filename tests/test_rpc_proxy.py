@@ -42,6 +42,7 @@ class _FakeClient:
 def _server(body, status=200):
     store = MagicMock()
     store.current_chain.return_value = DEFAULT_CHAINS[0]
+    store.dapp_chain.return_value = DEFAULT_CHAINS[0]
     store.chains = [DEFAULT_CHAINS[0]]
     srv = RpcServer(store)
     srv._client = _FakeClient(_FakeResp(status, body))
@@ -106,6 +107,7 @@ def test_proxy_transport_error_does_not_leak_upstream_url():
     chain = Chain(name="Local", chain_id=1, rpc_url=f"http://{secret}/")
     store = MagicMock()
     store.current_chain.return_value = chain
+    store.dapp_chain.return_value = chain
     store.chains = [chain]
     srv = RpcServer(store)
     srv._client = _RaisingClient()
@@ -145,6 +147,7 @@ def test_proxy_fails_over_to_fallback_on_transport_error():
 
     store = MagicMock()
     store.current_chain.return_value = chain
+    store.dapp_chain.return_value = chain
     store.chains = [chain]
     srv = RpcServer(store)
     client = _FailoverClient()
@@ -184,6 +187,7 @@ class _PerUrlClient:
 def _per_url_server(responses):
     store = MagicMock()
     store.current_chain.return_value = DEFAULT_CHAINS[0]
+    store.dapp_chain.return_value = DEFAULT_CHAINS[0]
     store.chains = [DEFAULT_CHAINS[0]]
     srv = RpcServer(store)
     srv._client = _PerUrlClient(responses)
@@ -276,6 +280,7 @@ class _RecordingClient:
 def _recording_server(body, fail_urls=()):
     store = MagicMock()
     store.current_chain.return_value = DEFAULT_CHAINS[0]
+    store.dapp_chain.return_value = DEFAULT_CHAINS[0]
     store.chains = [DEFAULT_CHAINS[0]]
     srv = RpcServer(store)
     srv._client = _RecordingClient(body, fail_urls)

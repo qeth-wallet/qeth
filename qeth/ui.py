@@ -465,6 +465,7 @@ class MainWindow(QMainWindow):
         # selected network. Hide it there (showing it just invites a switch
         # that does nothing, which reads as a bug).
         self.right_slot.active_plugin_changed.connect(self._on_right_plugin_changed)
+        self._apply_chain_availability()
         self._on_right_plugin_changed(self.right_slot.active())   # sync initial
         outer.addWidget(self.right_slot)
 
@@ -1504,10 +1505,24 @@ class MainWindow(QMainWindow):
                 return self._manifests.get(pid)
         return None
 
+    def _apply_chain_availability(self) -> None:
+        """Show each plugin's tab only on chain families it supports (manifest
+        ``families``) — ENS and Approvals are EVM-only, so they hide on Tron."""
+        family = self.store.current_chain().family
+        slots = {"left": self.left_slot, "right": self.right_slot}
+        selected = self.wallets_plugin.selected_address
+        for pid, m in self._manifests.items():
+            slots[m.slot].set_plugin_available(
+                self.plugins[pid], family in m.families, selected)
+
     def _on_chain_changed(self, idx: int) -> None:
         cid = self.chain_combo.itemData(idx)
         if cid is not None:
             self.store.set_current_chain(int(cid))
+            self._apply_chain_availability()
+            # The account tree first: switching family (EVM ⇄ Tron) changes
+            # which accounts it lists, which may move the selection.
+            self.left_slot.broadcast_chain_changed()
             self.right_slot.broadcast_chain_changed()
             # Push the UI chain to the dapp-facing RPC too (eth_chainId,
             # signTypedData domain checks). The link is asymmetric: UI ⇒ dapp,
@@ -1515,7 +1530,9 @@ class MainWindow(QMainWindow):
             # and never pulls the UI back. So switching to Gnosis in the wallet
             # makes Gnosis Pay see chainId 100 at once, instead of complaining
             # that 1 was provided.
-            if self.rpc is not None:
+            # A non-EVM chain (Tron) isn't one a dapp can use: dapps stay on
+            # the last EVM chain (Store.dapp_chain), so don't announce it.
+            if self.rpc is not None and self.store.current_chain().is_evm:
                 self.rpc.set_rpc_chain(int(cid))
             # Pre-warm the verified-state sidecar for the new chain so a
             # preview shortly after the switch doesn't pay sync inline.
@@ -1607,9 +1624,10 @@ class _TabCycleFilter(QObject):
     def _handle_left_right(self, obj, go_right: bool) -> bool:
         if obj not in self._right_tables():
             return False
-        # Cycle over EVERY plugin mounted in the right slot (Tokens,
-        # Transactions, ENS, …) — in tab-bar order — not a hardcoded pair.
-        plugins = self._mw.right_slot.plugins()
+        # Cycle over every plugin SHOWING in the right slot (Tokens,
+        # Transactions, ENS, …) — in tab-bar order — not a hardcoded pair,
+        # skipping tabs hidden on this chain (ENS / Approvals on Tron).
+        plugins = self._mw.right_slot.available_plugins()
         current = self._mw.right_slot.active()
         try:
             idx = plugins.index(current)

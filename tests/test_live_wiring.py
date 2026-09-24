@@ -117,7 +117,8 @@ def test_update_live_account_and_balance_dirty_relay(qtbot, monkeypatch):
 
 
 def _chain_ns(chain_id=1, symbol="ETH", name="Ethereum"):
-    return SimpleNamespace(chain_id=chain_id, symbol=symbol, name=name)
+    return SimpleNamespace(chain_id=chain_id, symbol=symbol, name=name,
+                           native_decimals=18, family="evm", is_evm=True)
 
 
 def test_on_transfer_seen_notifies_with_symbol_and_amount(qtbot, monkeypatch):
@@ -414,7 +415,7 @@ def test_rerender_view_from_cache_handles_hidden_and_usd(qtbot, tmp_qeth):
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     tok = "0x" + "11" * 20
     hid = "0x" + "22" * 20
@@ -499,7 +500,7 @@ def test_targeted_drop_repaints_via_host_view_not_stale_displayed_view(qtbot, tm
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     wbtc = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
     store = Store.load()
@@ -547,7 +548,7 @@ def test_targeted_read_drops_spent_token_despite_a_lagging_chunk(qtbot, tmp_qeth
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=42161, name="Arbitrum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=42161, name="Arbitrum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     spent = "0x" + "11" * 20
     laggy = "0x" + "22" * 20
@@ -607,7 +608,7 @@ def test_discovery_keeps_hidden_held_tokens_in_cache(qtbot, tmp_qeth):
     from qeth.icons import IconCache
     from qeth.pricing import Price
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     tok = "0x1111111111111111111111111111111111111111"
     store = Store.load()
@@ -654,7 +655,7 @@ def test_discovery_merges_and_is_block_ordered(qtbot, tmp_qeth):
     from qeth.icons import IconCache
     from qeth.pricing import Price
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     tok = "0x1111111111111111111111111111111111111111"
     store = Store.load()
@@ -715,7 +716,7 @@ def test_stale_discovery_native_does_not_regress(qtbot, tmp_qeth):
     from qeth.icons import IconCache
     from qeth.pricing import Price
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     store = Store.load()
     panel = TokenListPanel(IconCache(), store)
@@ -797,7 +798,7 @@ def test_stale_confirm_read_does_not_regress_the_panel(qtbot, tmp_qeth):
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     usdt = "0xdac17f958d2ee523a2206206994597c13d831ec7"
     store = Store.load()
@@ -844,7 +845,7 @@ def test_balance_ordering_is_per_token_not_per_account(qtbot, tmp_qeth):
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     usdt = "0xdac17f958d2ee523a2206206994597c13d831ec7"
     store = Store.load()
@@ -889,7 +890,7 @@ def test_stale_read_cannot_overwrite_a_fresher_drop(qtbot, tmp_qeth):
     from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
     from qeth.icons import IconCache
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     cb = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
     store = Store.load()
@@ -945,7 +946,7 @@ def test_stale_discovery_cannot_resurrect_a_sent_token(qtbot, tmp_qeth):
     from qeth.icons import IconCache
     from qeth.pricing import Price
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     wbtc = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
     usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -1011,7 +1012,7 @@ def test_carried_forward_token_is_not_block_stamped(qtbot, tmp_qeth):
     from qeth.icons import IconCache
     from qeth.pricing import Price
     from qeth.store import Store
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     tok = "0x" + "cd" * 20
     store = Store.load()
@@ -1053,7 +1054,7 @@ def test_reconcile_does_not_spawn_a_worker_while_shutting_down(qtbot):
     on exit."""
     from types import SimpleNamespace
     from qeth.plugins.tokens import TokensPlugin
-    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+    eth = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
     acc = "0xabc0000000000000000000000000000000000001"
     tok = "0x" + "cd" * 20
     tp = TokensPlugin(Mock())

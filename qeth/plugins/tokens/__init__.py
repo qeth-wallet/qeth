@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from ... import QULONGLONG
 from ...dialog import prompt_text
 from ...alerts import warn
-from ...chain import EthClient, wei_to_ether
+from ...chain import EthClient, native_amount
 from ...formatting import format_balance as _format_balance
 from ...formatting import format_usd as _format_usd
 from ...formatting import transfer_notice
@@ -642,7 +642,7 @@ class TokensPlugin(Plugin):
                 "is_native": True,
                 "contract": None,
                 "symbol": chain.symbol,
-                "decimals": 18,
+                "decimals": chain.native_decimals,
                 "balance_raw": cached.native_balance_wei if cached else 0,
                 "logo_uri": None,
             }
@@ -1155,7 +1155,7 @@ class TokensPlugin(Plugin):
         self._last_native_seen[key] = native_wei
         if prev is None or native_wei <= prev:
             return
-        amount = _format_balance(wei_to_ether(native_wei - prev))
+        amount = _format_balance(native_amount(native_wei - prev, chain))
         title, body = transfer_notice(
             False, amount, chain.symbol, chain_name=chain.name)
         icon = notification_icon(bundled_native_icon(chain.symbol), False)
@@ -2776,7 +2776,7 @@ class TokenListPanel(QWidget):
         self._lp_coins = {}
 
         # --- native row ---------------------------------------------------
-        native_balance = wei_to_ether(native_wei)
+        native_balance = native_amount(native_wei, chain)
         self._balances[(chain.chain_id, self.NATIVE_CONTRACT)] = native_balance
         # Remembered so a chain-icon-ready signal can fill the native row's
         # icon later (the cache fetch is async).
@@ -2992,7 +2992,7 @@ class TokenListPanel(QWidget):
         "fall back to show_balances rebuild" when contracts changed."""
         if not self.contract_set_matches(chain, tokens):
             return False
-        new_native = wei_to_ether(native_wei)
+        new_native = native_amount(native_wei, chain)
         by_addr = {b.contract.lower(): b for b in tokens}
 
         # First pass: collect what would change without mutating anything.

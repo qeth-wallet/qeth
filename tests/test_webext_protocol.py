@@ -31,9 +31,11 @@ B = "https://b.example"
 
 
 def _store():
-    chains = [SimpleNamespace(chain_id=1), SimpleNamespace(chain_id=10)]
+    chains = [SimpleNamespace(chain_id=1, is_evm=True),
+              SimpleNamespace(chain_id=10, is_evm=True)]
     return SimpleNamespace(
         current_chain=lambda: chains[0],
+        dapp_chain=lambda: chains[0],
         chains=chains,
         default_account="0x" + "11" * 20,
     )

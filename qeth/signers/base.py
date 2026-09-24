@@ -12,6 +12,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from ..chains import EVM
+
 if TYPE_CHECKING:
     from ..signing import Signer
     from ..store import Store
@@ -26,6 +28,10 @@ class SignerPlugin(ABC):
 
     source_id: str
     display_name: str
+    # Chain families this backend can sign for. A signer can hold a Tron
+    # account yet not sign for it (Ledger's Ethereum app), so this is checked
+    # alongside the account's own family before a Tron transaction is built.
+    families: frozenset[str] = frozenset((EVM,))
     # Spinner label shown while the signature is produced. Source-specific
     # (device confirm vs. keystore decrypt); the caller shows it via the
     # interaction host's ``progress``.

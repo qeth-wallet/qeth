@@ -282,7 +282,7 @@ def test_copy_action_puts_address_on_clipboard(mainwindow):
     mainwindow.tree.setCurrentItem(matches[0])
 
     mainwindow.act_copy.trigger()
-    assert QApplication.clipboard().text() == addr
+    assert QApplication.clipboard().text().lower() == addr   # shown EIP-55
 
 
 # --- Token-action buttons follow the table selection -----------------------

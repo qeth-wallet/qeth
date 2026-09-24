@@ -42,7 +42,7 @@ from qeth.store import Store
 from qeth.plugins.tokens.wallet_cache import CachedToken, CachedWallet, WalletCache
 
 CID = 1
-ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH")
+ETH = SimpleNamespace(chain_id=CID, name="Ethereum", symbol="ETH", native_decimals=18)
 A = "0x" + "a1" * 20
 B = "0x" + "b2" * 20
 ACCTS = [A, B]

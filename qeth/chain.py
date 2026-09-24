@@ -87,6 +87,13 @@ def wei_to_ether(wei: int) -> Decimal:
     return Decimal(int(wei)) / _WEI_PER_ETHER
 
 
+def native_amount(raw: int, chain: Chain) -> Decimal:
+    """A native-asset amount in whole coins for ``chain``: wei → ETH on EVM
+    chains, sun → TRX on Tron (``Chain.native_decimals``). Use this over
+    ``wei_to_ether`` wherever the chain may not be EVM."""
+    return Decimal(int(raw)) / (Decimal(10) ** chain.native_decimals)
+
+
 class ChainError(Exception):
     """JSON-RPC error response from the upstream node."""
 

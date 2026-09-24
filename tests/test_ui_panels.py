@@ -352,11 +352,20 @@ class TestAccountInfoDialog:
             "label": "Cold storage",
         })
         qtbot.addWidget(dlg)
-        assert dlg.address_lbl.text() == ADDR
+        assert dlg.address_lbl.text().lower() == ADDR     # shown EIP-55
         assert dlg.path_lbl.text() == "44'/60'/0'/0/0"
         assert dlg.source_lbl.text() == "ledger"
         assert dlg.scheme_lbl.text() == "BIP-44"
         # The receive QR rendered into the fixed-size label.
+        assert not dlg.qr_lbl.pixmap().isNull()
+
+    def test_tron_chain_shows_the_tron_address(self, qtbot, tmp_qeth):
+        from qeth.address import tron_from_hex
+        from qeth.chains import TRON, Chain
+        tron = Chain("Tron", 728126428, "", family=TRON)
+        dlg = AccountInfoDialog({"address": ADDR, "source": "hot"}, chain=tron)
+        qtbot.addWidget(dlg)
+        assert dlg.address_lbl.text() == tron_from_hex(ADDR)
         assert not dlg.qr_lbl.pixmap().isNull()
 
     def test_missing_fields_show_dash(self, qtbot, tmp_qeth):
@@ -518,7 +527,7 @@ class TestTokenListPanel:
         panel = TokenListPanel(IconCache(), Store.load(), chain_icon_getter=getter)
         qtbot.addWidget(panel)
 
-        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche")
+        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche", native_decimals=18)
         panel.show_balances(avax, native_wei=10**18, tokens=[], list_entries={})
         assert calls == [43114]                                   # fallback used
         assert not panel.table.item(0, 0).icon().isNull()         # icon set
@@ -539,7 +548,7 @@ class TestTokenListPanel:
         panel = TokenListPanel(IconCache(), Store.load(),
                                chain_icon_getter=lambda cid: None)  # miss
         qtbot.addWidget(panel)
-        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche")
+        avax = SimpleNamespace(chain_id=43114, symbol="AVAX", name="Avalanche", native_decimals=18)
         panel.show_balances(avax, native_wei=10**18, tokens=[], list_entries={})
         assert panel.table.item(0, 0).icon().isNull()        # blank at first
         pix = QPixmap(8, 8); pix.fill()

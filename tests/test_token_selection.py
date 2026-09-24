@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import Qt
 
-ETH = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH")
+ETH = SimpleNamespace(chain_id=1, name="Ethereum", symbol="ETH", native_decimals=18)
 AAA = "0x" + "aa" * 20
 BBB = "0x" + "bb" * 20
 CCC = "0x" + "cc" * 20
@@ -170,7 +170,7 @@ def test_the_native_row_survives_a_refresh_too(panel):
 def test_switching_chain_clears_rather_than_reselects(panel):
     """The identity key carries the chain id, so a token selected on
     Ethereum can't be re-anchored onto a different chain's row."""
-    op = SimpleNamespace(chain_id=10, name="Optimism", symbol="ETH")
+    op = SimpleNamespace(chain_id=10, name="Optimism", symbol="ETH", native_decimals=18)
     panel.table.selectRow(_row_of(panel, AAA))
 
     panel.render_full(op, 10**18, [_tok(AAA, "AAA", 300)], {}, _prices(AAA))

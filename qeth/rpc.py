@@ -208,7 +208,7 @@ class RpcServer:
         # chain without moving the others — as one global value did, where
         # 1inch switching to zkSync Era dragged every open tab along until
         # restart. An origin that hasn't overridden reads
-        # ``store.current_chain()`` live, so a toolbar flip still reaches it.
+        # ``store.dapp_chain()`` live, so a toolbar flip still reaches it.
         self._rpc_chain_id_by_origin: dict[str, int] = {}
         # In-flight ws request handlers — one task per message, dispatched
         # concurrently (5a) so a long-running handler (an unbounded signing
@@ -467,14 +467,15 @@ class RpcServer:
 
     def _chain_for_origin(self, origin: str | None) -> int:
         """The chain id this origin should see. Per-origin override
-        if it has one, otherwise the wallet UI's current chain.
+        if it has one, otherwise the wallet UI's current chain — or, while
+        the UI is on a non-EVM chain, the last EVM one (``Store.dapp_chain``).
         ``None`` and ``""`` share the same "origin-less" slot so
         direct callers (curl, tests) can also switch chains and
         see the override on subsequent reads."""
         cid = self._rpc_chain_id_by_origin.get(origin or "")
         if cid is not None:
             return cid
-        return self.store.current_chain().chain_id
+        return self.store.dapp_chain().chain_id
 
     def _ethereum_chains(self) -> list[dict]:
         """The configured chains, in Frame's ``wallet_getEthereumChains``
@@ -525,7 +526,9 @@ class RpcServer:
                 "icon": [],
                 "explorers": [{"url": c.explorer}] if c.explorer else [],
             }
-            for c in self.store.chains
+            # EIP-1193 is EVM-only: a Tron network isn't a chain a dapp here
+            # can use (it speaks TronLink's API, not eth_*).
+            for c in self.store.chains if c.is_evm
         ]
 
     def _granted_permissions(self, origin: str | None) -> list[dict]:
@@ -846,7 +849,7 @@ class RpcServer:
 
         if method == "wallet_switchEthereumChain":
             cid = int(params[0]["chainId"], 16)
-            if not any(c.chain_id == cid for c in self.store.chains):
+            if not any(c.chain_id == cid and c.is_evm for c in self.store.chains):
                 raise RpcError(4902, "Unrecognized chain")
             # Update only the calling origin's chain — the wallet
             # UI and other open dapps are unaffected. Origin-less
@@ -1075,8 +1078,8 @@ class RpcServer:
         # UI's chain when this origin hasn't pinned itself.
         cid = self._chain_for_origin(origin)
         chain = next(
-            (c for c in self.store.chains if c.chain_id == cid),
-            self.store.current_chain(),
+            (c for c in self.store.chains if c.chain_id == cid and c.is_evm),
+            self.store.dapp_chain(),
         )
         # Try the chain's primary RPC, then its fallbacks — the same list
         # EthClient fails over but the proxy previously ignored. A transport

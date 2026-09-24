@@ -60,7 +60,7 @@ from ...abi_cache import AbiCache
 from .contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
-from ...chain import EthClient, wei_to_ether
+from ...chain import EthClient, native_amount, wei_to_ether
 from .live_watcher import LiveWatcher, PendingTx
 from ...signing import ReplacementFloor, SignerError, SigningRequest
 from ...formatting import format_balance, transfer_notice
@@ -1851,7 +1851,7 @@ class TransactionsPlugin(Plugin):
         notify = getattr(host, "notify", None) if host is not None else None
         if not callable(notify):
             return
-        amount = format_balance(wei_to_ether(int(tx.value_wei)))
+        amount = format_balance(native_amount(int(tx.value_wei), chain))
         title, body = transfer_notice(
             True, amount, chain.symbol,
             counterparty=tx.to_addr, chain_name=chain.name)

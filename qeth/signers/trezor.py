@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..chains import EVM, TRON
 from .base import SignerPlugin
 
 if TYPE_CHECKING:
@@ -19,6 +20,9 @@ class TrezorSignerPlugin(SignerPlugin):
     source_id = "trezor"
     display_name = "Trezor"
     progress_text = "Confirm on your Trezor…"
+    # Tron on the core firmware (Model T, Safe 3/5/7, fw ≥ 2.11) — not the
+    # Trezor One, which refuses the message.
+    families = frozenset((EVM, TRON))
 
     def make_signer(
         self, store: Store, account: dict[str, Any], ui: SignerInteraction,

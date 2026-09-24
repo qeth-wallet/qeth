@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import fields
 from pathlib import Path
 
-from .chains import Chain, DEFAULT_CHAINS
+from .chains import DEFAULT_CHAINS, EVM, FAMILIES, Chain
 from .fsatomic import atomic_write_text
 
 
@@ -103,6 +103,18 @@ def _assign_tree_ids(accounts: list[dict], tree_labels: dict[str, str]) -> None:
                 tree_labels[key] = _default_tree_label(a["address"])
 
 
+def account_families(account: dict) -> frozenset[str]:
+    """The chain families an account record works on. A hot wallet holds a
+    raw secp256k1 key, and one key is one address body on EVM and Tron alike,
+    so it serves both. Every other record is tied to one family — a device
+    account by its derivation path (coin type 60 vs 195), a watch-only one by
+    the address form it was added with — stored as ``family``, absent = EVM
+    (every record predating Tron)."""
+    if account.get("source") == "hot":
+        return frozenset(FAMILIES)
+    return frozenset((account.get("family") or EVM,))
+
+
 CONFIG_DIR = Path.home() / ".qeth"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -135,8 +147,10 @@ class Store:
         self._io_lock = threading.Lock()
         self._save_seq = 0
         self._last_written_seq = 0
-        # {address, path, source, scheme, label, tree?} — ``tree`` (grouped
-        # sources only) is the per-device subtree id; see _assign_tree_ids.
+        # {address, path, source, scheme, label, tree?, family?} — ``tree``
+        # (grouped sources only) is the per-device subtree id; see
+        # _assign_tree_ids. ``family`` is set on non-EVM records only; see
+        # account_families. ``address`` is always the 0x hex form (qeth.address).
         self.accounts: list[dict] = []
         # Display order of the top-level account branches (source keys, e.g.
         # ["qr", "ledger", …]). Empty = the built-in default order. The tree
@@ -150,6 +164,9 @@ class Store:
         self.tree_labels: dict[str, str] = {}
         self.chains: list[Chain] = list(DEFAULT_CHAINS)
         self.current_chain_id: int = 1
+        # The last EVM chain the user picked. Dapps speak EIP-1193 only, so
+        # while the UI is on a non-EVM chain (Tron) they keep seeing this one.
+        self.dapp_chain_id: int = 1
         self.default_account: str | None = None
         # The default account's derivation path — its record identity together
         # with default_account. Disambiguates the signer when the same address
@@ -224,6 +241,9 @@ class Store:
             # Idempotent; persists on the next save (like the chain forward-fill).
             _assign_tree_ids(s.accounts, s.tree_labels)
             s.current_chain_id = data.get("current_chain_id", 1)
+            # Older configs have no dapp chain: every chain they could be on
+            # was EVM, so it's the current one.
+            s.dapp_chain_id = data.get("dapp_chain_id", s.current_chain_id)
             s.default_account = data.get("default_account")
             s.default_account_path = data.get("default_account_path")
             chains_data = data.get("chains")
@@ -302,6 +322,7 @@ class Store:
                 "tree_labels": dict(self.tree_labels),
                 "chains": [c.to_dict() for c in self.chains],
                 "current_chain_id": self.current_chain_id,
+                "dapp_chain_id": self.dapp_chain_id,
                 "default_account": self.default_account,
                 "default_account_path": self.default_account_path,
                 "hidden_tokens": [
@@ -351,7 +372,8 @@ class Store:
                 if a["address"].lower() == addr and a.get("path", "") == path:
                     return False
             self.accounts.append(account)
-            if self.default_account is None:
+            # The default is what dapps get from eth_accounts — EVM only.
+            if self.default_account is None and EVM in account_families(account):
                 self.default_account = account["address"]
         self.save()
         return True
@@ -384,8 +406,9 @@ class Store:
                     if self.default_account_path == path:
                         self.default_account_path = None
                 else:
-                    self.default_account = (
-                        self.accounts[0]["address"] if self.accounts else None)
+                    self.default_account = next(
+                        (a["address"] for a in self.accounts
+                         if EVM in account_families(a)), None)
                     self.default_account_path = None
             # Drop tree labels whose tree no longer has any account (removing a
             # whole device's last account retires its label); a sibling tree in
@@ -404,9 +427,29 @@ class Store:
                     return c
             return self.chains[0]
 
+    def dapp_chain(self) -> Chain:
+        """The chain dapps see by default: the current chain when it's EVM,
+        else the last EVM chain the user was on."""
+        with self._lock:
+            cur = self.current_chain()
+            if cur.is_evm:
+                return cur
+            for c in self.chains:
+                if c.chain_id == self.dapp_chain_id and c.is_evm:
+                    return c
+            return next((c for c in self.chains if c.is_evm), cur)
+
+    def accounts_for(self, family: str) -> list[dict]:
+        """The account records usable on chains of ``family``, in store
+        order."""
+        with self._lock:
+            return [a for a in self.accounts if family in account_families(a)]
+
     def set_current_chain(self, chain_id: int, *, persist: bool = True) -> None:
         with self._lock:
             self.current_chain_id = chain_id
+            if any(c.chain_id == chain_id and c.is_evm for c in self.chains):
+                self.dapp_chain_id = chain_id
         if persist:
             self.save()
 

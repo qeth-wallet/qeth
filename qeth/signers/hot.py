@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..chains import FAMILIES
 from .base import SignerPlugin
 
 if TYPE_CHECKING:
@@ -20,6 +21,8 @@ class HotWalletSignerPlugin(SignerPlugin):
     source_id = "hot"
     display_name = "Hot wallet"
     progress_text = "Decrypting keystore and signing…"
+    # One secp256k1 key signs an EVM tx and a Tron txid alike.
+    families = frozenset(FAMILIES)
 
     def make_signer(
         self, store: Store, account: dict[str, Any], ui: SignerInteraction,

@@ -1,5 +1,14 @@
 from dataclasses import dataclass, asdict
 
+# Chain families: how a network encodes addresses, builds + signs transactions
+# and serves reads. Every EVM chain shares one pipeline (JSON-RPC, RLP txs,
+# nonces, 0x addresses); Tron differs in all of those (base58 addresses,
+# protobuf txs with a ref-block instead of a nonce, TronGrid's HTTP API).
+# Plain strings, not an Enum, so they round-trip through the JSON config.
+EVM = "evm"
+TRON = "tron"
+FAMILIES = (EVM, TRON)
+
 
 @dataclass
 class Chain:
@@ -30,6 +39,19 @@ class Chain:
     # (works when the host serves ws on the same origin), then to http
     # polling. See qeth.plugins.transactions.live_watcher / qeth.async_chain.ws_urls_for.
     ws_url: tuple[str, ...] = ()
+    # One of FAMILIES. Chains added by a dapp (wallet_addEthereumChain) or by
+    # hand are EVM by construction.
+    family: str = EVM
+    # Decimals of the native asset: 18 on every EVM chain (wei), 6 on Tron
+    # (sun per TRX).
+    native_decimals: int = 18
+    # Base URL of the family's own HTTP API where it has one (TronGrid for
+    # Tron); EVM chains read everything over ``rpc_url``.
+    api_url: str = ""
+
+    @property
+    def is_evm(self) -> bool:
+        return self.family == EVM
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -176,6 +176,7 @@ files = [
     "qeth/chain.py",
     "qeth/async_chain.py",
     "qeth/chains.py",
+    "qeth/address.py",
     "qeth/store.py",
     "qeth/fsatomic.py",
     "qeth/single_instance.py",

@@ -43,6 +43,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread
 
+from ...address import codec_for
+from ...chains import EVM, Chain
+from ...store import account_families
 from ...alerts import confirm, error, info, warn
 from ...dialog import (
     Dialog, address_field_min_width, item_spacing, prompt_text,
@@ -973,17 +976,23 @@ class WalletsPlugin(Plugin):
         ``(item, is_default)`` so the caller can track the default row; the
         caller adds it under the right parent."""
         addr = a["address"]
+        chain = self._store.current_chain()
         # Record-aware: mark only the CONNECTED record as default. When the
         # default's path is unknown (legacy config, never re-connected), fall
-        # back to matching by address so the marker still shows.
+        # back to matching by address so the marker still shows. Dapps are
+        # EVM-only, so nothing is "connected" on a Tron view.
         default = self._store.default_account
         dpath = self._store.default_account_path
         is_default = (
-            default is not None
+            chain.is_evm
+            and default is not None
             and addr.lower() == default.lower()
             and (dpath is None or dpath == a.get("path", ""))
         )
-        display = f"[{addr}]" if is_default else f" {addr} "
+        # The row shows the chain family's form (T… on Tron); the item data
+        # keeps the internal 0x form every consumer keys on.
+        shown = codec_for(chain).display(addr)
+        display = f"[{shown}]" if is_default else f" {shown} "
         label_text = self._effective_label(addr)
         it = QTreeWidgetItem([display])
         it.setData(0, Qt.ItemDataRole.UserRole, addr)
@@ -1011,6 +1020,21 @@ class WalletsPlugin(Plugin):
         seen = {s[0] for s in ordered}
         ordered.extend(s for s in _SECTIONS if s[0] not in seen)
         return ordered
+
+    def _first_account_item(self) -> QTreeWidgetItem | None:
+        """The topmost account leaf in the tree, or None if it lists none."""
+        assert self._tree is not None
+        it = self._tree.topLevelItem(0)
+        while it is not None:
+            if isinstance(it.data(0, Qt.ItemDataRole.UserRole), str):
+                return it
+            it = self._tree.itemBelow(it)
+        return None
+
+    def on_chain_changed(self) -> None:
+        """A chain switch can change the family (EVM ⇄ Tron), and with it which
+        accounts are listed and how their addresses read — rebuild."""
+        self._rebuild_tree()
 
     def _rebuild_tree(self) -> None:
         if self._tree is None:
@@ -1059,6 +1083,11 @@ class WalletsPlugin(Plugin):
                 if got is not None:
                     default_item = got
             if not (prior_key and self._select_key(*prior_key)):
+                if default_item is None:
+                    # No connected account in view (a Tron view has none, and
+                    # a chain switch can hide the selected account): land on
+                    # the first account rather than on nothing.
+                    default_item = self._first_account_item()
                 if default_item is not None:
                     self._tree.setCurrentItem(default_item)
             # Capture the selection while every rebuilt row is still VISIBLE.
@@ -1096,7 +1125,11 @@ class WalletsPlugin(Plugin):
         branch's root is also a drop target for its address leaves, a GROUPED
         branch's isn't (its scheme subgroups are)."""
         assert self._tree is not None    # _rebuild_tree guards before calling
-        accts = [a for a in self._store.accounts if a.get("source") == source]
+        # Only the records usable on the selected chain's family: a Tron view
+        # lists hot wallets + Tron accounts, an EVM view hides the Tron ones.
+        family = self._store.current_chain().family
+        accts = [a for a in self._store.accounts
+                 if a.get("source") == source and family in account_families(a)]
         if not accts:
             return None
         root = QTreeWidgetItem([f"{label} ({len(accts)})"])
@@ -1363,6 +1396,7 @@ class WalletsPlugin(Plugin):
             return
         needle = self._filter_text.strip().lower()
         filtering = bool(needle)
+        codec = codec_for(self._store.current_chain())
         # Snapshot the true collapse state on the empty→non-empty transition so
         # the forced expand below can be undone on clear.
         if filtering and self._pre_filter_expansion is None:
@@ -1376,6 +1410,7 @@ class WalletsPlugin(Plugin):
                 label = str(item.data(0, ACCOUNT_LABEL_ROLE) or "")
                 show = (force or not filtering
                         or needle in addr.lower()
+                        or needle in codec.display(addr).lower()   # T… on Tron
                         or needle in label.lower())
                 item.setHidden(not show)
                 return show
@@ -1423,7 +1458,9 @@ class WalletsPlugin(Plugin):
                 None,
             )
         is_watch = acct is not None and acct.get("source") == "watch_only"
-        is_default = single and addrs[0] == self._store.default_account
+        # Dapps (Connect) and message signing (Sign) are EVM-only for now.
+        evm = self._store.current_chain().is_evm
+        is_default = evm and single and addrs[0] == self._store.default_account
         # The Label action doubles as the device-tree rename: it's enabled for a
         # single account OR a single selected tree row (the other buttons stay
         # off for a tree row — it has no address to act on).
@@ -1432,13 +1469,15 @@ class WalletsPlugin(Plugin):
         self.act_remove.setEnabled(len(addrs) >= 1)
         self.act_qr.setEnabled(single)
         self.act_label.setEnabled(single or is_tree)
-        self.act_sign.setEnabled(single and not is_watch)
-        self.act_connect.setEnabled(single and not is_watch and not is_default)
+        self.act_sign.setEnabled(single and not is_watch and evm)
+        self.act_connect.setEnabled(
+            single and not is_watch and not is_default and evm)
         self.act_connect.setChecked(bool(is_default))
         if self._connect_btn is not None:
             self._connect_btn.setChecked(bool(is_default))
             self._connect_btn.setToolTip(
                 "Watch-only — can't connect" if is_watch
+                else "Dapps connect on EVM networks only" if not evm
                 else "Connected to browser" if is_default
                 else "Connect to browser (make default for dapps)"
             )
@@ -1490,9 +1529,10 @@ class WalletsPlugin(Plugin):
         addrs = self.selected_addresses()
         if len(addrs) != 1:
             return
-        QApplication.clipboard().setText(addrs[0])
+        shown = codec_for(self._store.current_chain()).display(addrs[0])
+        QApplication.clipboard().setText(shown)
         if self.host is not None:
-            self.host.status_message(f"Copied {addrs[0]} to clipboard", 3000)
+            self.host.status_message(f"Copied {shown} to clipboard", 3000)
 
     def _remove_selected_account(self) -> None:
         if self._tree is None:
@@ -1955,7 +1995,7 @@ class WalletsPlugin(Plugin):
             return
         dlg = AccountInfoDialog(
             {**acct, "label": self._effective_label(addr)},
-            parent=self._container)
+            chain=self._store.current_chain(), parent=self._container)
         dlg.exec()
 
     def _edit_label(self) -> None:
@@ -2050,14 +2090,18 @@ class AccountInfoDialog(Dialog):
     the accounts panel's action row (the info used to sit in a
     permanent details panel below the tree)."""
 
-    def __init__(self, account: dict, parent=None):
+    def __init__(self, account: dict, chain: Chain | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Account")
         v = QVBoxLayout(self)
+        # The address in the selected chain's form: receiving on Tron needs
+        # the T… address, which is what gets shown, copied and QR-encoded.
+        self._family = chain.family if chain is not None else EVM
+        shown = codec_for(self._family).display(account["address"])
 
         form = QFormLayout()
         mono = QFont("monospace")
-        self.address_lbl = QLabel(account["address"]); self.address_lbl.setFont(mono)
+        self.address_lbl = QLabel(shown); self.address_lbl.setFont(mono)
         self.address_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.path_lbl = QLabel(account.get("path", "—")); self.path_lbl.setFont(mono)
@@ -2077,7 +2121,7 @@ class AccountInfoDialog(Dialog):
         self.qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_lbl.setFixedSize(220, 220)
         v.addWidget(self.qr_lbl, 0, Qt.AlignmentFlag.AlignCenter)
-        self._render_qr(account["address"])
+        self._render_qr(shown)
 
         btns = QDialogButtonBox()
         copy_btn = btns.addButton("&Copy Address",
@@ -2085,14 +2129,16 @@ class AccountInfoDialog(Dialog):
         copy_btn.setIcon(QIcon.fromTheme("edit-copy"))
         close_btn = btns.addButton(QDialogButtonBox.StandardButton.Close)
         copy_btn.clicked.connect(
-            lambda: QApplication.clipboard().setText(account["address"]))
+            lambda: QApplication.clipboard().setText(shown))
         close_btn.clicked.connect(self.accept)
         v.addWidget(btns)
 
     def _render_qr(self, address: str) -> None:
         buf = io.BytesIO()
-        # ethereum: URI per EIP-681 so wallets recognize it as a send intent
-        segno.make(f"ethereum:{address}", error="m").save(
+        # ethereum: URI per EIP-681 so wallets recognize it as a send intent.
+        # Tron has no such URI scheme — its wallets scan the bare T… address.
+        payload = f"ethereum:{address}" if self._family == EVM else address
+        segno.make(payload, error="m").save(
             buf, kind="png", scale=6, border=2)
         pix = QPixmap()
         pix.loadFromData(buf.getvalue())  # format auto-detected from the PNG header

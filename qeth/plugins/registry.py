@@ -18,6 +18,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..chains import EVM, TRON
 from ..plugin import Plugin
 from ..store import Store
 
@@ -37,6 +38,10 @@ class PluginManifest:
     hides_chain_selector: bool = False   # slot chrome: hide the chain combo while active
     persists_header: bool = False    # has header_state()/restore_header_state()
     description: str = ""            # one-liner for the toggle UI tooltip
+    # Chain families the plugin works on. Its tab is hidden while the selected
+    # chain is of another family (ENS / Approvals on Tron) — mounted once,
+    # shown or hidden on every chain switch, no restart.
+    families: tuple[str, ...] = (EVM,)
 
 
 def _wallets(store: Store) -> Plugin:
@@ -73,17 +78,17 @@ def _approvals(store: Store) -> Plugin:
 BUILTIN_MANIFESTS: tuple[PluginManifest, ...] = (
     PluginManifest(
         id="wallets", title="Accounts", factory=_wallets,
-        slot="left", order=0, required=True,
+        slot="left", order=0, required=True, families=(EVM, TRON),
         description="Wallet accounts — the account source; can't be turned off",
     ),
     PluginManifest(
         id="tokens", title="Tokens", factory=_tokens,
-        slot="right", order=10, persists_header=True,
+        slot="right", order=10, persists_header=True, families=(EVM, TRON),
         description="Token balances, prices, discovery, and sending",
     ),
     PluginManifest(
         id="transactions", title="Transactions", factory=_transactions,
-        slot="right", order=20, required=True,
+        slot="right", order=20, required=True, families=(EVM, TRON),
         description="Transaction history, sending, and signing",
     ),
     PluginManifest(

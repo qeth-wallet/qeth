@@ -266,6 +266,17 @@ def _dispose_plugins(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_trongrid_pacer():
+    """TronGrid's /v1 pacer (qeth.tron.client) is process-wide and a 429
+    pushes its next slot seconds ahead — reset it so one test's simulated
+    rate limit can't stall the next test's requests."""
+    yield
+    tc = sys.modules.get("qeth.tron.client")
+    if tc is not None:
+        tc._INDEX_PACER._next = 0.0
+
+
+@pytest.fixture(autouse=True)
 def _lock_hot_wallets():
     """The unlocked hot wallet (``hot_wallet.UNLOCKED``) is process-wide: a test
     that signs would otherwise leave its key unlocked — and its expiry timer

@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
@@ -37,6 +40,52 @@ TRONGRID_INSTANCES: dict[int, str] = {
     3448148188: "https://nile.trongrid.io",
     2494104990: "https://api.shasta.trongrid.io",
 }
+
+
+# Keyless TronGrid allows ~3 requests/s per IP and, past that, SUSPENDS the
+# caller for 4-5 s ("request rate exceeded the allowed_rps(3), and the query
+# server is suspended for 4 s"). The tokens tab, history and activities hit
+# /v1 concurrently, so pace every /v1 request process-wide below the limit,
+# and on a 429 wait out the suspension it names before retrying.
+_INDEX_INTERVAL_S = 0.4
+_INDEX_RETRIES = 2
+_INDEX_SUSPENSION_S = 5.0       # when the 429 body doesn't say
+_SUSPENDED = re.compile(r"suspended for (\d+) ?s")
+
+
+class _Pacer:
+    """Spaces calls at least ``interval`` apart across threads."""
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next)
+            self._next = slot + self._interval
+        if slot > now:
+            time.sleep(slot - now)
+
+    def hold(self, seconds: float) -> None:
+        """Push every caller's next slot past a server-imposed suspension."""
+        with self._lock:
+            self._next = max(self._next, time.monotonic() + seconds)
+
+
+_INDEX_PACER = _Pacer(_INDEX_INTERVAL_S)
+
+
+def _suspension(e: urllib.error.HTTPError) -> float:
+    """The suspension a TronGrid 429 names, in seconds (a default if not)."""
+    try:
+        body = e.read().decode(errors="replace") if e.fp is not None else ""
+    except Exception:
+        body = ""
+    m = _SUSPENDED.search(body)
+    return float(m.group(1)) + 0.5 if m else _INDEX_SUSPENSION_S
 
 
 class TronError(Exception):
@@ -201,12 +250,20 @@ class TronClient:
         url = base + path
         if params:
             url += "?" + urlencode(params)
-        try:
-            resp = self._request(url, None)
-        except urllib.error.HTTPError as e:
-            raise TronTransportError(f"{path}: HTTP {e.code}") from e
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            raise TronTransportError(f"{path}: {e}") from e
+        for attempt in range(_INDEX_RETRIES + 1):
+            _INDEX_PACER.wait()
+            try:
+                resp = self._request(url, None)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < _INDEX_RETRIES:
+                    wait = _suspension(e)
+                    log.info("TronGrid rate limit on %s — waiting %.1f s", path, wait)
+                    _INDEX_PACER.hold(wait)
+                    continue
+                raise TronTransportError(f"{path}: HTTP {e.code}") from e
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                raise TronTransportError(f"{path}: {e}") from e
         if not isinstance(resp, dict) or resp.get("success") is False:
             raise TronError(f"{path}: {str(resp)[:200]}")
         return resp

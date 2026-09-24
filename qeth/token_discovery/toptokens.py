@@ -195,12 +195,18 @@ class TopTokens:
         return self._cache_dir / "top_tokens.json"
 
     def _load(self) -> None:
-        # Prefer the runtime cache; fall back to the bundled seed.
-        for path in (self._cache_path(), self._seed_path):
-            parsed = self._read(path)
-            if parsed is not None:
-                self._by_chain, self._fetched_at = parsed
-                return
+        # Prefer the runtime cache; fall back to the bundled seed — per CHAIN,
+        # so a network added after the cache was last refreshed (Tron) still
+        # gets the seed's head until the next refresh covers it, instead of
+        # nothing for up to a TTL.
+        cache = self._read(self._cache_path())
+        seed = self._read(self._seed_path)
+        if cache is not None:
+            self._by_chain, self._fetched_at = cache
+            for cid, addrs in (seed[0] if seed is not None else {}).items():
+                self._by_chain.setdefault(cid, addrs)
+        elif seed is not None:
+            self._by_chain, self._fetched_at = seed
 
     @staticmethod
     def _read(path: Path) -> tuple[dict[int, list[str]], float] | None:

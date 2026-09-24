@@ -42,6 +42,27 @@ def test_cache_overrides_seed(tmp_path):
     assert tt.contracts(1) == [other]       # fresh cache wins over the seed
 
 
+def test_seed_fills_a_chain_the_cache_predates(tmp_path):
+    """A cache written before a network existed (Tron) must not blank that
+    network's head until the next refresh: the seed fills missing chains."""
+    tron_usdt = "0xa614f803b6fd780986a42c78ec9c7f77e6ded13c"
+    seed = _seed(tmp_path, {"1": [{"address": USDC, "symbol": "USDC"}],
+                            "728126428": [{"address": tron_usdt, "symbol": "USDT"}]})
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    other = "0x" + "11" * 20
+    (cache_dir / "top_tokens.json").write_text(json.dumps(
+        {"fetched_at": 123.0, "chains": {"1": [{"address": other, "symbol": "X"}]}}))
+    tt = TopTokens(cache_dir=cache_dir, seed_path=seed)
+    assert tt.contracts(1) == [other]                 # the cache still wins
+    assert tt.contracts(728126428) == [tron_usdt]     # the seed fills the gap
+
+
+def test_shipped_seed_has_the_tron_majors(tmp_path):
+    tt = TopTokens(cache_dir=tmp_path)
+    assert "0xa614f803b6fd780986a42c78ec9c7f77e6ded13c" in tt.contracts(728126428)
+
+
 def test_corrupt_cache_falls_back_to_seed(tmp_path):
     seed = _seed(tmp_path, {"1": [{"address": USDC, "symbol": "USDC"}]})
     cache_dir = tmp_path / "cache"

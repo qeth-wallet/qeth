@@ -2636,6 +2636,29 @@ class TestOwnHeldContractsAreRepriced:
                   if isinstance(w, tp.PricesWorker))
         assert self.VAULT in [c.lower() for c in pw.contracts]
 
+    def test_failed_discovery_without_a_top_n_still_reads_balances(
+        self, tokens_plugin, monkeypatch,
+    ):
+        """An indexer failure on a chain with no top-N head (Tron, whose
+        TronGrid 429s bursts) must still read the native balance + known
+        tokens directly — not leave the account blank with an error."""
+        from qeth.plugins import tokens as tp
+
+        plugin = tokens_plugin
+        host = _StubHost(chain=ETH, address=ADDR)
+        plugin.attach(host)
+        plugin._token_lists._loaded = True
+        monkeypatch.setattr(plugin._top_tokens, "contracts", lambda cid: [])
+        plugin._refresh(ADDR)
+        tlw = next(w for w in host.started_workers
+                   if isinstance(w, tp.TokenListWorker))
+        mark = len(host.started_workers)
+        tlw.failed.emit("/v1/accounts/T…: HTTP 429")
+        assert any(isinstance(w, tp.BalanceWorker)
+                   for w in host.started_workers[mark:])
+        assert any("Couldn't list this account's tokens" in text
+                   for text, _ in host.status_calls)
+
     def test_fresh_price_overwrites_the_frozen_cached_one(self, tokens_plugin):
         """The other half: once a price DOES come back for it, it must replace
         the stale cached value rather than the cache fallback winning."""

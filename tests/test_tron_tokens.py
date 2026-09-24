@@ -71,10 +71,42 @@ class TestTronGridSource:
         _serve(monkeypatch, {"success": True, "data": []})
         assert TronGridSource().list_balances(TRON_CHAIN, HOLDER) == []
 
-    def test_rate_limit_is_reported_as_such(self, monkeypatch):
+    def test_a_rate_limit_is_waited_out_then_retried(self, monkeypatch):
+        """TronGrid names the suspension in its 429 body; the client waits
+        it out (pacing every /v1 caller past it) and retries."""
+        import qeth.tron.client as tc
+        slept: list[float] = []
+        monkeypatch.setattr(tc.time, "sleep", slept.append)
+        body = io.BytesIO(b'{"Error":"request rate exceeded the allowed_rps(3), '
+                          b'and the query server is suspended for 4 s"}')
+        answers = [urllib.error.HTTPError("u", 429, "x", {}, body),
+                   {"success": True, "data": [{"trc20": [{USDT_T: "7"}]}]}]
+
+        def urlopen(req, timeout=None):
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return io.BytesIO(json.dumps(a).encode())
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        out = TronGridSource().list_balances(TRON_CHAIN, HOLDER)
+        assert [b.balance_raw for b in out] == [7]
+        assert slept and 4.0 <= max(slept) <= 5.0
+
+    def test_a_persistent_rate_limit_is_reported_as_such(self, monkeypatch):
+        import qeth.tron.client as tc
+        monkeypatch.setattr(tc.time, "sleep", lambda s: None)
         _serve(monkeypatch, urllib.error.HTTPError("u", 429, "x", {}, None))
         with pytest.raises(RateLimited):
             TronGridSource().list_balances(TRON_CHAIN, HOLDER)
+
+    def test_index_requests_are_paced(self, monkeypatch):
+        import qeth.tron.client as tc
+        slept: list[float] = []
+        monkeypatch.setattr(tc.time, "sleep", slept.append)
+        _serve(monkeypatch, {"success": True, "data": []})
+        for _ in range(3):
+            TronGridSource().list_balances(TRON_CHAIN, HOLDER)
+        assert len(slept) >= 2      # back-to-back calls wait for their slot
 
     def test_only_tron(self):
         assert TronGridSource().supports(TRON_CHAIN)

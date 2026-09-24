@@ -1548,9 +1548,9 @@ class TokensPlugin(Plugin):
     def _refresh(self, address: str) -> None:
         if self.host is None or self._panel is None:
             return
-        # Captured non-None aliases for the nested worker closures below;
+        # Captured non-None alias for the nested worker closures below;
         # mypy doesn't carry the guard's narrowing into inner scopes.
-        host, panel = self.host, self._panel
+        host = self.host
         chain = self.host.current_chain()
         self._maybe_scan_own_tokens(chain)
         self._maybe_scan_own_vaults(chain)
@@ -1825,17 +1825,22 @@ class TokensPlugin(Plugin):
             # directly, so a held USDC shows even with the indexer down.
             # on_discovered drives the in-flight guard to completion via
             # _on_combined_ready, so we DON'T discard it here.
-            if self._top_tokens.contracts(chain.chain_id):
-                log.warning("token discovery source failed (%s); falling "
-                            "back to top-N multicall for %s", msg, address)
-                on_discovered(0, [])
-                return
-            self._discovery_in_flight.discard(view_key)
-            # Nothing to fall back to (chain has no top-N): surface the
-            # error so the empty panel isn't mistaken for "no tokens".
-            if self._displayed_view == view_key:
-                panel.show_error(msg)
-            log.warning("token discovery failed for %s: %s", address, msg)
+            #
+            # Even with no top-N head for the chain (Tron's isn't seeded
+            # until the first CoinGecko refresh lands) the pass still reads
+            # the native balance and every contract already known — pinned,
+            # custom, own-history, cached — so the account never shows as
+            # empty just because the indexer is down or rate-limiting (keyless
+            # TronGrid 429s bursts). The status bar says the list may be short.
+            log.warning("token discovery failed for %s (%s); falling back to "
+                        "a direct balance read", address, msg)
+            if (not self._top_tokens.contracts(chain.chain_id)
+                    and self.host is not None
+                    and self._displayed_view == view_key):
+                self.host.status_message(
+                    f"Couldn't list this account's tokens ({msg}) — showing "
+                    "the balances qeth already knows about", 8000)
+            on_discovered(0, [])
 
         worker = TokenListWorker(
             chain, address, self._token_source, self._token_lists, self._store,

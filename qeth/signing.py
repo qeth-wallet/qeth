@@ -231,13 +231,61 @@ class TypedDataSigningRequest:
 class TronSigningRequest:
     """A Tron transaction to sign: the fully assembled ``TronTx`` (qeth.tron),
     TaPoS reference included. The signature is over ``tx.txid()`` —
-    sha256 of the exact ``raw_data`` bytes that get broadcast."""
+    sha256 of the exact ``raw_data`` bytes that get broadcast.
+
+    Arriving over the bridge (``origin`` set by the RPC layer) it's a DAPP's
+    transaction — built by its TronWeb, reviewed as-is, signed and handed
+    back unbroadcast (the dapp broadcasts it)."""
     chain_id: int
     tx: TronTx
+    origin: str | None = None
 
     @property
     def from_addr(self) -> str:
         return self.tx.owner
+
+
+@dataclass
+class TronMessageSigningRequest:
+    """A TronWeb message signature (``qeth.tron.messages``): ``version`` 2 is
+    ``signMessageV2`` (TIP-191), 1 the legacy ``trx.sign(hexString)``.
+    ``raw`` is the message bytes; the digest is computed from them."""
+    from_addr: str
+    raw: bytes
+    version: int = 2
+    origin: str | None = None
+
+    def digest(self) -> bytes:
+        from .tron.messages import message_digest
+        return message_digest(self.raw, self.version)
+
+
+@dataclass
+class TronTypedDataSigningRequest:
+    """TronWeb ``_signTypedData(domain, types, message)`` — TIP-712. The RPC
+    layer has already checked the domain pins the Tron chain
+    (``check_domain_chain``)."""
+    from_addr: str
+    domain: dict
+    types: dict
+    message: dict
+    origin: str | None = None
+
+    def digest(self) -> bytes:
+        from .tron.messages import typed_data_digest
+        return typed_data_digest(self.domain, self.types, self.message)
+
+    @property
+    def typed_data(self) -> dict:
+        """The EIP-712-shaped view the review dialog renders."""
+        from .tron.messages import TypedDataEncoder, domain_types
+        types = {k: v for k, v in self.types.items() if k != "EIP712Domain"}
+        return {
+            "types": {"EIP712Domain": domain_types(self.domain), **types},
+            "primaryType": TypedDataEncoder(types).primary_type,
+            "domain": self.domain,
+            "message": self.message,
+        }
 
 
 def parse_personal_sign_params(
@@ -399,6 +447,16 @@ class Signer(ABC):
         txid. Backends that can't sign Tron keep this default."""
         raise SignerError(f"{type(self).__name__} can't sign Tron transactions")
 
+    def sign_tron_message(
+        self, req: TronMessageSigningRequest | TronTypedDataSigningRequest,
+    ) -> bytes:
+        """Return the 65-byte ``r‖s‖v`` signature (v = 27/28) over
+        ``req.digest()`` — a TronWeb message or TIP-712 typed data. Computed
+        from the request, never a caller-supplied hash."""
+        raise SignerError(
+            "This wallet can't sign Tron messages or typed data in qeth — "
+            "only transactions.")
+
 
 class SignerBridge(QObject):
     """Cross-thread coordinator. Construct on the Qt main thread
@@ -428,6 +486,11 @@ class SignerBridge(QObject):
     # dict carrying chain_id / name / rpc_url / symbol / explorer /
     # origin for the confirmation dialog.
     chain_add_requested = Signal(object, object)
+    # (TronSigningRequest, signed Transaction hex) — a dapp broadcast, through
+    # qeth's node proxy, a Tron transaction qeth signed for it. The UI records
+    # it as pending then (not at signing: a dapp that never broadcasts must not
+    # get a row the watcher would re-broadcast).
+    tron_broadcast_seen = Signal(object, str)
 
     async def submit_async(self, req) -> str:
         """Called from the aiohttp event loop. Emits the signal
@@ -693,6 +756,16 @@ class SignMessageWorker(QThread):
                 raw = self._signer.sign_message(self._req)
             elif isinstance(self._req, TypedDataSigningRequest):
                 raw = self._signer.sign_typed_data(self._req)
+            elif isinstance(self._req, (TronMessageSigningRequest,
+                                        TronTypedDataSigningRequest)):
+                raw = self._signer.sign_tron_message(self._req)
+                # Same check as a Tron transaction: a signature from any other
+                # key would be handed to the dapp as ours.
+                if (isinstance(raw, (bytes, bytearray)) and len(raw) == 65
+                        and recover_signer(self._req.digest(), bytes(raw)).lower()
+                        != self._req.from_addr.lower()):
+                    raise SignerError(
+                        "The signature doesn't match the signing account")
             else:
                 raise SignerError(
                     f"unsupported request type {type(self._req).__name__}"
@@ -711,3 +784,38 @@ class SignMessageWorker(QThread):
             )
             return
         self.signed.emit("0x" + bytes(raw).hex())
+
+
+class TronSignWorker(QThread):
+    """Sign a DAPP's Tron transaction (``TronSigningRequest`` from the bridge)
+    and hand the signature back — no TaPoS refresh, no broadcast: the bytes
+    are the dapp's, and the dapp broadcasts them. The signature is checked to
+    recover to the owner, like every Tron signature qeth produces."""
+
+    signed = Signal(str)      # 65-byte r‖s‖v (v = 27/28), plain hex
+    failed = Signal(str)
+
+    def __init__(self, signer: Signer, req: TronSigningRequest, parent=None):
+        super().__init__(parent)
+        self._signer = signer
+        self._req = req
+
+    def run(self) -> None:
+        try:
+            sig = self._signer.sign_tron(self._req)
+        except SignerError as e:
+            self.failed.emit(str(e))
+            return
+        except Exception as e:
+            log.exception("tron signer raised unexpectedly")
+            self.failed.emit(f"Signing failed: {e}")
+            return
+        try:
+            signer_addr = recover_signer(self._req.tx.txid(), sig)
+        except Exception as e:
+            self.failed.emit(f"The signer returned an invalid signature: {e}")
+            return
+        if signer_addr.lower() != self._req.from_addr.lower():
+            self.failed.emit("The signature doesn't match the sending account.")
+            return
+        self.signed.emit(bytes(sig).hex())

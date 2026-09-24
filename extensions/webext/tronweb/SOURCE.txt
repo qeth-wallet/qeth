@@ -1,0 +1,11 @@
+TronWeb 6.5.1 — the unmodified browser bundle from the npm package.
+
+  package:   tronweb@6.5.1 (https://www.npmjs.com/package/tronweb)
+  tarball:   https://registry.npmjs.org/tronweb/-/tronweb-6.5.1.tgz
+  integrity: sha512-mqa3WIBq7sYtkkIywa2Jop3UwJX6EgIrBkFpm3sSjppStTOTtYeMJyeIHJVvFFCaYN4vjU1FDjQPSvHFTcuzEw==
+  file:      package/dist/TronWeb.js
+  sha256:    f35b43d3e67bda1442f073a30d90a62871b5390ecd11808cd55ed201b9fb1e6f
+  source:    https://github.com/tronprotocol/tronweb (tag v6.5.1)
+  license:   MIT (LICENSE; bundled third-party notices in TronWeb.js.LICENSE.txt)
+
+qeth runs it, on demand, in a page that uses Tron (see provider.js).

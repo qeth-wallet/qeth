@@ -74,7 +74,16 @@ PACKAGE_FILES = [
     "icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png",
     "icons/icon16-off.png", "icons/icon32-off.png",
     "icons/icon48-off.png", "icons/icon128-off.png",
+    "tronweb/TronWeb.js", "tronweb/TronWeb.js.LICENSE.txt",
+    "tronweb/LICENSE", "tronweb/SOURCE.txt",
 ]
+
+# The vendored TronWeb (npm tronweb@6.5.1 dist/TronWeb.js, UNMODIFIED — store
+# reviewers verify third-party code against its release by checksum). Pinned,
+# so an accidental edit, or a bump that forgets the pin and SOURCE.txt, can't
+# ship. The Falkon connector carries the same file.
+TRONWEB_FILE = "tronweb/TronWeb.js"
+TRONWEB_SHA256 = "f35b43d3e67bda1442f073a30d90a62871b5390ecd11808cd55ed201b9fb1e6f"
 
 AMO_API = "https://addons.mozilla.org/api/v5"
 
@@ -121,6 +130,17 @@ def _verify_tree() -> None:
     missing = [f for f in PACKAGE_FILES if not (HERE / f).is_file()]
     if missing:
         raise SystemExit("missing packaged files: " + ", ".join(missing))
+    # TronWeb is the pinned upstream bundle, and Falkon ships the same one.
+    tronweb = (HERE / TRONWEB_FILE).read_bytes()
+    if hashlib.sha256(tronweb).hexdigest() != TRONWEB_SHA256:
+        raise SystemExit(
+            f"{TRONWEB_FILE} isn't the pinned upstream bundle — it must be the "
+            "unmodified npm dist; update TRONWEB_SHA256 + tronweb/SOURCE.txt "
+            "when bumping it.")
+    falkon_tw = HERE.parent / "falkon" / "qeth_connector" / TRONWEB_FILE
+    if falkon_tw.exists() and falkon_tw.read_bytes() != tronweb:
+        raise SystemExit(f"the Falkon connector's {TRONWEB_FILE} has drifted "
+                         "from extensions/webext's — re-mirror it.")
 
 
 def _member_bytes(rel: str, target: str) -> bytes:

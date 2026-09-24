@@ -61,7 +61,8 @@
     }
   },
   "permissions": [
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "http://*/*",

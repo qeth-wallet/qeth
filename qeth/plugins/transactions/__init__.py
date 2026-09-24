@@ -65,7 +65,7 @@ from ...chain import EthClient, native_amount, wei_to_ether
 from ...address import codec_for
 from ...tron.client import TronClient, TronError
 from ...tron.history import TronGridTransactionSource
-from .tron_send import _TronFeesMixin
+from .tron_send import _TronFeesMixin, _trx
 from ...tron.tx import TransferContract as TronTransferContract
 from ...tron.tx import decode_raw as decode_tron_raw
 from ...tron.tx import read_fields as read_tron_fields
@@ -4295,10 +4295,10 @@ def _make_identity_row(*, to_addr: str | None, chain,
     """Build an identity-row label and a ``kick()`` that fills it via a
     background ContractIdentityWorker. ``mode`` picks the familiarity verb
     ("interact" / "send" / "approve" — see ContractIdentityWorker). Returns
-    ``(None, None)`` when there's no address to identify — or the chain has
-    no identity sources (Etherscan / Blockscout tags are EVM-only; on Tron
-    the row would only ever say "add an Etherscan key")."""
-    if not to_addr or not chain.is_evm:
+    ``(None, None)`` when there's no address to identify. On Tron the source
+    delegates to Tronscan (``TronIdentitySource``) and the badge names
+    addresses in their ``T…`` form."""
+    if not to_addr:
         return None, None
     label = QLabel("")
     # Word wrap on, and DON'T override the size policy — a wrapped QLabel
@@ -4334,7 +4334,8 @@ def _make_identity_row(*, to_addr: str | None, chain,
         label.setEnabled(False)
         worker = ContractIdentityWorker(
             identity_source, identity_cache, chain.chain_id, to_addr,
-            my_addresses, tx_cache=tx_cache, mode=mode)
+            my_addresses, tx_cache=tx_cache, mode=mode,
+            short=None if chain.is_evm else codec_for(chain).short)
         worker.ready.connect(_apply)
         start_worker(worker)
 
@@ -7045,3 +7046,83 @@ class TronSendTokenDialog(_TronFeesMixin, SendTokenDialog):
     Tron's fee half (``tron_send._TronFeesMixin``): the network resources a
     transaction burns instead of gas, and ``finalised_tron`` instead of an
     EVM request."""
+
+
+class TronSignTransactionDialog(_TronFeesMixin, SignTransactionDialog):
+    """A dapp's Tron transaction (``tron_signTransaction``) in the dapp sign
+    dialog — Requested by, To + identity, Spender for an approve, the decoded
+    call, the Events preview, the revert banner — with Tron's resources in
+    place of gas.
+
+    READ-ONLY: the bytes are the dapp's TronWeb's, signed exactly as reviewed
+    (``TronSignWorker``) and handed back for the dapp to broadcast. So there's
+    no allowance editor, the fee limit is the dapp's own (flagged when the
+    estimate outgrows it), and the expiration — TronWeb gives a transaction
+    a minute — counts down, since an expired one can only be refused."""
+
+    def __init__(self, tron_req: TronSigningRequest, chain, **kwargs):
+        # Read by the header / fee hooks the base __init__ runs.
+        self.tron_req = tron_req
+        tx = tron_req.tx
+        c = tx.contract
+        if isinstance(c, TronTransferContract):
+            to, value, data = c.to, c.amount, "0x"
+        else:
+            # Decode-side view only: a 41-prefixed address word would defeat
+            # the ABI decode (the TVM masks it — the same call either way).
+            to, value = c.contract, c.call_value
+            data = strip_tron_address_prefixes("0x" + c.data.hex())
+        req = SigningRequest(chain_id=chain.chain_id, from_addr=tx.owner,
+                             to_addr=to, value_wei=value, data=data,
+                             origin=tron_req.origin)
+        super().__init__(req, chain, **kwargs)
+        self._expiry_timer = QTimer(self)
+        self._expiry_timer.setInterval(1000)
+        self._expiry_timer.timeout.connect(self._tick_expiry)
+        self._expiry_timer.start()
+        self._tick_expiry()
+
+    def _build_header_rows(self, header: QFormLayout, outer) -> None:
+        super()._build_header_rows(header, outer)
+        memo = self.tron_req.tx.memo
+        if memo:
+            try:
+                text = memo.decode("utf-8")
+            except UnicodeDecodeError:
+                text = "0x" + memo.hex()
+            header.addRow("Memo:", self._value_label(text, monospace=True))
+        self._expiry_lbl = self._value_label("")
+        header.addRow("Expires:", self._expiry_lbl)
+
+    def _build_allowance_editor(self, header: QFormLayout) -> None:
+        """None: the approve amount is part of the dapp's signed bytes."""
+
+    def _tick_expiry(self) -> None:
+        import time
+        left = self.tron_req.tx.expiration / 1000 - time.time()
+        if left > 0:
+            self._expiry_lbl.setText(
+                f"in {int(left)} s" if left < 120 else f"in {int(left // 60)} min")
+            self._expiry_lbl.setStyleSheet("")
+            return
+        self._expiry_lbl.setText(
+            "⚠ expired — the network will refuse it; retry in the dapp")
+        bg, fg = _IDENTITY_TINT["warn"]      # the revert banner's pill
+        self._expiry_lbl.setStyleSheet(
+            f"background:{bg}; color:{fg}; padding:1px 6px; border-radius:4px;")
+        self._expiry_timer.stop()
+
+    def _kick_gas(self, probe: SigningRequest) -> None:
+        # Estimate the dapp's exact contract (and its memo's fee).
+        self._kick_tron_fee(self.tron_req.tx.contract, self.tron_req.tx.memo)
+
+    def _fee_limit_text(self, fee) -> str:
+        tx = self.tron_req.tx
+        if isinstance(tx.contract, TronTransferContract):
+            return ""
+        text = f"{_trx(tx.fee_limit)} TRX — set by the dapp; the most the call may burn"
+        if fee.energy_burn > tx.fee_limit:
+            text += (f"\n⚠ the estimate ({_trx(fee.energy_burn)} TRX) exceeds it: "
+                     "the call would run out of energy and fail, still burning "
+                     "up to the limit")
+        return text

@@ -1,7 +1,9 @@
 import asyncio
+import collections
 import concurrent.futures
 import json
 import logging
+import re
 import threading
 from typing import Any
 from urllib.parse import urlparse
@@ -11,14 +13,19 @@ from aiohttp import (
     TCPConnector, ServerDisconnectedError, WSMsgType, web,
 )
 
-from . import __version__
+from . import USER_AGENT, __version__
+from .address import tron_from_hex, tron_to_hex
 from .chain import is_provider_limit_error
-from .chains import Chain
+from .chains import TRON, Chain
 from .signing import (
-    SignerBridge, SignerError,
+    SignerBridge, SignerError, TronMessageSigningRequest, TronSigningRequest,
+    TronTypedDataSigningRequest,
     parse_personal_sign_params, parse_send_transaction_params,
     parse_typed_data_params,
 )
+from .tron.client import TRONGRID_INSTANCES
+from .tron.messages import TypedDataError, check_domain_chain, typed_data_digest
+from .tron.tx import decode_raw, read_fields, signed_transaction, txid as tron_txid
 
 log = logging.getLogger("qeth.rpc")
 
@@ -56,7 +63,10 @@ _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 # ADMIN namespace (personal_unlockAccount / _newAccount), never something to
 # forward to the user's provider. qeth's own personal_sign is handled well
 # before this guard.
-_WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_")
+#
+# ``tron_`` is qeth's own injected Tron provider (TronWeb / TIP-1193, see
+# _tron_dispatch): an unknown tron_* must never reach the EVM chain's node.
+_WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_", "tron_")
 
 # eth_subscribe types a NODE can serve. Everything else is a wallet-level
 # event (Frame extends eth_subscribe with them) and must be handled here or
@@ -76,7 +86,21 @@ _WALLET_SUBSCRIPTIONS = frozenset({
     # subscription on every connect); chainsChanged fires when the user
     # edits the chain list, assetsChanged is accepted but never pushed.
     "chainsChanged", "assetsChanged",
+    # qeth's Tron provider: the connected Tron account (base58) changed.
+    "tronAccountsChanged",
 })
+
+# What the Tron provider's node proxy (tron_node) may reach. TronWeb talks to
+# a full node (``wallet/*``), its solidity API (``walletsolidity/*``) and
+# TronGrid's event server (``v1/*``, with a query string) — nothing else. No
+# dots in a path, so no ``..`` traversal off the API root.
+_TRON_NODE_PATH = re.compile(r"^(wallet|walletsolidity)/[A-Za-z0-9_]+$")
+_TRON_EVENT_PATH = re.compile(r"^(v1(/[A-Za-z0-9_%\-]+)+|healthcheck)$")
+_TRON_QUERY = re.compile(r"^[A-Za-z0-9_%.=&+:,\-]*$")
+_TRON_BROADCASTS = frozenset({"wallet/broadcasttransaction", "wallet/broadcasthex"})
+# How many dapp transactions qeth remembers having signed, to recognise their
+# broadcast through tron_node (and record them as pending).
+_TRON_SIGNED_KEEP = 64
 
 # EIP-2255 capabilities qeth can grant. qeth has no connect prompt — every
 # origin is handed the default account on request — so "requesting"
@@ -231,6 +255,10 @@ class RpcServer:
         # modal — the user then has to dismiss a stack of identical
         # dialogs. Concurrent requests for the same id share one prompt.
         self._pending_chain_add: dict[int, asyncio.Future[bool]] = {}
+        # Dapp Tron transactions qeth signed, by txid (hex): (request, signed
+        # Transaction hex). tron_node spots their broadcast and tells the UI.
+        self._tron_signed: collections.OrderedDict[
+            str, tuple[TronSigningRequest, str]] = collections.OrderedDict()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -580,6 +608,11 @@ class RpcServer:
         ``provider.emit('accountsChanged', accounts)`` on
         ``window.ethereum`` so dapps re-render without polling."""
         self._schedule_event("accountsChanged", accounts)
+
+    def broadcast_tron_accounts_changed(self, accounts: list[str]) -> None:
+        """The connected Tron account changed (``accounts`` in base58) —
+        pushed to qeth's Tron provider as ``tronAccountsChanged``."""
+        self._schedule_event("tronAccountsChanged", accounts)
 
     def broadcast_chains_changed(self) -> None:
         """Frame's ``chainsChanged`` event — the set of AVAILABLE chains
@@ -988,6 +1021,9 @@ class RpcServer:
                 "eth_signTransaction not supported (use eth_sendTransaction)",
             )
 
+        if method.startswith("tron_"):
+            return await self._tron_dispatch(method, params, origin)
+
         if method.startswith(_WALLET_NAMESPACES):
             # A wallet-namespaced method that fell through every handler above
             # (wallet_watchAsset, wallet_getAssets, the EIP-5792 wallet_*Calls
@@ -1067,6 +1103,213 @@ class RpcServer:
     # a legacy leftover to stop leaning on. Matches async_chain /
     # live_watcher, which already pass ClientTimeout.
     _REQUEST_TIMEOUT = ClientTimeout(total=15)
+
+    # --- Tron (qeth's injected TronWeb / TIP-1193 provider) ----------------
+    #
+    # The page runs a real TronWeb whose node provider and signing methods are
+    # routed here (extensions/*/provider.js). qeth keeps no per-site connect
+    # gate on Tron either: every origin is handed the connected Tron account
+    # (Store.default_for(TRON)), as eth_accounts hands out the EVM one.
+
+    def _tron_chain(self) -> Chain:
+        chain = next((c for c in self.store.chains if c.family == TRON), None)
+        if chain is None:
+            raise RpcError(4901, "Tron isn't configured in qeth")
+        return chain
+
+    def _tron_accounts(self) -> list[str]:
+        acct = self.store.default_for(TRON)[0]
+        return [tron_from_hex(acct)] if acct else []
+
+    def _tron_signer(self, address: Any = None) -> str:
+        """The connected Tron account (internal hex) a request signs as —
+        refusing an explicit ``address`` that isn't it."""
+        acct = self.store.default_for(TRON)[0]
+        if not acct:
+            raise RpcError(4100, "no Tron account is connected in qeth")
+        if address:
+            text = str(address).strip()
+            want = (tron_to_hex(text) if text.startswith("T")
+                    else "0x" + text[-40:] if len(text) in (42, 44) else None)
+            if want is None or want.lower() != acct.lower():
+                raise RpcError(4100, "that isn't the Tron account connected in qeth")
+        return acct
+
+    async def _tron_submit(self, req) -> str:
+        assert self.signer_bridge is not None
+        try:
+            return await self.signer_bridge.submit_async(req)
+        except SignerError as e:
+            msg = str(e)
+            raise RpcError(4001 if msg == "User cancelled" else -32000, msg)
+
+    async def _tron_dispatch(self, method: str, params: list,
+                             origin: str | None) -> Any:
+        if method in ("tron_accounts", "tron_requestAccounts"):
+            self._tron_chain()                   # "is Tron there at all?"
+            return self._tron_accounts()
+        if method == "tron_network":
+            chain = self._tron_chain()
+            # fullHost: what TronLink's tronWeb reports — dapps compare it to
+            # tell mainnet from Nile / Shasta. The real node is qeth's (tron_node).
+            return {"chainId": hex(chain.chain_id), "name": chain.name,
+                    "fullHost": TRONGRID_INSTANCES.get(chain.chain_id) or chain.api_url}
+        if method == "tron_node":
+            return await self._tron_node(params)
+        if method in ("tron_signTransaction", "tron_signMessage",
+                      "tron_signTypedData") and self.signer_bridge is None:
+            raise RpcError(-32601, "No signer wired up")
+        if method == "tron_signTransaction":
+            return await self._tron_sign_transaction(params, origin)
+        if method == "tron_signMessage":
+            if not params or not isinstance(params[0], str):
+                raise RpcError(-32602, "tron_signMessage expects [messageHex, version]")
+            version = params[1] if len(params) > 1 else 2
+            if version not in (1, 2):
+                raise RpcError(-32602, f"unknown message version {version!r}")
+            text = params[0]
+            try:
+                raw = bytes.fromhex(text[2:] if text[:2].lower() == "0x" else text)
+            except ValueError:
+                raise RpcError(-32602, "the message must be hex") from None
+            req = TronMessageSigningRequest(
+                from_addr=self._tron_signer(params[2] if len(params) > 2 else None),
+                raw=raw, version=version, origin=origin)
+            return await self._tron_submit(req)
+        if method == "tron_signTypedData":
+            if len(params) < 3 or not all(isinstance(x, dict) for x in params[:3]):
+                raise RpcError(-32602,
+                               "tron_signTypedData expects [domain, types, message]")
+            domain, types, message = params[0], params[1], params[2]
+            try:
+                check_domain_chain(domain, self._tron_chain().chain_id)
+                typed_data_digest(domain, types, message)   # malformed → now
+            except TypedDataError as e:
+                raise RpcError(-32602, str(e)) from None
+            td = TronTypedDataSigningRequest(
+                from_addr=self._tron_signer(params[3] if len(params) > 3 else None),
+                domain=domain, types=types, message=message, origin=origin)
+            return await self._tron_submit(td)
+        raise RpcError(-32601, f"Method {method} not supported")
+
+    async def _tron_sign_transaction(self, params: list,
+                                     origin: str | None) -> str:
+        """Review + sign a transaction the dapp's TronWeb built. The review
+        shows what ``raw_data_hex`` decodes to, and that is what's signed —
+        so it must decode, and re-encode to the SAME bytes (nothing qeth
+        can't show), and match the txID. Returns the signature (hex, TronWeb's
+        form); the page attaches it and broadcasts — qeth doesn't."""
+        tx = params[0] if params else None
+        if not isinstance(tx, dict):
+            raise RpcError(-32602, "tron_signTransaction expects [transaction]")
+        if tx.get("signature"):
+            raise RpcError(-32602, "the transaction is already signed "
+                           "(multi-signature isn't supported)")
+        raw_hex = str(tx.get("raw_data_hex") or "")
+        try:
+            raw = bytes.fromhex(raw_hex[2:] if raw_hex[:2].lower() == "0x" else raw_hex)
+        except ValueError:
+            raise RpcError(-32602, "the transaction has no valid raw_data_hex") from None
+        try:
+            decoded = decode_raw(raw)
+        except (ValueError, AssertionError) as e:
+            raise RpcError(-32602, f"qeth can't review this transaction: {e}") from None
+        if decoded.raw_data() != raw:
+            raise RpcError(-32602, "qeth can't review this transaction: it "
+                           "carries fields qeth doesn't show")
+        tx_id = tron_txid(raw).hex()
+        given = str(tx.get("txID") or "").lower().removeprefix("0x")
+        if given and given != tx_id:
+            raise RpcError(-32602, "the transaction's txID doesn't match its raw_data_hex")
+        owner = self._tron_signer()
+        if decoded.owner.lower() != owner.lower():
+            raise RpcError(4100, "the transaction isn't from the Tron account "
+                           "connected in qeth")
+        req = TronSigningRequest(chain_id=self._tron_chain().chain_id,
+                                 tx=decoded, origin=origin)
+        sig_hex = (await self._tron_submit(req)).removeprefix("0x")
+        signed_hex = signed_transaction(raw, [bytes.fromhex(sig_hex)]).hex()
+        self._tron_signed[tx_id] = (req, signed_hex)
+        while len(self._tron_signed) > _TRON_SIGNED_KEEP:
+            self._tron_signed.popitem(last=False)
+        return sig_hex
+
+    async def _tron_node(self, params: list) -> Any:
+        """TronWeb's HTTP provider, through qeth: ``[path, payload, method]``
+        to the Tron chain's full node (failing over like TronClient) or, for
+        the event API, TronGrid. In-page, TronWeb would be bound by the dapp's
+        CSP and qeth's endpoints unknown to it; here it gets the same nodes
+        (and fallbacks) as the wallet."""
+        if not params or not isinstance(params[0], str):
+            raise RpcError(-32602, "tron_node expects [path, payload, method]")
+        payload = params[1] if len(params) > 1 and params[1] is not None else {}
+        verb = str(params[2] if len(params) > 2 else "get").lower()
+        if not isinstance(payload, dict) or verb not in ("get", "post"):
+            raise RpcError(-32602, "invalid tron_node request")
+        path, _, query = params[0].strip().lstrip("/").partition("?")
+        chain = self._tron_chain()
+        if _TRON_NODE_PATH.match(path) and not query:
+            bases = [u.rstrip("/") for u in (chain.api_url, *chain.api_fallbacks) if u]
+        elif _TRON_EVENT_PATH.match(path) and _TRON_QUERY.match(query):
+            event = TRONGRID_INSTANCES.get(chain.chain_id)
+            if event is None:
+                raise RpcError(-32601, f"no event server for {chain.name}")
+            bases = [event]
+        else:
+            raise RpcError(-32601, f"tron_node: {path!r} isn't a Tron API path")
+        suffix = "/" + path + ("?" + query if query else "")
+        get_params = {k: (str(v).lower() if isinstance(v, bool) else str(v))
+                      for k, v in payload.items()} if verb == "get" else None
+        assert self._client is not None
+        last: str = "no Tron endpoint configured"
+        for base in bases:
+            try:
+                if verb == "post":
+                    ctx = self._client.post(
+                        base + suffix, json=payload, timeout=self._REQUEST_TIMEOUT,
+                        headers={"User-Agent": USER_AGENT})
+                else:
+                    ctx = self._client.get(
+                        base + suffix, params=get_params, timeout=self._REQUEST_TIMEOUT,
+                        headers={"User-Agent": USER_AGENT})
+                async with ctx as r:
+                    status, body = r.status, await r.text()
+            except (ClientConnectorError, ClientOSError, ServerDisconnectedError,
+                    asyncio.TimeoutError) as e:
+                log.info("tron_node %s via %s: %s", path, base, type(e).__name__)
+                last = "Tron node unreachable"
+                continue
+            if status == 429 or status >= 500:
+                log.info("tron_node %s via %s: HTTP %s", path, base, status)
+                last = f"Tron node HTTP {status}"
+                continue
+            try:
+                data: Any = json.loads(body) if body.strip() else {}
+            except ValueError:
+                if status >= 400:
+                    raise RpcError(-32603, f"Tron node HTTP {status}") from None
+                data = body
+            if path in _TRON_BROADCASTS and isinstance(data, dict) and data.get("result"):
+                self._note_tron_broadcast(path, payload)
+            return data
+        raise RpcError(-32603, last)
+
+    def _note_tron_broadcast(self, path: str, payload: dict) -> None:
+        """A broadcast through tron_node succeeded: if it's a transaction qeth
+        signed for a dapp, have the UI record it as pending."""
+        if path == "wallet/broadcasthex":
+            try:
+                fields = read_fields(bytes.fromhex(str(payload.get("transaction", ""))))
+                raw = next(v for n, _, v in fields if n == 1)
+                tx_id = tron_txid(raw).hex() if isinstance(raw, bytes) else ""
+            except (ValueError, StopIteration):
+                return
+        else:
+            tx_id = str(payload.get("txID") or "").lower().removeprefix("0x")
+        hit = self._tron_signed.pop(tx_id, None)
+        if hit is not None and self.signer_bridge is not None:
+            req, signed_hex = hit
+            self.signer_bridge.tron_broadcast_seen.emit(req, "0x" + signed_hex)
 
     async def _proxy(
         self, method: str, params: list,

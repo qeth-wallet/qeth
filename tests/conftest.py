@@ -305,6 +305,9 @@ class _FakeRpc:
     def broadcast_accounts_changed(self, accounts) -> None:
         pass
 
+    def broadcast_tron_accounts_changed(self, accounts) -> None:
+        pass
+
     def broadcast_chain_changed(self, chain_id) -> None:
         pass
 

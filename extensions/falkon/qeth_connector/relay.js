@@ -52,6 +52,13 @@
     bridge.message.connect(function (msgCid, text) {
       if (msgCid === cid) toProvider("data", text);
     });
+    if (bridge.tronWebLoaded) {
+      bridge.tronWebLoaded.connect(function (msgCid, ok, error) {
+        if (msgCid !== cid) return;
+        window.postMessage({ source: RELAY_SRC, kind: "tronweb",
+                             ok: !!ok, error: error || null }, "*");
+      });
+    }
 
     // Page → native.
     window.addEventListener("message", function (e) {
@@ -62,6 +69,17 @@
         bridge.send(cid, window.location.origin || "", String(d.data));
       } else if (d.kind === "hello") {
         toProvider("ready");      // answer late-arriving providers
+      } else if (d.kind === "tronweb") {
+        // The page started using Tron: the native side finds THIS frame by a
+        // token only this (privileged) world holds, and runs TronWeb in its
+        // main world — native injection, outside the page's CSP.
+        if (typeof bridge.loadTronWeb !== "function") {
+          window.postMessage({ source: RELAY_SRC, kind: "tronweb", ok: false,
+                               error: "update the qeth Falkon connector" }, "*");
+          return;
+        }
+        window.__qethTronToken = cidGen();
+        bridge.loadTronWeb(cid, window.__qethTronToken, window.location.origin || "");
       }
     });
 

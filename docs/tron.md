@@ -9,7 +9,10 @@
 - the send dialog, with signing, broadcast and pending tracking;
 - hot-wallet and Trezor signing;
 - Trezor Tron discovery;
-- `T…` watch-only accounts.
+- `T…` watch-only accounts;
+- Tron dapps in the browser (qeth's extension and the Falkon connector): a
+  TronLink-compatible provider with transaction, message (TIP-191) and typed
+  data (TIP-712) signing, reviewed in qeth.
 
 Mainnet accepts qeth's locally encoded, signed transactions: a transfer
 signed by an unfunded key passes the TaPoS and signature checks and fails
@@ -20,10 +23,11 @@ Not built yet (see "Later phases"):
 
 - Ledger's Tron app;
 - Keystone;
-- Tron message signing (TIP-191 / TIP-712);
+- Tron message signing on a Trezor (the firmware has none);
+- multi-signature transactions;
 - TRC-20 approvals;
-- a TronLink-style dapp provider;
 - staking and voting;
+- WalletConnect for Tron;
 - testnets.
 
 Hardware signing is untested on a real device. The research was done on
@@ -92,12 +96,12 @@ be used as a key.
   `dapp_chain_id`). Tron isn't listed in `wallet_getEthereumChains`, can't be
   switched to, and doesn't push `chainChanged`. A Tron-only account never
   becomes `default_account` (that value is `eth_accounts`). Sign Message is
-  off on a Tron view.
+  off on a Tron view. Tron dapps get their own provider (Phase 4).
 - **A connected account per family.** Double-click / Enter / Connect on a Tron
   view sets Tron's own connected account (`Store.default_for(TRON)`, persisted
   as `family_defaults`). It's marked `[…]` in the tree, leaves the EVM one
-  untouched, and is what a future Tron dapp bridge will serve. It also routes
-  signing when one address is held by two signers.
+  untouched, and is the account Tron dapps are handed (Phase 4). It also
+  routes signing when one address is held by two signers.
 - **Plugin availability.** `PluginManifest.families` controls which plugins
   show on which chains:
   - ENS and Approvals are EVM-only; their tabs hide on Tron via
@@ -249,7 +253,85 @@ What's Tron-specific:
 - **Decoding.** Some wallets write addresses in calldata as 21-byte `41…`
   words; they're normalised before decoding
   (`tron.tx.strip_address_prefixes`).
-- **Details dialog.** No Etherscan identity row on Tron.
+- **Identity rows.** The Contract / Spender rows of the details and sign
+  dialogs come from Tronscan on Tron (`TronIdentitySource`, through the same
+  `ContractIdentitySource`), with addresses in `T…` form.
+
+## Phase 4: Tron dapps in the browser (done)
+
+qeth's extension (Chrome / Firefox) and the Falkon connector serve Tron dapps
+as TronLink does. They inject a real TronWeb whose node traffic and signing go
+to qeth. The page side is the shared `provider.js`, so both browsers run the
+same code.
+
+- **Always injected, and small.** Every page gets:
+  - `window.tron`: TIP-1193, flagged `isTronLink` like TronLink, as
+    `isMetaMask` is on EVM;
+  - a TIP-6963 announcement;
+  - `window.tronLink` / `window.tronWeb`, TronLink's legacy names, only
+    where nothing else defined them.
+- **TronWeb on demand.** The unmodified npm dist of TronWeb 6.5.1 is shipped
+  in `extensions/*/tronweb/`, pinned by sha256 in `build.py`. It's loaded into
+  a frame the first time its page uses Tron: an account request, or touching
+  `tronWeb`.
+  - The extension loads it with `chrome.scripting.executeScript` in the MAIN
+    world, targeting the requesting document (Chrome) or frame (Firefox).
+    This is why the extension now needs the `scripting` permission.
+  - The Falkon bridge finds the requesting frame by a token its relay holds
+    in the SafeJsWorld, then uses native `runJavaScript`.
+  - Neither route is bound by the page's CSP, and an EVM-only page never
+    loads TronWeb.
+  - TronWeb leaves two globals behind, `TronWebProto` and `proto`. Its
+    generated protobuf code needs them at run time, and TronLink leaves the
+    same two.
+- **The node goes through qeth.** The instance's HTTP providers call
+  `tron_node [path, payload, method]`:
+  - `wallet/*` and `walletsolidity/*` go to the Tron chain's full node, with
+    failover like `TronClient`;
+  - `v1/*` goes to TronGrid's event API;
+  - no other path is allowed.
+  The page's CSP and CORS don't apply, and it uses the same nodes as the
+  wallet. `fullHost` reads as TronLink's (`api.trongrid.io` on mainnet), so
+  dapps that compare it keep working.
+- **Accounts.** `tron_accounts` / `tron_requestAccounts` return
+  `Store.default_for(TRON)` in `T…` form, with no per-site gate (as
+  `eth_accounts`). A connect on the Tron view is pushed as the
+  `tronAccountsChanged` subscription (the extension) or picked up by the
+  poll (Falkon). Sub-frames stay inert until an explicit connect, as on EVM.
+- **Transactions.** `trx.sign(tx)` becomes `tron_signTransaction`.
+  - qeth decodes `raw_data_hex`, and requires two things: that it re-encodes
+    to the same bytes (so nothing goes unshown), and that it matches `txID`.
+  - Only Transfer / TriggerSmartContract, single-signature, from the
+    connected account, are accepted.
+  - The review is `TronSignTransactionDialog`: the dapp sign dialog plus the
+    Tron fee mixin, READ-ONLY. It shows the dapp's own fee limit (flagged
+    when the estimate exceeds it), any memo, and an expiration countdown;
+    TronWeb gives a transaction a minute.
+  - `TronSignWorker` signs, checks the recovery, and returns the signature.
+    The dapp broadcasts. When it does so through `tron_node`, qeth
+    recognises the txid and records the pending row (the bridge's
+    `tron_broadcast_seen`). It isn't recorded at signing, because the
+    watcher would re-broadcast a transaction the dapp never sent.
+- **Messages.** Hot wallets only (`Signer.sign_tron_message`).
+  - `signMessageV2` → `tron_signMessage [hex, 2]` (TIP-191).
+  - `trx.sign(hexString)` → version 1, TronWeb's fixed `…\n32` header.
+  - Its Ethereum-header variant is refused in the page. It would be an
+    Ethereum `personal_sign` by the same key.
+  - `_signTypedData` → `tron_signTypedData`. `tron.messages` ports TronWeb's
+    TIP-712 encoder: `trcToken` keeps its name in the type hash, and
+    addresses are accepted in any form.
+  - The domain must carry the Tron chain id. Otherwise the signature would
+    also be a valid EIP-712 signature for the key's EVM account.
+  - Digests are always computed by qeth, from the content shown.
+  - The TronWeb 6.5.1 vectors are in `tests/test_tron_dapp.py`.
+- **Tests.** The page side runs end to end in real Chromium and Firefox
+  (`tests/test_webext_tron_browser.py`, opt-in `-m browser`). It covers:
+  - the real extension and TronWeb, the real `RpcServer`, a fake Tron node,
+    and TronWeb's own verifiers checking qeth's signatures;
+  - a strict-CSP page, and sub-frames;
+  - account switching.
+  The Falkon injection is tested in a real QtWebEngine
+  (`test_falkon_tronweb_engine.py`).
 
 ## Later phases
 
@@ -257,23 +339,19 @@ What's Tron-specific:
   wallets above). Also declare `ledgerblue` as a dependency; today it's only
   transitive.
 - **Keystone 3.** The `tron-sign-request` / `tron-signature` UR types.
-- **Messages.** TIP-191 (`keccak("\x19TRON Signed Message:\n" + len + msg)`)
-  and TIP-712 (EIP-712 with the 0x41 prefix dropped from addresses,
-  `chainId` = `0x2b6653dc` on mainnet), for hot wallets. Trezor has no Tron
-  message signing at all.
 - **TRC-20 approvals.** The Approvals tab needs a Tron `Approval`-log source.
   TronGrid `/v1/contracts/{addr}/events`, or `eth_getLogs` over `/jsonrpc`
   (≤ 5000 blocks per call).
-- **Contract identity.** Tronscan's contract API could fill the details
-  dialog's Contract row.
+- **Contract ABIs.** A dapp call is decoded through the 4-byte database
+  (there's no Tron ABI source). Tronscan serves verified ABIs.
+- **Multi-signature.** `trx.multiSign` and `Permission_id` contracts are
+  refused today.
 - **Staking / voting / resource delegation.** Trezor already supports these
   contract types.
 - **Testnets.** Nile / Shasta chain entries. `TRONGRID_INSTANCES` already
   knows them.
-- **Dapps.** A TronLink-compatible provider means injecting a TronWeb
-  instance whose signing methods call qeth, which is a separate project from
-  the EIP-1193 bridge. WalletConnect uses `tron:0x2b6653dc` with
-  `tron_signTransaction` / `tron_signMessage`.
+- **WalletConnect.** It uses `tron:0x2b6653dc` with `tron_signTransaction` /
+  `tron_signMessage`, which map onto the Phase 4 methods.
 
 ## Networks
 

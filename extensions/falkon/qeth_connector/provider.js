@@ -123,6 +123,10 @@
     this._connectedEmitted = false;
     this._pollTimer = null;
     this._subIds = {};           // push mode: sub_id -> sub_type (our subs)
+    this._relayWaiters = [];     // whenRelay() callers waiting for "ready"
+    // Hooks the Tron provider (below) sets to ride this transport's events.
+    this._tronPush = null;       // (accounts) on a tronAccountsChanged push
+    this._tronRefresh = null;    // () on a poll tick / transport reconnect
 
     this._listenRelay();
   }
@@ -256,6 +260,22 @@
     if (this._mode === "direct") return;   // already committed to fallback
     this._relayReady = true;
     if (this._mode !== "relay") { this._mode = "relay"; this._flushQueue(); this._startPolling(); }
+    var w = this._relayWaiters; this._relayWaiters = [];
+    for (var i = 0; i < w.length; i++) w[i].resolve();
+  };
+  // Resolves once the privileged relay is up — for what only it can do
+  // (loading TronWeb into this frame). Rejects if we fell back to direct
+  // fetch: there's no relay to ask then.
+  QethProvider.prototype.whenRelay = function () {
+    var self = this;
+    this._engage();
+    if (this._relayReady) return Promise.resolve();
+    if (this._mode === "direct") {
+      return Promise.reject(rpcError(4900, "qeth's browser connector isn't active in this page"));
+    }
+    return new Promise(function (resolve, reject) {
+      self._relayWaiters.push({ resolve: resolve, reject: reject });
+    });
   };
 
   // --- direct transport (fallback: page-context fetch) -----------------
@@ -283,7 +303,13 @@
     // the queue simply waits for "ready" rather than racing a fetch fallback.
     if (DIRECT_FALLBACK) {
       setTimeout(function () {
-        if (self._mode == null) { self._mode = "direct"; self._flushQueue(); self._startPolling(); }
+        if (self._mode == null) {
+          self._mode = "direct"; self._flushQueue(); self._startPolling();
+          var w = self._relayWaiters; self._relayWaiters = [];
+          for (var i = 0; i < w.length; i++) {
+            w[i].reject(rpcError(4900, "qeth's browser connector isn't active in this page"));
+          }
+        }
       }, RELAY_WAIT_MS);
     }
   };
@@ -306,6 +332,7 @@
       var next = (accs && accs[0]) || null;
       if (next !== prevAccount) self.emit("accountsChanged", accs || []);
     }).catch(function () {});
+    if (this._tronRefresh) this._tronRefresh();
   };
 
   // --- event polling (no push subscription over this transport) --------
@@ -366,6 +393,8 @@
         this.selectedAddress = next;
         this.emit("accountsChanged", result || []);
       }
+    } else if (sub === "tronAccountsChanged") {
+      if (this._tronPush) this._tronPush(result || []);
     } else if (sub === "networkChanged") {
       var nv = String(result);
       if (nv !== this.networkVersion) {
@@ -470,5 +499,374 @@
     };
     window.addEventListener("eip6963:requestProvider", announce);
     announce();
+  }
+
+  // =====================================================================
+  // Tron — TIP-1193 `window.tron`, TIP-6963 discovery, and TronLink's
+  // legacy `window.tronLink` / `window.tronWeb` (only where absent), backed
+  // by a REAL TronWeb (the unmodified npm dist, shipped with the connector).
+  //
+  // Every page gets only this small stub. TronWeb itself (~1 MB) is loaded
+  // into THIS frame the first time the page uses Tron — asks for accounts,
+  // or touches tronWeb — by the privileged side of the connector (the
+  // extension's scripting API / Falkon's native runJavaScript), so the
+  // page's CSP doesn't apply and an EVM-only page never pays for it.
+  //
+  // The TronWeb instance is TronLink-shaped: its node provider goes through
+  // qeth (tron_node — qeth's nodes, failover, no page CSP / CORS), and
+  // trx.sign / signMessageV2 / _signTypedData ask qeth, which shows the
+  // review dialog. Calls with the dapp's OWN private key stay local, as in
+  // TronWeb. Sub-frames are inert until an explicit connect, as above.
+  // =====================================================================
+  var tronAuthorized = !IN_SUBFRAME;
+  var tronAccount = null;         // base58 of the connected account, or null
+  var tronNetwork = null;         // {chainId, fullHost, name} from qeth
+  var tronLib = null;             // the TronWeb namespace (TronWeb, providers…)
+  var tronWeb = null;             // the instance handed to the page
+  var tronSetAddress = null;      // TronWeb's own setAddress (page copy disabled)
+  var tronLibLoading = null;
+  var tronReady = null;
+
+  function tronCall(method, params) {
+    return provider.request({ method: method, params: params || [] });
+  }
+
+  // TronLink's window messages, for dapps that still listen for them.
+  function postTronLink(action, data) {
+    try {
+      window.postMessage({ message: { action: action, data: data || {} },
+                           isTronLink: true }, "*");
+    } catch (e) {}
+  }
+
+  // Load the TronWeb library into this frame (once). The UMD bundle sets
+  // window.TronWeb; we take it and put back whatever the page had there.
+  // An AMD page (RequireJS: define.amd) would get it registered as a module
+  // instead, so define.amd is masked for the load — define itself stays.
+  // (TronWeb's generated protobuf code keeps its classes on the globals
+  // TronWebProto and proto, resolved on every call — those have to stay, as
+  // they do under TronLink.)
+  function loadTronLib() {
+    if (tronLib) return Promise.resolve(tronLib);
+    if (tronLibLoading) return tronLibLoading;
+    tronLibLoading = provider.whenRelay().then(function () {
+      return new Promise(function (resolve, reject) {
+        var prev = Object.getOwnPropertyDescriptor(window, "TronWeb");
+        var amd = (typeof window.define === "function") ? window.define : null;
+        var amdFlag = amd ? amd.amd : undefined;
+        if (amd && amdFlag) { try { amd.amd = undefined; } catch (e) {} }
+        var timer = null;
+        function finish(ok, err) {
+          window.removeEventListener("message", onMsg);
+          clearTimeout(timer);
+          if (amd && amdFlag) { try { amd.amd = amdFlag; } catch (e) {} }
+          var got = window.TronWeb;
+          try {
+            if (prev) Object.defineProperty(window, "TronWeb", prev);
+            else delete window.TronWeb;
+          } catch (e) {}
+          if (ok && got && typeof got.TronWeb === "function") { tronLib = got; resolve(got); }
+          else reject(rpcError(4900, err || "qeth couldn't load TronWeb into this page"));
+        }
+        function onMsg(e) {
+          if (e.source !== window) return;
+          var d = e.data;
+          if (!d || d.source !== RELAY_SRC || d.kind !== "tronweb") return;
+          finish(!!d.ok, d.error);
+        }
+        window.addEventListener("message", onMsg);
+        timer = setTimeout(function () { finish(false, "timed out loading TronWeb"); }, 20000);
+        provider._postToRelay("tronweb");
+      });
+    }).catch(function (err) { tronLibLoading = null; throw err; });
+    return tronLibLoading;
+  }
+
+  function hexOf(bytes) {
+    var out = "0x";
+    for (var i = 0; i < bytes.length; i++) out += ("0" + (bytes[i] & 0xff).toString(16)).slice(-2);
+    return out;
+  }
+
+  // A signMessageV2 message → the exact bytes TronWeb hashes: a string is
+  // its UTF-8, an array / Uint8Array its bytes.
+  function messageHex(message) {
+    if (typeof message === "string") return hexOf(new TextEncoder().encode(message));
+    if (message && typeof message.length === "number") return hexOf(message);
+    throw rpcError(-32602, "the message must be a string or bytes");
+  }
+
+  // Typed data for the wire: byte arrays → 0x hex, BigInts → decimal.
+  function jsonable(x) {
+    if (typeof x === "bigint") return x.toString();
+    if (x instanceof Uint8Array) return hexOf(x);
+    if (Array.isArray(x)) return x.map(jsonable);
+    if (x && typeof x === "object") {
+      if (typeof x.toJSON === "function") return x.toJSON();
+      var out = {};
+      for (var k in x) {
+        if (Object.prototype.hasOwnProperty.call(x, k)) out[k] = jsonable(x[k]);
+      }
+      return out;
+    }
+    return x;
+  }
+
+  function makeTronWeb(lib, net) {
+    function node() {
+      var p = new lib.providers.HttpProvider(net.fullHost);
+      p.request = function (url, payload, method) {
+        return tronCall("tron_node", [String(url), payload || {}, String(method || "get")]);
+      };
+      return p;
+    }
+    var tw = new lib.TronWeb({ fullNode: node(), solidityNode: node(), eventServer: node() });
+    var trx = tw.trx;
+    var own = {
+      sign: trx.sign.bind(trx), multiSign: trx.multiSign.bind(trx),
+      signMessageV2: trx.signMessageV2.bind(trx),
+      _signTypedData: trx._signTypedData.bind(trx),
+    };
+    trx.sign = function (transaction, privateKey, useTronHeader, multisig) {
+      if (privateKey) return own.sign(transaction, privateKey, useTronHeader, multisig);
+      if (typeof transaction === "string") {
+        // Legacy message signing. With useTronHeader=false TronWeb uses
+        // Ethereum's header — i.e. an Ethereum personal_sign by the same key.
+        if (useTronHeader === false) {
+          return Promise.reject(rpcError(4200,
+            "qeth won't sign with the Ethereum message header on Tron"));
+        }
+        if (!/^(0x)?[0-9a-fA-F]*$/.test(transaction)) {
+          return Promise.reject(rpcError(-32602, "Expected hex message input"));
+        }
+        return tronCall("tron_signMessage", ["0x" + transaction.replace(/^0x/, ""), 1]);
+      }
+      if (multisig) {
+        return Promise.reject(rpcError(4200, "qeth doesn't support Tron multi-signature"));
+      }
+      if (!transaction || typeof transaction !== "object") {
+        return Promise.reject(rpcError(-32602, "Invalid transaction provided"));
+      }
+      return tronCall("tron_signTransaction", [jsonable(transaction)]).then(function (sig) {
+        var signed = {};
+        for (var k in transaction) {
+          if (Object.prototype.hasOwnProperty.call(transaction, k)) signed[k] = transaction[k];
+        }
+        signed.signature = [sig];
+        return signed;
+      });
+    };
+    trx.multiSign = function (transaction, privateKey, permissionId) {
+      if (privateKey) return own.multiSign(transaction, privateKey, permissionId);
+      return Promise.reject(rpcError(4200, "qeth doesn't support Tron multi-signature"));
+    };
+    trx.signMessageV2 = function (message, privateKey) {
+      if (privateKey) return own.signMessageV2(message, privateKey);
+      try { return tronCall("tron_signMessage", [messageHex(message), 2]); }
+      catch (e) { return Promise.reject(e); }
+    };
+    trx._signTypedData = trx.signTypedData = function (domain, types, value, privateKey) {
+      if (privateKey) return own._signTypedData(domain, types, value, privateKey);
+      return tronCall("tron_signTypedData", [jsonable(domain), jsonable(types), jsonable(value)]);
+    };
+    // As TronLink: the page doesn't re-point the wallet's instance.
+    tronSetAddress = tw.setAddress.bind(tw);
+    ["setPrivateKey", "setAddress", "setFullNode", "setSolidityNode", "setEventServer"]
+      .forEach(function (m) {
+        tw[m] = function () { throw new Error("qeth has disabled " + m + " on its TronWeb"); };
+      });
+    tw.ready = false;
+    return tw;
+  }
+
+  function applyTronAccount(next) {
+    if (!tronAuthorized) next = null;
+    if (next === tronAccount) return;
+    var had = tronAccount;
+    tronAccount = next;
+    if (tronWeb) {
+      if (next) tronSetAddress(next);
+      else tronWeb.defaultAddress = { hex: false, base58: false };
+      tronWeb.ready = !!next;
+    }
+    tronLinkObj.ready = !!next;
+    tronProvider.emit("accountsChanged", next ? [next] : []);
+    if (next) {
+      postTronLink("setAccount", { address: next });
+      postTronLink("accountsChanged", { address: next });
+    } else if (had) {
+      postTronLink("disconnect", {});
+    }
+  }
+
+  // Load TronWeb, build the instance, read the account — once per frame.
+  function tronEnsure() {
+    if (tronReady) return tronReady;
+    tronReady = Promise.all([loadTronLib(), tronCall("tron_network")]).then(function (r) {
+      tronNetwork = r[1];
+      tronWeb = makeTronWeb(r[0], tronNetwork);
+      provider._tronPush = function (accounts) { applyTronAccount((accounts && accounts[0]) || null); };
+      // Poll tick (Falkon) → re-read; push transport back up (the extension)
+      // → re-subscribe, the old subscription died with the socket.
+      provider._tronRefresh = function () {
+        if (PUSH) tronSubscribe();
+        tronRefresh();
+      };
+      tronSubscribe();
+      return tronRefresh();
+    }).then(function () { return tronWeb; }, function (err) { tronReady = null; throw err; });
+    return tronReady;
+  }
+
+  function tronSubscribe() {
+    if (PUSH) tronCall("eth_subscribe", ["tronAccountsChanged"]).catch(function () {});
+  }
+
+  function tronRefresh() {
+    if (!tronAuthorized) return Promise.resolve();
+    return tronCall("tron_accounts").then(function (accs) {
+      applyTronAccount((accs && accs[0]) || null);
+    }, function () {});
+  }
+
+  // Page-initiated connect (TIP-1193 eth_requestAccounts, TronLink's
+  // tron_requestAccounts): lifts the sub-frame gate, like eth_requestAccounts.
+  function tronConnect() {
+    return tronEnsure().then(function () {
+      return tronCall("tron_requestAccounts");
+    }).then(function (accs) {
+      var addr = (accs && accs[0]) || null;
+      if (!addr) {
+        throw rpcError(4001, "No Tron account is connected in qeth — pick one "
+                             + "in the wallet's Tron view");
+      }
+      tronAuthorized = true;
+      applyTronAccount(addr);
+      postTronLink("connect", {});
+      return addr;
+    });
+  }
+
+  function tronRequest(args) {
+    var method = args && args.method;
+    var params = (args && args.params) || [];
+    switch (method) {
+      case "eth_requestAccounts":
+      case "tron_requestAccounts":
+        return tronConnect().then(function (a) { return [a]; });
+      case "eth_accounts":
+      case "tron_accounts":
+        if (!tronAuthorized) return Promise.resolve([]);
+        return tronEnsure().then(function () { return tronAccount ? [tronAccount] : []; });
+      case "eth_chainId":
+      case "tron_chainId":
+        return tronEnsure().then(function () { return tronNetwork.chainId; });
+      case "wallet_switchEthereumChain":
+        return tronEnsure().then(function () {
+          var want = params[0] && params[0].chainId;
+          if (want && parseInt(want, 16) === parseInt(tronNetwork.chainId, 16)) return null;
+          throw rpcError(4902, "qeth has no such Tron network");
+        });
+      default:
+        return Promise.reject(rpcError(4200, "qeth: " + method + " isn't supported on Tron"));
+    }
+  }
+
+  // window.tron (TIP-1193). isTronLink: the TronWallet adapter (and most
+  // Tron dapps) only use window.tron when it's set — cf. isMetaMask. Not in
+  // a sub-frame (the inert rule).
+  function TronProvider() {
+    Emitter.call(this);
+    this.isQeth = true;
+    this.isTronLink = !IN_SUBFRAME;
+  }
+  TronProvider.prototype = Object.create(Emitter.prototype);
+  TronProvider.prototype.constructor = TronProvider;
+  TronProvider.prototype.request = function (args) { return tronRequest(args); };
+  var tronProvider = new TronProvider();
+
+  // Touching the instance is "using Tron": start loading it. Until it's
+  // there, TronLink's own not-ready value (false). Once only: a dapp polling
+  // window.tronWeb while the load fails (qeth not running) would otherwise
+  // retry on every read — after a failure only an explicit request retries.
+  var tronAutoLoaded = false;
+  function tronWebNow() {
+    if (!tronAutoLoaded) {
+      tronAutoLoaded = true;
+      tronEnsure().catch(function () {});
+    }
+    return tronWeb || false;
+  }
+  Object.defineProperty(tronProvider, "tronWeb", {
+    get: tronWebNow, enumerable: true, configurable: true,
+  });
+
+  // window.tronLink — TronLink's legacy surface: request answers with
+  // {code, message} objects instead of rejecting.
+  var tronLinkObj = { ready: false, isQeth: true, sunWeb: false };
+  tronLinkObj.request = function (args) {
+    var method = args && args.method;
+    if (method === "tron_requestAccounts" || method === "eth_requestAccounts") {
+      return tronConnect().then(function () {
+        return { code: 200, message: "The site is already in the whitelist" };
+      }, function (err) {
+        return { code: 4001, message: (err && err.message) || "User rejected" };
+      });
+    }
+    return tronRequest(args);
+  };
+  Object.defineProperty(tronLinkObj, "tronWeb", {
+    get: tronWebNow, enumerable: true, configurable: true,
+  });
+
+  // Install — never over another wallet's (or the page's own) globals.
+  function installGlobal(name, desc) {
+    if (name in window) return;
+    try {
+      desc.configurable = true;
+      desc.enumerable = true;
+      Object.defineProperty(window, name, desc);
+    } catch (e) {}
+  }
+  installGlobal("tron", { value: tronProvider, writable: true });
+  installGlobal("tronLink", { value: tronLinkObj, writable: true });
+  installGlobal("tronWeb", {
+    get: function () { var tw = tronWebNow(); return tw || undefined; },
+    // A later assignment (another wallet injecting after us) simply wins.
+    set: function (v) {
+      Object.defineProperty(window, "tronWeb", {
+        value: v, writable: true, configurable: true, enumerable: true,
+      });
+    },
+  });
+
+  // TIP-6963 discovery (TRON's EIP-6963) — top frame only, as above. Plus
+  // TronLink's "injected" event, which some dapps wait for.
+  if (!IN_SUBFRAME) {
+    var tronInfo = Object.freeze({
+      uuid: (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : "qeth-tron-" + Date.now() + "-" + Math.floor(Math.random() * 1e9),
+      name: "qeth",
+      icon: LOGO,
+      rdns: "org.qeth",
+    });
+    var tronAnnounce = function () {
+      window.dispatchEvent(new CustomEvent("TIP6963:announceProvider", {
+        detail: Object.freeze({ info: tronInfo, provider: tronProvider }),
+      }));
+    };
+    window.addEventListener("TIP6963:requestProvider", tronAnnounce);
+    tronAnnounce();
+    var initialized = function () {
+      if (window.tronLink === tronLinkObj) {
+        window.dispatchEvent(new Event("tronLink#initialized"));
+      }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", initialized, { once: true });
+    } else {
+      setTimeout(initialized, 0);
+    }
   }
 })();

@@ -154,3 +154,110 @@ def test_bridge_forwards_only_http_origins():
     for opaque in ("file://", "null", "", None, "chrome://x", "about:blank",
                    "data:text/html,x"):
         assert bridge._dapp_origin(opaque) == "", opaque
+
+
+# --- TronWeb on demand (bridge.loadTronWeb) -------------------------------------
+
+class _Url:
+    def __init__(self, scheme, host, port=-1):
+        self._s, self._h, self._p = scheme, host, port
+
+    def scheme(self):
+        return self._s
+
+    def host(self):
+        return self._h
+
+    def port(self):
+        return self._p
+
+
+class _Frame:
+    """A QWebEngineFrame stand-in: answers the token probe from its
+    SafeJsWorld "global", records what ran in the main world."""
+
+    def __init__(self, url, token=None, children=()):
+        self._url, self.token, self._children = url, token, list(children)
+        self.main_world: list[str] = []
+
+    def url(self):
+        return self._url
+
+    def children(self):
+        return self._children
+
+    def runJavaScript(self, src, world, callback):  # noqa: N802 — Qt's name
+        if world == 1:                                      # the relay's world
+            callback(src.endswith('"%s"' % self.token) if self.token else False)
+        else:
+            self.main_world.append(src)
+            callback(None)
+
+
+class _Page:
+    def __init__(self, main):
+        self._main = main
+
+    def mainFrame(self):  # noqa: N802
+        return self._main
+
+
+def _tron_bridge(tmp_path, pages):
+    mod = _load_module("bridge.py")
+    tw = tmp_path / "TronWeb.js"
+    tw.write_text("/* tronweb */")
+    b = mod.QethBridge(pages=lambda: pages, tronweb_path=str(tw))
+    got = []
+    b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
+    return b, got
+
+
+def test_bridge_loads_tronweb_into_the_frame_holding_the_token(qapp, tmp_path):
+    origin = _Url("https", "dapp.example")
+    asking = _Frame(origin, token="tok")
+    bystander = _Frame(origin)                        # same origin, other frame
+    other_site = _Frame(_Url("https", "evil.example"), token="tok")
+    page = _Page(_Frame(origin, children=[bystander, asking]))
+    b, got = _tron_bridge(tmp_path, [page, _Page(other_site)])
+    b.loadTronWeb("cid", "tok", "https://dapp.example")
+    assert got == [("cid", True, "")]
+    assert asking.main_world == ["/* tronweb */"]
+    assert bystander.main_world == [] and other_site.main_world == []
+
+
+def test_bridge_reports_a_frame_it_cant_find(qapp, tmp_path):
+    b, got = _tron_bridge(tmp_path, [_Page(_Frame(_Url("https", "dapp.example")))])
+    b.loadTronWeb("cid", "tok", "https://dapp.example")
+    assert got and got[0][:2] == ("cid", False)
+    b.loadTronWeb("cid2", "tok", "https://nowhere.example")
+    assert got[1][:2] == ("cid2", False)
+
+
+def test_bridge_reports_a_missing_bundle(qapp, tmp_path):
+    mod = _load_module("bridge.py")
+    b = mod.QethBridge(pages=lambda: [], tronweb_path=str(tmp_path / "nope.js"))
+    got = []
+    b.tronWebLoaded.connect(lambda cid, ok, err: got.append((cid, ok, err)))
+    b.loadTronWeb("cid", "tok", "")
+    assert got == [("cid", False, "TronWeb is missing from the qeth connector")]
+
+
+def test_origin_of_matches_window_location_origin():
+    mod = _load_module("bridge.py")
+    assert mod._origin_of(_Url("https", "a.example")) == "https://a.example"
+    assert mod._origin_of(_Url("http", "localhost", 3000)) == "http://localhost:3000"
+
+
+def test_falkon_relay_asks_the_bridge_with_a_private_token():
+    relay = (FALKON / "relay.js").read_text()
+    assert 'd.kind === "tronweb"' in relay
+    # The token lives in the SafeJsWorld, where no page script can set it.
+    assert "window.__qethTronToken = cidGen();" in relay
+    assert "bridge.loadTronWeb(cid, window.__qethTronToken" in relay
+    assert "bridge.tronWebLoaded.connect" in relay
+
+
+def test_falkon_ships_the_same_tronweb_as_the_extension():
+    webext = FALKON.parent.parent / "webext" / "tronweb"
+    for name in ("TronWeb.js", "TronWeb.js.LICENSE.txt", "LICENSE", "SOURCE.txt"):
+        assert (FALKON / "tronweb" / name).read_bytes() == (webext / name).read_bytes(), name

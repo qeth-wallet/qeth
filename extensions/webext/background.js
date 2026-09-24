@@ -104,6 +104,7 @@ chrome.runtime.onConnect.addListener(function (port) {
 function onPortMessage(port, msg) {
   if (!msg) return;
   if (msg.type === "ping") { connect(); return; }   // traffic keeps us awake
+  if (msg.type === "tronweb") { loadTronWeb(port); return; }
   if (msg.type !== "req" || !msg.payload) return;
   var payload = msg.payload;
   var wsId = nextId++;
@@ -140,6 +141,36 @@ function onPortGone(port) {
       }
       delete subs[sid];
     }
+  }
+}
+
+// --- TronWeb, on demand ---------------------------------------------
+// A frame's page started using Tron (provider.js): run the bundled TronWeb
+// (the unmodified npm dist) in THAT frame's main world. The scripting API
+// isn't bound by the page's CSP, and only pages that use Tron pay for ~1 MB
+// of script. Chrome targets the exact document (a navigation in between
+// can't receive it); Firefox has no documentId, so the frame.
+var TRONWEB_FILE = "tronweb/TronWeb.js";
+
+function loadTronWeb(port) {
+  function reply(ok, error) {
+    try { port.postMessage({ type: "tronweb", ok: ok, error: error || null }); } catch (e) {}
+  }
+  var s = port.sender || {};
+  if (!originOf(port) || !s.tab || s.tab.id == null) {
+    reply(false, "Tron is only available on http(s) pages");
+    return;
+  }
+  var target = { tabId: s.tab.id };
+  if (typeof s.documentId === "string") target.documentIds = [s.documentId];
+  else target.frameIds = [s.frameId || 0];
+  try {
+    chrome.scripting.executeScript({
+      target: target, world: "MAIN", files: [TRONWEB_FILE], injectImmediately: true,
+    }).then(function () { reply(true); },
+            function (e) { reply(false, String((e && e.message) || e)); });
+  } catch (e) {
+    reply(false, String((e && e.message) || e));
   }
 }
 

@@ -59,7 +59,8 @@ from .hot_wallet import UNLOCKED
 from .signer_interaction import DialogInteraction
 from .signing import (
     SignAndBroadcastWorker, Signer, SignerBridge, SignerError,
-    TronSignAndBroadcastWorker,
+    TronMessageSigningRequest, TronSignAndBroadcastWorker, TronSigningRequest,
+    TronSignWorker, TronTypedDataSigningRequest,
 )
 from .chains import EVM, FAMILIES, TRON
 
@@ -98,8 +99,13 @@ class MainWindow(QMainWindow):
         self.store = store
         self.rpc = rpc
         # The accounts last pushed to dapps as accountsChanged (see
-        # _push_accounts_changed) — None until the first push.
+        # _push_accounts_changed) — None until the first push. Likewise the
+        # connected Tron account pushed to qeth's Tron provider.
         self._pushed_accounts: list[str] | None = None
+        self._pushed_tron_accounts: list[str] | None = None
+        # Simulated logs of dapp Tron transactions just signed, by tx hash —
+        # the pending row's coins once the dapp broadcasts through qeth.
+        self._tron_dapp_sim_logs: dict[str, list] = {}
         # Tray controller (set by the entry point after install_tray); the
         # fallback sink for desktop notifications. None when there's no tray.
         self._tray = None
@@ -144,6 +150,10 @@ class MainWindow(QMainWindow):
         )
         self.signer_bridge.chain_add_requested.connect(
             self._on_chain_add_requested,
+            type=Qt.ConnectionType.QueuedConnection,
+        )
+        self.signer_bridge.tron_broadcast_seen.connect(
+            self._on_tron_dapp_broadcast,
             type=Qt.ConnectionType.QueuedConnection,
         )
         if self.rpc is not None:
@@ -904,6 +914,12 @@ class MainWindow(QMainWindow):
         if isinstance(req, (_MR, _TR)):
             self._launch_message_sign(req, fut)
             return
+        if isinstance(req, (TronMessageSigningRequest, TronTypedDataSigningRequest)):
+            self._launch_message_sign(req, fut, family=TRON)
+            return
+        if isinstance(req, TronSigningRequest):
+            self._launch_tron_dapp_sign(req, fut)
+            return
         chain = next(
             (c for c in self.store.chains if c.chain_id == req.chain_id),
             None,
@@ -1082,6 +1098,75 @@ class MainWindow(QMainWindow):
             self.wallets_plugin.select_address(req.from_addr)
         self.right_slot.set_active(self.transactions_plugin)
         on_broadcast(tx_hash)
+
+    def _launch_tron_dapp_sign(self, req: TronSigningRequest, fut) -> None:
+        """A dapp's TronWeb asks to sign a transaction it built: review it in
+        the shared composer (read-only — its bytes are the dapp's), sign, and
+        hand the signature back. The dapp broadcasts; if it does so through
+        qeth's node proxy, ``_on_tron_dapp_broadcast`` records the row."""
+        from .plugins.transactions import TronSignTransactionDialog
+        chain = next((c for c in self.store.chains if c.chain_id == req.chain_id), None)
+        if chain is None:
+            self.signer_bridge.reject(fut, SignerError(f"Unknown chain {req.chain_id}"))
+            return
+        dialog = TronSignTransactionDialog(
+            req, chain, **self._composer_shared_kwargs(chain, req.from_addr),
+            parent=self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.sign_requested.connect(
+            lambda d=dialog, r=req, f=fut: self._begin_tron_dapp_sign(d, r, f))
+        dialog.rejected.connect(
+            lambda f=fut: self.signer_bridge.reject(f, SignerError("User cancelled")))
+        dialog.show()
+
+    def _begin_tron_dapp_sign(self, dialog, req: TronSigningRequest, fut) -> None:
+        interaction = DialogInteraction(dialog, title="Signing Transaction")
+        signer, progress_text = self._pick_signer_for(
+            dialog, req.from_addr, interaction, family=TRON)
+        if signer is None:
+            return
+        if not signer.can_sign(req.from_addr):
+            warn(dialog, "Cannot sign", f"No known signer for {req.from_addr}")
+            return
+        dialog.set_signing_in_progress(True)
+        if progress_text:
+            interaction.progress(progress_text)
+        worker = TronSignWorker(signer, req)
+        worker.signed.connect(
+            lambda sig, d=dialog, it=interaction, r=req, f=fut:
+                self._on_tron_dapp_signed(sig, d, it, r, f))
+        worker.failed.connect(
+            lambda msg, d=dialog, it=interaction, f=fut:
+                self._on_tx_sign_failed(
+                    msg, d, it, lambda m: self.signer_bridge.reject(
+                        f, SignerError(m))))
+        self.start_worker(worker)
+
+    def _on_tron_dapp_signed(self, sig_hex: str, dialog, interaction,
+                             req: TronSigningRequest, fut) -> None:
+        # The preview's simulated coins, for the pending row the broadcast
+        # (if the dapp makes one through qeth) will add.
+        logs = getattr(dialog, "_logs", None)
+        if logs:
+            self._tron_dapp_sim_logs["0x" + req.tx.txid().hex()] = logs
+            while len(self._tron_dapp_sim_logs) > 16:
+                self._tron_dapp_sim_logs.pop(next(iter(self._tron_dapp_sim_logs)))
+        interaction.close()
+        dialog.accept()
+        self.signer_bridge.resolve(fut, sig_hex)
+
+    def _on_tron_dapp_broadcast(self, req: TronSigningRequest, raw_signed: str) -> None:
+        """A dapp broadcast a transaction qeth signed for it (seen in the RPC
+        server's Tron node proxy): track it as pending, like a Send."""
+        chain = next((c for c in self.store.chains if c.chain_id == req.chain_id), None)
+        if chain is None:
+            return
+        tx_hash = "0x" + req.tx.txid().hex()
+        self.transactions_plugin.add_tron_pending(tx_hash, req, chain, raw_signed)
+        logs = self._tron_dapp_sim_logs.pop(tx_hash, None)
+        if logs:
+            self.transactions_plugin.note_transfer_legs(
+                chain.chain_id, tx_hash, logs, req.from_addr)
 
     def open_replace_tx(self, tx, cancel: bool) -> None:
         """Speed up (or cancel) a pending tx by re-signing the SAME nonce
@@ -1347,17 +1432,18 @@ class MainWindow(QMainWindow):
             return None, ""   # user cancelled the unlock prompt
         return signer, plugin.progress_text
 
-    def _launch_message_sign(self, req, fut) -> None:
-        """Dapp-initiated personal_sign / eth_signTypedData_v4 flow.
-        Mirror of ``_on_signing_request`` for transactions, but
-        the worker is ``SignMessageWorker`` and the result is a
-        signature hex string rather than a tx hash."""
+    def _launch_message_sign(self, req, fut, family: str = EVM) -> None:
+        """Dapp-initiated personal_sign / eth_signTypedData_v4 flow (and
+        their Tron counterparts, ``family=TRON``). Mirror of
+        ``_on_signing_request`` for transactions, but the worker is
+        ``SignMessageWorker`` and the result is a signature hex string rather
+        than a tx hash."""
         from .plugins.sign_message import SignMessageDialog
         dialog = SignMessageDialog(req, parent=self)
 
         def on_confirm():
             self._run_message_sign(
-                req, dialog,
+                req, dialog, family=family,
                 on_signed=lambda sig: self.signer_bridge.resolve(fut, sig),
                 on_fail=lambda msg: self.signer_bridge.reject(
                     fut, SignerError(msg),
@@ -1372,7 +1458,8 @@ class MainWindow(QMainWindow):
         )
         dialog.show()
 
-    def _run_message_sign(self, req, dialog, *, on_signed, on_fail) -> None:
+    def _run_message_sign(self, req, dialog, *, on_signed, on_fail,
+                          family: str = EVM) -> None:
         """One signing attempt — picks the signer, prompts for
         passphrase if it's a hot wallet, kicks SignMessageWorker
         off the main thread. Errors keep the dialog open so the
@@ -1380,7 +1467,7 @@ class MainWindow(QMainWindow):
         from .signing import SignMessageWorker
         interaction = DialogInteraction(dialog, title="Signing Message")
         signer, progress_text = self._pick_signer_for(
-            dialog, req.from_addr, interaction,
+            dialog, req.from_addr, interaction, family=family,
         )
         if signer is None:
             return
@@ -1649,10 +1736,16 @@ class MainWindow(QMainWindow):
         # The signal also fires for a Tron connect, which leaves the EVM
         # account (what eth_accounts serves) as it was — don't tell dapps
         # their account changed when it didn't.
-        if accounts == self._pushed_accounts:
-            return
-        self._pushed_accounts = accounts
-        self.rpc.broadcast_accounts_changed(accounts)
+        if accounts != self._pushed_accounts:
+            self._pushed_accounts = accounts
+            self.rpc.broadcast_accounts_changed(accounts)
+        # …and the Tron provider's own event, for a Tron connect.
+        from .address import tron_from_hex
+        tron = self.store.default_for(TRON)[0]
+        tron_accounts = [tron_from_hex(tron)] if tron else []
+        if tron_accounts != self._pushed_tron_accounts:
+            self._pushed_tron_accounts = tron_accounts
+            self.rpc.broadcast_tron_accounts_changed(tron_accounts)
 
     def _lock_unused_hot_wallet(self, *_args) -> None:
         """Slot for selection / default-account changes: lock the unlocked hot

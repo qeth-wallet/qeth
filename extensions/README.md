@@ -33,6 +33,40 @@ python build.py sign       # AMO-sign → ../firefox/qeth-<version>.xpi
 `provider.js` is shared **byte-for-byte** between `webext/` and `falkon/`; a test
 gate and `build.py` enforce the mirror. See each dir's README for details.
 
+## Tron
+
+Both connectors also serve Tron dapps, TronLink-style. Every page gets a small
+stub:
+
+- `window.tron` (TIP-1193, flagged `isTronLink`);
+- a TIP-6963 announcement;
+- `window.tronLink` / `window.tronWeb`, only where nothing else defined them.
+
+A real TronWeb is loaded into a frame only once its page uses Tron. Its node
+traffic and signing go through qeth; see `docs/tron.md`, "Phase 4". The
+library is the **unmodified** npm dist, vendored as `webext/tronweb/` and
+`falkon/qeth_connector/tronweb/`: `TronWeb.js`, its licence files, and
+`SOURCE.txt` with the provenance. Store reviewers verify third-party code by
+checksum. `build.py` pins its sha256 (`TRONWEB_SHA256`) and refuses to build
+if the file was edited or Falkon's copy differs. To bump it:
+
+```sh
+curl -sO https://registry.npmjs.org/tronweb/-/tronweb-<v>.tgz   # check the npm integrity
+tar xzf tronweb-<v>.tgz
+cp package/dist/TronWeb.js package/dist/TronWeb.js.LICENSE.txt package/LICENSE \
+   webext/tronweb/
+cp webext/tronweb/* falkon/qeth_connector/tronweb/    # after updating SOURCE.txt
+```
+
+Then update `TRONWEB_SHA256` and `SOURCE.txt`, and run
+`uv run pytest -m browser tests/test_webext_tron_browser.py`. That runs real
+Chromium + Firefox beside a live qeth; it doesn't need port 1248.
+
+Loading TronWeb into a frame uses `chrome.scripting`, so the extension
+declares the **`scripting`** permission. Neither store shows an install
+warning for it (the host permissions are unchanged). It is still a manifest
+change for the next store review.
+
 ## Releasing / publishing
 
 The extension version is stamped from the app version, so a release is: bump

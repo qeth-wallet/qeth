@@ -41,7 +41,14 @@ from PySide6.QtWidgets import (
     QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..signing import MessageSigningRequest, TypedDataSigningRequest
+from ..address import tron_from_hex
+from ..signing import (
+    MessageSigningRequest, TronMessageSigningRequest, TronTypedDataSigningRequest,
+    TypedDataSigningRequest,
+)
+
+# The raw-bytes message kinds (vs structured typed data).
+_MESSAGE_KINDS = (MessageSigningRequest, TronMessageSigningRequest)
 from ..alerts import warn
 from ..dialog import Dialog, item_spacing
 
@@ -170,10 +177,12 @@ class SignMessageDialog(Dialog):
     def __init__(self, req, parent=None):
         super().__init__(parent)
         self._req = req
-        if isinstance(req, MessageSigningRequest):
-            self.setWindowTitle("Sign Message")
+        tron = isinstance(req, (TronMessageSigningRequest, TronTypedDataSigningRequest))
+        if isinstance(req, _MESSAGE_KINDS):
+            self.setWindowTitle("Sign Tron Message" if tron else "Sign Message")
         else:
-            self.setWindowTitle("Sign Typed Data (EIP-712)")
+            self.setWindowTitle("Sign Typed Data (TIP-712)" if tron
+                                else "Sign Typed Data (EIP-712)")
         self.resize(680, 540)
 
         outer = QVBoxLayout(self)
@@ -185,7 +194,7 @@ class SignMessageDialog(Dialog):
         outer.addLayout(header)
 
         mono = QFont("monospace")
-        from_lbl = QLabel(req.from_addr)
+        from_lbl = QLabel(tron_from_hex(req.from_addr) if tron else req.from_addr)
         from_lbl.setFont(mono)
         from_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         header.addRow("Signer:", from_lbl)
@@ -198,8 +207,16 @@ class SignMessageDialog(Dialog):
 
         if isinstance(req, MessageSigningRequest):
             kind = "personal_sign (EIP-191)"
+        elif isinstance(req, TronMessageSigningRequest):
+            kind = ("signMessageV2 (TIP-191)" if req.version == 2
+                    else "sign (legacy Tron message)")
+        elif isinstance(req, TronTypedDataSigningRequest):
+            kind = "signTypedData (TIP-712)"
         else:
             kind = "eth_signTypedData_v4 (EIP-712)"
+        if tron:
+            # A hot wallet's key signs for both families — say which one.
+            header.addRow("Network:", QLabel("Tron"))
         header.addRow("Kind:", QLabel(kind))
 
         outer.addWidget(self._build_message_view(req), 1)
@@ -220,7 +237,7 @@ class SignMessageDialog(Dialog):
         view.setFont(QFont("monospace"))
         view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        if isinstance(req, MessageSigningRequest):
+        if isinstance(req, _MESSAGE_KINDS):
             text = _is_printable_utf8(req.raw)
             if text is not None:
                 view.setPlainText(text)

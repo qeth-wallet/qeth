@@ -132,7 +132,9 @@ class TestManifest:
         assert "none" not in dcp["required"]
 
     def test_minimal_permissions(self):
-        assert MANIFEST["permissions"] == ["alarms"]
+        # "scripting": loading the bundled TronWeb into a frame that uses Tron
+        # (background.js loadTronWeb) — no install warning of its own.
+        assert MANIFEST["permissions"] == ["alarms", "scripting"]
         assert set(MANIFEST["host_permissions"]) == {"http://*/*", "https://*/*"}
 
     def test_all_referenced_icons_exist(self):
@@ -432,3 +434,63 @@ class TestShippedFirefoxPackage:
             assert (self.FIREFOX_DIR / name).is_file(), (
                 f"docs reference {name}, which is not in extensions/firefox/"
             )
+
+
+class TestTron:
+    """The Tron provider's static wiring. Behaviour is end to end in
+    tests/test_webext_tron_browser.py (opt-in, real browsers)."""
+
+    def test_tronweb_is_the_pinned_upstream_bundle(self):
+        import hashlib
+        data = (WEBEXT / BUILD.TRONWEB_FILE).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == BUILD.TRONWEB_SHA256
+        # SOURCE.txt names the same hash (what a store reviewer checks).
+        assert BUILD.TRONWEB_SHA256 in (WEBEXT / "tronweb" / "SOURCE.txt").read_text()
+        for rel in ("tronweb/TronWeb.js", "tronweb/LICENSE",
+                    "tronweb/TronWeb.js.LICENSE.txt", "tronweb/SOURCE.txt"):
+            assert rel in BUILD.PACKAGE_FILES
+
+    def test_build_rejects_a_modified_tronweb(self, tmp_path, monkeypatch):
+        import pytest
+        orig = BUILD.Path.read_bytes
+
+        def fake_read_bytes(self):
+            if self.name == "TronWeb.js" and "webext" in str(self):
+                return orig(self) + b"\n// patched"
+            return orig(self)
+
+        monkeypatch.setattr(BUILD.Path, "read_bytes", fake_read_bytes)
+        with pytest.raises(SystemExit, match="pinned upstream"):
+            BUILD.build(tmp_path)
+
+    def test_background_injects_the_bundle_into_the_asking_frame_only(self):
+        src = _strip_js_comments((WEBEXT / "background.js").read_text())
+        assert f'var TRONWEB_FILE = "{BUILD.TRONWEB_FILE}";' in src
+        assert "chrome.scripting.executeScript(" in src
+        assert 'world: "MAIN"' in src
+        # The requesting document (Chrome) / frame (Firefox) — never allFrames.
+        assert "target.documentIds = [s.documentId]" in src
+        assert "target.frameIds = [s.frameId || 0]" in src
+        assert "allFrames" not in src
+        assert "if (!originOf(port)" in src          # http(s) pages only
+
+    def test_relay_forwards_the_load_and_fails_it_on_disconnect(self):
+        src = (WEBEXT / "relay.js").read_text()
+        assert 'd.kind === "tronweb"' in src
+        assert 'sendToBackground({ type: "tronweb" })' in src
+        assert 'if (tronwebPending) tronwebDone(false, "qeth disconnected");' in src
+
+    def test_provider_installs_without_clobbering_and_announces_top_frame_only(self):
+        src = (WEBEXT / "provider.js").read_text()
+        assert "if (name in window) return;" in src   # never over another wallet
+        for name in ('"tron"', '"tronLink"', '"tronWeb"'):
+            assert f"installGlobal({name}," in src
+        assert "TIP6963:announceProvider" in src and "TIP6963:requestProvider" in src
+        assert "this.isTronLink = !IN_SUBFRAME;" in src
+        assert "var tronAuthorized = !IN_SUBFRAME;" in src
+
+    def test_provider_refuses_the_ethereum_message_header(self):
+        # trx.sign(hex, undefined, false) would be an Ethereum personal_sign by
+        # the same key — refused in the page before it reaches qeth.
+        src = (WEBEXT / "provider.js").read_text()
+        assert "if (useTronHeader === false) {" in src

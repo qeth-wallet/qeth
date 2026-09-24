@@ -54,15 +54,17 @@ class TronFeeWorker(QThread):
     estimated = Signal(object, object)
     failed = Signal(str)
 
-    def __init__(self, chain, contract: Contract, parent=None):
+    def __init__(self, chain, contract: Contract, parent=None, *,
+                 memo: bytes = b""):
         super().__init__(parent)
         self._chain = chain
         self._contract = contract
+        self._memo = memo
 
     def run(self) -> None:
         try:
             client = TronClient(self._chain)
-            fee = estimate_fee(client, self._contract)
+            fee = estimate_fee(client, self._contract, memo=self._memo)
             balance = client.get_balance(self._contract.owner)
         except TronError as e:
             self.failed.emit(str(e))
@@ -128,7 +130,10 @@ class _TronFeesMixin:
             contract = tron_contract(self._from_addr, probe)
         except SignerError:
             return
-        worker = TronFeeWorker(self.chain, contract)
+        self._kick_tron_fee(contract)
+
+    def _kick_tron_fee(self, contract: Contract, memo: bytes = b"") -> None:
+        worker = TronFeeWorker(self.chain, contract, memo=memo)
         self._gas_worker = worker
         # Bound-method connections (receiver-tracked), and _is_stale_gas drops
         # a superseded worker's answer — same discipline as the EVM gas probe.
@@ -153,13 +158,20 @@ class _TronFeesMixin:
         form.setRowVisible(self._activation_lbl, bool(fee.activation))
         self._activation_lbl.setText(
             f"{_trx(fee.activation)} TRX — the recipient's account is new")
-        form.setRowVisible(self._fee_limit_lbl, bool(fee.fee_limit))
-        self._fee_limit_lbl.setText(
-            f"{_trx(fee.fee_limit)} TRX — the most the call may burn")
+        limit_text = self._fee_limit_text(fee)
+        form.setRowVisible(self._fee_limit_lbl, bool(limit_text))
+        self._fee_limit_lbl.setText(limit_text)
         self.base_fee_lbl.setText("ready")
         self._gas_ready = True
         self._on_gas_ready()
         self._update_state()
+
+    def _fee_limit_text(self, fee: TronFee) -> str:
+        """The Fee limit row ("" hides it): the cap qeth will put on the
+        call. A dapp's transaction brings its own (``TronSignTransactionDialog``)."""
+        if not fee.fee_limit:
+            return ""
+        return f"{_trx(fee.fee_limit)} TRX — the most the call may burn"
 
     def _on_tron_failed(self, msg: str) -> None:
         if self._is_stale_gas():

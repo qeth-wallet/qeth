@@ -27,6 +27,7 @@
 
 import json
 import logging
+import os
 
 from PySide6.QtCore import QByteArray, QObject, QUrl, Signal, Slot
 from PySide6.QtNetwork import (
@@ -36,6 +37,49 @@ from PySide6.QtNetwork import (
 log = logging.getLogger("qeth.falkon.bridge")
 
 _ENDPOINT = "http://127.0.0.1:1248/"
+
+# The bundled TronWeb (the unmodified npm dist — see tronweb/SOURCE.txt), run
+# on demand in a frame whose page uses Tron (provider.js).
+_TRONWEB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tronweb", "TronWeb.js")
+# QWebEngineScript.ScriptWorldId: the page's own world, and Falkon's
+# SafeJsWorld (ApplicationWorld), where relay.js runs.
+_MAIN_WORLD = 0
+_SAFE_WORLD = 1
+
+
+def _origin_of(url):
+    """``scheme://host[:port]`` of a QUrl — ``window.location.origin``'s form
+    (a default port is absent from both)."""
+    port = url.port()
+    return f"{url.scheme()}://{url.host()}" + (f":{port}" if port != -1 else "")
+
+
+def _frames(page):
+    """Every frame of ``page`` that can run a script: the whole frame tree on
+    Qt >= 6.8 (QWebEngineFrame), else the page itself — its main frame."""
+    main = getattr(page, "mainFrame", None)
+    if main is None:
+        return [page]
+    out, stack = [], [main()]
+    while stack:
+        frame = stack.pop()
+        out.append(frame)
+        stack.extend(frame.children())
+    return out
+
+
+def _web_pages():
+    """Every open web page (Falkon's tabs are QWebEngineView subclasses)."""
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWidgets import QApplication
+    pages: list = []
+    for widget in QApplication.allWidgets():
+        if isinstance(widget, QWebEngineView):
+            page = widget.page()
+            if page is not None and all(page is not p for p in pages):
+                pages.append(page)
+    return pages
 
 
 def _dapp_origin(origin):
@@ -53,11 +97,56 @@ class QethBridge(QObject):
     # cid, json-text — emitted for every reply, routed back to the frame
     # whose relay sent the request.
     message = Signal(str, str)
+    # cid, ok, error — the answer to loadTronWeb.
+    tronWebLoaded = Signal(str, bool, str)
 
-    def __init__(self, endpoint=_ENDPOINT, parent=None):
+    def __init__(self, endpoint=_ENDPOINT, parent=None, *,
+                 pages=_web_pages, tronweb_path=_TRONWEB):
         super().__init__(parent)
         self._endpoint = endpoint
         self._nam = QNetworkAccessManager(self)
+        self._pages = pages
+        self._tronweb_path = tronweb_path
+        self._tronweb_src = None
+
+    @Slot(str, str, str)
+    def loadTronWeb(self, cid, token, origin):
+        """Run TronWeb in the frame whose relay asked (it holds ``token`` in
+        the SafeJsWorld, which no page script can reach), in that frame's
+        main world. Native injection: the page's CSP doesn't apply. The
+        answer comes back as ``tronWebLoaded(cid, ok, error)``."""
+        def fail(msg):
+            self.tronWebLoaded.emit(cid, False, msg)
+        if self._tronweb_src is None:
+            try:
+                with open(self._tronweb_path, encoding="utf-8") as f:
+                    self._tronweb_src = f.read()
+            except OSError as e:
+                log.warning("TronWeb bundle unreadable: %s", e)
+                return fail("TronWeb is missing from the qeth connector")
+        src = self._tronweb_src
+        frames = [f for page in self._pages() for f in _frames(page)
+                  if not origin or _origin_of(f.url()) == origin]
+        if not frames:
+            return fail("qeth couldn't find the page asking for Tron")
+        state = {"left": len(frames), "done": False}
+        probe = "window.__qethTronToken === " + json.dumps(token)
+
+        def answered(frame, result):
+            state["left"] -= 1
+            if state["done"]:
+                return
+            if result is True:
+                state["done"] = True
+                frame.runJavaScript(src, _MAIN_WORLD,
+                                    lambda _r: self.tronWebLoaded.emit(cid, True, ""))
+            elif state["left"] == 0:
+                # A sub-frame on Qt < 6.8 (no frame tree to search).
+                fail("qeth can't load Tron into this frame under Falkon")
+
+        for frame in frames:
+            frame.runJavaScript(probe, _SAFE_WORLD,
+                                lambda r, fr=frame: answered(fr, r))
 
     @Slot(str, str, str)
     def send(self, cid, origin, text):

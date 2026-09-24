@@ -170,9 +170,19 @@ def test_decoded_addresses_render_in_tron_form():
     assert out["args"][1]["value"] == "5"
 
 
-def test_no_evm_identity_row_on_tron():
-    from qeth.plugins.transactions import _make_identity_row
+def test_identity_row_on_tron_uses_tron_forms(qtbot):
+    """The Contract: row on Tron — its identity comes from Tronscan (the
+    source delegates) and the badge names addresses as T…."""
+    from unittest.mock import MagicMock
+
+    from qeth.address import codec_for
+    from qeth.plugins.transactions import ContractIdentityWorker, _make_identity_row
+    started: list = []
     label, kick = _make_identity_row(
-        to_addr=USDT, chain=CHAIN, identity_source=None, identity_cache=None,
-        my_addresses=[], start_worker=lambda w: None)
-    assert (label, kick) == (None, None)
+        to_addr=USDT, chain=CHAIN, identity_source=MagicMock(),
+        identity_cache=MagicMock(), my_addresses=[], start_worker=started.append)
+    assert label is not None and kick is not None
+    kick()
+    [worker] = started
+    assert isinstance(worker, ContractIdentityWorker)
+    assert worker._short("0x" + "ab" * 20) == codec_for(TRON).short("0x" + "ab" * 20)

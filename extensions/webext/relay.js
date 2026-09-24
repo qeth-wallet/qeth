@@ -28,6 +28,7 @@
   var failures = 0;             // consecutive port failures (quiet single restarts)
   var pingTimer = null;
   var dead = false;             // extension context invalidated (update/removed)
+  var tronwebPending = false;   // a TronWeb load for this frame is in flight
 
   // --- page (MAIN world) side -----------------------------------------
   function toPage(msg) { window.postMessage(msg, "*"); }
@@ -46,8 +47,18 @@
       }
       sendToBackground({ type: "req", payload: payload });
       updatePing();          // a request may pend a long time (signing prompt)
+    } else if (d.kind === "tronweb") {
+      // The page started using Tron: have the background load TronWeb into
+      // THIS frame (its scripting API isn't bound by the page's CSP).
+      tronwebPending = true;
+      sendToBackground({ type: "tronweb" });
     }
   });
+
+  function tronwebDone(ok, error) {
+    tronwebPending = false;
+    toPage({ source: RELAY_SRC, kind: "tronweb", ok: ok, error: error || null });
+  }
 
   // Announce the relay is present (order-independent with the provider's
   // hello — the provider handles "ready" idempotently).
@@ -88,6 +99,8 @@
       toPage({ source: RELAY_SRC, kind: "data", data: JSON.stringify(p) });
     } else if (msg.type === "push") {
       toPage({ source: RELAY_SRC, kind: "data", data: JSON.stringify(msg.payload) });
+    } else if (msg.type === "tronweb") {
+      tronwebDone(!!msg.ok, msg.error);
     } else if (msg.type === "event") {
       if (msg.event === "close") { if (closeReported) return; closeReported = true; }
       else if (msg.event === "connect") { closeReported = false; }
@@ -108,6 +121,7 @@
       }
     }
     outstanding = {}; outstandingCount = 0;
+    if (tronwebPending) tronwebDone(false, "qeth disconnected");
     // A routine service-worker restart must not flap the page's `disconnect`.
     // Only surface a close after two consecutive failures.
     failures++;

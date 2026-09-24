@@ -31,7 +31,8 @@ from .chains import Chain
 from .fsatomic import atomic_write_text
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
-    TronSigningRequest, TypedDataSigningRequest,
+    TronMessageSigningRequest, TronSigningRequest, TronTypedDataSigningRequest,
+    TypedDataSigningRequest,
 )
 from .tron.tx import signature_v27
 
@@ -317,6 +318,16 @@ class HotWalletSigner(Signer):
         priv = self._load_priv(req.from_addr)
         from eth_keys import keys
         sig = keys.PrivateKey(priv).sign_msg_hash(req.tx.txid())
+        return signature_v27(sig.to_bytes())
+
+    def sign_tron_message(
+        self, req: TronMessageSigningRequest | TronTypedDataSigningRequest,
+    ) -> bytes:
+        """A TronWeb message / TIP-712 signature over the digest the request
+        computes from its own content (``qeth.tron.messages``)."""
+        priv = self._load_priv(req.from_addr)
+        from eth_keys import keys
+        sig = keys.PrivateKey(priv).sign_msg_hash(req.digest())
         return signature_v27(sig.to_bytes())
 
     @staticmethod

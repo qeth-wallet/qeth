@@ -228,3 +228,55 @@ class TestMainWindowOnTron:
         assert pushed == []
         self._switch(win, 10)
         assert pushed == [10]
+
+
+class TestAddedAccountsAreRevealed:
+    """An account added from a view of another family must not vanish: the
+    wallet switches to a network it works on and selects it (the report:
+    a Tron watch-only address added from Ethereum was 'nowhere to be seen')."""
+
+    @pytest.fixture
+    def win(self, qtbot, tmp_qeth, fake_rpc, hermetic_mainwindow):
+        from qeth.ui import MainWindow
+        store = Store.load()
+        store.chains.append(TRON_CHAIN)
+        store.accounts = [_accounts()[1]]            # one EVM watch-only
+        store.set_current_chain(10)                  # viewing Optimism
+        w = MainWindow(store, fake_rpc)
+        qtbot.addWidget(w)
+        return w
+
+    def _add_watch(self, win, monkeypatch, account):
+        import qeth.plugins.wallets as wallets_mod
+        from PySide6.QtWidgets import QDialog
+
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def result_account(self):
+                return dict(account)
+        monkeypatch.setattr(wallets_mod, "AddWatchOnlyDialog", FakeDialog)
+        win.wallets_plugin._add_watch_only()
+
+    def test_tron_address_added_on_an_evm_view(self, win, monkeypatch):
+        self._add_watch(win, monkeypatch, _accounts()[2])
+        assert win.store.current_chain().chain_id == TRON_CHAIN.chain_id
+        assert win.wallets_plugin.selected_address == TRON_WATCH
+
+    def test_evm_address_added_on_tron_goes_to_the_last_evm_network(
+            self, win, monkeypatch):
+        win.chain_combo.setCurrentIndex(win.chain_combo.findData(TRON_CHAIN.chain_id))
+        new = {"address": "0x" + "44" * 20, "source": "watch_only", "label": ""}
+        self._add_watch(win, monkeypatch, new)
+        assert win.store.current_chain().chain_id == 10    # back to Optimism
+        assert win.wallets_plugin.selected_address == new["address"]
+
+    def test_no_switch_when_it_already_shows(self, win, monkeypatch):
+        new = {"address": "0x" + "55" * 20, "source": "watch_only", "label": ""}
+        self._add_watch(win, monkeypatch, new)
+        assert win.store.current_chain().chain_id == 10
+        assert win.wallets_plugin.selected_address == new["address"]

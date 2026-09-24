@@ -1037,6 +1037,36 @@ class WalletsPlugin(Plugin):
         accounts are listed and how their addresses read — rebuild."""
         self._rebuild_tree()
 
+    def _reveal_added(self, accounts: list[dict]) -> str | None:
+        """Show just-added accounts. The tree lists only the current network's
+        family, so an account that doesn't work here (a Tron address added
+        from an Ethereum view, a Ledger account added from Tron) would vanish
+        on add — switch to a network of its family instead (Tron, or the last
+        EVM network), then select it. Returns the network switched to, if
+        any, for the caller's status message."""
+        if not accounts:
+            return None
+        switched: str | None = None
+        families = account_families(accounts[0])
+        if (self._store.current_chain().family not in families
+                and self.host is not None):
+            target = (self._store.dapp_chain() if EVM in families else
+                      next((c for c in self._store.chains
+                            if c.family in families), None))
+            if target is not None:
+                self.host.switch_chain(target.chain_id)
+                switched = target.name
+        self.select_address(accounts[0]["address"])
+        return switched
+
+    def _scan_chain(self) -> Chain | None:
+        """The chain an EVM device scan reads nonces from: the current one,
+        or — while viewing Tron, which has no nonces — the last EVM one."""
+        if self.host is None:
+            return None
+        chain = self.host.current_chain()
+        return chain if chain.is_evm else self._store.dapp_chain()
+
     def _rebuild_tree(self) -> None:
         if self._tree is None:
             return
@@ -1639,7 +1669,7 @@ class WalletsPlugin(Plugin):
         if self.host is None:
             return
         dlg = AddLedgerDialog(
-            self.host.current_chain(), self._container,
+            self._scan_chain(), self._container,
             existing_addresses=self._addresses_for_source("ledger"))
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1648,26 +1678,30 @@ class WalletsPlugin(Plugin):
         # Ledger), or start a new one anchored on the first added address.
         discovered = [(d.address, d.path) for d in dlg.discovered_accounts()]
         tid = self._store.resolve_tree("ledger", scheme, discovered)
-        added_addrs: list[str] = []
+        added: list[dict] = []
         for d in dlg.selected_accounts():
             if tid is None:
                 tid = d.address.lower()
-            if self._store.add_account({
+            record = {
                 "address": d.address,
                 "path": d.path,
                 "source": "ledger",
                 "scheme": scheme,
                 "tree": tid,
                 "label": "",
-            }):
-                added_addrs.append(d.address)
+            }
+            if self._store.add_account(record):
+                added.append(record)
+        added_addrs = [r["address"] for r in added]
         if added_addrs and tid is not None:
             self._store.ensure_tree_label("ledger", tid)
         self._rebuild_tree()
         self.default_account_changed.emit()
+        switched = self._reveal_added(added)
         if added_addrs and self.host is not None:
             self.host.status_message(
-                f"Added {len(added_addrs)} account(s)", 3000,
+                f"Added {len(added_addrs)} account(s)"
+                + (f" — switched to {switched}" if switched else ""), 3000,
             )
             # Async ENS reverse-lookup for each new address —
             # mirrors the Frame-import path. The wallet ships
@@ -1694,6 +1728,7 @@ class WalletsPlugin(Plugin):
         tid = self._store.resolve_tree("trezor", scheme, discovered, xfp=xfp)
         added_addrs: list[str] = []
         tron = scheme in TRON_PATH_SCHEMES
+        added: list[dict] = []
         for d in dlg.selected_accounts():
             if tid is None:
                 tid = d.address.lower()
@@ -1711,13 +1746,16 @@ class WalletsPlugin(Plugin):
                 record["xfp"] = xfp
             if self._store.add_account(record):
                 added_addrs.append(d.address)
+                added.append(record)
         if added_addrs and tid is not None:
             self._store.ensure_tree_label("trezor", tid)
         self._rebuild_tree()
         self.default_account_changed.emit()
+        switched = self._reveal_added(added)
         if added_addrs and self.host is not None:
             self.host.status_message(
-                f"Added {len(added_addrs)} account(s)", 3000)
+                f"Added {len(added_addrs)} account(s)"
+                + (f" — switched to {switched}" if switched else ""), 3000)
             if not tron:     # ENS names EVM addresses only
                 self._kick_ens_label_lookups(added_addrs)
 
@@ -1739,7 +1777,7 @@ class WalletsPlugin(Plugin):
                  f"That doesn't look like a wallet account export.\n\n{e}")
             return
         dlg = AddQRWalletDialog(
-            account_key, self.host.current_chain(), self._container,
+            account_key, self._scan_chain(), self._container,
             existing_addresses=self._addresses_for_source("qr"))
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1750,10 +1788,11 @@ class WalletsPlugin(Plugin):
         discovered = [(d.address, d.path) for d in dlg.discovered_accounts()]
         tid = self._store.resolve_tree("qr", scheme, discovered, xfp=xfp)
         added_addrs: list[str] = []
+        added: list[dict] = []
         for d in dlg.selected_accounts():
             if tid is None:
                 tid = d.address.lower()
-            if self._store.add_account({
+            record = {
                 "address": d.address,
                 "path": d.path,
                 "source": "qr",
@@ -1761,15 +1800,19 @@ class WalletsPlugin(Plugin):
                 "xfp": xfp,
                 "tree": tid,
                 "label": "",
-            }):
+            }
+            if self._store.add_account(record):
                 added_addrs.append(d.address)
+                added.append(record)
         if added_addrs and tid is not None:
             self._store.ensure_tree_label("qr", tid)
         self._rebuild_tree()
         self.default_account_changed.emit()
+        switched = self._reveal_added(added)
         if added_addrs and self.host is not None:
             self.host.status_message(
-                f"Added {len(added_addrs)} account(s)", 3000)
+                f"Added {len(added_addrs)} account(s)"
+                + (f" — switched to {switched}" if switched else ""), 3000)
             self._kick_ens_label_lookups(added_addrs)
 
     def _add_hot_wallet(self) -> None:
@@ -1973,15 +2016,11 @@ class WalletsPlugin(Plugin):
         if self._store.add_account(account):
             self._rebuild_tree()
             self.default_account_changed.emit()
+            switched = self._reveal_added([account])
             if self.host is not None:
-                shown_here = (self._store.current_chain().family
-                              in account_families(account))
-                where = ("the Tron network" if account.get("family") == TRON
-                         else "an Ethereum-type network")
                 self.host.status_message(
-                    "Watch-only address added" if shown_here else
-                    f"Watch-only address added — switch to {where} to see it",
-                    5000)
+                    "Watch-only address added"
+                    + (f" — switched to {switched}" if switched else ""), 5000)
 
     def _sign_selected(self) -> None:
         """Sign button → open the compose/sign flow for the selected

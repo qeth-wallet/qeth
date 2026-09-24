@@ -1576,6 +1576,14 @@ class MainWindow(QMainWindow):
                 return self._manifests.get(pid)
         return None
 
+    def switch_chain(self, chain_id: int) -> None:
+        """Host API: select ``chain_id`` through the chain combo, so the
+        whole chain-change path (store, plugin availability, account tree,
+        dapp push) runs as for a user pick. No-op for an unknown chain."""
+        idx = self.chain_combo.findData(chain_id)
+        if idx >= 0 and idx != self.chain_combo.currentIndex():
+            self.chain_combo.setCurrentIndex(idx)
+
     def _apply_chain_availability(self) -> None:
         """Show each plugin's tab only on chain families it supports (manifest
         ``families``) — ENS and Approvals are EVM-only, so they hide on Tron."""

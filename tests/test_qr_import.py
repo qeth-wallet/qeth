@@ -173,7 +173,7 @@ def test_add_qr_scans_derives_and_persists(qtbot, tmp_qeth, monkeypatch):
     monkeypatch.setattr(wallets_mod, "AddQRWalletDialog", _AddStub)
 
     plugin.host = SimpleNamespace(
-        current_chain=lambda: SimpleNamespace(chain_id=1),
+        current_chain=lambda: SimpleNamespace(chain_id=1, is_evm=True, family="evm"),
         status_message=lambda *a, **k: None)
     monkeypatch.setattr(plugin, "_kick_ens_label_lookups", lambda addrs: None)
 

@@ -50,6 +50,11 @@ class Host(Protocol):
     def current_chain(self):
         """Return the qeth.chains.Chain currently selected by the user."""
 
+    def switch_chain(self, chain_id: int) -> None:
+        """Select the network ``chain_id`` in the UI, exactly as if the user
+        picked it — e.g. to show a just-added account that only exists on
+        another family (a Tron address added from an Ethereum view)."""
+
     def chain_by_id(self, chain_id: int):
         """Return the configured ``qeth.chains.Chain`` whose id matches,
         or None if no such chain is configured. Used by the pending-tx

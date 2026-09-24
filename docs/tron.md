@@ -1,12 +1,34 @@
 # qeth — Tron support (design note)
 
-**Status:** in progress on the `tron` branch. Phase 1 (the chain-family
-refactor) is done. Phase 2 (Tron core: address, protobuf, TronGrid client,
-local tx building, hot-wallet signing) is being built. Later phases add
-Trezor, send/history UI, TRC-20 and Ledger. The code is the source of truth;
-this note records the research the design rests on and the target shape.
-Research was done on 2026-09-24 against live mainnet endpoints and primary
-sources (java-tron, TronWeb, tronpy, trezor-firmware, app-tron).
+**Status:** on the `tron` branch, usable end-to-end. Built so far:
+
+- the chain-family refactor;
+- Tron as a default network;
+- TRX and TRC-20 balances, discovery, prices and logos;
+- transaction history and activity;
+- the send dialog, with signing, broadcast and pending tracking;
+- hot-wallet and Trezor signing;
+- Trezor Tron discovery;
+- `T…` watch-only accounts.
+
+Mainnet accepts qeth's locally encoded, signed transactions: a transfer
+signed by an unfunded key passes the TaPoS and signature checks and fails
+only at contract validation ("account does not exist"). A tampered
+signature fails at signature validation.
+
+Not built yet (see "Later phases"):
+
+- Ledger's Tron app;
+- Keystone;
+- Tron message signing (TIP-191 / TIP-712);
+- TRC-20 approvals;
+- a TronLink-style dapp provider;
+- staking and voting;
+- testnets.
+
+Hardware signing is untested on a real device. The research was done on
+2026-09-24 against live mainnet endpoints and primary sources (java-tron,
+TronWeb, tronpy, trezor-firmware, app-tron).
 
 ## Why Tron needs a refactor
 
@@ -84,9 +106,9 @@ be used as a key.
   - Ledger and QR: EVM only
   - watch-only can't sign
 
-## Phase 2: Tron core (`qeth/tron/`)
+## Phase 2: Tron core (`qeth/tron/`) (done)
 
-- **`proto.py`**: a minimal proto3 encoder/decoder for `Transaction.raw`,
+- **`tx.py`**: a minimal proto3 encoder/decoder for `Transaction.raw`,
   `TransferContract` and `TriggerSmartContract`.
   - Fields are written in field-number order.
   - Zero or empty scalars are omitted (proto3).
@@ -177,38 +199,62 @@ phase on top of the existing UR code.
 
 **Keycard Shell:** no Tron support.
 
+## Phase 3: Tron in the UI (done)
+
+The plugins stay family-agnostic wherever the data allows. Tron's read-only
+Ethereum JSON-RPC (`Chain.rpc_url`) serves `eth_getBalance` (in sun),
+`eth_call` and Multicall3, which has its own Tron address
+(`Chain.multicall_address`, `TEazPvZw…`). So the Tokens tab reads TRX,
+TRC-20 balances and metadata through the unchanged `EthClient`.
+
+What's Tron-specific:
+
+- **Discovery.** `token_discovery.tron.TronGridSource` reads the `/v1`
+  account `trc20` list. It includes spam, which the known-token gate
+  filters.
+- **Token lists.** CoinGecko's Tron list and the top-tokens head take base58
+  addresses, converted at ingest.
+- **Prices.** DefiLlama keys Tron tokens as `tron:<T…>`.
+- **Explorer links.** `qeth.explorer.explorer_url` builds Tronscan's `#/`
+  routes.
+- **History.** `tron.history.TronGridTransactionSource` serves Tron history.
+  - Rows carry `nonce = -1` and `Transaction.fee`.
+  - Lists order by `Transaction.order_key`, which is the timestamp when
+    there's no nonce.
+  - The paging block cursor maps to `max_timestamp`.
+  - Activities come from the TRC-20 transfer index (`tx_activity`).
+- **Send.** `plugins/transactions/tron_send.TronSendDialog` →
+  `MainWindow._begin_tron_sign` → `TronSignAndBroadcastWorker`.
+- **Pending transactions.** `add_tron_pending`. `PendingProbeWorker`'s Tron
+  branch confirms via `gettransactioninfobyid`, re-pushes the signed bytes,
+  and drops a transaction once it's past its expiration.
+- **Decoding.** Some wallets write addresses in calldata as 21-byte `41…`
+  words; they're normalised before decoding
+  (`tron.tx.strip_address_prefixes`).
+- **Details dialog.** No Etherscan identity row on Tron.
+
 ## Later phases
 
-- **Send.** A Tron send dialog for TRX and TRC-20:
-  - recipient `T…` (`TronAddressCodec`);
-  - fee preview: bandwidth, energy and activation, shown as "burns ≈X TRX",
-    with `fee_limit` shown as the maximum;
-  - sign → broadcast → pending row.
-- **History.** TronGrid `/v1/accounts/{addr}/transactions` +
-  `/transactions/trc20`, paged by fingerprint.
-  - Transactions have no nonce, so ordering and completeness go by
-    block/timestamp. `_is_full_history`'s nonce-contiguity test must not run.
-  - A TRC-20 row carries `token_info`.
-- **Tokens.**
-  - TRX balance: `getaccount.balance`, or `/jsonrpc` `eth_getBalance`.
-  - TRC-20 balances: `/v1/accounts/{addr}` `trc20` field, which includes
-    spam and gives no decimals.
-  - Metadata: `triggerconstantcontract`, or `eth_call` via `/jsonrpc`.
-  - Token list: CoinGecko `tokens.coingecko.com/tron/all.json` (base58
-    addresses, converted at ingest).
-  - Prices: DefiLlama keys `tron:<base58>`; `coingecko:tron` for TRX.
-  - Logos: TrustWallet `blockchains/tron/assets/<T…>/logo.png`.
-- **Explorer:** `https://tronscan.org/#/transaction/<txid>`,
-  `#/address/<T…>`, `#/token20/<T…>`.
-- **An address that holds only TRC-20 isn't activated** and can't send until
-  it receives TRX. Both `getaccount` and `getaccountresource` return `{}` for
-  it; the UI should say so rather than fail.
+- **Ledger Tron app.** Its own APDU client over `ledgerblue` (see Hardware
+  wallets above). Also declare `ledgerblue` as a dependency; today it's only
+  transitive.
+- **Keystone 3.** The `tron-sign-request` / `tron-signature` UR types.
 - **Messages.** TIP-191 (`keccak("\x19TRON Signed Message:\n" + len + msg)`)
   and TIP-712 (EIP-712 with the 0x41 prefix dropped from addresses,
-  `chainId` = `0x2b6653dc` on mainnet), for hot wallets.
-- **Dapps.** A TronLink-compatible provider means injecting a TronWeb instance
-  whose signing methods call qeth, which is a separate project from the
-  EIP-1193 bridge. WalletConnect uses `tron:0x2b6653dc` with
+  `chainId` = `0x2b6653dc` on mainnet), for hot wallets. Trezor has no Tron
+  message signing at all.
+- **TRC-20 approvals.** The Approvals tab needs a Tron `Approval`-log source.
+  TronGrid `/v1/contracts/{addr}/events`, or `eth_getLogs` over `/jsonrpc`
+  (≤ 5000 blocks per call).
+- **Contract identity.** Tronscan's contract API could fill the details
+  dialog's Contract row.
+- **Staking / voting / resource delegation.** Trezor already supports these
+  contract types.
+- **Testnets.** Nile / Shasta chain entries. `TRONGRID_INSTANCES` already
+  knows them.
+- **Dapps.** A TronLink-compatible provider means injecting a TronWeb
+  instance whose signing methods call qeth, which is a separate project from
+  the EIP-1193 bridge. WalletConnect uses `tron:0x2b6653dc` with
   `tron_signTransaction` / `tron_signMessage`.
 
 ## Networks

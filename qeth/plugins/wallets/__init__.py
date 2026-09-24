@@ -1976,10 +1976,12 @@ class WalletsPlugin(Plugin):
             if self.host is not None:
                 shown_here = (self._store.current_chain().family
                               in account_families(account))
+                where = ("the Tron network" if account.get("family") == TRON
+                         else "an Ethereum-type network")
                 self.host.status_message(
                     "Watch-only address added" if shown_here else
-                    "Watch-only Tron address added — switch to the Tron "
-                    "network to see it", 5000)
+                    f"Watch-only address added — switch to {where} to see it",
+                    5000)
 
     def _sign_selected(self) -> None:
         """Sign button → open the compose/sign flow for the selected

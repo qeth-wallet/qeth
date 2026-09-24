@@ -12,7 +12,9 @@ user's Qt theme applies.
 - `qeth/chain.py` — sync JSON-RPC client (`EthClient`) shaped like `w3.eth.*`; the seam for swapping to web3.py later
 - `qeth/async_chain.py` — async transport (`AsyncWeb3` over a `WebSocketProvider` or async-http failover stack) for the live watcher; mirrors `chain.py`'s UA / failover / PoA plumbing. `ws_urls_for(chain)` resolves explicit `Chain.ws_url` → inherited default → derived `https→wss`.
 - `qeth/plugins/transactions/live_watcher.py` — the WebSocket live-update watcher: a `QThread` running one asyncio loop that subscribes per active chain to `newHeads` (→ pending-tx confirmation, the async port of `PendingProbeWorker`) and the on-screen account's ERC-20 `Transfer` logs (→ live token balances). **On by default**; `QETH_LIVE_WS=0` disables it. A pure accelerator over the always-on polling floor. Design + rationale in `docs/ws-subscriptions.md`.
-- `qeth/chains.py` — `Chain` dataclass (incl. `ws_url` for the live watcher) + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, all on DRPC)
+- `qeth/chains.py` — `Chain` dataclass (incl. `ws_url` for the live watcher; `family` `"evm"`/`"tron"`, `native_decimals`, `api_url`/`api_fallbacks` for a family's own HTTP API, `multicall_address` when Multicall3 isn't at the canonical address) + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, Gnosis, BSC, Robinhood on DRPC/publicnode, and Tron)
+- `qeth/address.py` — per-family address codecs: `codec_for(chain).parse(text)` → internal `0x` hex, `.display(addr)` → EIP-55 or Tron `T…` (base58check); `parse_any` picks the family from the text. `qeth/explorer.py` — `explorer_url(chain, kind, value)`, Etherscan-family paths or Tronscan's `#/` routes.
+- `qeth/tron/` — Tron (docs/tron.md): `tx.py` (proto3 encoding of `Transaction.raw` — Transfer / TriggerSmartContract — built LOCALLY, never a node's txID; txid = sha256(raw_data); TaPoS `ref_block`; signature helpers), `client.py` (`TronClient` over the full-node HTTP API — PublicNode first, TronGrid fallback since keyless TronGrid is ~3 req/s — plus TronGrid's indexed `/v1` via `index_get`), `fees.py` (bandwidth / activation / energy burn estimate, `fee_limit`, `build_tx` with a fresh solid-block reference expiring 10 min after head), `history.py` (`TronGridTransactionSource`), `paths.py` (coin type 195 schemes). Tron reads (TRX balance, TRC-20 multicall, metadata) go through the unchanged `EthClient` over Tron's read-only `/jsonrpc`; sending never does.
 - `qeth/ledger.py` — Ledger signing + account discovery via `ledgereth`. Driven from QThread workers, but **all** ledgereth/hidapi calls route through `ledger_hid.py` (never touch HID from a worker directly — see the thread-safety convention below).
 - `qeth/device_thread.py` — `DeviceJobService`: the generic one-process-lifetime-thread job queue a USB hardware wallet runs on (callers block on a `Future`; optional `after_job` hook). `ledger_hid.LedgerHidService` and the Trezor service are instances.
 - `qeth/trezor.py` — Trezor signing + discovery via **trezorlib** (the optional `trezor` extra, imported lazily; missing → "install qeth[trezor]"). Every call is a job on the Trezor device thread (`run_trezor_job(fn(session), ui)`), which also **caches the trezorlib session** (so a passphrase wallet isn't re-asked per signature; the USB transport is still opened per call, so Suite can use the device between jobs) and rebuilds it once on a stale transport / `InvalidSessionError`. **Passphrase wallets:** the session IS one passphrase wallet, so it's ENDED (`_Connection.forget`) when the holds-check fails (a typo'd passphrase otherwise refused every retry until a re-plug) and at the start of every `TrezorWorker` scan (`fresh_session`), so the next job asks for the passphrase again. `TrezorSigner` (EIP-1559 + legacy tx, personal_sign, EIP-712 — full `sign_typed_data`, hash-only on a Trezor One) checks the device holds the address first, like Ledger; raw txs are assembled by `signing.signed_eip1559_tx` / `signed_legacy_tx` (shared with the QR signer). Tx signing passes a tolerant, memoized data.trezor.io definition source so the device names the chain/token. Device callbacks (PIN / passphrase / THP pairing code / "confirm on device") reach the job's `SignerInteraction`. `TrezorWorker` discovery: BIP44 / Legacy export ONE public node and derive on the host (`qr.derive`); Ledger Live asks per address; emits the wallet's root `fingerprint` (per seed AND passphrase) stored as the account's `xfp` to key its device tree. trezorlib's `@workflow` ParamSpec typing reads every `ethereum.*` parameter as `Never` under mypy, hence the `_ethereum() -> Any` accessor.
@@ -131,6 +133,25 @@ change to consumers.
   with tab nav — the filter consumes ←/→, passes the rest through.)
 - **Not yet done**: per-plugin package moves (helpers still at `qeth/` top level);
   a multi-select selection broadcast (deferred to the portfolio plugin).
+
+### Chain families: hex addresses inside, the family's form at the edges
+
+A `Chain` has a `family` (`qeth.chains.EVM` / `TRON`). Every address in the
+store, caches, Qt item roles and calldata is the internal `0x` + 20-byte form —
+the same body a key has on EVM and Tron — and is converted only for display /
+input / wire (`qeth.address.codec_for(chain)`; TronGrid wants `41…` hex, Tronscan
+and users `T…`). base58 is case-sensitive, so a `T…` string must never be
+`.lower()`-ed or used as a key. Native amounts go through
+`qeth.chain.native_amount(raw, chain)` (TRX has 6 decimals). Accounts carry
+`family` when not EVM (`store.account_families`: a hot wallet serves both, a
+device/watch-only record one); the wallet tree lists the current chain's
+family. Plugins declare `PluginManifest.families` (ENS / Approvals are EVM-only
+and hide on Tron via `Slot.set_plugin_available`); signer backends declare
+`SignerPlugin.families`. Dapps are EVM-only: the RPC server serves
+`Store.dapp_chain()` (the last EVM chain while the UI is on Tron) and never
+lists a non-EVM chain. Tron transactions have no nonce (`Transaction.nonce =
+-1`; lists order by `Transaction.order_key`) and report their fee
+(`Transaction.fee`).
 
 ### On-chain math: always `Decimal`, never `float`
 

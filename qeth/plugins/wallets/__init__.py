@@ -980,13 +980,11 @@ class WalletsPlugin(Plugin):
         chain = self._store.current_chain()
         # Record-aware: mark only the CONNECTED record as default. When the
         # default's path is unknown (legacy config, never re-connected), fall
-        # back to matching by address so the marker still shows. Dapps are
-        # EVM-only, so nothing is "connected" on a Tron view.
-        default = self._store.default_account
-        dpath = self._store.default_account_path
+        # back to matching by address so the marker still shows. Each family
+        # has its own connected account (a Tron view marks Tron's).
+        default, dpath = self._store.default_for(chain.family)
         is_default = (
-            chain.is_evm
-            and default is not None
+            default is not None
             and addr.lower() == default.lower()
             and (dpath is None or dpath == a.get("path", ""))
         )
@@ -1269,19 +1267,23 @@ class WalletsPlugin(Plugin):
         # Skip only if THIS exact record is already connected — the same address
         # held by another signer (Ledger vs QR) is a different connection, so a
         # double-click there should switch to it.
-        if (self._store.default_account is not None
-                and addr.lower() == self._store.default_account.lower()
-                and (self._store.default_account_path or "") == path):
+        default, dpath = self._family_default()
+        if (default is not None and addr.lower() == default.lower()
+                and (dpath or "") == path):
             return
         self._set_default(addr, path)
 
     def _on_tree_enter_pressed(self, address: str) -> None:
         """Enter / Return on a focused account leaf: same as
         double-click → connect to browser."""
-        current = self._store.default_account
+        current = self._family_default()[0]
         if current is not None and address.lower() == current.lower():
             return
         self._set_default(address)
+
+    def _family_default(self) -> tuple[str | None, str | None]:
+        """The connected ``(address, path)`` of the family on screen."""
+        return self._store.default_for(self._store.current_chain().family)
 
     def _emit_address(self, addrs: list[str] | None = None) -> str | None:
         """The address a selection broadcast carries: the single selected KNOWN
@@ -1489,9 +1491,12 @@ class WalletsPlugin(Plugin):
                 None,
             )
         is_watch = acct is not None and acct.get("source") == "watch_only"
-        # Dapps (Connect) and message signing (Sign) are EVM-only for now.
+        # Message signing (Sign) is EVM-only for now. Connect sets the
+        # connected account of the family on screen (Tron keeps its own).
         evm = self._store.current_chain().is_evm
-        is_default = evm and single and addrs[0] == self._store.default_account
+        default = self._family_default()[0]
+        is_default = (single and default is not None
+                      and addrs[0].lower() == default.lower())
         # The Label action doubles as the device-tree rename: it's enabled for a
         # single account OR a single selected tree row (the other buttons stay
         # off for a tree row — it has no address to act on).
@@ -1501,16 +1506,16 @@ class WalletsPlugin(Plugin):
         self.act_qr.setEnabled(single)
         self.act_label.setEnabled(single or is_tree)
         self.act_sign.setEnabled(single and not is_watch and evm)
-        self.act_connect.setEnabled(
-            single and not is_watch and not is_default and evm)
+        self.act_connect.setEnabled(single and not is_watch and not is_default)
         self.act_connect.setChecked(bool(is_default))
         if self._connect_btn is not None:
             self._connect_btn.setChecked(bool(is_default))
+            family = "" if evm else f"{self._store.current_chain().family.title()} "
             self._connect_btn.setToolTip(
                 "Watch-only — can't connect" if is_watch
-                else "Dapps connect on EVM networks only" if not evm
-                else "Connected to browser" if is_default
-                else "Connect to browser (make default for dapps)"
+                else f"Connected — the default {family}account for dapps"
+                if is_default
+                else f"Connect to browser (make default for {family}dapps)"
             )
 
     def _on_tree_context_menu(self, pos) -> None:
@@ -1536,7 +1541,7 @@ class WalletsPlugin(Plugin):
             menu.addAction(self.act_qr)
             menu.addAction(self.act_label)
             addr = addrs[0]
-            default = self._store.default_account
+            default = self._family_default()[0]
             already_default = (
                 default is not None and addr.lower() == default.lower()
             )
@@ -2093,7 +2098,7 @@ class WalletsPlugin(Plugin):
         if not addr:
             self._update_account_buttons()
             return
-        default = self._store.default_account
+        default = self._family_default()[0]
         if default is not None and addr.lower() == default.lower():
             self._update_account_buttons()
             return
@@ -2118,7 +2123,10 @@ class WalletsPlugin(Plugin):
             key = self._selected_key()
             if key is not None and key[0] == address:
                 path = key[1]
-        self._store.set_default_account(address, path)
+        # The family on screen: a double-click on a Tron view connects the
+        # Tron account and leaves the EVM one (eth_accounts) alone.
+        self._store.set_default_account(
+            address, path, family=self._store.current_chain().family)
         self._rebuild_tree()
         self.default_account_changed.emit()
         # Re-run selection to refresh the details-panel button state.

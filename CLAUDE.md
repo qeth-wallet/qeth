@@ -149,7 +149,10 @@ family. Plugins declare `PluginManifest.families` (ENS / Approvals are EVM-only
 and hide on Tron via `Slot.set_plugin_available`); signer backends declare
 `SignerPlugin.families`. Dapps are EVM-only: the RPC server serves
 `Store.dapp_chain()` (the last EVM chain while the UI is on Tron) and never
-lists a non-EVM chain. Tron transactions have no nonce (`Transaction.nonce =
+lists a non-EVM chain. Each family has its own connected account
+(`Store.default_for(family)`; double-click / Connect set the one of the family
+on screen) — `default_account` is the EVM one, what `eth_accounts` serves, and
+must never become a Tron-only account. Tron transactions have no nonce (`Transaction.nonce =
 -1`; lists order by `Transaction.order_key`) and report their fee
 (`Transaction.fee`).
 

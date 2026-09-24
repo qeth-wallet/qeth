@@ -61,7 +61,7 @@ from .signing import (
     SignAndBroadcastWorker, Signer, SignerBridge, SignerError,
     TronSignAndBroadcastWorker,
 )
-from .chains import EVM, TRON
+from .chains import EVM, FAMILIES, TRON
 
 
 def _apply_gear_icon(btn, tooltip: str) -> None:
@@ -97,6 +97,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.store = store
         self.rpc = rpc
+        # The accounts last pushed to dapps as accountsChanged (see
+        # _push_accounts_changed) — None until the first push.
+        self._pushed_accounts: list[str] | None = None
         # Tray controller (set by the entry point after install_tray); the
         # fallback sink for desktop notifications. None when there's no tray.
         self._tray = None
@@ -1627,6 +1630,12 @@ class MainWindow(QMainWindow):
         if self.rpc is None:
             return
         accounts = [self.store.default_account] if self.store.default_account else []
+        # The signal also fires for a Tron connect, which leaves the EVM
+        # account (what eth_accounts serves) as it was — don't tell dapps
+        # their account changed when it didn't.
+        if accounts == self._pushed_accounts:
+            return
+        self._pushed_accounts = accounts
         self.rpc.broadcast_accounts_changed(accounts)
 
     def _lock_unused_hot_wallet(self, *_args) -> None:
@@ -1635,8 +1644,8 @@ class MainWindow(QMainWindow):
         it's neither the selected account nor the dapp-connected one. Checking
         both means browsing another account while a dapp is connected to the
         hot wallet doesn't re-prompt that dapp's next signature."""
-        UNLOCKED.retain(
-            (self.wallets_plugin.selected_address, self.store.default_account))
+        UNLOCKED.retain((self.wallets_plugin.selected_address,
+                         *(self.store.default_for(f)[0] for f in FAMILIES)))
 
 
 class _TabCycleFilter(QObject):

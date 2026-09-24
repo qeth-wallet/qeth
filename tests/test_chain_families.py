@@ -280,3 +280,74 @@ class TestAddedAccountsAreRevealed:
         self._add_watch(win, monkeypatch, new)
         assert win.store.current_chain().chain_id == 10
         assert win.wallets_plugin.selected_address == new["address"]
+
+
+class TestConnectedAccountPerFamily:
+    """Each family has its own connected ("default for dapps") account. A
+    double-click on a Tron view connects the Tron account and must NOT
+    touch the EVM one — that is eth_accounts, and a Tron-only account there
+    would hand EVM dapps an address they can't use (the report: double-click
+    on Tron 'did not make it default', silently changing the EVM one)."""
+
+    TREZOR_TRON = "0x" + "66" * 20
+
+    @pytest.fixture
+    def win(self, qtbot, tmp_qeth, fake_rpc, hermetic_mainwindow):
+        from qeth.ui import MainWindow
+        store = Store.load()
+        store.chains.append(TRON_CHAIN)
+        store.accounts = [*_accounts(),
+                          {"address": self.TREZOR_TRON, "source": "trezor",
+                           "path": "44'/195'/0'/0/0", "label": "", "family": TRON}]
+        store.default_account = EVM_WATCH
+        w = MainWindow(store, fake_rpc)
+        qtbot.addWidget(w)
+        idx = w.chain_combo.findData(TRON_CHAIN.chain_id)
+        w.chain_combo.setCurrentIndex(idx)
+        return w
+
+    def _item(self, win, addr):
+        from PySide6.QtCore import Qt
+        it = win.tree.topLevelItem(0)
+        while it is not None:
+            if it.data(0, Qt.ItemDataRole.UserRole) == addr:
+                return it
+            it = win.tree.itemBelow(it)
+        raise AssertionError(addr)
+
+    def test_double_click_on_tron_connects_the_tron_account(self, win):
+        wp = win.wallets_plugin
+        wp._on_tree_double_clicked(self._item(win, self.TREZOR_TRON), 0)
+        assert win.store.default_for(TRON)[0] == self.TREZOR_TRON
+        assert win.store.default_account == EVM_WATCH        # eth_accounts untouched
+        assert self._item(win, self.TREZOR_TRON).text(0).startswith("[")
+
+    def test_the_evm_view_keeps_its_own_marker(self, win):
+        win.wallets_plugin._on_tree_double_clicked(self._item(win, HOT), 0)
+        assert win.store.default_for(TRON)[0] == HOT
+        win.chain_combo.setCurrentIndex(win.chain_combo.findData(1))
+        assert self._item(win, EVM_WATCH).text(0).startswith("[")
+        assert not self._item(win, HOT).text(0).startswith("[")
+
+    def test_a_tron_connect_does_not_ping_evm_dapps(self, win, fake_rpc, monkeypatch):
+        pushed = []
+        monkeypatch.setattr(fake_rpc, "broadcast_accounts_changed", pushed.append)
+        win._pushed_accounts = [EVM_WATCH]
+        win.wallets_plugin._on_tree_double_clicked(self._item(win, self.TREZOR_TRON), 0)
+        assert pushed == []
+
+
+def test_family_defaults_persist_and_repoint(tmp_qeth):
+    s = Store()
+    s.chains = [*DEFAULT_CHAINS, TRON_CHAIN]
+    for a in _accounts():
+        s.add_account(a)
+    # The first account of each family became its default.
+    assert s.default_for(EVM)[0] == HOT and s.default_for(TRON)[0] == HOT
+    s.set_default_account(TRON_WATCH, None, family=TRON)
+    again = Store.load()
+    assert again.default_for(TRON)[0] == TRON_WATCH
+    assert again.default_account == HOT
+    again.remove_account(TRON_WATCH)
+    assert again.default_for(TRON)[0] == HOT     # repointed within the family
+    assert again.account_for_signing(HOT, family=TRON)["source"] == "hot"

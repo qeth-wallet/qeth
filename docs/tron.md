@@ -91,8 +91,13 @@ be used as a key.
   current chain when it's EVM, else the last EVM chain (persisted as
   `dapp_chain_id`). Tron isn't listed in `wallet_getEthereumChains`, can't be
   switched to, and doesn't push `chainChanged`. A Tron-only account never
-  becomes `default_account` (that value is `eth_accounts`). Connect and Sign
-  Message are off on a Tron view.
+  becomes `default_account` (that value is `eth_accounts`). Sign Message is
+  off on a Tron view.
+- **A connected account per family.** Double-click / Enter / Connect on a Tron
+  view sets Tron's own connected account (`Store.default_for(TRON)`, persisted
+  as `family_defaults`). It's marked `[…]` in the tree, leaves the EVM one
+  untouched, and is what a future Tron dapp bridge will serve. It also routes
+  signing when one address is held by two signers.
 - **Plugin availability.** `PluginManifest.families` controls which plugins
   show on which chains:
   - ENS and Approvals are EVM-only; their tabs hide on Tron via

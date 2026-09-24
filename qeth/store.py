@@ -173,6 +173,11 @@ class Store:
         # is held by two signers (Ledger + Air-gapped): connecting the QR row
         # must sign via QR, the Ledger row via Ledger.
         self.default_account_path: str | None = None
+        # The connected account of each NON-EVM family, {family: {"address",
+        # "path"}} — Tron's own "default for dapps", set by double-click /
+        # Connect on a Tron view. Separate from default_account, which is what
+        # EVM dapps get from eth_accounts and must stay an EVM account.
+        self.family_defaults: dict[str, dict[str, str | None]] = {}
         # User overrides for the token panel: (chain_id, addr_lower) tuples.
         # `hidden` always wins over `shown` when both contain the same key.
         self.hidden_tokens: set[tuple[int, str]] = set()
@@ -246,6 +251,11 @@ class Store:
             s.dapp_chain_id = data.get("dapp_chain_id", s.current_chain_id)
             s.default_account = data.get("default_account")
             s.default_account_path = data.get("default_account_path")
+            fd = data.get("family_defaults")
+            if isinstance(fd, dict):
+                s.family_defaults = {
+                    fam: {"address": v.get("address"), "path": v.get("path")}
+                    for fam, v in fd.items() if isinstance(v, dict)}
             chains_data = data.get("chains")
             if chains_data:
                 s.chains = [_merge_chain(c) for c in chains_data]
@@ -325,6 +335,7 @@ class Store:
                 "dapp_chain_id": self.dapp_chain_id,
                 "default_account": self.default_account,
                 "default_account_path": self.default_account_path,
+                "family_defaults": {f: dict(v) for f, v in self.family_defaults.items()},
                 "hidden_tokens": [
                     {"chain_id": cid, "address": addr}
                     for (cid, addr) in sorted(self.hidden_tokens)
@@ -372,9 +383,11 @@ class Store:
                 if a["address"].lower() == addr and a.get("path", "") == path:
                     return False
             self.accounts.append(account)
-            # The default is what dapps get from eth_accounts — EVM only.
-            if self.default_account is None and EVM in account_families(account):
-                self.default_account = account["address"]
+            # Each family's first account becomes its default — for EVM that
+            # is what dapps get from eth_accounts, so only an EVM account.
+            for family in account_families(account):
+                if self.default_for(family)[0] is None:
+                    self._set_default_locked(account["address"], None, family)
         self.save()
         return True
 
@@ -398,18 +411,20 @@ class Store:
                             and a.get("path", "") == path)]
             if len(self.accounts) == before:
                 return False
-            still_has_addr = any(a["address"].lower() == addr for a in self.accounts)
-            if self.default_account and self.default_account.lower() == addr:
-                if still_has_addr:
+            for family in FAMILIES:
+                default, dpath = self.default_for(family)
+                if not default or default.lower() != addr:
+                    continue
+                if any(a["address"].lower() == addr
+                       and family in account_families(a) for a in self.accounts):
                     # The address survives in another branch — keep it as the
                     # default, but drop a now-stale connected-record path.
-                    if self.default_account_path == path:
-                        self.default_account_path = None
+                    if dpath == path:
+                        self._set_default_locked(default, None, family)
                 else:
-                    self.default_account = next(
+                    self._set_default_locked(next(
                         (a["address"] for a in self.accounts
-                         if EVM in account_families(a)), None)
-                    self.default_account_path = None
+                         if family in account_families(a)), None), None, family)
             # Drop tree labels whose tree no longer has any account (removing a
             # whole device's last account retires its label); a sibling tree in
             # the same source keeps its own.
@@ -576,14 +591,34 @@ class Store:
             self.save()
         return changed
 
-    def set_default_account(self, address: str, path: str | None = None) -> None:
-        """Set the connected/default account. ``path`` records WHICH record it is
-        when the same address is held by two signers, so signing routes to the
-        right one; ``None`` leaves it ambiguous (first record with the address)."""
+    def set_default_account(self, address: str, path: str | None = None,
+                            family: str = EVM) -> None:
+        """Set the connected/default account of ``family`` (EVM: the one dapps
+        get from eth_accounts). ``path`` records WHICH record it is when the
+        same address is held by two signers, so signing routes to the right
+        one; ``None`` leaves it ambiguous (first record with the address)."""
         with self._lock:
+            self._set_default_locked(address, path, family)
+        self.save()
+
+    def default_for(self, family: str) -> tuple[str | None, str | None]:
+        """``(address, path)`` of ``family``'s connected account (or Nones)."""
+        with self._lock:
+            if family == EVM:
+                return self.default_account, self.default_account_path
+            d = self.family_defaults.get(family) or {}
+            return d.get("address"), d.get("path")
+
+    def _set_default_locked(self, address: str | None, path: str | None,
+                            family: str) -> None:
+        # Caller holds the lock.
+        if family == EVM:
             self.default_account = address
             self.default_account_path = path
-        self.save()
+        elif address is None:
+            self.family_defaults.pop(family, None)
+        else:
+            self.family_defaults[family] = {"address": address, "path": path}
 
     def account_for_signing(self, address: str, path: str | None = None,
                             family: str | None = None) -> dict | None:
@@ -604,9 +639,9 @@ class Store:
 
         if path is not None and (hit := match(path)) is not None:
             return hit
-        if (self.default_account and al == self.default_account.lower()
-                and self.default_account_path is not None
-                and (hit := match(self.default_account_path)) is not None):
+        default, dpath = self.default_for(family or EVM)
+        if (default and al == default.lower() and dpath is not None
+                and (hit := match(dpath)) is not None):
             return hit
         return next((a for a in pool if a["address"].lower() == al), None)
 

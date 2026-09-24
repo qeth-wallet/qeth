@@ -62,10 +62,16 @@ from .contract_identity import (
 )
 from ...chain import EthClient, native_amount, wei_to_ether
 from ...address import codec_for
+from ...tron.client import TronClient, TronError
 from ...tron.history import TronGridTransactionSource
+from ...tron.tx import TransferContract as TronTransferContract
+from ...tron.tx import decode_raw as decode_tron_raw
+from ...tron.tx import read_fields as read_tron_fields
 from ...explorer import explorer_url
 from .live_watcher import LiveWatcher, PendingTx
-from ...signing import ReplacementFloor, SignerError, SigningRequest
+from ...signing import (
+    ReplacementFloor, SignerError, SigningRequest, TronSigningRequest,
+)
 from ...formatting import format_balance, transfer_notice
 from ...formatting import format_datetime as _format_datetime
 from ...plugin import Plugin
@@ -237,7 +243,32 @@ def _confirmed_from_receipt(old: Transaction, receipt: dict) -> Transaction:
         success=success,
         pending=False,
         raw_signed=None,   # confirmed — no need to keep it for re-broadcast
+        # Tron's receipt carries the fee it burned (``_tron_receipt``).
+        fee=receipt.get("fee", old.fee),
     )
+
+
+def _tron_receipt(info: dict) -> dict:
+    """A Tron ``gettransactioninfobyid`` answer in the shape of an
+    ``eth_getTransactionReceipt`` — what the confirm path consumes: hex
+    block / status / energy as gasUsed, the logs with ``0x`` hex (Tron
+    omits the prefix; log addresses are the 20-byte body), plus ``fee`` in
+    sun, since Tron reports its fee rather than gas × price."""
+    receipt = info.get("receipt") or {}
+    failed = (info.get("result") == "FAILED"
+              or receipt.get("result", "SUCCESS") != "SUCCESS")
+    return {
+        "blockNumber": hex(int(info.get("blockNumber") or 0)),
+        "status": "0x0" if failed else "0x1",
+        "gasUsed": hex(int(receipt.get("energy_usage_total") or 0)),
+        "effectiveGasPrice": "0x0",
+        "fee": int(info.get("fee") or 0),
+        "logs": [{
+            "address": "0x" + str(lg.get("address") or ""),
+            "topics": ["0x" + str(t) for t in lg.get("topics") or []],
+            "data": "0x" + str(lg.get("data") or ""),
+        } for lg in info.get("log") or []],
+    }
 
 
 # ---- pending-tx polling -------------------------------------------------
@@ -277,6 +308,9 @@ class PendingProbeWorker(QThread):
         self._rebroadcast = rebroadcast
 
     def run(self) -> None:
+        if not self._chain.is_evm:
+            self._run_tron()
+            return
         client = EthClient(self._chain)
         try:
             receipt = client.rpc(
@@ -313,6 +347,55 @@ class PendingProbeWorker(QThread):
         # in case the RPC silently dropped it.
         self._try_rebroadcast(client)
         self.still_pending.emit(self._chain, self._tx_hash)
+
+    # Grace past a Tron tx's expiration before calling it dropped: the node
+    # accepts it up to the expiration against HEAD time, and it can still be
+    # packed into a block a moment after.
+    _TRON_DROP_GRACE_MS = 60_000
+
+    def _run_tron(self) -> None:
+        """Tron: included → confirmed (``gettransactioninfobyid``); past its
+        expiration with no info → dropped (it can never be packed now);
+        else still pending, re-pushing the exact signed bytes."""
+        import time
+        client = TronClient(self._chain)
+        try:
+            info = client.transaction_info(self._tx_hash.removeprefix("0x"))
+        except TronError as e:
+            self._try_tron_rebroadcast(client)
+            self.failed.emit(self._chain, self._tx_hash, str(e))
+            return
+        if info:
+            self.confirmed.emit(self._chain, self._tx_hash, _tron_receipt(info))
+            return
+        expiration = self._tron_expiration()
+        if (expiration is not None
+                and time.time() * 1000 > expiration + self._TRON_DROP_GRACE_MS):
+            self.dropped.emit(self._chain, self._tx_hash)
+            return
+        self._try_tron_rebroadcast(client)
+        self.still_pending.emit(self._chain, self._tx_hash)
+
+    def _tron_expiration(self) -> int | None:
+        """The expiration (unix ms) inside the stored signed transaction."""
+        if not self._raw:
+            return None
+        try:
+            fields = read_tron_fields(bytes.fromhex(self._raw.removeprefix("0x")))
+            raw_data = next(v for n, _, v in fields if n == 1)
+            assert isinstance(raw_data, bytes)
+            return decode_tron_raw(raw_data).expiration
+        except (ValueError, StopIteration, AssertionError):
+            return None
+
+    def _try_tron_rebroadcast(self, client) -> None:
+        if not (self._rebroadcast and self._raw):
+            return
+        try:
+            client.broadcast(bytes.fromhex(self._raw.removeprefix("0x")))
+        except TronError as e:
+            # DUP_TRANSACTION_ERROR (already known) / expired — harmless.
+            log.debug("tron re-broadcast of %s: %s", self._tx_hash, e)
 
     def _try_rebroadcast(self, client) -> None:
         if not (self._rebroadcast and self._raw):
@@ -1707,7 +1790,6 @@ class TransactionsPlugin(Plugin):
         filled in by ``PendingTxWatcher`` when the receipt lands."""
         import time
         addr_lower = req.from_addr.lower()
-        key = (chain.chain_id, addr_lower)
         gas_price_wei = (req.max_fee_per_gas
                           if chain.eip1559 else req.gas_price) or 0
         method_id = req.data[:10] if (req.data and len(req.data) >= 10) else ""
@@ -1728,6 +1810,45 @@ class TransactionsPlugin(Plugin):
             pending=True,
             raw_signed=raw_signed,
         )
+        self._insert_pending(pending, chain)
+
+    def add_tron_pending(self, tx_hash: str, req: TronSigningRequest, chain,
+                         raw_signed: str) -> None:
+        """``add_pending`` for a broadcast Tron transaction: the row is built
+        from the transaction's own contract. No nonce (-1 — it orders by its
+        broadcast time); ``raw_signed`` (the signed Transaction hex) lets the
+        watcher re-broadcast it and read its expiration."""
+        import time
+        tx = req.tx
+        c = tx.contract
+        if isinstance(c, TronTransferContract):
+            to, value, data = c.to, c.amount, b""
+        else:
+            to, value, data = c.contract, c.call_value, c.data
+        pending = Transaction(
+            chain_id=chain.chain_id,
+            hash=tx_hash,
+            block_number=0,
+            timestamp=int(time.time()),
+            nonce=-1,
+            from_addr=tx.owner.lower(),
+            to_addr=to.lower(),
+            value_wei=value,
+            gas_used=0,
+            gas_price_wei=0,
+            method_id=("0x" + data[:4].hex()) if len(data) >= 4 else "",
+            input_data="0x" + data.hex(),
+            success=True,            # placeholder until the receipt lands
+            pending=True,
+            raw_signed=raw_signed,
+        )
+        self._insert_pending(pending, chain)
+
+    def _insert_pending(self, pending: Transaction, chain) -> None:
+        """Merge a just-broadcast pending row into the cache for its
+        (chain, sender), persist, show it, and make sure it's watched."""
+        key = (chain.chain_id, pending.from_addr)
+        addr_lower = pending.from_addr
         # Hydrate the in-memory cache from disk if this is the first
         # time we touch this view this session — otherwise we'd
         # overwrite the file with just the pending entry on save.

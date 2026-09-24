@@ -585,15 +585,20 @@ class Store:
             self.default_account_path = path
         self.save()
 
-    def account_for_signing(self, address: str, path: str | None = None) -> dict | None:
+    def account_for_signing(self, address: str, path: str | None = None,
+                            family: str | None = None) -> dict | None:
         """The account record to sign for ``address`` — disambiguated when the
         same address is held by two signers (Ledger + Air-gapped). Prefers an
         exact ``(address, path)``; else the connected default's remembered
-        record; else the first record with the address."""
+        record; else the first record with the address. ``family`` limits
+        the choice to records usable on that chain family (a Tron send must
+        not pick the same address's EVM-only Ledger record)."""
         al = address.lower()
+        pool = [a for a in self.accounts
+                if family is None or family in account_families(a)]
 
         def match(p: str) -> dict | None:
-            return next((a for a in self.accounts
+            return next((a for a in pool
                          if a["address"].lower() == al and a.get("path", "") == p),
                         None)
 
@@ -603,7 +608,7 @@ class Store:
                 and self.default_account_path is not None
                 and (hit := match(self.default_account_path)) is not None):
             return hit
-        return next((a for a in self.accounts if a["address"].lower() == al), None)
+        return next((a for a in pool if a["address"].lower() == al), None)
 
     def add_chain(self, chain: Chain) -> None:
         with self._lock:

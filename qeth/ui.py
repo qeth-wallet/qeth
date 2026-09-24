@@ -57,7 +57,11 @@ _STICKY_MARGIN = 4
 from .alerts import warn
 from .hot_wallet import UNLOCKED
 from .signer_interaction import DialogInteraction
-from .signing import SignAndBroadcastWorker, Signer, SignerBridge, SignerError
+from .signing import (
+    SignAndBroadcastWorker, Signer, SignerBridge, SignerError,
+    TronSignAndBroadcastWorker,
+)
+from .chains import EVM, TRON
 
 
 def _apply_gear_icon(btn, tooltip: str) -> None:
@@ -985,6 +989,9 @@ class MainWindow(QMainWindow):
         button. Opens SendTokenDialog and runs the same worker
         pipeline as the RPC flow; success / cancel / failure
         produce status-bar messages (no bridge future)."""
+        if not chain.is_evm:
+            self._open_tron_send(asset, chain, from_addr)
+            return
         from .plugins.transactions import SendTokenDialog
         dialog = SendTokenDialog(
             asset, chain, from_addr,
@@ -1003,6 +1010,63 @@ class MainWindow(QMainWindow):
                 f"Send failed: {msg}", 6000,
             ),
         )
+
+    def _open_tron_send(self, asset: dict, chain, from_addr: str) -> None:
+        """Send on Tron: its own dialog (no nonce / gas / simulation), signed
+        and broadcast by ``TronSignAndBroadcastWorker``."""
+        from .plugins.transactions.tron_send import TronSendDialog
+        label = next((a.get("label") or "" for a in self.store.accounts
+                      if a["address"].lower() == from_addr.lower()
+                      and a.get("label")), "")
+        dialog = TronSendDialog(
+            asset, chain, from_addr, start_worker=self.start_worker,
+            address_book=[(a["address"], a.get("label") or "")
+                          for a in self.store.accounts_for(TRON)],
+            label=label, parent=self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        signing_key = self.selected_key
+        dialog.send_requested.connect(
+            lambda contract, fee_limit, d=dialog, c=chain, sk=signing_key:
+                self._begin_tron_sign(d, c, contract, fee_limit, sk))
+        dialog.show()
+
+    def _begin_tron_sign(self, dialog, chain, contract, fee_limit: int,
+                         signing_key: "tuple[str, str] | None") -> None:
+        """One Tron sign-and-broadcast attempt (Send clicked). Mirrors
+        ``_begin_sign``: pick a signer that can sign Tron for this account,
+        then build (fresh TaPoS) → sign → recover-check → broadcast off the
+        main thread. The dialog stays open on failure for a retry."""
+        interaction = DialogInteraction(dialog, title="Signing Transaction")
+        path = self._signing_path_for(signing_key, contract.owner)
+        signer, progress_text = self._pick_signer_for(
+            dialog, contract.owner, interaction, path=path, family=TRON)
+        if signer is None:
+            return
+        dialog.set_signing_in_progress(True)
+        if progress_text:
+            interaction.progress(progress_text)
+        worker = TronSignAndBroadcastWorker(signer, contract, chain,
+                                            fee_limit=fee_limit)
+        built: dict = {}
+        worker.built.connect(lambda req: built.update(req=req))
+        worker.broadcast.connect(
+            lambda h, raw, ok, d=dialog, it=interaction, c=chain:
+                self._on_tron_broadcast(h, raw, ok, built.get("req"), d, it, c))
+        worker.failed.connect(
+            lambda msg, d=dialog, it=interaction:
+                self._on_tx_sign_failed(msg, d, it, on_fail=lambda m: None))
+        self.start_worker(worker)
+
+    def _on_tron_broadcast(self, tx_hash: str, raw_signed: str, first_push_ok: bool,
+                           req, dialog, interaction, chain) -> None:
+        interaction.close()
+        dialog.accept()
+        if req is not None:
+            self.transactions_plugin.add_tron_pending(tx_hash, req, chain, raw_signed)
+        self.status_message(
+            f"Broadcast {tx_hash}" if first_push_ok else
+            "⚠ Broadcast did not reach a node — the wallet will keep "
+            "re-trying until the transaction expires", 8000)
 
     def open_replace_tx(self, tx, cancel: bool) -> None:
         """Speed up (or cancel) a pending tx by re-signing the SAME nonce
@@ -1235,6 +1299,7 @@ class MainWindow(QMainWindow):
 
     def _pick_signer_for(
         self, dialog, address: str, interaction, path: str | None = None,
+        family: str = EVM,
     ) -> tuple[Signer | None, str]:
         """Pick a Signer for the account's ``source`` via the signer REGISTRY
         (``qeth.signers``). The plugin drives ``interaction`` for any up-front
@@ -1245,12 +1310,18 @@ class MainWindow(QMainWindow):
         ``(signer, progress_text)``, or ``(None, None)`` if the user cancelled
         the prompt or the source has no signer (shows the "no signer" warning
         in that case)."""
-        acct = self.store.account_for_signing(address, path)
+        acct = self.store.account_for_signing(address, path, family=family)
         source = acct.get("source") if acct else None
         from .signers import signer_for_source
         plugin = signer_for_source(source)
         if plugin is None or not plugin.can_sign() or acct is None:
             warn(dialog, "Cannot sign", f"No known signer for {address}")
+            return None, ""
+        if family not in plugin.families:
+            # e.g. a Ledger: its Ethereum app can't sign a Tron transaction.
+            warn(dialog, "Cannot sign",
+                 f"{plugin.display_name} accounts can't sign {family.title()} "
+                 "transactions in qeth yet.")
             return None, ""
         signer = plugin.make_signer(self.store, account=acct, ui=interaction)
         if signer is None:

@@ -77,6 +77,9 @@ def test_trx_send_estimates_and_finalises(qtbot):
     assert d.confirm_btn.isEnabled()
     assert "1.1 TRX burned" in d.max_total_lbl.text()
     assert "account is new" in d._activation_lbl.text()
+    # …and the reason is on the always-visible fee line, not only inside
+    # the collapsed "Network resources" section.
+    assert "includes 1 TRX to activate" in d.max_total_lbl.text()
     contract, fee_limit = d.finalised_tron()
     assert contract == TransferContract(d._from_addr, d._parsed_recipient(), 1_500_000)
     assert fee_limit == 0
@@ -88,6 +91,7 @@ def test_trc20_send_is_a_contract_call_with_a_fee_limit(qtbot):
     fee = TronFee(bandwidth=345, bandwidth_burn=0, energy=64285,
                   energy_burn=6_428_500, fee_limit=9_642_751)
     _estimate(d, fee)
+    assert "activate" not in d.max_total_lbl.text()   # no activation, no note
     contract, fee_limit = d.finalised_tron()
     assert isinstance(contract, TriggerSmartContract)
     assert contract.contract.lower() == USDT

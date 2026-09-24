@@ -183,6 +183,12 @@ class _TronFeesMixin:
                 text += f"  ({_format_usd(usd)})"
         else:
             text = "none — staked / free resources cover it"
+        # Activation is the one charge with no EVM counterpart, and 1 TRX can
+        # dwarf the rest — so say it on this always-visible line, not only in
+        # the collapsed resources section.
+        if fee.activation:
+            text += (f"\nincludes {_trx(fee.activation)} TRX to activate the "
+                     "recipient's new account (it has never received TRX)")
         # The fee is paid in TRX whatever is sent — say so when the account
         # can't cover it (warn, like a predicted revert: the node refuses a
         # tx it can't charge at broadcast, so nothing is lost).

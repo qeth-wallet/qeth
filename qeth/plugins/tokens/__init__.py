@@ -41,6 +41,7 @@ from ... import QULONGLONG
 from ...dialog import prompt_text
 from ...alerts import warn
 from ...chain import EthClient, native_amount
+from ...explorer import explorer_url
 from ...formatting import format_balance as _format_balance
 from ...formatting import format_usd as _format_usd
 from ...formatting import transfer_notice
@@ -57,7 +58,7 @@ from ...token_metadata import TokenMetadataCache
 from ...token_discovery import (
     COINGECKO_PLATFORMS, BlockscoutSource, EtherscanV2Source,
     RoutedTokenSource, TokenBalance, TokenListEntry, TokenLists, TokenSource,
-    TopTokens,
+    TopTokens, TronGridSource,
 )
 from .balance_ledger import BalanceLedger
 from .wallet_cache import CachedToken, CachedWallet, WalletCache
@@ -441,11 +442,16 @@ class TokensPlugin(Plugin):
         # chains it serves. Both lookups consult the store at
         # call time so changes to the key take effect on the very
         # next refresh without re-instantiating either source.
-        self._token_source = RoutedTokenSource(
-            EtherscanV2Source(lambda: self._store.etherscan_api_key),
-            BlockscoutSource(),
-        )
         self._token_lists = TokenLists()
+        # Tron has neither explorer: its holdings come from TronGrid, routed
+        # to only when the EVM pair doesn't support the chain.
+        self._token_source = RoutedTokenSource(
+            RoutedTokenSource(
+                EtherscanV2Source(lambda: self._store.etherscan_api_key),
+                BlockscoutSource(),
+            ),
+            TronGridSource(self._token_lists.get),
+        )
         # Top-tokens-by-market-cap head: a bounded set we always multicall
         # balanceOf over, so a held major shows even when the indexer's
         # per-holder list omits it (Blockscout has been observed to drop a
@@ -683,11 +689,9 @@ class TokensPlugin(Plugin):
             return
         chain = self.host.current_chain()
         addr = self.host.selected_address
-        if not chain.explorer or not addr:
-            return
-        base = chain.explorer.rstrip("/")
-        url = f"{base}/token/{contract}?a={addr}"
-        QDesktopServices.openUrl(QUrl(url))
+        url = explorer_url(chain, "token", contract, ref_addr=addr)
+        if url and addr:
+            QDesktopServices.openUrl(QUrl(url))
 
     def focus_widget(self):
         return getattr(self._panel, "table", None)

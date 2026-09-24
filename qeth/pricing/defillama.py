@@ -12,6 +12,8 @@ from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 
 from .. import USER_AGENT
+from ..address import codec_for, tron_to_hex
+from ..chains import TRON
 from .base import Price, PriceSource
 from .native import load_native_coin_ids, native_coingecko_id
 
@@ -44,6 +46,9 @@ DEFILLAMA_CHAIN_SLUGS: dict[int, str] = {
     # Robinhood Chain (chain id 4663) — slug verified against coins.llama.fi
     # on 2026-09-20 (it quotes USDG, the chain's main stablecoin).
     4663:  "robinhood",
+    # Tron — keys take the base58 T… address (``tron:0x…`` returns nothing;
+    # probed 2026-09-24), converted from/to qeth's hex in fetch().
+    728126428: "tron",
 }
 
 
@@ -81,10 +86,12 @@ class DefiLlamaPrices(PriceSource):
             if native_id:
                 keys.append(f"coingecko:{native_id}")
         if slug:
+            codec = codec_for(chain)
             for c in contracts:
                 c = c.lower()
                 if c.startswith("0x") and len(c) == 42:
-                    keys.append(f"{slug}:{c}")
+                    # EVM keys take the hex as-is; Tron's take its T… form.
+                    keys.append(f"{slug}:{c if chain.family != TRON else codec.display(c)}")
         if not keys:
             return {}
 
@@ -112,5 +119,10 @@ class DefiLlamaPrices(PriceSource):
                     out[""] = Price(price, ts, self.name, conf)
                 elif ":" in k:
                     _, addr = k.split(":", 1)
+                    if chain.family == TRON:
+                        hex_addr = tron_to_hex(addr)
+                        if hex_addr is None:
+                            continue
+                        addr = hex_addr
                     out[addr.lower()] = Price(price, ts, self.name, conf)
         return out

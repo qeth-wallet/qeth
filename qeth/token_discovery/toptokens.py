@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import cast
 
 from .. import USER_AGENT
+from ..address import tron_to_hex
 from ..fsatomic import atomic_write_text
 
 log = logging.getLogger("qeth.token_discovery.toptokens")
@@ -46,6 +47,7 @@ COINGECKO_PLATFORMS: dict[int, str] = {
     100:   "xdai",
     56:    "binance-smart-chain",
     4663:  "robinhood",
+    728126428: "tron",     # platform addresses are base58 T… — converted below
 }
 
 _MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
@@ -134,6 +136,8 @@ def fetch_top_tokens(
         sym = symbols.get(coin_id, "")
         for cid, slug in slugs.items():
             addr = plats.get(slug)
+            if isinstance(addr, str) and not addr.startswith("0x"):
+                addr = tron_to_hex(addr)
             if isinstance(addr, str) and addr.startswith("0x") and len(addr) == 42:
                 out[cid].append(TopToken(address=addr.lower(), symbol=sym))
     return out

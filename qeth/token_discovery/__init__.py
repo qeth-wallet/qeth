@@ -6,6 +6,7 @@
 - ``tokenlists``: curated whitelists (Uniswap / CoinGecko / Curve / 1inch),
   merged + disk-cached; a token must be recognised to survive discovery.
 - ``toptokens``: the top-by-market-cap head, a candidate source of its own.
+- ``tron``: TRC-20 holdings of a Tron account, from TronGrid's indexer.
 - ``own_history``: tokens the user obtained through their OWN transactions
   (vault/LP tokens), reconstructed from the local tx + activity caches.
 """
@@ -35,6 +36,7 @@ from .tokenlists import (
     UniswapDefault,
 )
 from .toptokens import COINGECKO_PLATFORMS, TopToken, TopTokens, fetch_top_tokens
+from .tron import TronGridSource
 # own_history LAST: it pulls in transactions_cache → transactions, which imports
 # BLOCKSCOUT_INSTANCES back from this package — so `sources` must be bound first.
 from .own_history import discover_own_tokens
@@ -50,6 +52,8 @@ __all__ = [
     "Curve", "OneInch", "UniswapDefault",
     # toptokens
     "TopTokens", "TopToken", "COINGECKO_PLATFORMS", "fetch_top_tokens",
+    # Tron
+    "TronGridSource",
     # own-history discovery
     "discover_own_tokens",
 ]

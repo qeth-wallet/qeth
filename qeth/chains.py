@@ -51,6 +51,10 @@ class Chain:
     # ``rpc_url``.
     api_url: str = ""
     api_fallbacks: tuple[str, ...] = ()
+    # Multicall3, when it isn't at the canonical 0xcA11… CREATE2 address (the
+    # TVM derives contract addresses differently, so Tron's is elsewhere).
+    # Empty = canonical.
+    multicall_address: str = ""
 
     @property
     def is_evm(self) -> bool:
@@ -107,4 +111,18 @@ DEFAULT_CHAINS: list[Chain] = [
           fallback_rpcs=("https://robinhood-rpc.publicnode.com",
                          "https://rpc.mainnet.chain.robinhood.com"),
           ws_url=("wss://robinhood.drpc.org", "wss://robinhood-rpc.publicnode.com")),
+    # Tron — the one non-EVM family (qeth/tron, docs/tron.md): T… addresses,
+    # protobuf transactions built locally and broadcast over the full-node
+    # HTTP API (``api_url``; keyless TronGrid allows ~3 req/s, so PublicNode
+    # leads). ``rpc_url`` is Tron's read-only Ethereum JSON-RPC: eth_getBalance
+    # (in sun), eth_call and Multicall3 — deployed at its own Tron address,
+    # TEazPvZwDjDtFeJupyo7QunvnrnUjPH8ED — all work there, so balances and
+    # token metadata read through EthClient; sending never does. No ws.
+    Chain("Tron",     728126428, "https://tron-rpc.publicnode.com/jsonrpc", "TRX", "https://tronscan.org", "tron",
+          eip1559=False,
+          fallback_rpcs=("https://api.trongrid.io/jsonrpc",),
+          family=TRON, native_decimals=6,
+          api_url="https://tron-rpc.publicnode.com",
+          api_fallbacks=("https://api.trongrid.io",),
+          multicall_address="0x32a4F47A74a6810BD0bF861CABAb99656a75DE9E"),
 ]

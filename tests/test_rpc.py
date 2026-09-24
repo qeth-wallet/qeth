@@ -380,7 +380,9 @@ def test_chains_changed_broadcast_carries_the_chain_list():
     _run(server._broadcast_event("chainsChanged", server._ethereum_chains()))
     (sent_sub, chains), = _pushes(ws)
     assert sent_sub == sub
-    assert [c["chainId"] for c in chains] == [c.chain_id for c in DEFAULT_CHAINS]
+    # EVM chains only — a dapp can't use Tron through EIP-1193.
+    assert [c["chainId"] for c in chains] == [c.chain_id for c in DEFAULT_CHAINS
+                                              if c.is_evm]
 
 
 class TestOurOwnExtensionNeverMakesQethCallTheChain:

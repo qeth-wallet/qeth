@@ -61,6 +61,7 @@ from .contract_identity import (
     ContractIdentityCache, ContractIdentitySource, describe_identity,
 )
 from ...chain import EthClient, native_amount, wei_to_ether
+from ...explorer import explorer_url
 from .live_watcher import LiveWatcher, PendingTx
 from ...signing import ReplacementFloor, SignerError, SigningRequest
 from ...formatting import format_balance, transfer_notice
@@ -3289,10 +3290,9 @@ class TransactionListPanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _open_in_explorer(self, tx: Transaction) -> None:
-        if self._chain is None or not self._chain.explorer:
-            return
-        url = f"{self._chain.explorer.rstrip('/')}/tx/{tx.hash}"
-        QDesktopServices.openUrl(QUrl(url))
+        url = explorer_url(self._chain, "tx", tx.hash)
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     def _on_context_menu(self, pos) -> None:
         # Resolve the row, not the item: the justify gap columns hold no
@@ -4574,24 +4574,12 @@ class TransactionDetailsDialog(Dialog):
 
     def _explorer_url(self, kind: str, addr: str,
                        *, ref_addr: str | None = None) -> str | None:
-        """Build an Etherscan-family URL: ``tx``/``address``/``token``.
+        """Build an explorer URL: ``tx``/``address``/``token``.
         ``token`` with ``ref_addr`` appends ``?a=<ref>`` — Etherscan's
         convention for filtering the token page to a specific holder
         (so clicking a token in the To row jumps straight to the
         sender's transfer history for that token)."""
-        if not self.chain.explorer or not addr:
-            return None
-        base = self.chain.explorer.rstrip("/")
-        if kind == "tx":
-            return f"{base}/tx/{addr}"
-        if kind == "address":
-            return f"{base}/address/{addr}"
-        if kind == "token":
-            url = f"{base}/token/{addr}"
-            if ref_addr:
-                url += f"?a={ref_addr}"
-            return url
-        return None
+        return explorer_url(self.chain, kind, addr, ref_addr=ref_addr)
 
     # --- "To:" row composition ------------------------------------------
 
@@ -5352,19 +5340,7 @@ class _TxComposerDialog(_EventPreviewMixin, Dialog):
 
     def _explorer_url(self, kind: str, addr: str,
                        *, ref_addr: str | None = None) -> str | None:
-        if not self.chain.explorer or not addr:
-            return None
-        base = self.chain.explorer.rstrip("/")
-        if kind == "tx":
-            return f"{base}/tx/{addr}"
-        if kind == "address":
-            return f"{base}/address/{addr}"
-        if kind == "token":
-            url = f"{base}/token/{addr}"
-            if ref_addr:
-                url += f"?a={ref_addr}"
-            return url
-        return None
+        return explorer_url(self.chain, kind, addr, ref_addr=ref_addr)
 
     def _build_token_header_row(self, asset: dict, mono: QFont) -> QWidget:
         """Icon + "SYMBOL (linked-contract-addr)" — same treatment

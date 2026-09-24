@@ -25,6 +25,7 @@ from typing import ClassVar
 from collections.abc import Iterable
 
 from .. import USER_AGENT
+from ..address import tron_to_hex
 from ..fsatomic import atomic_write_bytes
 
 log = logging.getLogger("qeth.token_discovery.tokenlists")
@@ -131,12 +132,16 @@ def _fetch_json(url: str, cache_path: Path, ttl: float, timeout: float):
     return None
 
 
-def _from_tokenlists_schema(data: dict, source_name: str) -> Iterable[TokenListEntry]:
-    """Iterate entries from the tokenlists.org JSON schema."""
+def _from_tokenlists_schema(data: dict, source_name: str,
+                            chain_id: int | None = None) -> Iterable[TokenListEntry]:
+    """Iterate entries from the tokenlists.org JSON schema. ``chain_id`` fills
+    in for entries without one (CoinGecko's Tron list has ``chainId: null``).
+    A Tron ``T…`` address is converted to qeth's internal hex form."""
     for t in data.get("tokens", []):
         try:
-            addr = str(t.get("address", "")).lower()
-            cid = int(t.get("chainId") or 0)
+            raw = str(t.get("address", ""))
+            addr = raw.lower() if raw.startswith("0x") else (tron_to_hex(raw) or "").lower()
+            cid = int(t.get("chainId") or chain_id or 0)
             if not addr.startswith("0x") or len(addr) != 42 or cid == 0:
                 continue
             yield TokenListEntry(
@@ -194,6 +199,8 @@ class CoinGeckoPerChain(TokenListSource):
         # token must pass to be shown at all — so without an entry the chain's
         # tokens stay invisible even once discovery returns them.
         4663:  "robinhood",
+        # Tron: base58 addresses and ``chainId: null`` (see the parser).
+        728126428: "tron",
     }
 
     def fetch_entries(self, cache_dir, ttl, timeout):
@@ -201,7 +208,7 @@ class CoinGeckoPerChain(TokenListSource):
             url = f"https://tokens.coingecko.com/{slug}/all.json"
             data = _fetch_json(url, cache_dir / f"coingecko-{cid}.json", ttl, timeout)
             if data:
-                yield from _from_tokenlists_schema(data, self.name)
+                yield from _from_tokenlists_schema(data, self.name, cid)
 
 
 class Curve(TokenListSource):

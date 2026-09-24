@@ -253,7 +253,9 @@ class LiveWatcher(QThread):
             if cur is not None:
                 chain, account = cur
                 targets[chain.chain_id] = (chain, account)
-        return targets
+        # eth_subscribe exists only on EVM nodes — Tron's JSON-RPC has no
+        # subscriptions (TronGrid serves no ws at all), so polling covers it.
+        return {cid: t for cid, t in targets.items() if t[0].is_evm}
 
     @staticmethod
     async def _cancel(task: "asyncio.Task[None]") -> None:

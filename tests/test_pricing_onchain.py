@@ -55,6 +55,8 @@ class Chain:
 class FakeChain:
     """handlers: {(target_lower, selector_hex): callable(calldata)->bytes|None}"""
 
+    multicall_address = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
     def __init__(self, handlers: dict):
         self.handlers = handlers
         self.calls = 0

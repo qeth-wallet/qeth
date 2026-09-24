@@ -291,6 +291,26 @@ def ref_block(number: int, block_id: str) -> tuple[bytes, bytes]:
     return number.to_bytes(8, "big")[6:8], bid[8:16]
 
 
+# --- calldata ------------------------------------------------------------------
+
+def strip_address_prefixes(calldata: str) -> str:
+    """Calldata (``0x`` hex) with Tron's ``41`` address prefix cleared from
+    every 32-byte argument word that holds one. Some Tron wallets ABI-encode
+    an address as its 21-byte ``41…`` form; the TVM (and old TRC-20s like
+    USDT) mask it back to 20 bytes, but a strict ABI decoder rejects the
+    dirty word — and then a colliding 4-byte signature "wins" the decode
+    (a9059cbb as ``workMyDirefulOwner(uint256,uint256)``). A word of exactly
+    ``00×11 41`` + 20 bytes is a Tron address, not a plausible amount."""
+    if not calldata.startswith("0x") or len(calldata) < 10:
+        return calldata
+    head, body = calldata[:10], calldata[10:]
+    words = [body[i:i + 64] for i in range(0, len(body), 64)]
+    prefix = "00" * 11 + "41"
+    return head + "".join(
+        "00" * 12 + w[24:] if len(w) == 64 and w.lower().startswith(prefix) else w
+        for w in words)
+
+
 # --- signatures ------------------------------------------------------------------
 
 def signature_v27(signature: bytes) -> bytes:

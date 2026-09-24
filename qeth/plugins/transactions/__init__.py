@@ -67,6 +67,7 @@ from ...tron.history import TronGridTransactionSource
 from ...tron.tx import TransferContract as TronTransferContract
 from ...tron.tx import decode_raw as decode_tron_raw
 from ...tron.tx import read_fields as read_tron_fields
+from ...tron.tx import strip_address_prefixes as strip_tron_address_prefixes
 from ...explorer import explorer_url
 from .live_watcher import LiveWatcher, PendingTx
 from ...signing import (
@@ -4258,8 +4259,10 @@ def _make_identity_row(*, to_addr: str | None, chain,
     """Build an identity-row label and a ``kick()`` that fills it via a
     background ContractIdentityWorker. ``mode`` picks the familiarity verb
     ("interact" / "send" / "approve" — see ContractIdentityWorker). Returns
-    ``(None, None)`` when there's no address to identify."""
-    if not to_addr:
+    ``(None, None)`` when there's no address to identify — or the chain has
+    no identity sources (Etherscan / Blockscout tags are EVM-only; on Tron
+    the row would only ever say "add an Etherscan key")."""
+    if not to_addr or not chain.is_evm:
         return None, None
     label = QLabel("")
     # Word wrap on, and DON'T override the size policy — a wrapped QLabel
@@ -4428,8 +4431,10 @@ class TransactionDetailsDialog(Dialog):
         form.addRow("Date:", self._value_label(dt.strftime("%c")))
         form.addRow("Timestamp:", self._value_label(f"{tx.timestamp} (unix)"))
         form.addRow("Block:", self._value_label(str(tx.block_number)))
+        # Tron writes txids without 0x (Tronscan, TronLink) — show it so.
+        shown_hash = tx.hash if chain.is_evm else tx.hash.removeprefix("0x")
         form.addRow("Hash:",
-                    self._link_label(tx.hash,
+                    self._link_label(shown_hash,
                                      self._explorer_url("tx", tx.hash),
                                      monospace=True))
         form.addRow("From:",
@@ -4484,9 +4489,12 @@ class TransactionDetailsDialog(Dialog):
         if tx.fee is not None and not tx.pending:
             # The chain reported the fee itself (Tron: burned bandwidth +
             # energy) — there's no gas / gas price to show.
-            form.addRow("Fee paid:", self._value_label(_native_value_with_usd(
-                tx.fee, chain.symbol, self._native_price_usd,
-                decimals=chain.native_decimals)))
+            form.addRow("Fee paid:", self._value_label(
+                _native_value_with_usd(tx.fee, chain.symbol,
+                                       self._native_price_usd,
+                                       decimals=chain.native_decimals)
+                if tx.fee else
+                "none — staked / free resources covered it"))
         elif not tx.pending and tx.gas_used > 0:
             form.addRow("Gas used:",
                         self._value_label(f"{tx.gas_used:,}"))
@@ -4587,11 +4595,18 @@ class TransactionDetailsDialog(Dialog):
             logs_worker.ready.connect(self._events.set_logs)
             self._start_worker(logs_worker)
 
+    def _calldata(self) -> str:
+        """The tx's calldata as a decoder should read it — on Tron with the
+        21-byte ``41…`` address words some wallets write normalised."""
+        if self.chain.is_evm:
+            return self.tx.input_data
+        return strip_tron_address_prefixes(self.tx.input_data)
+
     def _on_abi_ready(self, abi) -> None:
         decoded = None
         if isinstance(abi, list):
             decoded = decode_call(
-                abi, self.tx.input_data, address=self.tx.to_addr,
+                abi, self._calldata(), address=self.tx.to_addr,
             )
         if decoded is not None:
             self._render_decoded_call(decoded)
@@ -4601,7 +4616,7 @@ class TransactionDetailsDialog(Dialog):
         # 4-byte signature DB like an explorer.
         self._abi_state = abi
         self.decoded_view.setPlainText("(decoding via signature database…)")
-        worker = SignatureFetchWorker(self.tx.input_data)
+        worker = SignatureFetchWorker(self._calldata())
         worker.ready.connect(self._on_signature_ready)
         self._start_worker(worker)
 
@@ -4648,6 +4663,8 @@ class TransactionDetailsDialog(Dialog):
             self._render_decoded_call(self._decoded_tree)
 
     def _render_decoded_call(self, decoded) -> None:
+        if not self.chain.is_evm:
+            decoded = _addresses_in_family_form(decoded, self.chain)
         self._resolve_batch_targets(decoded)
         # If the called contract is on the curated whitelist, pass
         # its (symbol, decimals) so the renderer can annotate token-
@@ -4882,6 +4899,21 @@ def _format_usd(usd) -> str:
     if usd >= Decimal("0.01"):
         return f"{usd:.4f} USD"
     return f"{usd:.6f} USD"
+
+
+def _addresses_in_family_form(node, chain):
+    """A decoded-call tree with every ``address`` value in the chain's own
+    form (T… on Tron) — the decoder speaks 0x hex, the user doesn't."""
+    codec = codec_for(chain)
+    if isinstance(node, list):
+        return [_addresses_in_family_form(n, chain) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: _addresses_in_family_form(v, chain) if k in ("args", "children", "call")
+           else v for k, v in node.items()}
+    if out.get("type") == "address" and isinstance(out.get("value"), str):
+        out["value"] = codec.display(out["value"])
+    return out
 
 
 def _native_value_with_usd(wei: int, symbol: str, price, *,

@@ -129,3 +129,50 @@ def test_full_history_needs_nonces(nonces, full):
     txs = [Transaction(1, f"0x{i}", 1, 1, n, OWNER, TO, 0, 0, 0, "", "0x", True)
            for i, n in enumerate(nonces)]
     assert _is_full_history(txs) is full
+
+
+# --- decoding Tron calldata ---------------------------------------------------
+
+DIRTY_TRANSFER = ("0xa9059cbb" + "00" * 11 + "41" + TO[2:]
+                  + (5).to_bytes(32, "big").hex())
+
+
+def test_tron_address_words_are_normalised_for_decoding():
+    from qeth.tron.tx import strip_address_prefixes
+    clean = strip_address_prefixes(DIRTY_TRANSFER)
+    assert clean == "0xa9059cbb" + "00" * 12 + TO[2:] + (5).to_bytes(32, "big").hex()
+    assert strip_address_prefixes("0x") == "0x"
+    # A plain amount word is left alone.
+    amt = "0xa9059cbb" + (0x41 << 100).to_bytes(32, "big").hex()
+    assert strip_address_prefixes(amt) == amt
+
+
+def test_the_standard_signature_beats_a_4byte_collision():
+    """a9059cbb is also registered as workMyDirefulOwner(uint256,uint256):
+    the standard transfer must win without asking the database."""
+    from qeth.abi import decode_via_4byte
+
+    def db(url, timeout):
+        raise AssertionError("4byte.directory must not be consulted")
+    clean = "0xa9059cbb" + "00" * 12 + TO[2:] + (5).to_bytes(32, "big").hex()
+    d = decode_via_4byte(clean, transport=db)
+    assert d["function"] == "transfer"
+    assert d["args"][0]["value"].lower() == TO
+
+
+def test_decoded_addresses_render_in_tron_form():
+    from qeth.plugins.transactions import _addresses_in_family_form
+    tree = {"function": "transfer", "args": [
+        {"name": "arg0", "type": "address", "value": TO},
+        {"name": "arg1", "type": "uint256", "value": "5"}]}
+    out = _addresses_in_family_form(tree, CHAIN)
+    assert out["args"][0]["value"] == tron_from_hex(TO)
+    assert out["args"][1]["value"] == "5"
+
+
+def test_no_evm_identity_row_on_tron():
+    from qeth.plugins.transactions import _make_identity_row
+    label, kick = _make_identity_row(
+        to_addr=USDT, chain=CHAIN, identity_source=None, identity_cache=None,
+        my_addresses=[], start_worker=lambda w: None)
+    assert (label, kick) == (None, None)

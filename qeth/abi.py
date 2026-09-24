@@ -514,12 +514,31 @@ def fetch_signatures(selector: str, *, transport=None,
             if isinstance(r, dict) and r.get("text_signature")]
 
 
+# The token standard's own selectors, tried before 4byte.directory: their
+# selectors have registered collisions (a9059cbb is also
+# ``workMyDirefulOwner(uint256,uint256)``), and a uint256 decodes any address
+# word, so the database's first match can be a nonsense name for the most
+# common call there is. Matters wherever no ABI is available (an unverified
+# token, or Tron, which has no ABI source at all).
+_WELL_KNOWN_SIGNATURES = {
+    "0xa9059cbb": "transfer(address,uint256)",
+    "0x095ea7b3": "approve(address,uint256)",
+    "0x23b872dd": "transferFrom(address,address,uint256)",
+}
+
+
 def decode_via_4byte(input_data: str, *, transport=None) -> dict | None:
-    """Last-resort decode when no ABI matched: look the selector up in
-    the 4-byte database and try each candidate signature, returning the
-    first that decodes cleanly."""
+    """Last-resort decode when no ABI matched: the token standard's own
+    signature for its selectors, else look the selector up in the 4-byte
+    database and try each candidate signature, returning the first that
+    decodes cleanly."""
     if not input_data or len(input_data) < 10:
         return None
+    known = _WELL_KNOWN_SIGNATURES.get(input_data[:10].lower())
+    if known is not None:
+        decoded = decode_with_signature(known, input_data)
+        if decoded is not None:
+            return decoded
     for sig in fetch_signatures(input_data[:10], transport=transport):
         decoded = decode_with_signature(sig, input_data)
         if decoded is not None:

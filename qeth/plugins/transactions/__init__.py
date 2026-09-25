@@ -475,7 +475,9 @@ class PendingTxWatcher(QObject):
 
     def _spawn_worker(self, chain, tx) -> None:
         attempts = self._rebroadcast_attempts.get(tx.hash, 0)
-        has_raw = tx.raw_signed is not None
+        # The raw bytes still go to the probe for a dapp's Tron transaction
+        # (its expiration is in them), just never re-pushed.
+        has_raw = tx.raw_signed is not None and tx.rebroadcast
         do_rebroadcast = has_raw and attempts < self.REBROADCAST_MAX_ATTEMPTS
         if (has_raw and not do_rebroadcast
                 and tx.hash not in self._capped_warned):
@@ -1078,6 +1080,32 @@ def _oldest_mined_block(txs: list[Transaction]) -> int | None:
     dropped row carries block 0, and a cursor of 0 pages "older than
     genesis": nothing comes back and the history reads as exhausted."""
     return min((t.block_number for t in txs if t.block_number), default=None)
+
+
+class TronActivityCheckWorker(QThread):
+    """Tron's ``NonceCheckWorker``: there's no nonce, but the account record
+    carries ``latest_opration_time`` (sic — java-tron's spelling), when it
+    last sent anything. Later than the newest transaction we hold → something
+    was sent that we never saw: from another wallet, or a dapp broadcasting
+    what qeth only signed. One cheap full-node read per poll; ``None`` on
+    error (the poll is skipped)."""
+
+    checked = Signal(object, object)   # (key, unix ms | None)
+
+    def __init__(self, chain, address: str, key, parent=None):
+        super().__init__(parent)
+        self._chain = chain
+        self._address = address
+        self._key = key
+
+    def run(self) -> None:
+        try:
+            account = TronClient(self._chain).get_account(self._address)
+        except Exception as e:
+            log.warning("tron activity check failed for %s: %s", self._address, e)
+            self.checked.emit(self._key, None)
+            return
+        self.checked.emit(self._key, int(account.get("latest_opration_time") or 0))
 
 
 class NonceCheckWorker(QThread):
@@ -1844,11 +1872,12 @@ class TransactionsPlugin(Plugin):
         self._insert_pending(pending, chain)
 
     def add_tron_pending(self, tx_hash: str, req: TronSigningRequest, chain,
-                         raw_signed: str) -> None:
+                         raw_signed: str, *, rebroadcast: bool = True) -> None:
         """``add_pending`` for a broadcast Tron transaction: the row is built
         from the transaction's own contract. No nonce (-1 — it orders by its
         broadcast time); ``raw_signed`` (the signed Transaction hex) lets the
-        watcher re-broadcast it and read its expiration."""
+        watcher read its expiration and re-broadcast it — unless
+        ``rebroadcast`` is False (a dapp's transaction, which the dapp sends)."""
         import time
         tx = req.tx
         c = tx.contract
@@ -1872,6 +1901,7 @@ class TransactionsPlugin(Plugin):
             success=True,            # placeholder until the receipt lands
             pending=True,
             raw_signed=raw_signed,
+            rebroadcast=rebroadcast,
         )
         self._insert_pending(pending, chain)
 
@@ -2140,12 +2170,16 @@ class TransactionsPlugin(Plugin):
         if not address:
             return
         chain = self.host.current_chain()
-        if not chain.is_evm:
-            return        # no nonce to compare (Tron's history is refetched)
         key = (chain.chain_id, address.lower())
         if key in self._nonce_in_flight:
             return
         self._nonce_in_flight.add(key)
+        if not chain.is_evm:
+            # No nonce on Tron: the account's last-operation time instead.
+            tron_worker = TronActivityCheckWorker(chain, address, key)
+            tron_worker.checked.connect(self._on_tron_activity)
+            self.host.start_worker(tron_worker)
+            return
         worker = NonceCheckWorker(chain, address, key)
         worker.checked.connect(self._on_external_nonce)
         self.host.start_worker(worker)
@@ -2176,6 +2210,28 @@ class TransactionsPlugin(Plugin):
             return
         if not self._hold_elapsed(self._nonce_hold, key):
             return   # already fetched for this gap; the explorer lags behind
+        self._strike(self._nonce_hold, key)
+        self._exhausted.discard(key)
+        self._fetch_page(key, addr, page=1)
+
+    def _on_tron_activity(self, key, last_op_ms) -> None:
+        """``_on_external_nonce`` for Tron: the account last sent something at
+        ``last_op_ms``. Newer than every row we hold (their times are block
+        times, which follow their own operation's) → re-fetch the newest page.
+        The same back-off hold: TronGrid's index trails the chain by seconds."""
+        self._nonce_in_flight.discard(key)
+        if not last_op_ms or self.host is None:
+            return
+        addr = self.host.selected_address
+        if addr is None or key != (self.host.current_chain().chain_id, addr.lower()):
+            return
+        newest = max((t.timestamp for t in self._hydrated(key) if not t.dropped),
+                     default=0)
+        if last_op_ms // 1000 <= newest:
+            self._nonce_hold.pop(key, None)
+            return
+        if not self._hold_elapsed(self._nonce_hold, key):
+            return
         self._strike(self._nonce_hold, key)
         self._exhausted.discard(key)
         self._fetch_page(key, addr, page=1)

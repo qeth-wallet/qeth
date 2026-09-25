@@ -248,8 +248,17 @@ What's Tron-specific:
   `MainWindow._begin_sign` routes a Tron chain to `_begin_tron_sign` →
   `TronSignAndBroadcastWorker`.
 - **Pending transactions.** `add_tron_pending`. `PendingProbeWorker`'s Tron
-  branch confirms via `gettransactioninfobyid`, re-pushes the signed bytes,
-  and drops a transaction once it's past its expiration.
+  branch confirms via `gettransactioninfobyid`, re-pushes the signed bytes
+  (unless the row's `rebroadcast` is off: a dapp's transaction), and drops a
+  transaction once it's past its expiration.
+- **Transactions sent elsewhere.** On EVM a nonce ahead of the history
+  triggers a re-fetch of the newest page. Tron has no nonce, so opening the
+  tab only paged OLDER history, and a transaction qeth hadn't recorded
+  itself never appeared. `TronActivityCheckWorker` runs on the same 30 s
+  timer. It reads the account's `latest_opration_time` (sic) from
+  `getaccount`, and re-fetches the newest page when that's later than every
+  row held, with the same back-off (TronGrid's index trails the chain by
+  seconds).
 - **Decoding.** Some wallets write addresses in calldata as 21-byte `41…`
   words; they're normalised before decoding
   (`tron.tx.strip_address_prefixes`).
@@ -316,10 +325,10 @@ same code.
     when the estimate exceeds it), any memo, and an expiration countdown;
     TronWeb gives a transaction a minute.
   - `TronSignWorker` signs, checks the recovery, and returns the signature.
-    The dapp broadcasts. When it does so through `tron_node`, qeth
-    recognises the txid and records the pending row (the bridge's
-    `tron_broadcast_seen`). It isn't recorded at signing, because the
-    watcher would re-broadcast a transaction the dapp never sent.
+    The dapp broadcasts it, often through ITS OWN node (sun.io does), so
+    qeth records the pending row at signing with `rebroadcast=False`. The
+    watcher confirms it, or marks it dropped once it expires unsent, but
+    never pushes it itself: a dapp may abandon what it had signed.
 - **Messages.** Hot wallets only (`Signer.sign_tron_message`).
   - `signMessageV2` → `tron_signMessage [hex, 2]` (TIP-191).
   - `trx.sign(hexString)` → version 1, TronWeb's fixed `…\n32` header.

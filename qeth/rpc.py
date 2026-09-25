@@ -1,5 +1,4 @@
 import asyncio
-import collections
 import concurrent.futures
 import json
 import logging
@@ -25,7 +24,7 @@ from .signing import (
 )
 from .tron.client import TRONGRID_INSTANCES
 from .tron.messages import TypedDataError, check_domain_chain, typed_data_digest
-from .tron.tx import decode_raw, read_fields, signed_transaction, txid as tron_txid
+from .tron.tx import decode_raw, txid as tron_txid
 
 log = logging.getLogger("qeth.rpc")
 
@@ -119,10 +118,6 @@ _WALLET_SUBSCRIPTIONS = frozenset({
 _TRON_NODE_PATH = re.compile(r"^(wallet|walletsolidity)/[A-Za-z0-9_]+$")
 _TRON_EVENT_PATH = re.compile(r"^(v1(/[A-Za-z0-9_%\-]+)+|healthcheck)$")
 _TRON_QUERY = re.compile(r"^[A-Za-z0-9_%.=&+:,\-]*$")
-_TRON_BROADCASTS = frozenset({"wallet/broadcasttransaction", "wallet/broadcasthex"})
-# How many dapp transactions qeth remembers having signed, to recognise their
-# broadcast through tron_node (and record them as pending).
-_TRON_SIGNED_KEEP = 64
 
 # EIP-2255 capabilities qeth can grant. qeth has no connect prompt — every
 # origin is handed the default account on request — so "requesting"
@@ -280,10 +275,6 @@ class RpcServer:
         # The family each site last explicitly used (_EVM/_TRON_SITE_METHODS),
         # for qeth_status. This session only.
         self._site_family: dict[str, str] = {}
-        # Dapp Tron transactions qeth signed, by txid (hex): (request, signed
-        # Transaction hex). tron_node spots their broadcast and tells the UI.
-        self._tron_signed: collections.OrderedDict[
-            str, tuple[TronSigningRequest, str]] = collections.OrderedDict()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -1272,7 +1263,8 @@ class RpcServer:
         shows what ``raw_data_hex`` decodes to, and that is what's signed —
         so it must decode, and re-encode to the SAME bytes (nothing qeth
         can't show), and match the txID. Returns the signature (hex, TronWeb's
-        form); the page attaches it and broadcasts — qeth doesn't."""
+        form); the page attaches it and broadcasts — qeth doesn't (the UI
+        records it as pending, watched but never re-sent)."""
         tx = params[0] if params else None
         if not isinstance(tx, dict):
             raise RpcError(-32602, "tron_signTransaction expects [transaction]")
@@ -1301,12 +1293,7 @@ class RpcServer:
                            "connected in qeth")
         req = TronSigningRequest(chain_id=self._tron_chain().chain_id,
                                  tx=decoded, origin=origin)
-        sig_hex = (await self._tron_submit(req)).removeprefix("0x")
-        signed_hex = signed_transaction(raw, [bytes.fromhex(sig_hex)]).hex()
-        self._tron_signed[tx_id] = (req, signed_hex)
-        while len(self._tron_signed) > _TRON_SIGNED_KEEP:
-            self._tron_signed.popitem(last=False)
-        return sig_hex
+        return (await self._tron_submit(req)).removeprefix("0x")
 
     async def _tron_node(self, params: list) -> Any:
         """TronWeb's HTTP provider, through qeth: ``[path, payload, method]``
@@ -1363,27 +1350,8 @@ class RpcServer:
                 if status >= 400:
                     raise RpcError(-32603, f"Tron node HTTP {status}") from None
                 data = body
-            if path in _TRON_BROADCASTS and isinstance(data, dict) and data.get("result"):
-                self._note_tron_broadcast(path, payload)
             return data
         raise RpcError(-32603, last)
-
-    def _note_tron_broadcast(self, path: str, payload: dict) -> None:
-        """A broadcast through tron_node succeeded: if it's a transaction qeth
-        signed for a dapp, have the UI record it as pending."""
-        if path == "wallet/broadcasthex":
-            try:
-                fields = read_fields(bytes.fromhex(str(payload.get("transaction", ""))))
-                raw = next(v for n, _, v in fields if n == 1)
-                tx_id = tron_txid(raw).hex() if isinstance(raw, bytes) else ""
-            except (ValueError, StopIteration):
-                return
-        else:
-            tx_id = str(payload.get("txID") or "").lower().removeprefix("0x")
-        hit = self._tron_signed.pop(tx_id, None)
-        if hit is not None and self.signer_bridge is not None:
-            req, signed_hex = hit
-            self.signer_bridge.tron_broadcast_seen.emit(req, "0x" + signed_hex)
 
     async def _proxy(
         self, method: str, params: list,

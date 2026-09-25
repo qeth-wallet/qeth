@@ -151,9 +151,6 @@ class StubBridge:
 
     def __init__(self):
         self.requests: list = []
-        self.seen: list = []
-        self.tron_broadcast_seen = SimpleNamespace(
-            emit=lambda req, raw: self.seen.append((req, raw)))
 
     async def submit_async(self, req):
         from eth_keys import keys
@@ -319,7 +316,6 @@ def page(driver, backend, dapp_url):
     driver.switch_to.default_content()
     backend.defaults[TRON] = ACCOUNT
     backend.bridge.requests.clear()
-    backend.bridge.seen.clear()
     driver.get(dapp_url + "/")
     _wait_js(driver, "window.qeth && window.tron", timeout=15)
     return driver
@@ -403,8 +399,6 @@ def test_send_trx_is_reviewed_signed_and_broadcast(page, backend):
     from qeth.tron.tx import recover_signer
     sig = bytes.fromhex(sent["signature"][0])
     assert recover_signer(bytes.fromhex(sent["txID"]), sig).lower() == ACCOUNT
-    # …and qeth saw the broadcast (the pending-row hook).
-    assert [q.tx.txid().hex() for q, _ in backend.bridge.seen] == [sent["txID"]]
 
 
 def test_messages_verify_with_tronwebs_own_verifiers(page):

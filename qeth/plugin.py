@@ -313,6 +313,10 @@ class Slot(QWidget):
         if available == was:
             return
         self._tab_bar.setTabVisible(idx, available)
+        # QTabBar doesn't tell the layout its size hint changed, so the row
+        # would keep the bar at its old width: started on Tron (2 tabs), the
+        # 4 tabs back on Ethereum got squeezed behind scroll arrows.
+        self._tab_bar.updateGeometry()
         if available:
             self._unavailable.discard(plugin)
             plugin.on_chain_changed()

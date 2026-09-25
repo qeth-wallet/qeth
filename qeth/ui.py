@@ -62,6 +62,7 @@ from .signing import (
     TronMessageSigningRequest, TronSignAndBroadcastWorker, TronSigningRequest,
     TronSignWorker, TronTypedDataSigningRequest,
 )
+from .tron.tx import signed_transaction
 from .chains import EVM, FAMILIES, TRON
 
 
@@ -103,9 +104,6 @@ class MainWindow(QMainWindow):
         # connected Tron account pushed to qeth's Tron provider.
         self._pushed_accounts: list[str] | None = None
         self._pushed_tron_accounts: list[str] | None = None
-        # Simulated logs of dapp Tron transactions just signed, by tx hash —
-        # the pending row's coins once the dapp broadcasts through qeth.
-        self._tron_dapp_sim_logs: dict[str, list] = {}
         # Tray controller (set by the entry point after install_tray); the
         # fallback sink for desktop notifications. None when there's no tray.
         self._tray = None
@@ -150,10 +148,6 @@ class MainWindow(QMainWindow):
         )
         self.signer_bridge.chain_add_requested.connect(
             self._on_chain_add_requested,
-            type=Qt.ConnectionType.QueuedConnection,
-        )
-        self.signer_bridge.tron_broadcast_seen.connect(
-            self._on_tron_dapp_broadcast,
             type=Qt.ConnectionType.QueuedConnection,
         )
         if self.rpc is not None:
@@ -1102,8 +1096,9 @@ class MainWindow(QMainWindow):
     def _launch_tron_dapp_sign(self, req: TronSigningRequest, fut) -> None:
         """A dapp's TronWeb asks to sign a transaction it built: review it in
         the shared composer (read-only — its bytes are the dapp's), sign, and
-        hand the signature back. The dapp broadcasts; if it does so through
-        qeth's node proxy, ``_on_tron_dapp_broadcast`` records the row."""
+        hand the signature back. The dapp broadcasts it (often through its own
+        node, not qeth's), so the pending row is recorded at signing time —
+        watched, never re-sent (``_on_tron_dapp_signed``)."""
         from .plugins.transactions import TronSignTransactionDialog
         chain = next((c for c in self.store.chains if c.chain_id == req.chain_id), None)
         if chain is None:
@@ -1144,29 +1139,35 @@ class MainWindow(QMainWindow):
 
     def _on_tron_dapp_signed(self, sig_hex: str, dialog, interaction,
                              req: TronSigningRequest, fut) -> None:
-        # The preview's simulated coins, for the pending row the broadcast
-        # (if the dapp makes one through qeth) will add.
-        logs = getattr(dialog, "_logs", None)
-        if logs:
-            self._tron_dapp_sim_logs["0x" + req.tx.txid().hex()] = logs
-            while len(self._tron_dapp_sim_logs) > 16:
-                self._tron_dapp_sim_logs.pop(next(iter(self._tron_dapp_sim_logs)))
+        """Hand the signature to the dapp, and record the transaction as
+        pending with ``rebroadcast=False``: the watcher confirms it — or marks
+        it dropped once it expires unsent — but never pushes it itself, since
+        a dapp may abandon what it had signed. Then, as after a Send, the
+        Transactions tab shows it."""
+        self.signer_bridge.resolve(fut, sig_hex)
+        chain = next((c for c in self.store.chains if c.chain_id == req.chain_id), None)
+        tx_hash = "0x" + req.tx.txid().hex()
+        raw_signed = "0x" + signed_transaction(
+            req.tx.raw_data(), [bytes.fromhex(sig_hex)]).hex()
+        sim_logs = getattr(dialog, "_logs", None)
         interaction.close()
         dialog.accept()
-        self.signer_bridge.resolve(fut, sig_hex)
-
-    def _on_tron_dapp_broadcast(self, req: TronSigningRequest, raw_signed: str) -> None:
-        """A dapp broadcast a transaction qeth signed for it (seen in the RPC
-        server's Tron node proxy): track it as pending, like a Send."""
-        chain = next((c for c in self.store.chains if c.chain_id == req.chain_id), None)
         if chain is None:
             return
-        tx_hash = "0x" + req.tx.txid().hex()
-        self.transactions_plugin.add_tron_pending(tx_hash, req, chain, raw_signed)
-        logs = self._tron_dapp_sim_logs.pop(tx_hash, None)
-        if logs:
-            self.transactions_plugin.note_transfer_legs(
-                chain.chain_id, tx_hash, logs, req.from_addr)
+        try:
+            self.transactions_plugin.add_tron_pending(
+                tx_hash, req, chain, raw_signed, rebroadcast=False)
+            if sim_logs:
+                self.transactions_plugin.note_transfer_legs(
+                    chain.chain_id, tx_hash, sim_logs, req.from_addr)
+        except Exception:
+            import logging
+            logging.getLogger("qeth.ui").exception("add_tron_pending failed")
+        chain_idx = self.chain_combo.findData(chain.chain_id)
+        if chain_idx >= 0 and chain_idx != self.chain_combo.currentIndex():
+            self.chain_combo.setCurrentIndex(chain_idx)
+        self.wallets_plugin.select_address(req.from_addr)
+        self.right_slot.set_active(self.transactions_plugin)
 
     def open_replace_tx(self, tx, cancel: bool) -> None:
         """Speed up (or cancel) a pending tx by re-signing the SAME nonce

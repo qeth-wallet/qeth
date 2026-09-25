@@ -83,6 +83,10 @@ class Transaction:
     # it directly rather than as gas × price — Tron's burned bandwidth +
     # energy (+ activation). None on EVM rows (fee = gas_used × gas_price).
     fee: int | None = None
+    # Local-only: may the watcher re-push ``raw_signed``? False for a dapp's
+    # Tron transaction: qeth only signed it, and the dapp broadcasts it (or
+    # abandons it) — qeth watches it confirm or expire, never sends it itself.
+    rebroadcast: bool = True
 
     @property
     def order_key(self) -> int:

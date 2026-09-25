@@ -212,10 +212,7 @@ def test_other_signers_refuse_tron_messages():
 class _Bridge:
     def __init__(self, answer=None, error=None):
         self.requests: list = []
-        self.seen: list = []
         self._answer, self._error = answer, error
-        self.tron_broadcast_seen = SimpleNamespace(
-            emit=lambda req, raw: self.seen.append((req, raw)))
 
     async def submit_async(self, req):
         self.requests.append(req)
@@ -286,8 +283,6 @@ class TestSignTransaction:
         assert isinstance(req, TronSigningRequest)
         assert req.tx == tx and req.origin == "https://dapp.example"
         assert recover_signer(tx.txid(), bytes.fromhex(sig)).lower() == ACCOUNT
-        # Remembered, to recognise the dapp's broadcast.
-        assert tx.txid().hex() in s._tron_signed
 
     @pytest.mark.parametrize("wire, code, match", [
         (lambda tx: _wire(tx, signature=["00"]), -32602, "already signed"),
@@ -428,32 +423,6 @@ class TestNodeProxy:
         code, seen = self._run(fn)
         assert code == -32601 and seen == []
 
-    def test_a_signed_transactions_broadcast_is_noticed(self):
-        bridge = _Bridge()
-        tx = _tx()
-
-        async def fn(s):
-            sig = await s._dispatch("tron_signTransaction", [_wire(tx)], origin="https://d.example")
-            signed = signed_transaction(tx.raw_data(), [bytes.fromhex(sig)])
-            await s._dispatch("tron_node", ["wallet/broadcasthex",
-                                            {"transaction": signed.hex()}, "post"])
-            return signed
-        signed, _ = self._run(fn, bridge=bridge)
-        [(req, raw)] = bridge.seen
-        assert req.tx == tx and raw == "0x" + signed.hex()
-
-    def test_the_json_broadcast_form_too_and_only_once(self):
-        bridge = _Bridge()
-        tx = _tx()
-
-        async def fn(s):
-            sig = await s._dispatch("tron_signTransaction", [_wire(tx)])
-            body = {**_wire(tx), "signature": [sig]}
-            for _ in range(2):          # a dapp re-broadcasting: one pending row
-                await s._dispatch("tron_node", ["wallet/broadcasttransaction", body, "post"])
-        self._run(fn, bridge=bridge)
-        assert len(bridge.seen) == 1
-
 
 def test_accounts_changed_is_a_wallet_subscription():
     from qeth import rpc
@@ -558,15 +527,73 @@ def test_a_tron_connect_is_pushed_to_the_tron_provider(mainwindow, monkeypatch):
     assert pushed == [[ACCOUNT_B58]]
 
 
-def test_a_seen_dapp_broadcast_becomes_a_pending_row(mainwindow, monkeypatch):
+def test_a_signed_dapp_transaction_is_pending_but_never_resent(mainwindow, monkeypatch):
+    """Recorded at signing (a dapp may broadcast through its own node, where
+    qeth never sees it), with rebroadcast off — qeth watches, never sends."""
+    from unittest.mock import MagicMock as _MM
     added = []
     monkeypatch.setattr(mainwindow.transactions_plugin, "add_tron_pending",
-                        lambda *a: added.append(a))
+                        lambda *a, **k: added.append((a, k)))
     req = TronSigningRequest(TRON_CHAIN.chain_id, _tx())
-    mainwindow._on_tron_dapp_broadcast(req, "0xabcd")
-    [(tx_hash, r, chain, raw)] = added
-    assert tx_hash == "0x" + req.tx.txid().hex() and raw == "0xabcd"
-    assert chain.chain_id == TRON_CHAIN.chain_id
+    sig = _sig(req.tx.txid())[2:]
+    fut = _MM()
+    mainwindow._on_tron_dapp_signed(sig, _MM(), _MM(), req, fut)
+    [((tx_hash, r, chain, raw), kw)] = added
+    assert tx_hash == "0x" + req.tx.txid().hex() and kw == {"rebroadcast": False}
+    assert raw == "0x" + signed_transaction(req.tx.raw_data(), [bytes.fromhex(sig)]).hex()
+    assert mainwindow.right_slot.active() is mainwindow.transactions_plugin
+
+
+def test_the_watcher_never_resends_a_dapps_transaction(mainwindow, monkeypatch):
+    import qeth.plugins.transactions as txp
+    from qeth.transactions import Transaction
+    made = []
+
+    class Probe:
+        def __init__(self, chain, h, frm, nonce, raw, rebroadcast):
+            made.append((raw, rebroadcast))
+            self.confirmed = self.dropped = self.still_pending = self.failed = _Sig()
+    monkeypatch.setattr(txp, "PendingProbeWorker", Probe)
+    monkeypatch.setattr(mainwindow, "start_worker", lambda w: None)
+    watcher = mainwindow.transactions_plugin._pending_watcher
+    for rb in (True, False):
+        row = Transaction(TRON_CHAIN.chain_id, f"0x{int(rb)}", 0, 1, -1, ACCOUNT, TO, 0,
+                          0, 0, "", "0x", True, pending=True, raw_signed="0xab",
+                          rebroadcast=rb)
+        watcher._spawn_worker(TRON_CHAIN, row)
+    # Both get the bytes (the expiration is in them); only ours is re-pushed.
+    assert made == [("0xab", True), ("0xab", False)]
+
+
+class _Sig:
+    def connect(self, *_a):
+        pass
+
+
+def test_tron_history_catches_up_with_the_accounts_last_operation(mainwindow, monkeypatch):
+    """Tron's nonce poll: the account's latest_opration_time newer than every
+    row we hold → the newest page is re-fetched (a tx sent elsewhere)."""
+    from qeth.transactions import Transaction
+    plugin = mainwindow.transactions_plugin
+    key = (TRON_CHAIN.chain_id, ACCOUNT)
+    old = Transaction(TRON_CHAIN.chain_id, "0xold", 5, 1_790_000_000, -1, ACCOUNT, TO,
+                      0, 0, 0, "", "0x", True)
+    plugin._cache[key] = [old]
+    monkeypatch.setattr(type(mainwindow), "selected_address", property(lambda self: ACCOUNT))
+    monkeypatch.setattr(mainwindow, "current_chain", lambda: TRON_CHAIN)
+    started = []
+    monkeypatch.setattr(mainwindow, "start_worker", started.append)
+    plugin._poll_external_nonce()                             # the 30 s timer's tick
+    from qeth.plugins.transactions import TronActivityCheckWorker
+    assert [type(w) for w in started] == [TronActivityCheckWorker]
+    fetched = []
+    monkeypatch.setattr(plugin, "_fetch_page", lambda k, a, page, **kw: fetched.append(k))
+    plugin._on_tron_activity(key, 1_790_000_000 * 1000)       # that same tx
+    assert fetched == []
+    plugin._on_tron_activity(key, 1_790_000_100 * 1000)       # a newer one
+    assert fetched == [key]
+    plugin._on_tron_activity(key, 1_790_000_100 * 1000)       # within the back-off
+    assert fetched == [key]
 
 
 # --- qeth_status (the connectors' status views) ----------------------------------

@@ -486,11 +486,6 @@ class SignerBridge(QObject):
     # dict carrying chain_id / name / rpc_url / symbol / explorer /
     # origin for the confirmation dialog.
     chain_add_requested = Signal(object, object)
-    # (TronSigningRequest, signed Transaction hex) — a dapp broadcast, through
-    # qeth's node proxy, a Tron transaction qeth signed for it. The UI records
-    # it as pending then (not at signing: a dapp that never broadcasts must not
-    # get a row the watcher would re-broadcast).
-    tron_broadcast_seen = Signal(object, str)
 
     async def submit_async(self, req) -> str:
         """Called from the aiohttp event loop. Emits the signal

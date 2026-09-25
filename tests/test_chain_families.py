@@ -163,6 +163,41 @@ class TestSlotAvailability:
         assert slot.active() is a
         assert slot.available_plugins() == [a]
 
+    def test_the_tab_bar_regrows_when_hidden_tabs_come_back(self, qtbot):
+        """Started with tabs hidden (qeth launched on Tron), the tab row laid
+        the bar out narrow; showing them again must widen it — QTabBar doesn't
+        signal its new size hint on its own, and the returning tabs ended up
+        squeezed behind scroll arrows."""
+        from unittest.mock import MagicMock
+        from PySide6.QtWidgets import QApplication, QWidget
+        from qeth.plugin import Plugin, Slot
+
+        class P(Plugin):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+                self._w = QWidget()
+
+            def widget(self):
+                return self._w
+
+        slot = Slot()
+        qtbot.addWidget(slot)
+        tabs = [P(n) for n in ("Tokens", "Transactions", "ENS", "Approvals")]
+        for t in tabs:
+            slot.add_plugin(t, MagicMock())
+        for t in tabs[2:]:
+            slot.set_plugin_available(t, False)
+        slot.resize(1000, 300)
+        slot.show()
+        qtbot.waitExposed(slot)
+        bar = slot._tab_bar
+        narrow = bar.width()
+        for t in tabs[2:]:
+            slot.set_plugin_available(t, True, "0xabc")
+        QApplication.processEvents()          # the layout request
+        assert bar.width() >= bar.sizeHint().width() > narrow
+
 
 class TestMainWindowOnTron:
     @pytest.fixture

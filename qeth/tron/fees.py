@@ -20,6 +20,7 @@ whatever its resources don't cover (java-tron ``BandwidthProcessor`` /
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from .tx import (
     Contract, TransferContract, TriggerSmartContract, TronTx, ref_block,
     signed_transaction,
 )
+
+log = logging.getLogger("qeth.tron.fees")
 
 # Energy headroom on fee_limit over the simulated need: the dynamic-energy
 # factor can move at the 6-hourly maintenance, and running out of energy
@@ -82,8 +85,11 @@ class TronFee:
     """What a transaction will cost, in sun unless noted."""
     bandwidth: int            # bytes it will consume
     bandwidth_burn: int       # burned for bandwidth (0 if staked/free covers it)
-    energy: int = 0           # estimated energy units (contract calls)
-    energy_burn: int = 0      # burned for energy staked energy doesn't cover
+    energy: int = 0           # estimated energy units (contract calls), in total
+    energy_burn: int = 0      # burned for the caller's share staked energy doesn't cover
+    # The part of ``energy`` the contract's deployer pays (Tron's energy
+    # sharing — a dapp's "energy subsidy"; see ``deployer_energy_share``).
+    energy_by_contract: int = 0
     activation: int = 0       # creating the recipient account
     memo_fee: int = 0
     fee_limit: int = 0        # the cap to put on the tx (contract calls)
@@ -111,6 +117,33 @@ def _bandwidth_bytes(contract: Contract, fee_limit: int, memo: bytes) -> int:
     return len(signed_transaction(probe.raw_data(), [bytes(65)])) + 64
 
 
+def deployer_energy_share(client: TronClient, contract: TriggerSmartContract,
+                          energy: int) -> int:
+    """The energy of a call to ``contract`` that its DEPLOYER pays — java-tron's
+    energy sharing, as ``ReceiptCapsule.payEnergyBill`` settles it: the
+    deployer covers ``(100 - consume_user_resource_percent)%`` of the total,
+    capped by the contract's ``origin_energy_limit`` and by the energy the
+    deployer has staked; the caller pays the rest. SunSwap's router is set to
+    1% — its users pay a hundredth of a swap's energy (the dynamic-energy
+    penalty of USDT included). Both fields are proto3: absent means 0 (a 0%
+    contract's deployer pays it all; a 0 limit means it pays nothing).
+    Best-effort: 0 (the caller pays everything) when the node can't say."""
+    try:
+        info = client.get_contract(contract.contract)
+        origin = str(info.get("origin_address") or "")
+        percent = int(info.get("consume_user_resource_percent", 0) or 0)
+        limit = int(info.get("origin_energy_limit", 0) or 0)
+        if (percent >= 100 or not limit or len(origin) != 42
+                or origin[2:].lower() == contract.owner[2:].lower()):
+            return 0
+        res = client.account_resources("0x" + origin[2:])
+    except TronError as e:
+        log.info("energy sharing of %s unknown: %s", contract.contract, e)
+        return 0
+    left = max(0, int(res.get("EnergyLimit", 0)) - int(res.get("EnergyUsed", 0)))
+    return min(energy * (100 - percent) // 100, limit, left)
+
+
 def estimate_fee(client: TronClient, contract: Contract, *,
                  memo: bytes = b"") -> TronFee:
     """Estimate what ``contract`` will cost its owner right now. Raises
@@ -126,14 +159,17 @@ def estimate_fee(client: TronClient, contract: Contract, *,
     staked_bw = int(res.get("NetLimit", 0)) - int(res.get("NetUsed", 0))
     free_bw = int(res.get("freeNetLimit", 0)) - int(res.get("freeNetUsed", 0))
 
-    energy = energy_burn = fee_limit = 0
+    energy = energy_burn = fee_limit = by_contract = 0
     if isinstance(contract, TriggerSmartContract):
         sim = client.trigger_constant(owner, contract.contract, contract.data,
                                       contract.call_value)
         energy = int(sim.get("energy_used", 0))
+        by_contract = deployer_energy_share(client, contract, energy)
         staked_energy = int(res.get("EnergyLimit", 0)) - int(res.get("EnergyUsed", 0))
         price = params["getEnergyFee"]
-        energy_burn = max(0, energy - max(0, staked_energy)) * price
+        energy_burn = max(0, energy - by_contract - max(0, staked_energy)) * price
+        # The cap stays on the TOTAL: should the deployer's energy run out
+        # before the call lands, the caller pays all of it.
         fee_limit = min(max(int(energy * price * FEE_LIMIT_HEADROOM) + 1,
                             MIN_FEE_LIMIT),
                         params["getMaxFeeLimit"])
@@ -149,7 +185,7 @@ def estimate_fee(client: TronClient, contract: Contract, *,
         bandwidth_burn = size * params["getTransactionFee"]
     return TronFee(
         bandwidth=size, bandwidth_burn=bandwidth_burn, energy=energy,
-        energy_burn=energy_burn, activation=activation,
+        energy_burn=energy_burn, energy_by_contract=by_contract, activation=activation,
         memo_fee=params["getMemoFee"] if memo else 0, fee_limit=fee_limit)
 
 

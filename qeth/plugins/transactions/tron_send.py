@@ -163,8 +163,17 @@ class _TronFeesMixin:
             return f" — burns {_trx(sun)} TRX" if sun else " — covered"
         self._bandwidth_lbl.setText(
             f"{fee.bandwidth:,} bytes{burn(fee.bandwidth_burn)}")
-        self._energy_lbl.setText(
-            f"{fee.energy:,}{burn(fee.energy_burn)}" if fee.energy else "none")
+        if not fee.energy:
+            energy = "none"
+        elif fee.energy_by_contract:
+            # A dapp's "energy subsidy" (Tron's energy sharing): its contract
+            # pays most of the call — often the dynamic-energy penalty too.
+            yours = fee.energy - fee.energy_by_contract
+            energy = (f"{fee.energy:,} — the contract pays "
+                      f"{fee.energy_by_contract:,}; your {yours:,}{burn(fee.energy_burn)}")
+        else:
+            energy = f"{fee.energy:,}{burn(fee.energy_burn)}"
+        self._energy_lbl.setText(energy)
         form.setRowVisible(self._activation_lbl, bool(fee.activation))
         self._activation_lbl.setText(
             f"{_trx(fee.activation)} TRX — the recipient's account is new")

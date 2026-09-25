@@ -244,6 +244,15 @@ What's Tron-specific:
   - a "Network resources" section (bandwidth, energy, activation,
     fee_limit, and what gets burned) in place of gas / fee / nonce;
   - `finalised_tron()` in place of an EVM request.
+  - Energy sharing ("energy subsidy"). A contract's deployer can pay
+    `(100 − consume_user_resource_percent)%` of every call's energy, up to
+    the contract's `origin_energy_limit` and the energy the deployer has
+    staked (java-tron's `payEnergyBill`). `fees.deployer_energy_share`
+    applies it. SunSwap's UniversalRouter is at 1%: a swap's ~336k energy
+    (mostly USDT's dynamic-energy penalty, ×4.4) costs its caller ~3.4k.
+    Charging all of it overstated a ~2 TRX swap as 30–50+ TRX. The fee
+    limit stays on the total, because if the subsidy runs dry the caller
+    pays everything.
   - A banner above Confirm when the account can't pay. On Tron a contract
     call that can't pay its energy isn't refused: it's mined, runs out of
     energy (its energy limit is what the balance can buy), fails, and burns

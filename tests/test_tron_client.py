@@ -118,6 +118,7 @@ def _fee_routes(*, to_exists=True, resources=None, energy=None):
                                               else {"freeNetLimit": 600}],
         f"{base}/wallet/triggerconstantcontract": [
             {"result": {"result": True}, "energy_used": energy or 0}],
+        f"{base}/wallet/getcontract": [{}],      # no energy sharing
     }
 
 
@@ -177,3 +178,71 @@ def test_build_tx_references_the_solid_block(http):
     assert tx.ref_block_bytes == bytes.fromhex("65a6")
     assert tx.ref_block_hash == bytes.fromhex("11" * 8)
     assert tx.expiration == 1000 + fees_mod.EXPIRATION_MS
+
+
+
+# --- energy sharing (a dapp's "energy subsidy") -----------------------------------
+
+DEPLOYER = "0x" + "33" * 20
+ROUTER = "0x" + "a3" * 20
+
+
+def _sharing(http, contract: dict, deployer_res: dict, energy=335_747, owner_res=None):
+    routes = _fee_routes(energy=energy)
+    routes["https://a.invalid/wallet/getcontract"] = [contract]
+    # The caller's resources first, then the deployer's.
+    routes["https://a.invalid/wallet/getaccountresource"] = [
+        owner_res or {"freeNetLimit": 600}, deployer_res]
+    http(routes)
+    return estimate_fee(TronClient(CHAIN), TriggerSmartContract(OWNER, ROUTER, b"\x35"))
+
+
+def test_a_one_percent_contract_charges_the_caller_a_hundredth(http):
+    """SunSwap's UniversalRouter (1%): the real swap 8aa357… used 335,747
+    energy, the contract paid 332,389 and the caller 3,358 (0.3358 TRX) —
+    charging all of it overstated a ~2 TRX swap as 30+ TRX."""
+    fee = _sharing(http, {"origin_address": "41" + DEPLOYER[2:],
+                          "consume_user_resource_percent": 1,
+                          "origin_energy_limit": 1_000_000},
+                   {"EnergyLimit": 1_967_951_136, "EnergyUsed": 1_367_292_900})
+    assert fee.energy == 335_747 and fee.energy_by_contract == 332_389
+    assert fee.energy_burn == 3_358 * 100
+    # The cap stays on the total — if the subsidy ran dry, the caller pays.
+    assert fee.fee_limit == int(335_747 * 100 * 1.5) + 1
+
+
+@pytest.mark.parametrize("contract, deployer_res, by_contract", [
+    # capped by the contract's per-call limit
+    ({"consume_user_resource_percent": 1, "origin_energy_limit": 100_000},
+     {"EnergyLimit": 10**9}, 100_000),
+    # capped by what the deployer has staked
+    ({"consume_user_resource_percent": 1, "origin_energy_limit": 10**6},
+     {"EnergyLimit": 50_000}, 50_000),
+    # 100%: the caller pays everything (most contracts — USDT included)
+    ({"consume_user_resource_percent": 100, "origin_energy_limit": 10**6},
+     {"EnergyLimit": 10**9}, 0),
+    # proto3: a 0% contract omits the field — its deployer pays it all
+    ({"origin_energy_limit": 10**6}, {"EnergyLimit": 10**9}, 335_747),
+    # …and an absent limit is 0: the deployer pays nothing
+    ({"consume_user_resource_percent": 1}, {"EnergyLimit": 10**9}, 0),
+])
+def test_the_deployers_share_follows_java_tron(http, contract, deployer_res, by_contract):
+    fee = _sharing(http, {"origin_address": "41" + DEPLOYER[2:], **contract}, deployer_res)
+    assert fee.energy_by_contract == by_contract
+    assert fee.energy_burn == (335_747 - by_contract) * 100
+
+
+def test_the_deployer_calling_its_own_contract_pays_itself(http):
+    fee = _sharing(http, {"origin_address": "41" + OWNER[2:],
+                          "consume_user_resource_percent": 1,
+                          "origin_energy_limit": 10**6}, {"EnergyLimit": 10**9})
+    assert fee.energy_by_contract == 0
+
+
+def test_an_unknown_sharing_is_charged_in_full(http):
+    routes = _fee_routes(energy=335_747)
+    routes["https://a.invalid/wallet/getcontract"] = [_http_error(400)]
+    routes["https://b.invalid/wallet/getcontract"] = [_http_error(400)]
+    http(routes)
+    fee = estimate_fee(TronClient(CHAIN), TriggerSmartContract(OWNER, ROUTER, b"\x35"))
+    assert fee.energy_by_contract == 0 and fee.energy_burn == 335_747 * 100

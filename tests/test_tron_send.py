@@ -294,3 +294,14 @@ def test_the_nonce_column_hides_on_tron(qtbot):
     assert panel.table.isColumnHidden(_C_NONCE)
     panel.set_context(next(c for c in CHAINS if c.is_evm), OWNER)
     assert not panel.table.isColumnHidden(_C_NONCE)
+
+
+def test_the_energy_row_shows_what_the_contract_pays(qtbot):
+    d = _tron_dialog(qtbot, USDT_ASSET)
+    _type(d, amount="1")
+    _estimate(d, TronFee(bandwidth=345, bandwidth_burn=0, energy=335_747,
+                         energy_by_contract=332_389, energy_burn=335_800,
+                         fee_limit=50_362_051))
+    assert d._energy_lbl.text() == \
+        "335,747 — the contract pays 332,389; your 3,358 — burns 0.3358 TRX"
+    assert "0.3358 TRX burned" in d.max_total_lbl.text()

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, cast
 from collections.abc import Callable, Iterable, Mapping
 
 from . import USER_AGENT
-from .abi import AnyAbiSource, BlockscoutAbiSource, selector_names
+from .abi import AnyAbiSource, BlockscoutAbiSource, TronAbiSource, selector_names
 from .abi_cache import AbiCache
 from .address import tron_from_hex, tron_to_hex
 from .chains import DEFAULT_CHAINS, TRON, Chain
@@ -429,10 +429,15 @@ def _tron_transfer_rows(chain: Chain, address: str, txs: list[Transaction],
 def _tron_activities(chain: Chain, address: str, txs: list[Transaction], *,
                      timeout: float,
                      on_batch: Callable[[dict[str, Activity]], None] | None,
+                     abi_source: AnyAbiSource | None = None,
+                     abi_cache: AbiCache | None = None,
                      ) -> dict[str, Activity]:
-    """``fetch_activities`` for Tron: verbs from the method selector, coins
-    from the tx's own TRX value + TronGrid's TRC-20 transfer index."""
+    """``fetch_activities`` for Tron: verbs from the called contract's own ABI
+    (on-chain — ``TronAbiSource``, cached like EVM ones), coins from the tx's
+    own TRX value + TronGrid's TRC-20 transfer index."""
     viewer = address.lower()
+    verbs = _Verbs(chain.chain_id, abi_source or TronAbiSource(),
+                   abi_cache if abi_cache is not None else AbiCache())
     try:
         transfers = _tron_transfer_rows(chain, address, txs, timeout)
     except TronError as e:
@@ -446,7 +451,10 @@ def _tron_activities(chain: Chain, address: str, txs: list[Transaction], *,
     out: dict[str, Activity] = {}
     for tx in txs:
         sel = (tx.method_id or "").lower()
-        verb = "send" if sel in ("", "0x") else _TRON_VERBS.get(sel, sel)
+        if sel in ("", "0x"):
+            verb = "send"
+        else:
+            verb = (_TRON_VERBS.get(sel) or verbs.name(tx.to_addr, sel) or sel)
         out_legs, in_legs = _coins(tx, viewer, chain.symbol or "TRX", tok_by_hash, {})
         out[tx.hash] = _make_activity(verb, out_legs, in_legs, sel, tx, sym_of)
     if on_batch and out:
@@ -476,7 +484,8 @@ def fetch_activities(
     ``callTracer`` read over the chain's RPC and is injectable for tests."""
     if chain.family == TRON:
         return _tron_activities(chain, address, txs, timeout=timeout,
-                                on_batch=on_batch)
+                                on_batch=on_batch, abi_source=abi_source,
+                                abi_cache=abi_cache)
     base = BLOCKSCOUT_INSTANCES.get(chain.chain_id)
     if base is None:
         return {}

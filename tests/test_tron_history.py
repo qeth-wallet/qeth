@@ -186,3 +186,50 @@ def test_identity_row_on_tron_uses_tron_forms(qtbot):
     [worker] = started
     assert isinstance(worker, ContractIdentityWorker)
     assert worker._short("0x" + "ab" * 20) == codec_for(TRON).short("0x" + "ab" * 20)
+
+
+# --- activity verbs from the contract's own ABI ------------------------------------
+
+ROUTER = "0xa31d689a84244bc01be56e07aeafb7686f56bb89"
+EXECUTE_ABI = [{"type": "function", "name": "execute", "stateMutability": "payable",
+                "inputs": [{"name": "commands", "type": "bytes"},
+                           {"name": "inputs", "type": "bytes[]"},
+                           {"name": "deadline", "type": "uint256"}], "outputs": []}]
+
+
+def _swap_tx():
+    return Transaction(CHAIN.chain_id, "0x" + "8a" * 32, 86550307, 1790323296, -1,
+                       OWNER, ROUTER, 0, 0, 0, "0x3593564c", "0x3593564c", True)
+
+
+def test_tron_activity_names_the_call_from_its_abi(monkeypatch, tmp_path):
+    """A router swap reads "execute" in the Activity column, not 0x3593564c."""
+    from qeth.abi_cache import AbiCache
+    from qeth.tx_activity import fetch_activities
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: io.BytesIO(
+        json.dumps({"success": True, "data": [], "meta": {}}).encode()))
+
+    class Source:
+        def supports(self, cid):
+            return cid == CHAIN.chain_id
+
+        def fetch(self, cid, addr):
+            assert addr == ROUTER
+            return EXECUTE_ABI
+    acts = fetch_activities(CHAIN, OWNER, [_swap_tx()], abi_source=Source(),
+                            abi_cache=AbiCache(tmp_path))
+    assert acts["0x" + "8a" * 32].verb == "execute"
+
+
+def test_a_cached_selector_verb_is_renamed_once_the_abi_is_known(mainwindow):
+    """Activities persisted before the ABI was known keep the bare selector,
+    and a two-sided one is never re-fetched — the disk ABI renames it."""
+    from qeth.tx_activity import Activity, AssetLeg
+    plugin = mainwindow.transactions_plugin
+    act = Activity("0x3593564c", out=(AssetLeg("TRX", None),),
+                   inn=(AssetLeg("USDT", USDT),))
+    tx = _swap_tx()
+    assert plugin._fill_verb(CHAIN.chain_id, tx, act) is act       # ABI unknown yet
+    plugin._abi_cache.save(CHAIN.chain_id, ROUTER, EXECUTE_ABI)
+    named = plugin._fill_verb(CHAIN.chain_id, tx, act)
+    assert named.verb == "execute" and named.out == act.out and named.inn == act.inn

@@ -54,7 +54,7 @@ from shiboken6 import isValid as _qt_alive   # is a Qt C++ object still alive?
 from ... import QULONGLONG
 from ...abi import (
     KNOWN_EVENT_NAMES, AnyAbiSource, BlockscoutAbiSource, EtherscanV2AbiSource,
-    RoutedAbiSource, TronAbiSource, decode_call, decode_event,
+    RoutedAbiSource, TronAbiSource, decode_call, decode_event, selector_names,
 )
 from ...abi_cache import AbiCache
 from .contract_identity import (
@@ -2377,6 +2377,24 @@ class TransactionsPlugin(Plugin):
             return meta["symbol"]
         return self._symbol_cache.get((chain_id, contract.lower()))
 
+    def _fill_verb(self, chain_id: int, tx: Transaction | None,
+                   activity: Activity) -> Activity:
+        """A cached activity still named by its bare selector (its contract's
+        ABI wasn't known when it was built — e.g. Tron's, before
+        ``TronAbiSource``) gets the method's name once the ABI cache has it.
+        Disk only: a two-sided activity is never re-fetched, so this is what
+        renames it."""
+        verb = activity.verb
+        if (tx is None or not tx.to_addr or len(verb) != 10
+                or not verb.startswith("0x")):
+            return activity
+        abi = self._abi_cache.load(chain_id, tx.to_addr)
+        name = selector_names(abi).get(verb) if isinstance(abi, list) else None
+        if not name:
+            return activity
+        from dataclasses import replace
+        return replace(activity, verb=name)
+
     def _fill_symbols(self, chain_id: int, activity: Activity) -> Activity:
         """Rewrite any leg whose symbol is unknown ("?"/empty) with the token's
         real on-chain symbol when we can resolve it — so a token outside every
@@ -2541,7 +2559,9 @@ class TransactionsPlugin(Plugin):
             # get a worker. Re-scan any cached-coinless rows by receipt too,
             # so a tokentx miss persisted last session gets a second chance
             # without forcing a full re-resolve.
-            primed = {h: self._fill_symbols(chain.chain_id, a)
+            by_hash = {t.hash: t for t in cached}
+            primed = {h: self._fill_verb(chain.chain_id, by_hash.get(h),
+                                         self._fill_symbols(chain.chain_id, a))
                       for h, a in self._activity_cache.load(
                           chain.chain_id, address).items()}
             self._panel.prime_activities(primed)

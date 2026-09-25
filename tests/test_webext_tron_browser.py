@@ -478,26 +478,40 @@ def test_account_change_reaches_the_page(page, backend):
     assert _js(page, "window.__accountsEvents")[-1] == [tron_from_hex(OTHER)]
 
 
-def test_the_popup_shows_the_selected_network_and_the_site(page, backend, dapp_url):
-    """The status popup (Chromium — Firefox's moz-extension id is random): the
-    network selected in qeth and ITS account, and what the site is presented."""
+def test_an_auto_connected_tron_site_reads_as_tron_only(page, backend, dapp_url):
+    """sun.io after a reload: its adapter never asks — it reads the account
+    off window.tron.tronWeb (auto-connect), while our EVM provider refreshes
+    eth_accounts on its own. The site is connected to Tron, and only Tron."""
+    backend.server._site_families.clear()      # the reloaded page starts fresh too
+    r = _run(page, """
+      window.tron.tronWeb;                                  // the adapter's check
+      for (let i = 0; i < 100 && !window.tron.tronWeb; i++)
+        await new Promise(ok => setTimeout(ok, 100));
+      await new Promise(ok => setTimeout(ok, 500));         // the account lands
+      return window.tron.tronWeb.defaultAddress.base58;""")
+    assert r == {"ok": ACCOUNT_B58}
+    import time
+    deadline = time.time() + 5
+    while time.time() < deadline and not backend.server._site_families.get(dapp_url):
+        time.sleep(0.1)
+    assert backend.server._site_families.get(dapp_url) == {"tron"}
+
+
+def test_the_popup_shows_what_the_site_is_connected_to(page, backend, dapp_url):
+    """The status popup (Chromium — Firefox's moz-extension id is random) for
+    a Tron site: the site, Tron and its T… account — not qeth's Ethereum."""
     popup = getattr(page, "qeth_popup", None)
     if popup is None:
         pytest.skip("the popup page is reached by id on Chromium only")
     _run(page, "await window.tron.request({method: 'eth_requestAccounts'});")   # a Tron site
-    backend.selected["chain"] = backend.tron                                     # qeth on Tron
-    try:
-        page.get(popup)
-        _wait_js(page, "document.getElementById('detail')", timeout=10)
-        r = _run(page, """
-          const res = await new Promise(ok => chrome.runtime.sendMessage(
-            {type: "status", origin: "%s"}, ok));
-          showConnected(res);
-          return document.getElementById("detail").innerText;""" % dapp_url)
-    finally:
-        backend.selected["chain"] = backend.eth
+    page.get(popup)
+    _wait_js(page, "document.getElementById('detail')", timeout=10)
+    r = _run(page, """
+      const res = await new Promise(ok => chrome.runtime.sendMessage(
+        {type: "status", origin: "%s"}, ok));
+      showConnected(res);
+      return document.getElementById("detail").innerText;""" % dapp_url)
     text = r["ok"]
-    assert "Network: Tron" in text and ACCOUNT_B58 in text
-    assert "0x" + "11" * 20 not in text.lower()          # not the EVM account too
     host = dapp_url.split("//")[1]
-    assert f"This site ({host}): Tron · {ACCOUNT_B58[:6]}…{ACCOUNT_B58[-4:]}" in text
+    assert f"Site: {host}" in text and "Network: Tron" in text and ACCOUNT_B58 in text
+    assert "0x" not in text.lower()                  # qeth is on Ethereum; the site isn't

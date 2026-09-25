@@ -124,6 +124,7 @@
     this._pollTimer = null;
     this._subIds = {};           // push mode: sub_id -> sub_type (our subs)
     this._relayWaiters = [];     // whenRelay() callers waiting for "ready"
+    this._siteUses = {};         // family -> true once the PAGE obtained it
     // Hooks the Tron provider (below) sets to ride this transport's events.
     this._tronPush = null;       // (accounts) on a tronAccountsChanged push
     this._tronRefresh = null;    // () on a poll tick / transport reconnect
@@ -141,8 +142,13 @@
     return changed;
   };
 
-  // EIP-1193 core.
+  // EIP-1193 core. The page's calls come in here; the provider's own
+  // (state refresh, subscriptions, the Tron side) use _request(args, true),
+  // so noteSiteUse sees only what the PAGE obtained.
   QethProvider.prototype.request = function (args) {
+    return this._request(args, false);
+  };
+  QethProvider.prototype._request = function (args, internal) {
     var self = this;
     if (!args || typeof args.method !== "string") {
       return Promise.reject(rpcError(-32600, "Invalid request: 'method' required"));
@@ -173,8 +179,36 @@
       if (args.method === "eth_requestAccounts"
           || args.method === "wallet_requestPermissions") self._authorized = true;
       self._absorb(args.method, args.params, result);
+      if (!internal) self._noteDappUse(args.method, result);
       return result;
     });
+  };
+
+  // What the page has obtained from the wallet, per network — the status
+  // views (qeth_status) show a site exactly this. A page that read an EVM
+  // account or asked for an EVM signature "is connected" on EVM; the Tron
+  // side calls noteSiteUse("tron") for its equivalents. Told to qeth once,
+  // and again on every state refresh (a reconnect: qeth may have restarted
+  // and forgotten; Falkon's poll: cheap and local).
+  var EVM_ACCOUNT_METHODS = { eth_accounts: 1, eth_requestAccounts: 1,
+    eth_coinbase: 1, wallet_requestPermissions: 1, wallet_getPermissions: 1 };
+  var EVM_SIGN_METHODS = { eth_sendTransaction: 1, personal_sign: 1,
+    eth_signTypedData: 1, eth_signTypedData_v3: 1, eth_signTypedData_v4: 1 };
+  QethProvider.prototype._noteDappUse = function (method, result) {
+    if (EVM_SIGN_METHODS[method]
+        || (EVM_ACCOUNT_METHODS[method] && result
+            && (typeof result === "string" || result.length))) {
+      this.noteSiteUse("evm");
+    }
+  };
+  QethProvider.prototype.noteSiteUse = function (family) {
+    if (this._siteUses[family]) return;
+    this._siteUses[family] = true;
+    this._tellSiteUse(family);
+  };
+  QethProvider.prototype._tellSiteUse = function (family) {
+    this._request({ method: "qeth_siteConnected", params: [family] }, true)
+      .catch(function () {});
   };
 
   // Route a payload over the active transport (or queue until ready).
@@ -324,14 +358,17 @@
     // always see "no change" and never emit. Compare against the
     // captured previous value instead.
     var prevChain = this.chainId;
-    this.request({ method: "eth_chainId" }).then(function (cid) {
+    this._request({ method: "eth_chainId" }, true).then(function (cid) {
       if (cid !== prevChain) self.emit("chainChanged", cid);
     }).catch(function () { self._onPollError(); });
     var prevAccount = this.selectedAddress;
-    this.request({ method: "eth_accounts" }).then(function (accs) {
+    this._request({ method: "eth_accounts" }, true).then(function (accs) {
       var next = (accs && accs[0]) || null;
       if (next !== prevAccount) self.emit("accountsChanged", accs || []);
     }).catch(function () {});
+    for (var fam in this._siteUses) {
+      if (Object.prototype.hasOwnProperty.call(this._siteUses, fam)) this._tellSiteUse(fam);
+    }
     if (this._tronRefresh) this._tronRefresh();
   };
 
@@ -362,9 +399,9 @@
     var noop = function () {};
     if (PUSH) {
       this._subIds = {};
-      this.request({ method: "eth_subscribe", params: ["chainChanged"] }).catch(noop);
-      this.request({ method: "eth_subscribe", params: ["accountsChanged"] }).catch(noop);
-      this.request({ method: "eth_subscribe", params: ["networkChanged"] }).catch(noop);
+      this._request({ method: "eth_subscribe", params: ["chainChanged"] }, true).catch(noop);
+      this._request({ method: "eth_subscribe", params: ["accountsChanged"] }, true).catch(noop);
+      this._request({ method: "eth_subscribe", params: ["networkChanged"] }, true).catch(noop);
     }
     this._refreshState();
     this._markConnected();
@@ -528,7 +565,7 @@
   var tronReady = null;
 
   function tronCall(method, params) {
-    return provider.request({ method: method, params: params || [] });
+    return provider._request({ method: method, params: params || [] }, true);
   }
 
   // TronLink's window messages, for dapps that still listen for them.
@@ -629,6 +666,7 @@
     };
     trx.sign = function (transaction, privateKey, useTronHeader, multisig) {
       if (privateKey) return own.sign(transaction, privateKey, useTronHeader, multisig);
+      provider.noteSiteUse("tron");
       if (typeof transaction === "string") {
         // Legacy message signing. With useTronHeader=false TronWeb uses
         // Ethereum's header — i.e. an Ethereum personal_sign by the same key.
@@ -662,11 +700,13 @@
     };
     trx.signMessageV2 = function (message, privateKey) {
       if (privateKey) return own.signMessageV2(message, privateKey);
+      provider.noteSiteUse("tron");
       try { return tronCall("tron_signMessage", [messageHex(message), 2]); }
       catch (e) { return Promise.reject(e); }
     };
     trx._signTypedData = trx.signTypedData = function (domain, types, value, privateKey) {
       if (privateKey) return own._signTypedData(domain, types, value, privateKey);
+      provider.noteSiteUse("tron");
       return tronCall("tron_signTypedData", [jsonable(domain), jsonable(types), jsonable(value)]);
     };
     // As TronLink: the page doesn't re-point the wallet's instance.
@@ -676,6 +716,17 @@
         tw[m] = function () { throw new Error("qeth has disabled " + m + " on its TronWeb"); };
       });
     tw.ready = false;
+    // The page reading the account is it using Tron — how an adapter's
+    // auto-connect gets it, with no request (TronWeb itself only assigns).
+    var address = tw.defaultAddress;
+    Object.defineProperty(tw, "defaultAddress", {
+      configurable: true, enumerable: true,
+      get: function () {
+        if (address && address.base58) provider.noteSiteUse("tron");
+        return address;
+      },
+      set: function (v) { address = v; },
+    });
     return tw;
   }
 
@@ -743,6 +794,7 @@
       tronAuthorized = true;
       applyTronAccount(addr);
       postTronLink("connect", {});
+      provider.noteSiteUse("tron");
       return addr;
     });
   }
@@ -757,7 +809,10 @@
       case "eth_accounts":
       case "tron_accounts":
         if (!tronAuthorized) return Promise.resolve([]);
-        return tronEnsure().then(function () { return tronAccount ? [tronAccount] : []; });
+        return tronEnsure().then(function () {
+          if (tronAccount) provider.noteSiteUse("tron");
+          return tronAccount ? [tronAccount] : [];
+        });
       case "eth_chainId":
       case "tron_chainId":
         return tronEnsure().then(function () { return tronNetwork.chainId; });

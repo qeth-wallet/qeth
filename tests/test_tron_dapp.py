@@ -615,27 +615,39 @@ def test_status_is_the_selected_network_and_its_account():
     assert out["chain"]["family"] == "tron" and out["account"] == ACCOUNT_B58
 
 
-def test_status_says_what_a_site_is_presented():
+def test_status_says_what_a_site_is_connected_to():
     s = _status_server()
     site = "https://sun.io"
-    # The injected provider's automatic reads don't count as using a network…
+
+    def conns(origin):
+        return _call(s, "qeth_status", [{"origin": origin}], origin=None)["site"]["connections"]
+    # Nothing obtained yet (the provider's own reads aren't the site's).
     _call(s, "eth_accounts", [], origin=site)
     _call(s, "tron_accounts", [], origin=site)
-    out = _call(s, "qeth_status", [{"origin": site}], origin=None)
-    assert out["site"]["chain"]["name"] == "Ethereum"
-    # …a connect does.
-    _call(s, "tron_requestAccounts", [], origin=site)
-    out = _call(s, "qeth_status", [{"origin": site}], origin=None)
-    assert out["site"] == {"origin": site, "account": ACCOUNT_B58, "chain": {
-        "chainId": "0x2b6653dc", "name": "Tron", "family": "tron"}}
-    # An EVM site shows its own (per-origin) chain.
+    assert conns(site) == []
+    # The provider reports the page read the Tron account (an adapter's
+    # auto-connect: no request at all) → Tron, and only Tron.
+    _call(s, "qeth_siteConnected", ["tron"], origin=site)
+    assert conns(site) == [{"account": ACCOUNT_B58, "chain": {
+        "chainId": "0x2b6653dc", "name": "Tron", "family": "tron"}}]
+    # An EVM site shows its own (per-origin) chain; an explicit connect counts
+    # even from a client that doesn't report (Frame's).
     uni = "https://app.uniswap.org"
     s.store.chains.append(Chain("Base", 8453, "http://127.0.0.1:9/", "ETH", ""))
     _call(s, "eth_requestAccounts", [], origin=uni)
     _call(s, "wallet_switchEthereumChain", [{"chainId": "0x2105"}], origin=uni)
-    out = _call(s, "qeth_status", [{"origin": uni}], origin=None)
-    assert out["site"]["chain"]["name"] == "Base"
-    assert out["site"]["account"] == "0x" + "11" * 20
+    [base] = conns(uni)
+    assert base["chain"]["name"] == "Base" and base["account"] == "0x" + "11" * 20
+    # A site on both networks lists both.
+    _call(s, "qeth_siteConnected", ["evm"], origin=site)
+    assert [c["chain"]["name"] for c in conns(site)] == ["Tron", "Ethereum"]
+
+
+def test_a_page_can_only_mark_itself():
+    s = _status_server()
+    _call(s, "qeth_siteConnected", ["tron"], origin=None)            # not a site
+    _call(s, "qeth_siteConnected", ["bitcoin"], origin="https://a.example")
+    assert s._site_families == {}
 
 
 def test_status_is_for_qeths_connectors_only():

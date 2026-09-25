@@ -147,22 +147,28 @@ class TestProbe:
         assert body[2]["params"] == [{"origin": "https://sun.io"}]
 
     WALLET = {
-        "chain": {"chainId": "0x2b6653dc", "name": "Tron", "family": "tron"},
-        "account": "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL",
-        "site": {"origin": "https://sun.io",
-                 "chain": {"chainId": "0x2b6653dc", "name": "Tron", "family": "tron"},
-                 "account": "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"},
+        "chain": {"chainId": "0x1", "name": "Ethereum", "family": "evm"},
+        "account": "0xABC",
+        "site": {"origin": "https://sun.io", "connections": [
+            {"chain": {"chainId": "0x2b6653dc", "name": "Tron", "family": "tron"},
+             "account": "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"}]},
     }
 
-    def test_the_selected_network_and_the_site(self):
+    def test_a_connected_site_shows_only_its_connection(self):
         import json
         p = self._probe()
         st = p.parse_status(json.dumps([
             {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
             {"id": 3, "result": self.WALLET}]))
-        # qeth is on Tron: that's the network + the T… account, not the EVM one.
-        assert p.selected(st) == ("Tron", "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL")
-        assert p.site_line(st) == "This site (sun.io): Tron · TSzcke…tfFL"
+        # qeth is on Ethereum, but sun.io is connected to Tron: show that.
+        assert p.view(st) == ("sun.io", [("Tron", "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL")])
+        # A site that obtained nothing → what's selected in qeth.
+        unconnected = {**self.WALLET, "site": {"origin": "https://x.example",
+                                               "connections": []}}
+        st = p.parse_status(json.dumps([
+            {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
+            {"id": 3, "result": unconnected}]))
+        assert p.view(st) == (None, [("Ethereum", "0xABC")])
 
     def test_an_older_qeth_falls_back_to_its_evm_chain(self):
         import json
@@ -171,7 +177,7 @@ class TestProbe:
             {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
             {"id": 3, "error": {"code": -32601, "message": "no such method"}}]))
         assert st.connected and st.error is None and st.wallet is None
-        assert p.selected(st) == ("Ethereum", "0xABC") and p.site_line(st) is None
+        assert p.view(st) == (None, [("Ethereum", "0xABC")])
 
     def test_origin_of(self):
         p = self._probe()

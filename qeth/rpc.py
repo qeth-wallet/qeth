@@ -69,9 +69,10 @@ _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 _WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_", "tron_",
                       "qeth_")
 
-# A site's explicit use of each provider — its connect and signing calls, not
-# the injected provider's own automatic eth_accounts refresh. The last one
-# seen per origin is the network qeth_status says the site is on.
+# A site's explicit use of each provider — its connect and signing calls (not
+# the injected provider's own automatic eth_accounts refresh). With what qeth's
+# provider reports (qeth_siteConnected), the networks qeth_status says the
+# site is connected to. Also covers clients that don't report (Frame's).
 _EVM_SITE_METHODS = frozenset({
     "eth_requestAccounts", "wallet_requestPermissions", "eth_sendTransaction",
     "personal_sign", "personal_signMessage", "eth_signTypedData",
@@ -272,9 +273,11 @@ class RpcServer:
         # modal — the user then has to dismiss a stack of identical
         # dialogs. Concurrent requests for the same id share one prompt.
         self._pending_chain_add: dict[int, asyncio.Future[bool]] = {}
-        # The family each site last explicitly used (_EVM/_TRON_SITE_METHODS),
-        # for qeth_status. This session only.
-        self._site_family: dict[str, str] = {}
+        # The families each site obtained accounts / signatures on, for
+        # qeth_status: _EVM/_TRON_SITE_METHODS seen here, plus what qeth's
+        # provider reports (qeth_siteConnected — re-sent after a reconnect,
+        # so a qeth restart doesn't forget a still-open page).
+        self._site_families: dict[str, set[str]] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="qeth-rpc", daemon=True)
@@ -806,12 +809,20 @@ class RpcServer:
                          ) -> Any:
         if _is_web_origin(origin):
             if method in _EVM_SITE_METHODS:
-                self._site_family[origin or ""] = EVM
+                self._site_families.setdefault(origin or "", set()).add(EVM)
             elif method in _TRON_SITE_METHODS:
-                self._site_family[origin or ""] = TRON
+                self._site_families.setdefault(origin or "", set()).add(TRON)
 
         if method == "qeth_status":
             return self._wallet_status(params, origin)
+
+        if method == "qeth_siteConnected":
+            # qeth's provider: the page obtained ``params[0]``'s account (or
+            # asked it to sign). Only ever about the CALLER's own origin.
+            family = params[0] if params else None
+            if _is_web_origin(origin) and family in (EVM, TRON):
+                self._site_families.setdefault(origin or "", set()).add(family)
+            return True
 
         if method == "eth_subscribe":
             # Frame extends eth_subscribe with wallet-event types
@@ -1134,9 +1145,9 @@ class RpcServer:
     def _wallet_status(self, params: list, origin: str | None) -> dict:
         """What the status UIs show (the extension popup, Falkon's toolbar and
         status dialog): the network selected in qeth and its family's connected
-        account — and, for ``params[0].origin``, what that site is presented:
-        the Tron account if it last used qeth's Tron provider, else its EVM
-        chain (per-origin) and account.
+        account — and, for ``params[0].origin``, what that site is connected
+        to: one entry per network it obtained an account (or a signature) on
+        — Tron's account, its per-origin EVM chain's — and none if it hasn't.
 
         qeth's connectors only: a web page is refused, since which sites used
         which network is no other site's business."""
@@ -1148,15 +1159,19 @@ class RpcServer:
         arg = params[0] if params and isinstance(params[0], dict) else {}
         site = arg.get("origin")
         if isinstance(site, str) and _is_web_origin(site):
+            families = self._site_families.get(site, set())
+            shown: list[Chain] = []
             tron = next((c for c in self.store.chains if c.family == TRON), None)
-            if self._site_family.get(site) == TRON and tron is not None:
-                shown = tron
-            else:
+            if TRON in families and tron is not None:
+                shown.append(tron)
+            if EVM in families:
                 cid = self._chain_for_origin(site)
-                shown = next((c for c in self.store.chains
-                              if c.chain_id == cid and c.is_evm), self.store.dapp_chain())
-            out["site"] = {"origin": site, "chain": self._chain_info(shown),
-                           "account": self._account_on(shown)}
+                shown.append(next((c for c in self.store.chains
+                                   if c.chain_id == cid and c.is_evm),
+                                  self.store.dapp_chain()))
+            out["site"] = {"origin": site, "connections": [
+                {"chain": self._chain_info(c), "account": self._account_on(c)}
+                for c in shown]}
         return out
 
     @staticmethod

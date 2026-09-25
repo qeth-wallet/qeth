@@ -104,11 +104,10 @@ class QethStatusButton(Falkon.AbstractButtonInterface):
     def _apply(self, st):
         self.setIcon(self._icon_on if st.connected else self._icon_off)
         if st.connected:
-            network, account = probe.selected(st)
-            tip = f"qeth — connected ({network})\n{account or 'no account selected'}"
-            site = probe.site_line(st)
-            if site:
-                tip += f"\n{site}"
+            host, shown = probe.view(st)
+            tip = "qeth — connected" + (f" · {host}" if host else "")
+            for network, account in shown:
+                tip += f"\n{network}: {account or 'no account selected'}"
             self.setToolTip(tip)
         else:
             self.setToolTip("qeth wallet — not running (127.0.0.1:1248)")
@@ -118,20 +117,19 @@ class QethStatusButton(Falkon.AbstractButtonInterface):
         st = self._poller.status
         menu = QMenu()
         if st.connected:
-            network, account = probe.selected(st)
+            host, shown = probe.view(st)
             self._info(menu, "Connected to qeth")
-            self._info(menu, f"Network: {network}")
-            if account:
-                act = menu.addAction(f"Account: {probe.short(account)}")
-                act.setToolTip("Copy address")
-                act.triggered.connect(
-                    lambda: QGuiApplication.clipboard().setText(account))
-            else:
-                self._info(menu, "No account selected in qeth")
-            site = probe.site_line(st)
-            if site:
-                menu.addSeparator()
-                self._info(menu, site)
+            if host:
+                self._info(menu, f"Site: {host}")
+            for network, account in shown:
+                self._info(menu, f"Network: {network}")
+                if account:
+                    act = menu.addAction(f"Account: {probe.short(account)}")
+                    act.setToolTip("Copy address")
+                    act.triggered.connect(
+                        lambda _=False, a=account: QGuiApplication.clipboard().setText(a))
+                else:
+                    self._info(menu, "No account selected in qeth")
         else:
             self._info(menu, "qeth not connected")
             self._info(menu, "Start qeth — it serves 127.0.0.1:1248")

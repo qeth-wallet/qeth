@@ -40,55 +40,56 @@ function setVersion() {
   catch (e) {}
 }
 
-function shortAddr(a) {
-  return a && a.length > 12 ? a.slice(0, 6) + "\u2026" + a.slice(-4) : a;
-}
-
 function networkName(chain) {
   return (chain && chain.name) || chainName(chain && chain.chainId);
 }
 
-// res.wallet (qeth_status): the network selected in qeth + its account (T… on
-// Tron), and what the active tab's site is presented. Without it (an older
-// qeth), the EVM chain dapps get and its account.
-function showConnected(res) {
+// What to show (res.wallet = qeth_status): the active tab's site when it's
+// connected — each network it obtained an account on, with that account —
+// else the network selected in qeth and its account. Without qeth_status (an
+// older qeth), the EVM chain dapps get and its account.
+function view(res) {
   var wallet = res.wallet || {};
-  var network = wallet.chain ? networkName(wallet.chain) : chainName(res.chainId);
-  var account = wallet.chain ? wallet.account : res.account;
+  var site = wallet.site;
+  if (site && site.connections && site.connections.length) {
+    var host = "";
+    try { host = new URL(site.origin).host; } catch (e) {}
+    return { host: host, shown: site.connections.map(function (c) {
+      return { network: networkName(c.chain), account: c.account };
+    }) };
+  }
+  if (wallet.chain) {
+    return { host: null, shown: [{ network: networkName(wallet.chain),
+                                   account: wallet.account }] };
+  }
+  return { host: null, shown: [{ network: chainName(res.chainId), account: res.account }] };
+}
+
+function showConnected(res) {
+  var v = view(res);
   $("status").className = "status ok";
   $("status").textContent = "Connected to qeth";
   var detail = $("detail");
   clear(detail);
-  detail.appendChild(text("Network: "));
-  detail.appendChild(el("b", network));
-  detail.appendChild(document.createElement("br"));
-  detail.appendChild(text("Account: "));
-  if (account) {
-    var addr = el("span", account);
-    addr.className = "addr";
-    detail.appendChild(addr);
-  } else {
-    detail.appendChild(text("No account selected in qeth"));
+  if (v.host) {
+    detail.appendChild(text("Site: "));
+    detail.appendChild(el("b", v.host));
+    detail.appendChild(document.createElement("br"));
   }
-  var site = wallet.site;
-  if (site) {
-    var line = el("div");
-    line.className = "site";
-    var host = "";
-    try { host = new URL(site.origin).host; } catch (e) {}
-    line.appendChild(text("This site (" + host + "): "));
-    line.appendChild(el("b", networkName(site.chain)));
-    line.appendChild(text(" \u00b7 "));
-    if (site.account) {
-      var sa = el("span", shortAddr(site.account));
-      sa.className = "addr";
-      sa.title = site.account;
-      line.appendChild(sa);
+  v.shown.forEach(function (row, i) {
+    if (i) detail.appendChild(document.createElement("br"));
+    detail.appendChild(text("Network: "));
+    detail.appendChild(el("b", row.network));
+    detail.appendChild(document.createElement("br"));
+    detail.appendChild(text("Account: "));
+    if (row.account) {
+      var addr = el("span", row.account);
+      addr.className = "addr";
+      detail.appendChild(addr);
     } else {
-      line.appendChild(text("no account connected"));
+      detail.appendChild(text("No account selected in qeth"));
     }
-    detail.appendChild(line);
-  }
+  });
 }
 
 function showDisconnected() {

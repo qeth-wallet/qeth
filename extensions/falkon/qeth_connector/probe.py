@@ -105,15 +105,17 @@ def selected(st):
     return chain_name(st.chain), st.account
 
 
-def site_line(st):
-    """"This site (sun.io): Tron · TSzc…tfFL" — what the current tab is
-    presented — or None (no http(s) tab, or an older qeth)."""
+def view(st):
+    """What a status view shows: ``(site host, [(network, account), …])`` for
+    the current tab's site when it's connected — what it obtained from qeth,
+    per network — else ``(None, [selected(st)])``: the network selected in
+    qeth and its account."""
     site = (st.wallet or {}).get("site")
-    if not isinstance(site, dict):
-        return None
-    host = urlparse(site.get("origin") or "").netloc
-    account = short(site.get("account")) or "no account connected"
-    return f"This site ({host}): {_network_name(site.get('chain'))} · {account}"
+    if isinstance(site, dict) and site.get("connections"):
+        conns = site["connections"]
+        host = urlparse(site.get("origin") or "").netloc
+        return host, [(_network_name(c.get("chain")), c.get("account")) for c in conns]
+    return None, [selected(st)]
 
 
 def origin_of(url):

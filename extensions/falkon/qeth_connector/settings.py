@@ -172,17 +172,16 @@ class StatusDialog(QDialog):
             self._status.setText("Connected to qeth")
             st = probe.Status(connected=True, chain=self._chain,
                               account=self._account, wallet=self._wallet)
-            network, account = probe.selected(st)
-            account = account or "No account selected in qeth"
+            host, shown = probe.view(st)
             # Don't wrap the address — let the window widen to keep it on
             # one line (nicer than breaking a 0x… hash mid-line).
             self._detail.setWordWrap(False)
-            site = probe.site_line(st)
-            self._detail.setText(
-                f"Network: <b>{html.escape(network)}</b><br>"
-                f"Account: {html.escape(account)}"
-                + (f"<br><br>{html.escape(site)}" if site else "")
-            )
+            lines = [f"Site: <b>{html.escape(host)}</b>"] if host else []
+            for network, account in shown:
+                lines.append(f"Network: <b>{html.escape(network)}</b>")
+                lines.append("Account: " + html.escape(
+                    account or "No account selected in qeth"))
+            self._detail.setText("<br>".join(lines))
         else:
             self._set_icon("network-offline", "dialog-warning",
                            fallback=QStyle.StandardPixmap.SP_MessageBoxWarning)

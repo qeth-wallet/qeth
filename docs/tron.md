@@ -344,12 +344,22 @@ same code.
 - **Status views.** `qeth_status` (for qeth's own connectors only; a web
   page is refused) reports two things:
   - the network selected in qeth and that family's connected account;
-  - what a given site is presented: the Tron account if it last explicitly
-    used the Tron provider (a connect or a signature; the provider's
-    automatic reads don't count), else its per-origin EVM chain and account.
+  - what a given site is CONNECTED to: one entry per network it obtained an
+    account (or a signature) on.
+  The page side knows what that is; the server can't tell a page's
+  `eth_accounts` from the provider's own refresh. So `provider.js` reports
+  the page's own account reads and signature requests with
+  `qeth_siteConnected` (for the caller's own origin only), and re-sends
+  them on every state refresh so a qeth restart doesn't forget an open page.
+  That covers the Tron adapter's auto-connect, which never calls a connect
+  method: it reads `tronWeb.defaultAddress`, and an accessor catches that.
+  Explicit connects seen on the server also count, which covers clients
+  like Frame's that don't report.
   The extension popup (for the active tab) and Falkon's toolbar and status
-  dialog (the active window's current tab) show both. They fall back to
-  `eth_chainId` / `eth_accounts` on an older qeth.
+  dialog (the active window's current tab) show the connected site's
+  networks and accounts. They show the network selected in qeth only for a
+  site that hasn't connected, and fall back to `eth_chainId` /
+  `eth_accounts` on an older qeth.
 - **Tests.** The page side runs end to end in real Chromium and Firefox
   (`tests/test_webext_tron_browser.py`, opt-in `-m browser`). It covers:
   - the real extension and TronWeb, the real `RpcServer`, a fake Tron node,

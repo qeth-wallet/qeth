@@ -567,3 +567,60 @@ def test_a_seen_dapp_broadcast_becomes_a_pending_row(mainwindow, monkeypatch):
     [(tx_hash, r, chain, raw)] = added
     assert tx_hash == "0x" + req.tx.txid().hex() and raw == "0xabcd"
     assert chain.chain_id == TRON_CHAIN.chain_id
+
+
+# --- qeth_status (the connectors' status views) ----------------------------------
+
+def _status_server(current=None):
+    s = _server(bridge=_Bridge())
+    if current is not None:
+        s.store.current_chain = lambda: current
+    return s
+
+
+def test_status_is_the_selected_network_and_its_account():
+    s = _status_server()
+    out = _call(s, "qeth_status", [], origin=None)
+    assert out["chain"] == {"chainId": "0x1", "name": "Ethereum", "family": "evm"}
+    assert out["account"] == "0x" + "11" * 20 and out["site"] is None
+    tron = next(c for c in s.store.chains if c.family == TRON)
+    out = _call(_status_server(tron), "qeth_status", [], origin=None)
+    assert out["chain"]["family"] == "tron" and out["account"] == ACCOUNT_B58
+
+
+def test_status_says_what_a_site_is_presented():
+    s = _status_server()
+    site = "https://sun.io"
+    # The injected provider's automatic reads don't count as using a network…
+    _call(s, "eth_accounts", [], origin=site)
+    _call(s, "tron_accounts", [], origin=site)
+    out = _call(s, "qeth_status", [{"origin": site}], origin=None)
+    assert out["site"]["chain"]["name"] == "Ethereum"
+    # …a connect does.
+    _call(s, "tron_requestAccounts", [], origin=site)
+    out = _call(s, "qeth_status", [{"origin": site}], origin=None)
+    assert out["site"] == {"origin": site, "account": ACCOUNT_B58, "chain": {
+        "chainId": "0x2b6653dc", "name": "Tron", "family": "tron"}}
+    # An EVM site shows its own (per-origin) chain.
+    uni = "https://app.uniswap.org"
+    s.store.chains.append(Chain("Base", 8453, "http://127.0.0.1:9/", "ETH", ""))
+    _call(s, "eth_requestAccounts", [], origin=uni)
+    _call(s, "wallet_switchEthereumChain", [{"chainId": "0x2105"}], origin=uni)
+    out = _call(s, "qeth_status", [{"origin": uni}], origin=None)
+    assert out["site"]["chain"]["name"] == "Base"
+    assert out["site"]["account"] == "0x" + "11" * 20
+
+
+def test_status_is_for_qeths_connectors_only():
+    s = _status_server()
+    with pytest.raises(RpcError) as e:
+        _call(s, "qeth_status", [{"origin": "https://other.example"}],
+              origin="https://evil.example")
+    assert e.value.code == 4100
+    # An extension's own origin isn't a website.
+    assert _call(s, "qeth_status", [], origin="chrome-extension://abc")["chain"]
+    # Unknown qeth_* never reaches the node.
+    s._proxy = MagicMock(side_effect=AssertionError("proxied"))
+    with pytest.raises(RpcError) as e:
+        _call(s, "qeth_somethingElse", [], origin=None)
+    assert e.value.code == -32601

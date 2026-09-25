@@ -140,35 +140,45 @@ class TestProbe:
         p = self._probe()
         body = json.loads(p.batch_body())
         assert [e["method"] for e in body] == ["eth_chainId", "eth_accounts",
-                                               "tron_accounts"]
+                                               "qeth_status"]
         assert [e["id"] for e in body] == [1, 2, 3]
+        assert body[2]["params"] == []
+        body = json.loads(p.batch_body("https://sun.io"))
+        assert body[2]["params"] == [{"origin": "https://sun.io"}]
 
-    def test_parse_the_tron_account(self):
+    WALLET = {
+        "chain": {"chainId": "0x2b6653dc", "name": "Tron", "family": "tron"},
+        "account": "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL",
+        "site": {"origin": "https://sun.io",
+                 "chain": {"chainId": "0x2b6653dc", "name": "Tron", "family": "tron"},
+                 "account": "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"},
+    }
+
+    def test_the_selected_network_and_the_site(self):
         import json
         p = self._probe()
         st = p.parse_status(json.dumps([
             {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
-            {"id": 3, "result": ["TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"]}]))
-        assert st.connected and st.tron_account == "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL"
-        # A qeth without Tron errors on id 3: still connected, just no Tron line.
-        old = p.parse_status(json.dumps([
+            {"id": 3, "result": self.WALLET}]))
+        # qeth is on Tron: that's the network + the T… account, not the EVM one.
+        assert p.selected(st) == ("Tron", "TSzckeDYKoVyMhoh7jQ3kH9vLi5g5ZtfFL")
+        assert p.site_line(st) == "This site (sun.io): Tron · TSzcke…tfFL"
+
+    def test_an_older_qeth_falls_back_to_its_evm_chain(self):
+        import json
+        p = self._probe()
+        st = p.parse_status(json.dumps([
             {"id": 1, "result": "0x1"}, {"id": 2, "result": ["0xABC"]},
             {"id": 3, "error": {"code": -32601, "message": "no such method"}}]))
-        assert old.connected and old.error is None and old.tron_account is None
+        assert st.connected and st.error is None and st.wallet is None
+        assert p.selected(st) == ("Ethereum", "0xABC") and p.site_line(st) is None
 
-
-def test_bridge_forwards_only_http_origins():
-    # Finding C from the Frame Companion review: a file:// page's
-    # window.location.origin collapses to a shared "file://", so every local
-    # file would share one per-origin slot in qeth. Only http(s) origins are
-    # forwarded as the Origin header; everything else is origin-less.
-    bridge = _load_module("bridge.py")
-    assert bridge._dapp_origin("https://app.uniswap.org") == "https://app.uniswap.org"
-    assert bridge._dapp_origin("http://localhost:3000") == "http://localhost:3000"
-    for opaque in ("file://", "null", "", None, "chrome://x", "about:blank",
-                   "data:text/html,x"):
-        assert bridge._dapp_origin(opaque) == "", opaque
-
+    def test_origin_of(self):
+        p = self._probe()
+        assert p.origin_of("https://sun.io/#/home?x=1") == "https://sun.io"
+        assert p.origin_of("http://localhost:3000/a") == "http://localhost:3000"
+        for other in ("falkon:speeddial", "about:blank", "file:///x", "", None):
+            assert p.origin_of(other) is None
 
 # --- TronWeb on demand (bridge.loadTronWeb) -------------------------------------
 

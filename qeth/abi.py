@@ -355,9 +355,72 @@ class RoutedAbiSource:
         raise AbiSourceError(f"No ABI source supports chain {chain_id}")
 
 
+def tron_abi_to_json(entries) -> Abi:
+    """Tron's ABI entries (``wallet/getcontract``'s ``abi.entrys``) as an
+    Ethereum JSON ABI: java-tron capitalises the kinds (``"Function"``,
+    ``"Nonpayable"``) and may omit an empty ``inputs``."""
+    out: Abi = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        e = dict(entry)
+        e["type"] = str(e.get("type") or "function").lower()
+        if isinstance(e.get("stateMutability"), str):
+            e["stateMutability"] = e["stateMutability"].lower()
+        if e["type"] in ("function", "event", "error", "constructor"):
+            e.setdefault("inputs", [])
+        if e["type"] == "function":
+            e.setdefault("outputs", [])
+        out.append(e)
+    return out
+
+
+class TronAbiSource:
+    """A Tron contract's ABI, from the chain itself. java-tron keeps the ABI a
+    contract was deployed with, and any full node serves it
+    (``wallet/getcontract``). It needs no key, and covers contracts Tronscan
+    hasn't verified; "verified" there is about the SOURCE.
+
+    A proxy resolves to its implementation too: the EIP-1967 & co. slots are
+    read over Tron's ``/jsonrpc`` (``set_storage_reader``), as on EVM.
+    ``chain_for`` maps a chain id to its ``Chain`` (the node to ask)."""
+
+    def __init__(self, chain_for=None):
+        from .chains import DEFAULT_CHAINS
+        self._chain_for = chain_for or (
+            lambda cid: next((c for c in DEFAULT_CHAINS if c.chain_id == cid), None))
+        self._storage_reader = None
+
+    def set_storage_reader(self, reader) -> None:
+        self._storage_reader = reader
+
+    def supports(self, chain_id: int) -> bool:
+        from .chains import TRON
+        chain = self._chain_for(chain_id)
+        return chain is not None and chain.family == TRON
+
+    def fetch(self, chain_id: int, address: str) -> Abi | bool:
+        from .tron.client import TronClient, TronError
+        chain = self._chain_for(chain_id) if self.supports(chain_id) else None
+        if chain is None:
+            raise AbiSourceError(f"not a Tron chain: {chain_id}")
+        client = TronClient(chain)
+        try:
+            abi = tron_abi_to_json(
+                (client.get_contract(address).get("abi") or {}).get("entrys"))
+            impl = _impl_from_storage(self._storage_reader, chain_id, address)
+            if impl and impl.lower() != address.lower():
+                abi = _dedup_by_selector(abi + tron_abi_to_json(
+                    (client.get_contract(impl).get("abi") or {}).get("entrys")))
+        except TronError as e:
+            raise AbiSourceError(f"Tron node: {e}") from e
+        # No ABI on-chain (deployed without one): the unverified sentinel.
+        return abi or False
+
+
 # Any of the concrete ABI sources — they share .supports()/.fetch(). Used
 # wherever a caller is agnostic about which explorer backs the lookup.
-AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource
+AnyAbiSource = BlockscoutAbiSource | EtherscanV2AbiSource | RoutedAbiSource | TronAbiSource
 
 
 def _dedup_by_selector(abi: Abi) -> Abi:

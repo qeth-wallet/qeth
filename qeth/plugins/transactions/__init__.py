@@ -54,7 +54,7 @@ from shiboken6 import isValid as _qt_alive   # is a Qt C++ object still alive?
 from ... import QULONGLONG
 from ...abi import (
     KNOWN_EVENT_NAMES, AnyAbiSource, BlockscoutAbiSource, EtherscanV2AbiSource,
-    RoutedAbiSource, decode_call, decode_event,
+    RoutedAbiSource, TronAbiSource, decode_call, decode_event,
 )
 from ...abi_cache import AbiCache
 from .contract_identity import (
@@ -1363,6 +1363,10 @@ class TransactionsPlugin(Plugin):
                 )
             else:
                 abi_source = blockscout_abi
+            # Tron has neither explorer; its contracts carry their ABI on-chain.
+            abi_source = RoutedAbiSource(abi_source, TronAbiSource(
+                (lambda cid: next((c for c in store.chains if c.chain_id == cid), None))
+                if store is not None else None))
         self._abi_source = abi_source
         self._abi_cache = abi_cache if abi_cache is not None else AbiCache()
         # Contract-identity machinery (name / verified / deployer / age),

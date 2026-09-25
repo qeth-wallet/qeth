@@ -256,6 +256,14 @@ What's Tron-specific:
 - **Identity rows.** The Contract / Spender rows of the details and sign
   dialogs come from Tronscan on Tron (`TronIdentitySource`, through the same
   `ContractIdentitySource`), with addresses in `T…` form.
+- **ABIs.** Neither explorer serves Tron, but java-tron keeps the ABI a
+  contract was deployed with. `abi.TronAbiSource` reads it with
+  `wallet/getcontract` from the chain's own node: keyless, and it covers
+  contracts Tronscan hasn't verified. It normalises Tron's capitalised
+  entry kinds, and resolves a proxy through the EIP-1967 & co. slots read
+  over `/jsonrpc`. The transactions plugin routes Tron chain ids to it, so
+  dapp calls and history decode with parameter names instead of the 4-byte
+  database.
 
 ## Phase 4: Tron dapps in the browser (done)
 
@@ -324,6 +332,15 @@ same code.
     also be a valid EIP-712 signature for the key's EVM account.
   - Digests are always computed by qeth, from the content shown.
   - The TronWeb 6.5.1 vectors are in `tests/test_tron_dapp.py`.
+- **Status views.** `qeth_status` (for qeth's own connectors only; a web
+  page is refused) reports two things:
+  - the network selected in qeth and that family's connected account;
+  - what a given site is presented: the Tron account if it last explicitly
+    used the Tron provider (a connect or a signature; the provider's
+    automatic reads don't count), else its per-origin EVM chain and account.
+  The extension popup (for the active tab) and Falkon's toolbar and status
+  dialog (the active window's current tab) show both. They fall back to
+  `eth_chainId` / `eth_accounts` on an older qeth.
 - **Tests.** The page side runs end to end in real Chromium and Firefox
   (`tests/test_webext_tron_browser.py`, opt-in `-m browser`). It covers:
   - the real extension and TronWeb, the real `RpcServer`, a fake Tron node,
@@ -342,8 +359,10 @@ same code.
 - **TRC-20 approvals.** The Approvals tab needs a Tron `Approval`-log source.
   TronGrid `/v1/contracts/{addr}/events`, or `eth_getLogs` over `/jsonrpc`
   (≤ 5000 blocks per call).
-- **Contract ABIs.** A dapp call is decoded through the 4-byte database
-  (there's no Tron ABI source). Tronscan serves verified ABIs.
+- **Router commands.** A Universal-Router-style `execute(commands, inputs,
+  deadline)` (SunSwap's router) decodes by name, but `commands` / `inputs`
+  stay packed bytes. Decoding them needs SunSwap's command set; the Events
+  tab already shows what actually moves.
 - **Multi-signature.** `trx.multiSign` and `Permission_id` contracts are
   refused today.
 - **Staking / voting / resource delegation.** Trezor already supports these

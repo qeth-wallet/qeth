@@ -211,6 +211,12 @@ class TronClient:
         return {p["key"]: int(p.get("value", 0))
                 for p in resp.get("chainParameter", []) if "key" in p}
 
+    def get_contract(self, address: str) -> dict:
+        """A contract's record — ``abi.entrys`` is the ABI it was deployed
+        with (java-tron keeps it on-chain), ``name`` its contract name. ``{}``
+        for an address that isn't a contract."""
+        return self._post("/wallet/getcontract", {"value": tron_hex41(address)})
+
     def head_block(self) -> BlockRef:
         return _block_ref(self._post("/wallet/getblock", {"detail": False}))
 

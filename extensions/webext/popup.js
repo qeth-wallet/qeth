@@ -40,13 +40,27 @@ function setVersion() {
   catch (e) {}
 }
 
-function showConnected(chainId, account, tronAccount) {
+function shortAddr(a) {
+  return a && a.length > 12 ? a.slice(0, 6) + "\u2026" + a.slice(-4) : a;
+}
+
+function networkName(chain) {
+  return (chain && chain.name) || chainName(chain && chain.chainId);
+}
+
+// res.wallet (qeth_status): the network selected in qeth + its account (T… on
+// Tron), and what the active tab's site is presented. Without it (an older
+// qeth), the EVM chain dapps get and its account.
+function showConnected(res) {
+  var wallet = res.wallet || {};
+  var network = wallet.chain ? networkName(wallet.chain) : chainName(res.chainId);
+  var account = wallet.chain ? wallet.account : res.account;
   $("status").className = "status ok";
   $("status").textContent = "Connected to qeth";
   var detail = $("detail");
   clear(detail);
   detail.appendChild(text("Network: "));
-  detail.appendChild(el("b", chainName(chainId)));
+  detail.appendChild(el("b", network));
   detail.appendChild(document.createElement("br"));
   detail.appendChild(text("Account: "));
   if (account) {
@@ -56,12 +70,24 @@ function showConnected(chainId, account, tronAccount) {
   } else {
     detail.appendChild(text("No account selected in qeth"));
   }
-  if (tronAccount) {              // what Tron dapps are handed
-    detail.appendChild(document.createElement("br"));
-    detail.appendChild(text("Tron: "));
-    var tron = el("span", tronAccount);
-    tron.className = "addr";
-    detail.appendChild(tron);
+  var site = wallet.site;
+  if (site) {
+    var line = el("div");
+    line.className = "site";
+    var host = "";
+    try { host = new URL(site.origin).host; } catch (e) {}
+    line.appendChild(text("This site (" + host + "): "));
+    line.appendChild(el("b", networkName(site.chain)));
+    line.appendChild(text(" \u00b7 "));
+    if (site.account) {
+      var sa = el("span", shortAddr(site.account));
+      sa.className = "addr";
+      sa.title = site.account;
+      line.appendChild(sa);
+    } else {
+      line.appendChild(text("no account connected"));
+    }
+    detail.appendChild(line);
   }
 }
 
@@ -77,13 +103,29 @@ function showDisconnected() {
   detail.appendChild(text(" — then press Recheck."));
 }
 
+// The active tab's http(s) origin, or null — the site the popup describes.
+function activeOrigin(cb) {
+  if (!chrome.tabs || !chrome.tabs.query) { cb(null); return; }
+  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    var url = tabs && tabs[0] && tabs[0].url;      // host permissions expose it
+    var origin = null;
+    try {
+      var u = new URL(url);
+      if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin;
+    } catch (e) {}
+    cb(origin);
+  });
+}
+
 function probe() {
   $("status").className = "status off";
   $("status").textContent = "Checking…";
   $("detail").textContent = "";
-  chrome.runtime.sendMessage({ type: "status" }, function (res) {
-    if (chrome.runtime.lastError || !res || !res.connected) { showDisconnected(); return; }
-    showConnected(res.chainId, res.account, res.tronAccount);
+  activeOrigin(function (origin) {
+    chrome.runtime.sendMessage({ type: "status", origin: origin }, function (res) {
+      if (chrome.runtime.lastError || !res || !res.connected) { showDisconnected(); return; }
+      showConnected(res);
+    });
   });
 }
 

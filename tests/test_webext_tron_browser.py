@@ -18,6 +18,7 @@ runs beside a live qeth.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import shutil
 import socket
@@ -229,8 +230,10 @@ def backend():
     tron = dataclasses.replace(TRON_CHAIN, api_url=node.url, api_fallbacks=())
     eth = Chain("Ethereum", 1, "http://127.0.0.1:9/", "ETH", "")
     defaults = {EVM: "0x" + "11" * 20, TRON: ACCOUNT}
+    selected = {"chain": eth}           # the network "selected in qeth's UI"
     store = SimpleNamespace(
-        chains=[eth, tron], current_chain=lambda: eth, dapp_chain=lambda: eth,
+        chains=[eth, tron], current_chain=lambda: selected["chain"],
+        dapp_chain=lambda: eth,
         default_for=lambda fam: (defaults.get(fam), None),     # Store's (address, path)
     )
     store.default_account = defaults[EVM]
@@ -241,7 +244,7 @@ def backend():
     if server._error is not None:
         pytest.skip(f"couldn't start the stub RpcServer: {server._error}")
     yield SimpleNamespace(server=server, node=node, bridge=bridge, port=port,
-                          defaults=defaults)
+                          defaults=defaults, selected=selected, tron=tron, eth=eth)
     server.stop()
     node.close()
 
@@ -280,6 +283,10 @@ def driver(request, backend, dapp_url, tmp_path_factory):
             opts.add_argument(arg)
         drv = webdriver.Chrome(options=opts, service=ChromeService(
             executable_path=shutil.which("chromedriver")))
+        # An unpacked extension's id: its path's sha256, as letters a–p.
+        drv.qeth_popup = "chrome-extension://{}/popup.html".format("".join(
+            chr(ord("a") + int(c, 16))
+            for c in hashlib.sha256(str(ext).encode()).hexdigest()[:32]))
     else:
         if not shutil.which("geckodriver") or not shutil.which("firefox"):
             pytest.skip("geckodriver / firefox not on PATH")
@@ -475,3 +482,28 @@ def test_account_change_reaches_the_page(page, backend):
     _wait_js(page, f"window.tronWeb.defaultAddress.base58 === '{tron_from_hex(OTHER)}'",
              timeout=10)
     assert _js(page, "window.__accountsEvents")[-1] == [tron_from_hex(OTHER)]
+
+
+def test_the_popup_shows_the_selected_network_and_the_site(page, backend, dapp_url):
+    """The status popup (Chromium — Firefox's moz-extension id is random): the
+    network selected in qeth and ITS account, and what the site is presented."""
+    popup = getattr(page, "qeth_popup", None)
+    if popup is None:
+        pytest.skip("the popup page is reached by id on Chromium only")
+    _run(page, "await window.tron.request({method: 'eth_requestAccounts'});")   # a Tron site
+    backend.selected["chain"] = backend.tron                                     # qeth on Tron
+    try:
+        page.get(popup)
+        _wait_js(page, "document.getElementById('detail')", timeout=10)
+        r = _run(page, """
+          const res = await new Promise(ok => chrome.runtime.sendMessage(
+            {type: "status", origin: "%s"}, ok));
+          showConnected(res);
+          return document.getElementById("detail").innerText;""" % dapp_url)
+    finally:
+        backend.selected["chain"] = backend.eth
+    text = r["ok"]
+    assert "Network: Tron" in text and ACCOUNT_B58 in text
+    assert "0x" + "11" * 20 not in text.lower()          # not the EVM account too
+    host = dapp_url.split("//")[1]
+    assert f"This site ({host}): Tron · {ACCOUNT_B58[:6]}…{ACCOUNT_B58[-4:]}" in text

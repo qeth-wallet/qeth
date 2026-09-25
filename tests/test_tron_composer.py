@@ -124,3 +124,71 @@ class TestTronIdentity:
         badge = describe_identity(idy, my_addresses=[], now_ts=10**10,
                                   short=codec_for(TRON).short)
         assert tron_from_hex("0x" + "ab" * 20)[:5] in badge.text
+
+
+# --- ABIs: from the chain itself ---------------------------------------------------
+
+ROUTER = "0xa31d689a84244bc01be56e07aeafb7686f56bb89"
+IMPL = "0x" + "c1" * 20
+EXECUTE = {"name": "execute", "type": "Function", "stateMutability": "Payable",
+           "inputs": [{"name": "commands", "type": "bytes"},
+                      {"name": "inputs", "type": "bytes[]"},
+                      {"name": "deadline", "type": "uint256"}]}
+
+
+def _contracts(monkeypatch, by_address):
+    """Serve wallet/getcontract from ``by_address`` (hex41 → abi entries)."""
+    seen: list[str] = []
+
+    def urlopen(req, timeout=None):
+        body = json.loads(req.data)
+        seen.append(body["value"])
+        entries = by_address.get(body["value"])
+        return io.BytesIO(json.dumps(
+            {"abi": {"entrys": entries}} if entries is not None else {}).encode())
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    return seen
+
+
+def test_tron_abi_comes_from_the_node_normalised(monkeypatch):
+    from qeth.abi import TronAbiSource, decode_call
+    _contracts(monkeypatch, {"41" + ROUTER[2:]: [
+        EXECUTE, {"type": "Receive", "stateMutability": "Payable"},
+        {"name": "owner", "type": "Function", "stateMutability": "View"}]})
+    src = TronAbiSource()
+    assert src.supports(CHAIN.chain_id) and not src.supports(1)
+    abi = src.fetch(CHAIN.chain_id, ROUTER)
+    assert abi[0]["type"] == "function" and abi[0]["stateMutability"] == "payable"
+    assert abi[1] == {"type": "receive", "stateMutability": "payable"}
+    assert abi[2]["inputs"] == [] and abi[2]["outputs"] == []
+    from eth_abi import encode
+    data = "0x3593564c" + encode(["bytes", "bytes[]", "uint256"],
+                                 [b"\x12\x04", [b"\x01"], 7]).hex()
+    d = decode_call(abi, data, address=ROUTER)
+    assert d["function"] == "execute"
+    assert [a["name"] for a in d["args"]] == ["commands", "inputs", "deadline"]
+
+
+def test_tron_abi_resolves_a_proxy_and_flags_a_contract_without_one(monkeypatch):
+    from qeth.abi import TronAbiSource
+    seen = _contracts(monkeypatch, {
+        "41" + ROUTER[2:]: [{"name": "upgradeTo", "type": "Function",
+                             "inputs": [{"name": "i", "type": "address"}]}],
+        "41" + IMPL[2:]: [EXECUTE]})
+    src = TronAbiSource()
+    src.set_storage_reader(
+        lambda cid, addr, slot: "0x" + "00" * 12 + IMPL[2:] if addr == ROUTER else "0x0")
+    names = [e["name"] for e in src.fetch(CHAIN.chain_id, ROUTER)]
+    assert names == ["upgradeTo", "execute"] and seen[-1] == "41" + IMPL[2:]
+    src.set_storage_reader(None)
+    assert src.fetch(CHAIN.chain_id, "0x" + "ee" * 20) is False   # deployed without
+
+
+def test_the_plugins_abi_source_routes_tron_to_the_chain(monkeypatch, mainwindow):
+    """What the sign / details dialogs use: EVM explorers first, and a Tron
+    chain id (which neither serves) → the chain's own node."""
+    _contracts(monkeypatch, {"41" + ROUTER[2:]: [EXECUTE]})
+    src = mainwindow.transactions_plugin._abi_source
+    src.set_storage_reader(lambda cid, addr, slot: "0x0")     # no proxy, no /jsonrpc
+    assert src.supports(CHAIN.chain_id)
+    assert src.fetch(CHAIN.chain_id, ROUTER)[0]["name"] == "execute"

@@ -14,9 +14,9 @@ from aiohttp import (
 )
 
 from . import USER_AGENT, __version__
-from .address import tron_from_hex, tron_to_hex
+from .address import display_address, tron_from_hex, tron_to_hex
 from .chain import is_provider_limit_error
-from .chains import TRON, Chain
+from .chains import EVM, TRON, Chain
 from .signing import (
     SignerBridge, SignerError, TronMessageSigningRequest, TronSigningRequest,
     TronTypedDataSigningRequest,
@@ -66,7 +66,29 @@ _EXPLORER_URL_SCHEMES = frozenset({"http", "https"})
 #
 # ``tron_`` is qeth's own injected Tron provider (TronWeb / TIP-1193, see
 # _tron_dispatch): an unknown tron_* must never reach the EVM chain's node.
-_WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_", "tron_")
+# ``qeth_`` is qeth's own connectors talking to it (qeth_status).
+_WALLET_NAMESPACES = ("wallet_", "frame_", "metamask_", "personal_", "tron_",
+                      "qeth_")
+
+# A site's explicit use of each provider — its connect and signing calls, not
+# the injected provider's own automatic eth_accounts refresh. The last one
+# seen per origin is the network qeth_status says the site is on.
+_EVM_SITE_METHODS = frozenset({
+    "eth_requestAccounts", "wallet_requestPermissions", "eth_sendTransaction",
+    "personal_sign", "personal_signMessage", "eth_signTypedData",
+    "eth_signTypedData_v3", "eth_signTypedData_v4",
+})
+_TRON_SITE_METHODS = frozenset({
+    "tron_requestAccounts", "tron_signTransaction", "tron_signMessage",
+    "tron_signTypedData",
+})
+
+
+def _is_web_origin(origin: str | None) -> bool:
+    """An http(s) origin with a host — a website (vs an extension, a native
+    client, curl)."""
+    parsed = urlparse(origin or "")
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 # eth_subscribe types a NODE can serve. Everything else is a wallet-level
 # event (Frame extends eth_subscribe with them) and must be handled here or
@@ -255,6 +277,9 @@ class RpcServer:
         # modal — the user then has to dismiss a stack of identical
         # dialogs. Concurrent requests for the same id share one prompt.
         self._pending_chain_add: dict[int, asyncio.Future[bool]] = {}
+        # The family each site last explicitly used (_EVM/_TRON_SITE_METHODS),
+        # for qeth_status. This session only.
+        self._site_family: dict[str, str] = {}
         # Dapp Tron transactions qeth signed, by txid (hex): (request, signed
         # Transaction hex). tron_node spots their broadcast and tells the UI.
         self._tron_signed: collections.OrderedDict[
@@ -788,6 +813,15 @@ class RpcServer:
                          origin: str | None = None,
                          ws: web.WebSocketResponse | None = None,
                          ) -> Any:
+        if _is_web_origin(origin):
+            if method in _EVM_SITE_METHODS:
+                self._site_family[origin or ""] = EVM
+            elif method in _TRON_SITE_METHODS:
+                self._site_family[origin or ""] = TRON
+
+        if method == "qeth_status":
+            return self._wallet_status(params, origin)
+
         if method == "eth_subscribe":
             # Frame extends eth_subscribe with wallet-event types
             # (_WALLET_SUBSCRIPTIONS) on top of the standard
@@ -1103,6 +1137,46 @@ class RpcServer:
     # a legacy leftover to stop leaning on. Matches async_chain /
     # live_watcher, which already pass ClientTimeout.
     _REQUEST_TIMEOUT = ClientTimeout(total=15)
+
+    # --- status for qeth's own connectors ----------------------------------
+
+    def _wallet_status(self, params: list, origin: str | None) -> dict:
+        """What the status UIs show (the extension popup, Falkon's toolbar and
+        status dialog): the network selected in qeth and its family's connected
+        account — and, for ``params[0].origin``, what that site is presented:
+        the Tron account if it last used qeth's Tron provider, else its EVM
+        chain (per-origin) and account.
+
+        qeth's connectors only: a web page is refused, since which sites used
+        which network is no other site's business."""
+        if _is_web_origin(origin):
+            raise RpcError(4100, "qeth_status is for qeth's own connectors")
+        chain = self.store.current_chain()
+        out: dict[str, Any] = {"chain": self._chain_info(chain),
+                               "account": self._account_on(chain), "site": None}
+        arg = params[0] if params and isinstance(params[0], dict) else {}
+        site = arg.get("origin")
+        if isinstance(site, str) and _is_web_origin(site):
+            tron = next((c for c in self.store.chains if c.family == TRON), None)
+            if self._site_family.get(site) == TRON and tron is not None:
+                shown = tron
+            else:
+                cid = self._chain_for_origin(site)
+                shown = next((c for c in self.store.chains
+                              if c.chain_id == cid and c.is_evm), self.store.dapp_chain())
+            out["site"] = {"origin": site, "chain": self._chain_info(shown),
+                           "account": self._account_on(shown)}
+        return out
+
+    @staticmethod
+    def _chain_info(chain: Chain) -> dict:
+        return {"chainId": hex(chain.chain_id), "name": chain.name,
+                "family": chain.family}
+
+    def _account_on(self, chain: Chain) -> str | None:
+        """The connected account of ``chain``'s family, in its form there."""
+        acct = self.store.default_for(chain.family)[0]
+        return display_address(acct, chain) if acct else None
 
     # --- Tron (qeth's injected TronWeb / TIP-1193 provider) ----------------
     #

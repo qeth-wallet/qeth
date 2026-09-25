@@ -275,16 +275,21 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
 // eth_chainId / eth_accounts are sent origin-less (no __frameOrigin), so the
 // server answers for the wallet's default chain — the Falkon StatusDialog
 // semantics. Opening the popup also nudges a reconnect.
-function askLocal(method, cb) {
+function askLocal(method, cb, params) {
   if (!wsOpen || !ws) { cb(null); return; }
   var wsId = nextId++;
   pending[wsId] = { port: null, originalId: null, method: method, cb: cb };
-  try { ws.send(JSON.stringify({ jsonrpc: "2.0", id: wsId, method: method })); }
-  catch (e) { delete pending[wsId]; cb(null); }
+  try {
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: wsId, method: method,
+                             params: params || [] }));
+  } catch (e) { delete pending[wsId]; cb(null); }
 }
 
-function queryStatus(sendResponse) {
-  var res = { connected: true, chainId: null, account: null, tronAccount: null };
+// qeth_status adds what the popup describes (the network selected in qeth and
+// its account; what the active tab's site is presented); a qeth without it
+// errors, and the popup falls back to eth_chainId / eth_accounts.
+function queryStatus(sendResponse, origin) {
+  var res = { connected: true, chainId: null, account: null, wallet: null };
   var left = 3, done = false;
   function finish() { if (!done) { done = true; sendResponse(res); } }
   var t = setTimeout(finish, 2000);
@@ -295,9 +300,10 @@ function queryStatus(sendResponse) {
   askLocal("eth_accounts", function (m) {
     if (m && m.result && m.result[0]) res.account = m.result[0]; got();
   });
-  askLocal("tron_accounts", function (m) {       // an error from a qeth without Tron
-    if (m && m.result && m.result[0]) res.tronAccount = m.result[0]; got();
-  });
+  askLocal("qeth_status", function (m) {
+    if (m && m.result && typeof m.result === "object") res.wallet = m.result;
+    got();
+  }, origin ? [{ origin: origin }] : []);
 }
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
@@ -305,7 +311,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   connect();
   var deadline = Date.now() + 1500;         // give a just-started socket a moment
   (function attempt() {
-    if (wsOpen) { queryStatus(sendResponse); return; }
+    if (wsOpen) { queryStatus(sendResponse, msg.origin); return; }
     if (Date.now() >= deadline) { sendResponse({ connected: false }); return; }
     setTimeout(attempt, 150);
   })();

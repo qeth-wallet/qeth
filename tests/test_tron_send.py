@@ -102,13 +102,46 @@ def test_trc20_send_is_a_contract_call_with_a_fee_limit(qtbot):
     assert tron_from_hex(TO) in d.decoded_view.toPlainText()
 
 
-def test_not_enough_trx_is_flagged(qtbot):
+def test_not_enough_trx_is_a_banner(qtbot):
+    """On Tron a call that can't pay its energy is MINED and fails, burning what
+    the account has — a banner above Confirm, not a note on the fee line."""
     d = _tron_dialog(qtbot, USDT_ASSET)
     _type(d, amount="1")
     fee = TronFee(bandwidth=345, bandwidth_burn=0, energy=64285,
                   energy_burn=6_428_500, fee_limit=9_642_751)
     _estimate(d, fee, trx_balance=1_000_000)       # 1 TRX < 6.43 burn
-    assert "⚠ needs 6.4285 TRX" in d.max_total_lbl.text()
+    banner = d._funds_banner
+    assert banner is not None and not banner.isHidden()
+    assert "needs about 6.4285 TRX" in banner.text() and "holds 1 TRX" in banner.text()
+    assert "run out of energy" in banner.text()
+    assert "⚠" not in d.max_total_lbl.text()
+    _estimate(d, fee, trx_balance=10**9)           # topped up → gone
+    assert banner.isHidden()
+
+
+def test_a_trx_send_the_account_cant_pay_would_be_refused(qtbot):
+    d = _tron_dialog(qtbot)
+    _type(d, amount="9.9")
+    _estimate(d, TronFee(bandwidth=268, bandwidth_burn=268_000), trx_balance=10_000_000)
+    assert "the network will refuse it" in d._funds_banner.text()
+
+
+def test_the_estimate_refreshes_while_the_dialog_is_open(qtbot):
+    """A dapp's approve lands after its swap's dialog opened: the balance and
+    energy move, so the estimate re-runs — but never mid-signing."""
+    from qeth.plugins.transactions.tron_send import TronFeeWorker
+    d = _tron_dialog(qtbot, USDT_ASSET)
+    _type(d, amount="1")
+    _estimate(d, TronFee(bandwidth=345, bandwidth_burn=0, energy=64285,
+                         energy_burn=6_428_500, fee_limit=9_642_751))
+    assert d._fee_refresh.isActive()
+    d.started.clear()
+    d._refresh_tron_fee()
+    assert [type(w) for w in d.started] == [TronFeeWorker]
+    d.set_signing_in_progress(True)
+    d.started.clear()
+    d._refresh_tron_fee()
+    assert d.started == []
 
 
 def test_max_trx_leaves_the_burn(qtbot):
@@ -249,3 +282,15 @@ def test_confirmed_receipt_carries_the_fee():
     new = _confirmed_from_receipt(old, {"blockNumber": "0x10", "status": "0x1",
                                         "gasUsed": "0x0", "fee": 268000})
     assert (new.block_number, new.fee, new.pending, new.raw_signed) == (16, 268000, False, None)
+
+
+def test_the_nonce_column_hides_on_tron(qtbot):
+    """Tron transactions have no nonce — the column would only ever be empty."""
+    from qeth.chains import DEFAULT_CHAINS as CHAINS
+    from qeth.plugins.transactions import _C_NONCE, TransactionListPanel
+    panel = TransactionListPanel()
+    qtbot.addWidget(panel)
+    panel.set_context(CHAIN, OWNER)
+    assert panel.table.isColumnHidden(_C_NONCE)
+    panel.set_context(next(c for c in CHAINS if c.is_evm), OWNER)
+    assert not panel.table.isColumnHidden(_C_NONCE)

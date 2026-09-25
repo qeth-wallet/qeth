@@ -21,8 +21,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QFormLayout
+from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtWidgets import QFormLayout, QLabel, QVBoxLayout
 
 from ...chain import native_amount
 from ...signing import SignerError, SigningRequest
@@ -30,8 +30,6 @@ from ...tron.client import TronClient, TronError
 from ...tron.fees import TronFee, estimate_fee
 from ...tron.tx import Contract, TransferContract, TriggerSmartContract
 
-if TYPE_CHECKING:
-    from PySide6.QtWidgets import QLabel
 
 
 def tron_contract(owner: str, req: SigningRequest) -> Contract:
@@ -83,6 +81,11 @@ def _trx(sun: int) -> str:
 class _TronFeesMixin:
     """The Tron fee hooks over ``_TxComposerDialog`` (mixed in FIRST)."""
 
+    # Re-estimate this often while the dialog is open: a transaction just
+    # before it (a dapp's approve, then its swap) moves the balance and the
+    # energy after the first estimate.
+    TRON_FEE_REFRESH_MS = 12_000
+
     if TYPE_CHECKING:
         chain: Any
         _from_addr: Any
@@ -90,8 +93,11 @@ class _TronFeesMixin:
         _gas_worker: QThread | None
         _native_price_usd: Any
         _start_worker: Any
+        _signing: bool
         max_total_lbl: QLabel
 
+        def layout(self) -> Any: ...
+        def revert_banner(self) -> QLabel: ...
         def _value_label(self, text: str, *, monospace: bool = False) -> QLabel: ...
         def _is_stale_gas(self) -> bool: ...
         def _on_gas_ready(self) -> None: ...
@@ -124,6 +130,10 @@ class _TronFeesMixin:
             form.setRowVisible(lbl, False)
         self._gas_section.set_content_layout(form)
         outer.addWidget(self._gas_section)
+        self._funds_banner: QLabel | None = None
+        self._fee_refresh = QTimer(self)        # type: ignore[arg-type]
+        self._fee_refresh.setInterval(self.TRON_FEE_REFRESH_MS)
+        self._fee_refresh.timeout.connect(self._refresh_tron_fee)
 
     def _kick_gas(self, probe: SigningRequest) -> None:
         try:
@@ -163,6 +173,8 @@ class _TronFeesMixin:
         self._fee_limit_lbl.setText(limit_text)
         self.base_fee_lbl.setText("ready")
         self._gas_ready = True
+        if not self._fee_refresh.isActive():
+            self._fee_refresh.start()
         self._on_gas_ready()
         self._update_state()
 
@@ -178,6 +190,8 @@ class _TronFeesMixin:
             return
         self._tron_fee = None
         self._gas_ready = False
+        if self._funds_banner is not None:      # it described a stale estimate
+            self._funds_banner.setVisible(False)
         self.base_fee_lbl.setText(f"(failed: {msg})")
         self.max_total_lbl.setText(f"— {msg}")
         self._update_state()
@@ -201,15 +215,52 @@ class _TronFeesMixin:
         if fee.activation:
             text += (f"\nincludes {_trx(fee.activation)} TRX to activate the "
                      "recipient's new account (it has never received TRX)")
-        # The fee is paid in TRX whatever is sent — say so when the account
-        # can't cover it (warn, like a predicted revert: the node refuses a
-        # tx it can't charge at broadcast, so nothing is lost).
-        need = burn + self._native_outflow()
-        if self._trx_balance is not None and need > self._trx_balance:
-            text += (f"   ⚠ needs {_trx(need)} TRX, the account holds "
-                     f"{_trx(self._trx_balance)}")
         self.max_total_lbl.setText(text)
+        # The fee is paid in TRX whatever is sent.
+        self._set_funds_warning(burn + self._native_outflow(), fee)
         self._update_extra_totals(burn)
+
+    def _set_funds_warning(self, need: int, fee: TronFee) -> None:
+        """A banner above Confirm when the account can't cover ``need`` sun —
+        loud, not a suffix on the fee line, because on Tron a contract call
+        that can't pay its energy isn't refused: it's mined, runs out of
+        energy, FAILS, and still burns the TRX the account had."""
+        short = self._trx_balance is not None and need > self._trx_balance
+        banner = self._funds_banner
+        if not short:
+            if banner is not None:
+                banner.setVisible(False)
+            return
+        if banner is None:
+            from . import _IDENTITY_TINT
+            banner = self._funds_banner = QLabel()
+            banner.setWordWrap(True)
+            bg, fg = _IDENTITY_TINT["warn"]
+            banner.setStyleSheet(
+                f"background:{bg}; color:{fg}; padding:6px 10px; border-radius:4px;")
+            root = self.layout()
+            if isinstance(root, QVBoxLayout):
+                root.insertWidget(root.indexOf(self.revert_banner()), banner)
+        held = f"{_trx(self._trx_balance or 0)} TRX"
+        if fee.energy:
+            text = (f"⚠ Not enough TRX: this needs about {_trx(need)} TRX and the "
+                    f"account holds {held}. The call would still be mined, run "
+                    "out of energy and fail — burning the TRX the account has.")
+        else:
+            text = (f"⚠ Not enough TRX: this needs {_trx(need)} TRX and the "
+                    f"account holds {held} — the network will refuse it.")
+        banner.setText(text)
+        banner.setVisible(True)
+
+    def _refresh_tron_fee(self) -> None:
+        """The periodic re-estimate (fresh balance, energy, activation)."""
+        if getattr(self, "_signing", False):
+            return
+        try:
+            probe = self._build_request()
+        except SignerError:
+            return
+        self._kick_gas(probe)
 
     def _native_outflow(self) -> int:
         """TRX leaving with the transaction itself (a TRX send's amount)."""

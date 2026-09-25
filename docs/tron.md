@@ -244,6 +244,15 @@ What's Tron-specific:
   - a "Network resources" section (bandwidth, energy, activation,
     fee_limit, and what gets burned) in place of gas / fee / nonce;
   - `finalised_tron()` in place of an EVM request.
+  - A banner above Confirm when the account can't pay. On Tron a contract
+    call that can't pay its energy isn't refused: it's mined, runs out of
+    energy (its energy limit is what the balance can buy), fails, and burns
+    what the account had.
+  - A re-estimate every 12 s while the dialog is open (not while signing).
+    A dapp's approve, landing after its swap's dialog opened, burns TRX
+    that the first estimate still counted.
+  - The transaction list hides its Nonce column on Tron: there's no nonce,
+    since a block reference plus an expiration guard against replay.
 
   `MainWindow._begin_sign` routes a Tron chain to `_begin_tron_sign` →
   `TronSignAndBroadcastWorker`.

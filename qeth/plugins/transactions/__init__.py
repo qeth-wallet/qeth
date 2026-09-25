@@ -3084,6 +3084,9 @@ class TransactionListPanel(QWidget):
     def set_context(self, chain, viewer_address: str) -> None:
         self._chain = chain
         self._viewer = viewer_address
+        # Tron transactions have no nonce (a block reference + expiration
+        # guard against replay) — the column could only ever be empty there.
+        self.table.setColumnHidden(_C_NONCE, not chain.is_evm)
         self._update_action_buttons()
 
     # --- Activity column (verb + coins moved) -------------------------------

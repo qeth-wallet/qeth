@@ -4,11 +4,12 @@ QtMultimedia — those are verified on hardware)."""
 
 import io
 
+import pytest
 import segno
 from cbor2 import CBORTag, dumps
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QLabel
 
 from qeth.qr import ur
 from qeth.qr_scan import decode_qr
@@ -219,6 +220,73 @@ def test_dialog_single_part_renders_once(qtbot):
     dlg._render_frame()
     dlg._render_frame()                       # constant → no re-render
     assert dlg._shown == "ur:eth-sign-request/const"
+
+
+@pytest.mark.parametrize("payload_size", [120, 10_000])
+def test_dialog_qr_grows_and_shrinks_without_consuming_frames(qtbot, payload_size):
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    frames = frame_source("eth-sign-request", bytes(payload_size))
+    calls = []
+
+    def next_frame():
+        frame = frames()
+        calls.append(frame)
+        return frame
+
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=next_frame)
+    dlg._anim.stop()  # Resize alone must not advance the fountain stream.
+    dlg.show()
+    qtbot.waitUntil(dlg.isVisible)
+    initial_width = dlg._qr_label.pixmap().width()
+    dlg.resize(1400, 900)
+    qtbot.waitUntil(lambda: dlg._qr_label.width() > 320)
+    large_width = dlg._qr_label.pixmap().width()
+    assert large_width > initial_width
+    for caption in dlg.findChildren(QLabel):
+        if caption.wordWrap():
+            assert caption.height() >= caption.heightForWidth(caption.width())
+    assert decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == calls[0].upper()
+
+    dlg.resize(700, 430)
+    qtbot.waitUntil(lambda: dlg._qr_label.pixmap().width() < large_width)
+    assert decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == calls[0].upper()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("scan_only", [False, True])
+def test_camera_preview_refits_cached_frame_and_keeps_failure_text(qtbot, scan_only):
+    from PySide6.QtGui import QImage
+
+    from qeth.qr_exchange_dialog import QRScanDialog
+
+    scanner = _FakeScanner()
+    dlg = QRScanDialog(scanner=scanner) if scan_only else _dialog(qtbot, scanner)
+    if scan_only:
+        qtbot.addWidget(dlg)
+    else:
+        dlg._anim.stop()
+    dlg.show()
+    frame = QImage(640, 480, QImage.Format.Format_RGB32)
+    frame.fill("green")
+    scanner.frame.emit(frame)
+    initial = dlg._preview.pixmap().width()
+
+    dlg.resize(1400, 900)
+    qtbot.waitUntil(lambda: dlg._preview.pixmap().width() > initial)
+    large = dlg._preview.pixmap()
+    assert large.width() == large.height()
+    assert large.toImage().pixelColor(0, 0).name() == "#008000"
+    dlg.resize(700, 430)
+    qtbot.waitUntil(lambda: dlg._preview.pixmap().width() < large.width())
+
+    scanner.failed.emit("Camera permission was denied")
+    dlg.resize(900, 600)
+    assert dlg._preview.text() == "Camera permission was denied"
+    assert dlg._preview.pixmap().isNull()
+    dlg.reject()
+    assert scanner.started == scanner.stopped == 1
 
 
 def test_dialog_ignores_non_ur_barcodes(qtbot):

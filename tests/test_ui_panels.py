@@ -356,8 +356,24 @@ class TestAccountInfoDialog:
         assert dlg.path_lbl.text() == "44'/60'/0'/0/0"
         assert dlg.source_lbl.text() == "ledger"
         assert dlg.scheme_lbl.text() == "BIP-44"
-        # The receive QR rendered into the fixed-size label.
+        # The receive QR is immediately available, before showing the dialog.
         assert not dlg.qr_lbl.pixmap().isNull()
+
+    def test_receive_qr_resizes_and_preserves_address_case(self, qtbot, tmp_qeth):
+        from qeth.qr_scan import _qimage_to_gray, decode_qr
+
+        address = "0x1234567890aBcDeF1234567890aBcDeF12345678"
+        dlg = AccountInfoDialog({"address": address, "source": "ledger"})
+        qtbot.addWidget(dlg)
+        dlg.show()
+        initial = dlg.qr_lbl.pixmap().width()
+        dlg.resize(900, 900)
+        qtbot.waitUntil(lambda: dlg.qr_lbl.pixmap().width() > initial)
+        large = dlg.qr_lbl.pixmap().width()
+        assert decode_qr(_qimage_to_gray(dlg.qr_lbl.grab().toImage())) == f"ethereum:{address}"
+        dlg.resize(600, 430)
+        qtbot.waitUntil(lambda: dlg.qr_lbl.pixmap().width() < large)
+        assert decode_qr(_qimage_to_gray(dlg.qr_lbl.grab().toImage())) == f"ethereum:{address}"
 
     def test_missing_fields_show_dash(self, qtbot, tmp_qeth):
         dlg = AccountInfoDialog({"address": ADDR, "source": "ledger"})

@@ -35,12 +35,10 @@ FOUNTAIN_RATIO = 2
 # code (no animation, no coupon-collector tail). Sized to hold a simple send.
 SINGLE_PART_MAX = 150
 # When a payload IS too big (a swap's calldata), fragment it into pieces this
-# size. At 220 each part's QR is ~version 12 — calibrated on a Keycard Shell,
-# whose camera read v12 reliably off a desktop screen and started dropping frames
-# denser than ~v13; a bigger fragment also means fewer frames (a faster transfer).
-# The rateless fountain parts absorb the occasional missed frame. Lower it
-# (→ lower QR version, more frames) only if a device's camera can't lock on.
-FRAGMENT_LEN = 220
+# size. At 120 bytes each part is typically ~version 9 rather than ~version 12
+# at 220 bytes. Larger modules help low-resolution cameras lock on, at the cost
+# of more frames. Very large payloads still need denser parts to fit the cap.
+FRAGMENT_LEN = 120
 # BC-UR receivers reassemble into a fixed-size part table and reject a message
 # with more parts than it holds — the Keycard Shell caps at 128 (its
 # UR_MAX_PART_COUNT). _fragment_len_for() packs denser than FRAGMENT_LEN when a
@@ -65,7 +63,7 @@ def _plan(message: bytes, fragment_len: int) -> tuple[int, list[bytes], int]:
 
 def _fragment_len_for(message_len: int) -> int:
     """Bytes per fragment for a payload of ``message_len``: :data:`FRAGMENT_LEN`
-    (QR ~v12) normally, but packed denser when the payload is big enough that
+    (QR ~v9) normally, but packed denser when the payload is big enough that
     FRAGMENT_LEN would split it into more than :data:`MAX_FRAGMENTS` parts (which
     a Keycard-class receiver rejects outright)."""
     return max(FRAGMENT_LEN, -(-message_len // MAX_FRAGMENTS))
@@ -104,7 +102,7 @@ def frame_source(
     is wire-compatible: the parts are byte-identical and spec-valid, so a decoder
     that does not need the re-injection (e.g. Keystone) reads it unchanged.
 
-    ``fragment_len`` defaults to :func:`_fragment_len_for` (QR ~v12, and never so
+    ``fragment_len`` defaults to :func:`_fragment_len_for` (QR ~v9, and never so
     many parts that a Keycard-class receiver rejects the message)."""
     if len(message) <= single_part_max:
         part = ur.encode(ur_type, message)

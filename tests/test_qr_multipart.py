@@ -4,6 +4,8 @@ BCR-2024-001 part-CBOR test vector, plus encode→decode round-trips."""
 import math
 import zlib
 
+import pytest
+import segno
 from cbor2 import dumps, loads
 
 from qeth.qr.multipart import (
@@ -99,15 +101,53 @@ def test_frame_source_reinjects_pure_fragments_every_cycle():
 
 
 def test_fragment_len_caps_parts_for_a_huge_payload():
-    # FRAGMENT_LEN (v12) for a normal-sized payload...
-    assert _fragment_len_for(10_000) == 220
-    # ...but a payload too big for 128 parts at 220 packs denser to stay under the
+    # Readable default for a normal-sized payload...
+    assert _fragment_len_for(10_000) == 120
+    # ...but a payload too big for 128 parts at 120 packs denser to stay under the
     # cap that a Keycard-class receiver enforces.
-    big = 128 * 220 + 5_000
+    big = 128 * 120 + 5_000
     fl = _fragment_len_for(big)
-    assert fl > 220
+    assert fl > 120
     assert _plan(bytes(big), fl)[0] <= MAX_FRAGMENTS
 
     # frame_source uses the capped fragment length by default
     nf = frame_source("eth-sign-request", bytes(big))
     assert all(_split_part(nf())[2] <= MAX_FRAGMENTS for _ in range(10))
+
+
+@pytest.mark.parametrize("size,parts", [(149, 1), (150, 1), (151, 2)])
+def test_default_static_boundary_roundtrips(size, parts):
+    message = bytes((i * 13 + 1) % 256 for i in range(size))
+    nf = frame_source("eth-sign-request", message)
+    frames = [nf() for _ in range(parts)]
+    assert (_split_part(frames[0])[2] or 1) == parts
+    assert decode_parts(frames) == ("eth-sign-request", message)
+    if parts == 1:
+        assert nf() == frames[0]
+
+
+@pytest.mark.parametrize(
+    "size,fragment_size,part_count",
+    [(15_359, 120, 128), (15_360, 120, 128), (15_361, 121, 127), (30_000, 235, 128)],
+)
+def test_default_fragment_cap_boundary_roundtrips(size, fragment_size, part_count):
+    message = bytes((i * 13 + 1) % 256 for i in range(size))
+    assert _fragment_len_for(size) == fragment_size
+    nf = frame_source("eth-sign-request", message)
+    frames = [nf() for _ in range(part_count)]
+    assert all(_split_part(frame)[2] == part_count for frame in frames)
+    assert decode_parts(frames) == ("eth-sign-request", message)
+
+
+def test_default_frames_are_less_dense_without_losing_payload():
+    message = bytes((i * 13 + 1) % 256 for i in range(10_000))
+    nf = frame_source("eth-sign-request", message)
+    frames = [nf() for _ in range(84)]
+    assert all(_split_part(frame)[2] == 84 for frame in frames)
+    assert decode_parts(frames) == ("eth-sign-request", message)
+    old_frame = frame_source("eth-sign-request", message, fragment_len=220)()
+    assert segno.make_qr(old_frame.upper(), error="l").symbol_size() == (73, 73)
+    assert all(
+        segno.make_qr(frame.upper(), error="l").symbol_size() == (61, 61)
+        for frame in (frames[0], frames[-1], nf())  # Includes a rateless frame.
+    )

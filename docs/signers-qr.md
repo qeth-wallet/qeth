@@ -121,19 +121,31 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   it is tall) — left = the animated `segno` QR (a fresh fountain part per timer
   tick via `multipart.frame_source`); right = the live camera preview with the
   decoder running per frame; a complete decode → `accept()` returning the bytes;
-  cancel → `None`. The two panes are equal **squares** (`PANE` px, both the QR
-  and the 1:1 camera view) laid out in a `QGridLayout` — captions in row 0, panes
+  cancel → `None`. The two panes **expand with the window**, starting with a
+  preferred 320 px side. Each centers square content (QR or 1:1 camera view)
+  in its available space. They use equal-width columns in a `QGridLayout` — captions in row 0, panes
   in row 1 — so they stay aligned however a caption wraps. Spacing is the house
   rhythm: caption↔pane is `item_spacing` (within a paragraph), the between-column
-  gap is `group_spacing` (two distinct groups). The QR is rendered large by
-  `ur_to_pixmap` then scaled to the pane with **nearest-neighbour** (hard module
-  edges, best for the device's scan, vs. grey-fringed smooth scaling); the camera
+  gap is `group_spacing` (two distinct groups). The shared `QRWidget` caches a
+  one-pixel-per-module source and fits it using **whole physical pixels per
+  module**, including on HiDPI displays. It preserves a four-module white quiet
+  zone and hard black/white edges. Resizing never advances the animation. The camera
   frame is scaled *expanding* + centre-cropped to fill the square (the decoder
   still runs on the full frame, so no scan area is lost). Each pane sits in the
   theme's native sunken **"view" frame** via `_view_framed` (a `QScrollArea`
   wrap — the same trick the ENS renewal calendar uses, since a plain `QFrame`
   border is suppressed by Kvantum). The account-import scanner
   (`QRScanDialog`) reuses the same square, view-framed camera pane.
+  The receive-address QR uses the same responsive renderer, preserving the
+  address's case and the `ethereum:` URI.
+- Animated signing requests target **120-byte fragments** (typically QR v9),
+  prioritizing larger modules for low-resolution cameras over fewer frames.
+  Requests up to 150 bytes remain static; animation stays at 200 ms per frame
+  with the existing pure/rateless fountain cycle. The receiver's 128-fragment
+  limit takes precedence: above 15,360 bytes, fragments grow to fit that limit.
+  For these large requests, enlarging the window is the main readability aid.
+  Automated pixel/decoder tests cover rendering; scan reliability and transfer
+  time on a physical Keycard Shell must be checked separately.
 - Implement `DialogInteraction.exchange_qr` to open it (already marshaled from
   the worker by step 2). Add the `progress_text==""` skip in `ui.py`.
 - Camera + decoder are injectable so the **frame-cycling and decode-callback

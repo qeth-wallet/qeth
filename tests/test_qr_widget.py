@@ -1,0 +1,71 @@
+"""Decode the actual displayed pixels, including resize and display scaling."""
+
+import io
+
+import pytest
+import segno
+from PIL import Image, ImageChops
+
+from qeth.qr.multipart import frame_source
+from qeth.qr_scan import _qimage_to_gray, decode_qr
+from qeth.qr_widget import QRWidget
+
+
+@pytest.mark.parametrize("size", [(240, 320), (900, 700), (533, 411)])
+@pytest.mark.parametrize("payload_size", [120, 10_000, 30_000])
+def test_display_has_uniform_modules_full_border_and_exact_payload(
+    qtbot, size, payload_size
+):
+    content = frame_source("eth-sign-request", bytes(payload_size))().upper()
+    widget = QRWidget()
+    qtbot.addWidget(widget)
+    widget.set_content(content, error="l")
+    widget.resize(*size)
+    widget.show()
+    displayed = _qimage_to_gray(widget.grab().toImage())
+    assert decode_qr(displayed) == content
+    assert {value for count, value in displayed.getcolors()} == {0, 255}
+
+    # Compare every pixel against an independent, integer-scaled Segno render.
+    # This catches uneven modules, a cropped quiet zone, smoothing and off-center
+    # drawing. The same test runs under QT_SCALE_FACTOR=1, 1.5 and 2.
+    qr = segno.make_qr(content, error="l")
+    module_count = qr.symbol_size()[0]
+    scale = min(displayed.size) // module_count
+    buf = io.BytesIO()
+    qr.save(buf, kind="png", scale=scale, border=4)
+    symbol = Image.open(buf).convert("L")
+    expected = Image.new("L", displayed.size, 255)
+    expected.paste(
+        symbol,
+        (
+            (displayed.width - symbol.width) // 2,
+            (displayed.height - symbol.height) // 2,
+        ),
+    )
+    assert ImageChops.difference(displayed, expected).getbbox() is None
+
+
+def test_resize_reuses_encoding_and_new_content_replaces_cache(qtbot, monkeypatch):
+    import qeth.qr_widget as qr_widget
+
+    original = qr_widget.qr_to_pixmap
+    encoded = []
+
+    def encode(content, **kwargs):
+        encoded.append(content)
+        return original(content, **kwargs)
+
+    monkeypatch.setattr(qr_widget, "qr_to_pixmap", encode)
+    widget = QRWidget()
+    qtbot.addWidget(widget)
+    first = "ethereum:0x1234567890aBcDeF1234567890aBcDeF12345678"
+    second = "ethereum:0xABCDEF0123456789ABCDEF0123456789ABCDEF01"
+    widget.set_content(first)
+    widget.show()
+    for size in ((320, 320), (700, 500), (260, 300)):
+        widget.resize(*size)
+        assert decode_qr(_qimage_to_gray(widget.grab().toImage())) == first
+    widget.set_content(second)
+    assert decode_qr(_qimage_to_gray(widget.grab().toImage())) == second
+    assert encoded == [first, second]

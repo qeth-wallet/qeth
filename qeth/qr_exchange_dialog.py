@@ -10,13 +10,11 @@ hardware.
 
 from __future__ import annotations
 
-import io
 from collections.abc import Callable
 from typing import Any
 
-import segno
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QImage, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QDialogButtonBox,
     QGridLayout,
@@ -28,27 +26,20 @@ from PySide6.QtWidgets import (
 )
 
 from .dialog import Dialog, group_spacing, item_spacing
+from .qr_widget import QRWidget, qr_to_pixmap
 
-# Side of each square pane (the QR and the camera view), in px. Both dialogs use
-# it so the QR and camera read as a matched pair; tune here if they want to be
-# larger or smaller.
+# Initial preferred side; the panes expand with the window.
 PANE = 320
 
 
 def ur_to_pixmap(ur_string: str, *, scale: int = 8) -> QPixmap:
     """Render a UR string as a QR ``QPixmap``. UR is uppercased so the QR uses
     the compact alphanumeric mode (``ur:``/``/``/``-`` and digits are all in
-    that charset). ``scale`` is the source px-per-module — high enough that the
-    dialog can scale the result down to its pane crisply (the on-screen size is
-    the dialog's ``PANE``, not this)."""
-    buf = io.BytesIO()
-    segno.make(ur_string.upper(), error="l").save(buf, kind="png", scale=scale)
-    pixmap = QPixmap()
-    pixmap.loadFromData(buf.getvalue())   # PNG auto-detected
-    return pixmap
+    that charset). ``scale`` is the source px-per-module."""
+    return qr_to_pixmap(ur_string.upper(), error="l", scale=scale)
 
 
-def _fill_square(pixmap: QPixmap, size: Any) -> QPixmap:
+def _fill_square(pixmap: QPixmap, size: QSize) -> QPixmap:
     """Scale a camera frame to *fill* the (square) ``size`` and centre-crop the
     overflow, so the preview shows edge-to-edge video instead of a letterboxed
     4:3 image with bars. The QR decoder works on the full frame (qr_scan.py), so
@@ -61,17 +52,61 @@ def _fill_square(pixmap: QPixmap, size: Any) -> QPixmap:
     return scaled.copy(x, y, size.width(), size.height())
 
 
+class _CameraPreview(QLabel):
+    """Keep the original camera frame so a resize can refit it immediately."""
+
+    def __init__(self) -> None:
+        super().__init__("Starting camera…")
+        self._frame: QPixmap | None = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(self.minimumSizeHint())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 — Qt override
+        return QSize(PANE, PANE)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt override
+        return QSize(192, 192)
+
+    def set_frame(self, image: QImage) -> None:
+        self._frame = QPixmap.fromImage(image)
+        self._render_frame()
+
+    def _render_frame(self) -> None:
+        if self._frame is None or self._frame.isNull():
+            return
+        dpr = self.devicePixelRatioF()
+        side = int(min(self.width(), self.height()) * dpr)
+        if side < 1:
+            return
+        pixmap = _fill_square(self._frame, QSize(side, side))
+        pixmap.setDevicePixelRatio(dpr)
+        self.setPixmap(pixmap)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — Qt override
+        super().resizeEvent(event)
+        self._render_frame()
+
+    def clear(self) -> None:
+        self._frame = None
+        super().clear()
+
+
 def _view_framed(inner: QWidget) -> QScrollArea:
-    """Wrap a fixed-size widget so it gets the theme's native sunken "view"
+    """Wrap an expanding widget so it gets the theme's native sunken "view"
     frame — the inset border item-views and text fields have. A plain ``QFrame``
     border is suppressed by some styles (Kvantum); a scroll-area's view frame is
     drawn natively. Same trick as the ENS renewal calendar. Scrollbars are off
     (the inner is sized to fit, so it never scrolls)."""
     scroll = QScrollArea()
     scroll.setWidget(inner)
+    scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    border = 2 * scroll.frameWidth()
+    scroll.setMinimumSize(inner.minimumSizeHint() + QSize(border, border))
     return scroll
 
 
@@ -107,25 +142,25 @@ class QRExchangeDialog(Dialog):
         grid = QGridLayout()
         grid.setVerticalSpacing(item_spacing(self))
         grid.setHorizontalSpacing(group_spacing(self))
-        top = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(1, 1)
+        # Use each full column width so Qt's height-for-width calculation
+        # matches the caption's actual width when the dialog is resized.
+        top = Qt.AlignmentFlag.AlignTop
 
         show_caption = QLabel("1. Show this to your wallet's camera:")
         show_caption.setWordWrap(True)
-        self._qr_label = QLabel()
-        self._qr_label.setFixedSize(PANE, PANE)
-        self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._qr_label = QRWidget(preferred_side=PANE)
         grid.addWidget(show_caption, 0, 0, top)
         grid.addWidget(_view_framed(self._qr_label), 1, 0)
 
         scan_caption = QLabel("2. Point your camera at the wallet's signature QR:")
         scan_caption.setWordWrap(True)
-        self._preview = QLabel("Starting camera…")
-        self._preview.setFixedSize(PANE, PANE)
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setWordWrap(True)
+        self._preview = _CameraPreview()
         grid.addWidget(scan_caption, 0, 1, top)
         grid.addWidget(_view_framed(self._preview), 1, 1)
-        root.addLayout(grid)
+        root.addLayout(grid, 1)
 
         self._render_frame()   # first frame
         self._anim: QTimer | None = QTimer(self)
@@ -167,14 +202,8 @@ class QRExchangeDialog(Dialog):
         ur_string = self._next_frame()
         if ur_string != self._shown:      # a constant single part renders once
             self._shown = ur_string
-            # Fit the QR to the square pane. FastTransformation (nearest) keeps
-            # the module edges hard black/white — best for the device's scan —
-            # rather than the grey-fringed edges smooth scaling would give.
-            pixmap = ur_to_pixmap(ur_string).scaled(
-                PANE, PANE,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation)
-            self._qr_label.setPixmap(pixmap)
+            # URs are case-insensitive; uppercase uses compact alphanumeric QR.
+            self._qr_label.set_content(ur_string.upper(), error="l")
 
     # --- scanner signals ---------------------------------------------------
 
@@ -189,8 +218,7 @@ class QRExchangeDialog(Dialog):
             QTimer.singleShot(0, self.accept)
 
     def _on_frame(self, image: Any) -> None:
-        self._preview.setPixmap(_fill_square(
-            QPixmap.fromImage(image), self._preview.size()))
+        self._preview.set_frame(image)
 
     def _on_camera_failed(self, message: str) -> None:
         self._preview.clear()
@@ -216,12 +244,9 @@ class QRScanDialog(Dialog):
         body = QVBoxLayout()
         body.setSpacing(item_spacing(self))
         body.addWidget(QLabel(prompt))
-        self._preview = QLabel("Starting camera…")
-        self._preview.setFixedSize(PANE, PANE)     # square, matching the exchange
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setWordWrap(True)
-        body.addWidget(_view_framed(self._preview))
-        root.addLayout(body)
+        self._preview = _CameraPreview()
+        body.addWidget(_view_framed(self._preview), 1)
+        root.addLayout(body, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         buttons.rejected.connect(self.reject)
@@ -256,8 +281,7 @@ class QRScanDialog(Dialog):
             QTimer.singleShot(0, self.accept)
 
     def _on_frame(self, image: Any) -> None:
-        self._preview.setPixmap(_fill_square(
-            QPixmap.fromImage(image), self._preview.size()))
+        self._preview.set_frame(image)
 
     def _on_camera_failed(self, message: str) -> None:
         self._preview.clear()

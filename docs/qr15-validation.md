@@ -4,8 +4,9 @@ The scheduler target is 15 fps (66⅔ ms per image). Relative to 12 fps, this
 offers 25% more images per second and 20% less dwell time. Thirty sensor frames
 per second does not guarantee two usable camera images per QR: exposure,
 capture buffering, decoding, and display presentation also matter.
-**One user-reported physical completion is recorded below; comparative results
-are still pending.**
+**Three user-reported physical completions are recorded below, including one
+matched framing pair. A repeatable framing or frame-rate advantage is not yet
+established.**
 
 The wallet's fixed version remains the comparison baseline, not an evidence-based
 winner. The diagnostic now supports matched fixed/per-frame trials at one frame
@@ -30,7 +31,7 @@ rate. See [the protocol and measured geometry](qr-framing-trials.md).
   fixed-version baseline. Full wallet GUI/camera launch was not tested.
 
 These establish software behavior, not optical transfer performance. The agent
-did not independently observe the physical trial below. The previous decoder simulations
+did not independently observe the physical trials below. The previous decoder simulations
 remain evidence about reconstruction under selected losses, not camera behavior.
 
 ## First user-reported Shell result
@@ -52,6 +53,34 @@ The original repeated 44 KB protocol imposed too much operator time for this
 initial comparison. The revised protocol starts with an eight-chunk dense fixture
 and one pair capped at 30 seconds per attempt. It preserves the version boundary
 but does not predict large-message performance.
+
+## First matched short-pilot pair
+
+The operator supplied these results on 2026-09-26. Both attempts used the same
+2,760-byte request, eight 345-byte chunks, frame-order seed 71, 15 fps target,
+340-logical-pixel QR width and DPR 2. Brightness and distance were unrecorded.
+Payload SHA-256:
+`1e23fa91fc190feec773b7409abc7bb16a82b2103b69d2be8f2435d5846af377`.
+
+| Attempt / policy | Completion timestamp (UTC) | Seconds | Installed images | 85 / 89 module counts |
+| --- | --- | --- | --- | --- |
+| 1 / fixed | 20:52:43.231579 | 12.717957 | 190 | 0 / 190 |
+| 2 / per-frame | 20:53:05.334823 | 15.694555 | 234 | 85 / 149 |
+
+Both completed. Fixed took 2.9766 seconds less, approximately 19% less elapsed
+time relative to per-frame. Installation rates were about 14.9 fps for both.
+At this width/DPR, the smaller grid gets 8 backing-store pixels per module
+instead of 7, and occurred in 36.3% of per-frame image installations. That
+resolution opportunity did not produce faster completion in this pair.
+
+This is limited evidence in favor of retaining the fixed baseline, not proof
+that stable geometry caused the difference or that fixed version is strictly
+better. There is only one attempt per policy, in fixed-first order, with
+unmeasured optical conditions and manual completion timing. It does not compare
+12 with 15 fps or predict the original 44 KB transfer. No policy change follows
+from this pair alone. If another pair is practical, the existing harness's next
+two attempts run per-frame then fixed, reversing the order with the same fixture
+and 30-second caps; this adds repetition but still cannot establish universality.
 
 ## App
 

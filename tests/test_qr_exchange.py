@@ -4,11 +4,12 @@ QtMultimedia — those are verified on hardware)."""
 
 import io
 
+import pytest
 import segno
 from cbor2 import CBORTag, dumps
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QLabel
 
 from qeth.qr import ur
 from qeth.qr_scan import decode_qr
@@ -39,6 +40,7 @@ def test_decode_qr_from_grayscale_qimage(qtbot):
     wants), not RGB — round-trip a QR through _qimage_to_gray."""
     from PySide6.QtGui import QImage
     from qeth.qr_scan import _qimage_to_gray
+
     urs = _signature_ur()
     buf = io.BytesIO()
     segno.make(urs.upper(), error="l").save(buf, kind="png", scale=6)
@@ -49,20 +51,24 @@ def test_decode_qr_from_grayscale_qimage(qtbot):
 
 # --- _pick_video_format: ~720p sweet spot with graceful fallback ------------
 
+
 def _fmt(w, h, fps=30.0):
     from types import SimpleNamespace
     from PySide6.QtCore import QSize
+
     size = QSize(w, h)
     return SimpleNamespace(resolution=lambda: size, maxFrameRate=lambda: fps)
 
 
 def _device(*formats):
     from types import SimpleNamespace
+
     return SimpleNamespace(videoFormats=lambda: list(formats))
 
 
 def test_pick_format_prefers_720p():
     from qeth.qr_scan import _pick_video_format
+
     dev = _device(_fmt(640, 480), _fmt(1280, 720), _fmt(1920, 1080))
     assert _pick_video_format(dev).resolution().height() == 720
 
@@ -70,30 +76,35 @@ def test_pick_format_prefers_720p():
 def test_pick_format_falls_back_to_best_when_no_720p():
     """A 640×480-only webcam keeps its best format rather than forcing 720p."""
     from qeth.qr_scan import _pick_video_format
+
     dev = _device(_fmt(320, 240), _fmt(640, 480))
     assert _pick_video_format(dev).resolution().height() == 480
 
 
 def test_pick_format_uses_1080_when_720_absent():
     from qeth.qr_scan import _pick_video_format
+
     dev = _device(_fmt(640, 480), _fmt(1920, 1080))
     assert _pick_video_format(dev).resolution().height() == 1080
 
 
 def test_pick_format_avoids_4k():
     from qeth.qr_scan import _pick_video_format
+
     dev = _device(_fmt(640, 480), _fmt(3840, 2160))
-    assert _pick_video_format(dev).resolution().height() == 480   # 4K skipped
+    assert _pick_video_format(dev).resolution().height() == 480  # 4K skipped
 
 
 def test_pick_format_higher_fps_wins_at_same_resolution():
     from qeth.qr_scan import _pick_video_format
+
     dev = _device(_fmt(1280, 720, 15.0), _fmt(1280, 720, 30.0))
     assert _pick_video_format(dev).maxFrameRate() == 30.0
 
 
 def test_pick_format_none_when_device_reports_nothing():
     from qeth.qr_scan import _pick_video_format
+
     assert _pick_video_format(_device()) is None
 
 
@@ -107,7 +118,8 @@ def _permission_scanner(*, start_requested=True):
     QObject.__init__(scanner)
     scanner._camera = SimpleNamespace(starts=0)
     scanner._camera.start = lambda: setattr(
-        scanner._camera, "starts", scanner._camera.starts + 1)
+        scanner._camera, "starts", scanner._camera.starts + 1
+    )
     scanner._permission_request_in_flight = True
     scanner._start_requested = start_requested
     return scanner
@@ -115,6 +127,7 @@ def _permission_scanner(*, start_requested=True):
 
 def _permission(status):
     from types import SimpleNamespace
+
     return SimpleNamespace(status=lambda: status)
 
 
@@ -184,9 +197,11 @@ class _FakeScanner(QObject):
 
 def _dialog(qtbot, scanner, next_frame=None):
     from qeth.qr_exchange_dialog import QRExchangeDialog
+
     nf = next_frame or (lambda: "ur:eth-sign-request/aeadcylabntfgm")
     dlg = QRExchangeDialog(nf, scanner=scanner)
     qtbot.addWidget(dlg)
+    qtbot.waitUntil(lambda: dlg._animation.shown is not None)
     return dlg
 
 
@@ -194,31 +209,166 @@ def test_dialog_accepts_the_first_scanned_ur(qtbot):
     scanner = _FakeScanner()
     dlg = _dialog(qtbot, scanner)
     dlg.show()
-    assert scanner.started == 1                    # camera started on show
+    assert scanner.started == 1  # camera started on show
     resp = _signature_ur()
     scanner.decoded.emit(resp)
-    assert dlg.scanned_ur() == resp                 # captured synchronously
+    assert dlg.scanned_ur() == resp  # captured synchronously
     # …but the close is DEFERRED (out of the frame callback) — pump the loop.
-    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted,
-                    timeout=2000)
-    assert scanner.stopped == 1                     # camera stopped on close
+    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted, timeout=2000)
+    assert scanner.stopped == 1  # camera stopped on close
+
+
+def _advance(qtbot, dlg):
+    previous = dlg._animation.shown
+    dlg._animation.timer.start(0)
+    qtbot.waitUntil(lambda: dlg._animation.shown is not previous)
+    dlg._animation.timer.stop()
 
 
 def test_dialog_animates_by_pulling_fresh_frames(qtbot):
-    seq = iter(f"ur:eth-sign-request/{i}-3/aeadcylabntfgm" for i in range(1, 5))
-    dlg = _dialog(qtbot, _FakeScanner(), next_frame=lambda: next(seq))
-    assert dlg._shown == "ur:eth-sign-request/1-3/aeadcylabntfgm"   # first frame
-    dlg._render_frame()
-    assert dlg._shown == "ur:eth-sign-request/2-3/aeadcylabntfgm"   # fresh part
-    assert dlg._anim is not None and dlg._anim.isActive()
+    from qeth.qr.multipart import frame_source
+
+    source = frame_source("eth-sign-request", bytes(400))
+    expected = frame_source("eth-sign-request", bytes(400))
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=source)
+    assert dlg._animation.shown.content == expected()
+    _advance(qtbot, dlg)
+    assert dlg._animation.shown.content == expected()
 
 
 def test_dialog_single_part_renders_once(qtbot):
-    dlg = _dialog(qtbot, _FakeScanner(),
-                  next_frame=lambda: "ur:eth-sign-request/const")
-    dlg._render_frame()
-    dlg._render_frame()                       # constant → no re-render
-    assert dlg._shown == "ur:eth-sign-request/const"
+    calls = []
+
+    def source():
+        calls.append(1)
+        return "ur:eth-sign-request/const"
+
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=source)
+    qtbot.wait(200)
+    assert dlg._animation.shown.content == "ur:eth-sign-request/const"
+    assert calls == [1]
+    assert not dlg._animation.timer.isActive()
+
+
+def test_repeated_fragment_cycles_all_masks_without_changing_its_ur(qtbot):
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    frame = frame_source("eth-sign-request", bytes(2000))()
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=lambda: frame)
+    dlg.show()
+    pictures = []
+    for attempt in range(9):
+        if attempt:
+            _advance(qtbot, dlg)
+        dlg._animation.timer.stop()
+        shown = _qimage_to_gray(dlg._qr_label.grab().toImage())
+        assert decode_qr(shown) == frame.upper()
+        pictures.append(shown.tobytes())
+    assert len(set(pictures[:8])) == 8
+    assert pictures[8] == pictures[0]
+
+
+def test_large_transfer_keeps_the_same_qr_grid_across_sequence_digits(qtbot):
+    import random
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    # The reported multicall is ~44 KB. Its first nine frames fit version 15,
+    # but frame 10 needs version 16. Keep the footprint steady so a camera
+    # framed around the code does not need repositioning. This is a geometry
+    # contract, not evidence that fixed versions improve independent decoding.
+    payload = random.Random(892).randbytes(44_345)
+    source = frame_source("eth-sign-request", payload)
+    expected_source = frame_source("eth-sign-request", payload)
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=source)
+    # Use a desktop-sized viewport even when the offscreen test display is
+    # reduced to 400 logical pixels by QT_SCALE_FACTOR=2.
+    dlg.resize(1000, 720)
+    dlg.show()
+    widths = []
+    for index in range(12):
+        if index:
+            _advance(qtbot, dlg)
+        dlg._animation.timer.stop()
+        expected = expected_source().upper()
+        widths.append(dlg._qr_label.pixmap().width())
+        assert decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == expected
+    assert len(set(widths)) == 1
+    assert dlg._qr_label.width() > 2 * dlg._preview.width()
+
+
+@pytest.mark.parametrize("payload_size", [120, 10_000])
+def test_dialog_qr_grows_and_shrinks_without_consuming_frames(qtbot, payload_size):
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    frames = frame_source("eth-sign-request", bytes(payload_size))
+    calls = []
+
+    def next_frame():
+        frame = frames()
+        calls.append(frame)
+        return frame
+
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=next_frame)
+    dlg._animation.timer.stop()  # Resize alone must not advance the fountain stream.
+    dlg.show()
+    qtbot.waitUntil(dlg.isVisible)
+    initial_width = dlg._qr_label.pixmap().width()
+    dlg.resize(1400, 900)
+    qtbot.waitUntil(lambda: dlg._qr_label.width() > 320)
+    large_width = dlg._qr_label.pixmap().width()
+    assert large_width > initial_width
+    for caption in dlg.findChildren(QLabel):
+        if caption.wordWrap():
+            assert caption.height() >= caption.heightForWidth(caption.width())
+    assert (
+        decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == calls[0].upper()
+    )
+
+    dlg.resize(700, 430)
+    qtbot.waitUntil(lambda: dlg._qr_label.pixmap().width() < large_width)
+    assert (
+        decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == calls[0].upper()
+    )
+    # Preparation may fill its four slots; resize never consumes a displayed frame.
+    assert dlg._animation.shown.content == calls[0]
+    assert len(calls) <= 5
+
+
+@pytest.mark.parametrize("scan_only", [False, True])
+def test_camera_preview_refits_cached_frame_and_keeps_failure_text(qtbot, scan_only):
+    from PySide6.QtGui import QImage
+
+    from qeth.qr_exchange_dialog import QRScanDialog
+
+    scanner = _FakeScanner()
+    dlg = QRScanDialog(scanner=scanner) if scan_only else _dialog(qtbot, scanner)
+    if scan_only:
+        qtbot.addWidget(dlg)
+    else:
+        dlg._animation.timer.stop()
+    dlg.show()
+    frame = QImage(640, 480, QImage.Format.Format_RGB32)
+    frame.fill("green")
+    scanner.frame.emit(frame)
+    initial = dlg._preview.pixmap().width()
+
+    dlg.resize(1400, 900)
+    qtbot.waitUntil(lambda: dlg._preview.pixmap().width() > initial)
+    large = dlg._preview.pixmap()
+    assert large.width() == large.height()
+    assert large.toImage().pixelColor(0, 0).name() == "#008000"
+    dlg.resize(700, 430)
+    qtbot.waitUntil(lambda: dlg._preview.pixmap().width() < large.width())
+
+    scanner.failed.emit("Camera permission was denied")
+    dlg.resize(900, 600)
+    assert dlg._preview.text() == "Camera permission was denied"
+    assert dlg._preview.pixmap().isNull()
+    dlg.reject()
+    assert scanner.started == scanner.stopped == 1
 
 
 def test_dialog_ignores_non_ur_barcodes(qtbot):
@@ -227,7 +377,7 @@ def test_dialog_ignores_non_ur_barcodes(qtbot):
     dlg.show()
     scanner.decoded.emit("https://example.com/not-a-ur")
     assert dlg.scanned_ur() is None
-    assert dlg.isVisible()                          # still waiting
+    assert dlg.isVisible()  # still waiting
 
 
 def test_dialog_surfaces_camera_start_failure(qtbot):
@@ -265,6 +415,7 @@ def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
 
         def scanned_ur(self):
             return resp
+
     monkeypatch.setattr(ex, "QRExchangeDialog", _StubDialog)
 
     parent = QWidget()
@@ -275,6 +426,7 @@ def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
 
 def test_ur_to_pixmap_is_non_null(qtbot):
     from qeth.qr_exchange_dialog import ur_to_pixmap
+
     pm = ur_to_pixmap(_signature_ur())
     assert not pm.isNull() and pm.width() > 0
 
@@ -283,6 +435,7 @@ def test_scan_dialog_accepts_first_ur_and_runs_camera(qtbot):
     from PySide6.QtWidgets import QDialog
 
     from qeth.qr_exchange_dialog import QRScanDialog
+
     scanner = _FakeScanner()
     dlg = QRScanDialog(scanner=scanner)
     qtbot.addWidget(dlg)
@@ -290,13 +443,13 @@ def test_scan_dialog_accepts_first_ur_and_runs_camera(qtbot):
     assert scanner.started == 1
     scanner.decoded.emit("ur:crypto-hdkey/aeadcylabntfgm")
     assert dlg.scanned_ur() == "ur:crypto-hdkey/aeadcylabntfgm"
-    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted,
-                    timeout=2000)
+    qtbot.waitUntil(lambda: dlg.result() == QDialog.DialogCode.Accepted, timeout=2000)
     assert scanner.stopped == 1
 
 
 def test_scan_dialog_cancel_returns_none(qtbot):
     from qeth.qr_exchange_dialog import QRScanDialog
+
     scanner = _FakeScanner()
     dlg = QRScanDialog(scanner=scanner)
     qtbot.addWidget(dlg)

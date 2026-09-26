@@ -18,6 +18,7 @@ crc32(message), fragment] )>``.
 from __future__ import annotations
 
 import math
+import random
 import zlib
 from collections.abc import Callable, Iterator
 
@@ -35,12 +36,10 @@ FOUNTAIN_RATIO = 2
 # code (no animation, no coupon-collector tail). Sized to hold a simple send.
 SINGLE_PART_MAX = 150
 # When a payload IS too big (a swap's calldata), fragment it into pieces this
-# size. At 220 each part's QR is ~version 12 — calibrated on a Keycard Shell,
-# whose camera read v12 reliably off a desktop screen and started dropping frames
-# denser than ~v13; a bigger fragment also means fewer frames (a faster transfer).
-# The rateless fountain parts absorb the occasional missed frame. Lower it
-# (→ lower QR version, more frames) only if a device's camera can't lock on.
-FRAGMENT_LEN = 220
+# size. At 120 bytes each part is typically ~version 9 rather than ~version 12
+# at 220 bytes. Larger modules help low-resolution cameras lock on, at the cost
+# of more frames. Very large payloads still need denser parts to fit the cap.
+FRAGMENT_LEN = 120
 # BC-UR receivers reassemble into a fixed-size part table and reject a message
 # with more parts than it holds — the Keycard Shell caps at 128 (its
 # UR_MAX_PART_COUNT). _fragment_len_for() packs denser than FRAGMENT_LEN when a
@@ -54,7 +53,7 @@ def _crc32(data: bytes) -> int:
 
 def _fragments(message: bytes, seq_len: int, frag_len: int) -> list[bytes]:
     padded = message + b"\x00" * (seq_len * frag_len - len(message))
-    return [padded[i * frag_len:(i + 1) * frag_len] for i in range(seq_len)]
+    return [padded[i * frag_len : (i + 1) * frag_len] for i in range(seq_len)]
 
 
 def _plan(message: bytes, fragment_len: int) -> tuple[int, list[bytes], int]:
@@ -65,14 +64,20 @@ def _plan(message: bytes, fragment_len: int) -> tuple[int, list[bytes], int]:
 
 def _fragment_len_for(message_len: int) -> int:
     """Bytes per fragment for a payload of ``message_len``: :data:`FRAGMENT_LEN`
-    (QR ~v12) normally, but packed denser when the payload is big enough that
+    (QR ~v9) normally, but packed denser when the payload is big enough that
     FRAGMENT_LEN would split it into more than :data:`MAX_FRAGMENTS` parts (which
     a Keycard-class receiver rejects outright)."""
     return max(FRAGMENT_LEN, -(-message_len // MAX_FRAGMENTS))
 
 
-def _part(ur_type: str, seq_num: int, seq_len: int, message_len: int,
-          checksum: int, frags: list[bytes]) -> str:
+def _part(
+    ur_type: str,
+    seq_num: int,
+    seq_len: int,
+    message_len: int,
+    checksum: int,
+    frags: list[bytes],
+) -> str:
     """One ``ur:…`` part. seqNum 1..seqLen is a pure fragment; beyond that a
     rateless fountain mix (fountain.choose_fragments picks the same set the
     device will)."""
@@ -81,62 +86,98 @@ def _part(ur_type: str, seq_num: int, seq_len: int, message_len: int,
     return f"ur:{ur_type}/{seq_num}-{seq_len}/{bytewords.encode(cbor)}"
 
 
+# Search a disjoint uint32 sequence range, bounded per message and per retry.
+RETRY_SEARCH_LIMIT = 16_384
+RETRY_SEARCH_BATCH = 32
+RETRY_SEQUENCE_START = 1 << 31
+
+
+class _PlainRetries:
+    """Find degree-one fountain sequences without delaying the first pass.
+
+    Shell runs its pending-equation recovery routine for seqNum > seqLen only.
+    A valid degree-one fountain part delivers the same plain bytes through that
+    path. Missing aliases fall back to the ordinary systematic sequence.
+    """
+
+    def __init__(self, seq_len: int, checksum: int) -> None:
+        self.seq_len = seq_len
+        self.checksum = checksum
+        self.searched = 0
+        self.aliases: dict[int, int] = {}
+
+    def sequence(self, index: int) -> int:
+        if len(self.aliases) < self.seq_len:
+            for _ in range(min(RETRY_SEARCH_BATCH, RETRY_SEARCH_LIMIT - self.searched)):
+                sequence = RETRY_SEQUENCE_START + self.searched
+                self.searched += 1
+                indexes = fountain.choose_fragments(
+                    sequence, self.seq_len, self.checksum
+                )
+                if len(indexes) == 1:
+                    self.aliases.setdefault(next(iter(indexes)), sequence)
+        return self.aliases.get(index, index + 1)
+
+
 def frame_source(
-    ur_type: str, message: bytes, *,
-    single_part_max: int = SINGLE_PART_MAX, fragment_len: int | None = None,
+    ur_type: str,
+    message: bytes,
+    *,
+    single_part_max: int = SINGLE_PART_MAX,
+    fragment_len: int | None = None,
+    rng: random.Random | None = None,
 ) -> Callable[[], str]:
-    """Return ``next_frame() -> ur_string`` for the exchange dialog to show one
-    QR per animation tick. Small payload → a constant single part; large payload
-    → an UNBOUNDED stream that shows the pure fragments (``seqNum`` 1..seqLen),
-    then a batch of fresh rateless fountain parts, and REPEATS — re-injecting the
-    pure fragments every cycle rather than only once.
+    """First show every original chunk, then shuffled groups of two plain
+    retries and one fresh recovery part. Plain coverage stays cyclic across
+    groups; recovery sequences retain the standard fountain distribution.
 
-    The pure fragments are the self-contained, immediately-usable ones (each
-    yields one fragment the instant it's scanned, no peeling). Re-showing them
-    means a device that locks on AFTER the first pure block — likely on a big,
-    slow-to-scan sequence — keeps getting those fast, guaranteed fragments instead
-    of only the slower-to-peel rateless mixes, so it converges without depending
-    on lock-on timing. (This is a convergence aid for large transfers, e.g. a
-    Keycard Shell scanning a ~120-part tx; it is NOT recovery from a decoder
-    state-wipe — a Keycard maintainer confirmed a mis-read frame is simply
-    dropped, not thrown back. See keycard-tech/keycard-shell#219.) The rateless
-    batch between pure blocks still removes the coupon-collector tail. The order
-    is wire-compatible: the parts are byte-identical and spec-valid, so a decoder
-    that does not need the re-injection (e.g. Keystone) reads it unchanged.
-
-    ``fragment_len`` defaults to :func:`_fragment_len_for` (QR ~v12, and never so
-    many parts that a Keycard-class receiver rejects the message)."""
+    Retry aliases are searched incrementally with ordinary retries as fallback.
+    Small requests remain a static single UR. The optional RNG makes diagnostic
+    comparisons reproducible without changing transaction contents.
+    """
     if len(message) <= single_part_max:
         part = ur.encode(ur_type, message)
         return lambda: part
     if fragment_len is None:
         fragment_len = _fragment_len_for(len(message))
     seq_len, frags, checksum = _plan(message, fragment_len)
+    order = rng if rng is not None else random.Random()
+    retries = _PlainRetries(seq_len, checksum)
 
     def frames() -> Iterator[str]:
+        for n in range(1, seq_len + 1):
+            yield _part(ur_type, n, seq_len, len(message), checksum, frags)
+        pure = 0
         rateless = seq_len
         while True:
-            for n in range(1, seq_len + 1):                    # pure fragments
-                yield _part(ur_type, n, seq_len, len(message), checksum, frags)
-            for _ in range(seq_len):                           # fresh rateless mixes
-                rateless += 1
-                yield _part(ur_type, rateless, seq_len, len(message), checksum, frags)
+            sequences = [retries.sequence(pure), retries.sequence((pure + 1) % seq_len)]
+            pure = (pure + 2) % seq_len
+            rateless += 1
+            sequences.append(rateless)
+            order.shuffle(sequences)
+            for sequence in sequences:
+                yield _part(ur_type, sequence, seq_len, len(message), checksum, frags)
 
     gen = frames()
     return lambda: next(gen)
 
 
 def encode_parts(
-    ur_type: str, message: bytes, *,
-    single_part_max: int = SINGLE_PART_MAX, fragment_len: int = FRAGMENT_LEN,
+    ur_type: str,
+    message: bytes,
+    *,
+    single_part_max: int = SINGLE_PART_MAX,
+    fragment_len: int = FRAGMENT_LEN,
 ) -> list[str]:
     """A FINITE list of parts (single, else FOUNTAIN_RATIO×seqLen). Used by tests
     and decode_parts round-trips; the live flow uses :func:`frame_source`."""
     if len(message) <= single_part_max:
         return [ur.encode(ur_type, message)]
     seq_len, frags, checksum = _plan(message, fragment_len)
-    return [_part(ur_type, n, seq_len, len(message), checksum, frags)
-            for n in range(1, FOUNTAIN_RATIO * seq_len + 1)]
+    return [
+        _part(ur_type, n, seq_len, len(message), checksum, frags)
+        for n in range(1, FOUNTAIN_RATIO * seq_len + 1)
+    ]
 
 
 def _split_part(ur_string: str) -> tuple[str, int | None, int | None, bytes]:

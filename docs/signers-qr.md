@@ -121,19 +121,53 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   it is tall) — left = the animated `segno` QR (a fresh fountain part per timer
   tick via `multipart.frame_source`); right = the live camera preview with the
   decoder running per frame; a complete decode → `accept()` returning the bytes;
-  cancel → `None`. The two panes are equal **squares** (`PANE` px, both the QR
-  and the 1:1 camera view) laid out in a `QGridLayout` — captions in row 0, panes
+  cancel → `None`. The two panes **expand with the window**, starting with a
+  preferred 320 px QR side and 192 px camera side. The exchange window starts
+  at 620 × 420 logical pixels (bounded by the desktop), keeping the QR compact
+  for close-range wallet cameras. Each centers square content
+  (QR or 1:1 camera view) in its available space. A 3:1 column stretch gives the
+  request more space in a `QGridLayout` — captions in row 0, panes
   in row 1 — so they stay aligned however a caption wraps. Spacing is the house
   rhythm: caption↔pane is `item_spacing` (within a paragraph), the between-column
-  gap is `group_spacing` (two distinct groups). The QR is rendered large by
-  `ur_to_pixmap` then scaled to the pane with **nearest-neighbour** (hard module
-  edges, best for the device's scan, vs. grey-fringed smooth scaling); the camera
+  gap is `group_spacing` (two distinct groups). The shared `QRWidget` caches a
+  one-pixel-per-module source and fits it using **whole physical pixels per
+  module**, including on HiDPI displays. It preserves a four-module white quiet
+  zone and hard black/white edges. Resizing never advances the animation. The camera
   frame is scaled *expanding* + centre-cropped to fill the square (the decoder
   still runs on the full frame, so no scan area is lost). Each pane sits in the
   theme's native sunken **"view" frame** via `_view_framed` (a `QScrollArea`
   wrap — the same trick the ENS renewal calendar uses, since a plain `QFrame`
   border is suppressed by Kvantum). The account-import scanner
   (`QRScanDialog`) reuses the same square, view-framed camera pane.
+  The receive-address QR uses the same responsive renderer, preserving the
+  address's case and the `ethereum:` URI.
+- Animated signing requests target **120-byte fragments** (typically QR v9),
+  prioritizing larger modules for low-resolution cameras over fewer frames.
+  Requests up to 150 bytes remain static. The trial targets **10 fps** using
+  fractional monotonic deadlines. A background worker prepares at most four
+  images ahead; only installing/resizing the image happens on the GUI thread.
+  If preparation or the GUI falls behind, the current QR stays visible and
+  display resumes without catch-up flashes. The wallet retains a fixed QR
+  version per message, selected after a short physical pair favored it and the
+  operator reported better usability. It reserves room for sequence growth and stabilizes geometry, but
+  can reduce pixels per module on early parts. Shell detects each image
+  independently; fixed version is not established as universally better.
+  The diagnostic can compare it with choosing each frame's smallest version.
+  Repeated plain fragments cycle through all eight standard QR masks, including
+  degree-one fountain retries; static URs are unaffected.
+  After the first pass through every original chunk, all animated transfers
+  send shuffled groups of two cyclic plain retries and one fresh standard
+  fountain recovery part. Plain retries use degree-one fountain sequence
+  numbers when available, triggering Shell's pending-equation recovery path.
+  The search examines 32 candidates per plain retry, at most 16,384 per message,
+  and falls back to ordinary systematic retries when no alias is available.
+  The receiver's 128-fragment
+  limit takes precedence: above 15,360 bytes, fragments grow to fit that limit.
+  Firmware before Keycard Shell 1.2.1 supports only 64 fragments; update it for
+  larger transfers. A ~44 KB request still needs ~347 bytes per fragment and
+  QR version 16; smaller fragments require receiver firmware changes.
+  Automated pixel/decoder tests cover rendering; scan reliability and transfer
+  time on a physical Keycard Shell must be checked separately.
 - Implement `DialogInteraction.exchange_qr` to open it (already marshaled from
   the worker by step 2). Add the `progress_text==""` skip in `ui.py`.
 - Camera + decoder are injectable so the **frame-cycling and decode-callback
@@ -178,3 +212,47 @@ Still open, lower-stakes (resolve in-flight):
    recommended) vs `pyzbar` (needs `libzbar0`).
 4. **BC-UR/EIP-4527** — adopt a Python lib if a solid one exists, else implement
    the registry CBOR ourselves (well-specified, bounded). Decide via the 3a spike.
+
+## Hardware transfer trials
+
+The success criterion is time to **100% reconstruction on a physical Shell**.
+Software loss simulations and display cadence do not establish optical speed.
+The earlier 200 ms setting was a project default, not a UR requirement.
+
+The diagnostic now shares `QRAnimation`, `QRWidget`, and `frame_source` with
+signing. Its synthetic unsigned request has a fixed UUID, and each run records
+its SHA-256, so the payload is identical across rates. The old legacy-order,
+GIF, and pause controls were removed from this comparison harness.
+
+```sh
+uv run python scripts/keycard_fountain_gui.py --fps 5
+uv run python scripts/keycard_fountain_gui.py --fps 8
+uv run python scripts/keycard_fountain_gui.py --fps 10
+uv run python scripts/keycard_fountain_gui.py --fps 12
+uv run python scripts/keycard_fountain_gui.py --fps 15
+```
+
+Keep `--qr-size` (default 320 logical pixels), display scaling, brightness,
+viewing distance, and payload constant. Use `--calldata path/to/unsigned.hex`
+for a particular payload; use the same file for every rate. Record the actual
+conditions with `--brightness` and `--distance-cm`. Reset the Shell scanner
+before each attempt. Press Enter when it reaches 100%, X for a failed attempt,
+and R to restart. Closing or restarting an unfinished attempt is also logged;
+180 seconds without completion records a timeout. These are transfer trials,
+not requests to sign or broadcast the synthetic transaction.
+
+Run at least five attempts per rate, alternating the order of rates. Results
+append to `/tmp/qeth-qr-trials.jsonl` (override with `--results`). Report median
+completion time, range, and failed/timeout/aborted attempts separately; do not
+silently discard failures. Timing starts at the first image installation and
+ends at the operator's keypress, so it includes manual reaction time.
+
+Physical results include one short framing pair favoring fixed version, which
+the operator chose to retain. No rate is yet established as faster on hardware.
+See `docs/qr10-validation.md` for the current trial, `docs/qr15-validation.md`
+for the physical framing results, and `docs/qr12-validation.md` for the earlier
+fixed-grid trial.
+
+For the matched fixed-version/per-frame comparison, use
+[the framing trial protocol](qr-framing-trials.md). It holds 15 fps constant
+and includes a dense payload that actually crosses QR version boundaries.

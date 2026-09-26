@@ -122,7 +122,9 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   tick via `multipart.frame_source`); right = the live camera preview with the
   decoder running per frame; a complete decode → `accept()` returning the bytes;
   cancel → `None`. The two panes **expand with the window**, starting with a
-  preferred 560 px QR side and 192 px camera side. Each centers square content
+  preferred 320 px QR side and 192 px camera side. The exchange window starts
+  at 620 × 420 logical pixels (bounded by the desktop), keeping the QR compact
+  for close-range wallet cameras. Each centers square content
   (QR or 1:1 camera view) in its available space. A 3:1 column stretch gives the
   request more space in a `QGridLayout` — captions in row 0, panes
   in row 1 — so they stay aligned however a caption wraps. Spacing is the house

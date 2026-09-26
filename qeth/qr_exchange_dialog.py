@@ -156,7 +156,7 @@ class QRExchangeDialog(Dialog):
 
         show_caption = QLabel("1. Show this to your wallet's camera:")
         show_caption.setWordWrap(True)
-        self._qr_label = QRWidget(preferred_side=560)
+        self._qr_label = QRWidget(preferred_side=PANE)
         grid.addWidget(show_caption, 0, 0, top)
         grid.addWidget(_view_framed(self._qr_label), 1, 0)
 
@@ -179,10 +179,9 @@ class QRExchangeDialog(Dialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-        # QScrollArea caps its size hint, and Qt's automatic dialog sizing can
-        # shrink even a large QR hint. Start roomy, bounded by the desktop;
-        # users can still shrink the window to its normal layout minimum.
-        self.resize(QSize(840, 680).boundedTo(self.screen().availableGeometry().size()))
+        # Start with a compact QR so a short-focus wallet camera can frame it
+        # at close range. Resizing the window still enlarges or shrinks it.
+        self.resize(QSize(620, 420).boundedTo(self.screen().availableGeometry().size()))
 
         if self._scanner is not None:
             self._scanner.decoded.connect(self._on_decoded)

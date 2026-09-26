@@ -148,10 +148,10 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   images ahead; only installing/resizing the image happens on the GUI thread.
   If preparation or the GUI falls behind, the current QR stays visible and
   display resumes without catch-up flashes. The wallet retains a fixed QR
-  version per message as the existing comparison baseline, pending physical
-  trials. It reserves room for sequence growth and stabilizes geometry, but
+  version per message, selected after a short physical pair favored it and the
+  operator reported better usability. It reserves room for sequence growth and stabilizes geometry, but
   can reduce pixels per module on early parts. Shell detects each image
-  independently; fixed version is not established as the better framing policy.
+  independently; fixed version is not established as universally better.
   The diagnostic can compare it with choosing each frame's smallest version.
   Repeated plain fragments cycle through all eight standard QR masks, including
   degree-one fountain retries; static URs are unaffected.
@@ -247,8 +247,9 @@ completion time, range, and failed/timeout/aborted attempts separately; do not
 silently discard failures. Timing starts at the first image installation and
 ends at the operator's keypress, so it includes manual reaction time.
 
-Physical results for this build are **pending**. No rate is yet established as
-faster on hardware. See `docs/qr15-validation.md` for current automated evidence
+Physical results include one short framing pair favoring fixed version, which
+the operator chose to retain. No rate is yet established as faster on hardware.
+See `docs/qr15-validation.md` for current physical and automated evidence
 and `docs/qr12-validation.md` for the previous fixed-grid trial.
 
 For the matched fixed-version/per-frame comparison, use

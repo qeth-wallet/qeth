@@ -1,8 +1,13 @@
 # Matched framing trials
 
-Neither fixed version nor per-frame version has established better physical
-Shell transfer performance. The wallet keeps the existing fixed-version
-baseline while this diagnostic compares the two through the same worker,
+**Decision: keep a fixed QR version per transfer.** In the first short physical
+pair, fixed completed in 12.72 seconds versus 15.69 for per-frame, and the
+operator reported that fixed framing felt better and explicitly chose it.
+This supports the choice for the tested setup; it does not establish universal
+superiority. No further framing comparison is required now. The protocol below
+is retained for reproducibility and possible future investigation.
+
+The diagnostic compares the two policies through the same worker,
 scheduler, renderer, fragment order, and mask-variation logic. No firmware,
 transaction-signing behavior, or wallet settings change.
 

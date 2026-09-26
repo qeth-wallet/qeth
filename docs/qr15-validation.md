@@ -8,9 +8,11 @@ capture buffering, decoding, and display presentation also matter.
 matched framing pair. A repeatable framing or frame-rate advantage is not yet
 established.**
 
-The wallet's fixed version remains the comparison baseline, not an evidence-based
-winner. The diagnostic now supports matched fixed/per-frame trials at one frame
-rate. See [the protocol and measured geometry](qr-framing-trials.md).
+The wallet keeps a fixed version per transfer. This choice is supported by the
+short physical pilot and the operator's explicit report that fixed framing felt
+better, rather than a claim of universal superiority. The diagnostic retains
+both policies for future investigation. See [the protocol and measured
+geometry](qr-framing-trials.md).
 
 ## Automated validation
 
@@ -73,14 +75,16 @@ At this width/DPR, the smaller grid gets 8 backing-store pixels per module
 instead of 7, and occurred in 36.3% of per-frame image installations. That
 resolution opportunity did not produce faster completion in this pair.
 
-This is limited evidence in favor of retaining the fixed baseline, not proof
+The operator subsequently reported that fixed frame size "definitely felt better"
+and explicitly chose to keep it. The wallet therefore retains fixed version per
+transfer; no further framing trials are requested for this decision.
+
+This is limited evidence in favor of retaining fixed framing, not proof
 that stable geometry caused the difference or that fixed version is strictly
 better. There is only one attempt per policy, in fixed-first order, with
 unmeasured optical conditions and manual completion timing. It does not compare
-12 with 15 fps or predict the original 44 KB transfer. No policy change follows
-from this pair alone. If another pair is practical, the existing harness's next
-two attempts run per-frame then fixed, reversing the order with the same fixture
-and 30-second caps; this adds repetition but still cannot establish universality.
+12 with 15 fps or predict the original 44 KB transfer. The existing diagnostic
+can still run reversed-order pairs if future conditions warrant reconsideration.
 
 ## App
 

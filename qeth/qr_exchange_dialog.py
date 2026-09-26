@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dialog import Dialog, group_spacing, item_spacing
+from .qr.multipart import MAX_FRAGMENTS
 from .qr_widget import QRWidget, qr_to_pixmap, ur_animation_version
 
 # Initial preferred side; the panes expand with the window.
@@ -136,7 +137,9 @@ class QRExchangeDialog(Dialog):
         # fountain parts, so the device keeps getting new frames and converges.
         self._next_frame = next_frame
         self._shown: str | None = None
+        self._shown_mask_shift = 0
         self._qr_version: int | None = None
+        self._pure_frame_visits: dict[int, int] = {}
 
         root = QVBoxLayout(self)
 
@@ -213,12 +216,27 @@ class QRExchangeDialog(Dialog):
 
     def _render_frame(self) -> None:
         ur_string = self._next_frame()
-        if ur_string != self._shown:      # a constant single part renders once
+        mask_shift = 0
+        fields = ur_string.split("/")
+        if len(fields) == 3:
+            number, separator, count = fields[1].partition("-")
+            if separator and number.isdecimal() and count.isdecimal():
+                sequence, total = int(number), int(count)
+                if 1 <= sequence <= total <= MAX_FRAGMENTS:
+                    # Repeating an identical bitmap can repeatedly lose the
+                    # same fragment to blur or screen/camera pixel alignment.
+                    # Try each standard QR mask while preserving its UR bytes.
+                    mask_shift = self._pure_frame_visits.get(sequence, 0)
+                    self._pure_frame_visits[sequence] = (mask_shift + 1) % 8
+        if ur_string != self._shown or mask_shift != self._shown_mask_shift:
             if self._shown is None:
                 self._qr_version = ur_animation_version(ur_string)
             self._shown = ur_string
+            self._shown_mask_shift = mask_shift
             # URs are case-insensitive; uppercase uses compact alphanumeric QR.
-            self._qr_label.set_content(ur_string.upper(), error="l", version=self._qr_version)
+            self._qr_label.set_content(
+                ur_string.upper(), error="l", version=self._qr_version, mask_shift=mask_shift,
+            )
         if self._anim is not None:
             interval = self.DENSE_FRAME_MS if (self._qr_version or 0) >= 13 else self.FRAME_MS
             self._anim.start(interval)

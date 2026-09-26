@@ -69,3 +69,21 @@ def test_resize_reuses_encoding_and_new_content_replaces_cache(qtbot, monkeypatc
     widget.set_content(second)
     assert decode_qr(_qimage_to_gray(widget.grab().toImage())) == second
     assert encoded == [first, second]
+
+
+def test_mask_variants_preserve_payload_and_grid(qtbot):
+    import random
+
+    content = frame_source("eth-sign-request", random.Random(71).randbytes(44_345))().upper()
+    widget = QRWidget()
+    qtbot.addWidget(widget)
+    widget.resize(720, 720)
+    widget.show()
+    patterns = set()
+    for shift in range(8):
+        widget.set_content(content, error="l", version=16, mask_shift=shift)
+        shown = _qimage_to_gray(widget.grab().toImage())
+        assert decode_qr(shown) == content
+        assert {value for count, value in shown.getcolors()} == {0, 255}
+        patterns.add(shown.tobytes())
+    assert len(patterns) == 8

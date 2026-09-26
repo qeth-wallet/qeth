@@ -86,8 +86,10 @@ def frame_source(
     """Return ``next_frame() -> ur_string`` for the exchange dialog to show one
     QR per animation tick. Small payload → a constant single part; large payload
     → an UNBOUNDED stream that shows the pure fragments (``seqNum`` 1..seqLen),
-    then a batch of fresh rateless fountain parts, and REPEATS — re-injecting the
-    pure fragments every cycle rather than only once.
+    then repeatedly re-injects pure fragments alongside fresh fountain parts.
+    For 64+ fragments, interleave two pure parts with one recovery part after
+    the first pure pass. This avoids a long recovery-only block when the camera
+    is struggling; smaller transfers retain alternating pure/recovery blocks.
 
     The pure fragments are the self-contained, immediately-usable ones (each
     yields one fragment the instant it's scanned, no peeling). Re-showing them
@@ -113,6 +115,16 @@ def frame_source(
 
     def frames() -> Iterator[str]:
         rateless = seq_len
+        if seq_len >= 64:
+            for n in range(1, seq_len + 1):
+                yield _part(ur_type, n, seq_len, len(message), checksum, frags)
+            pure = 1
+            while True:
+                for _ in range(2):
+                    yield _part(ur_type, pure, seq_len, len(message), checksum, frags)
+                    pure = pure % seq_len + 1
+                rateless += 1
+                yield _part(ur_type, rateless, seq_len, len(message), checksum, frags)
         while True:
             for n in range(1, seq_len + 1):                    # pure fragments
                 yield _part(ur_type, n, seq_len, len(message), checksum, frags)

@@ -100,6 +100,24 @@ def test_frame_source_reinjects_pure_fragments_every_cycle():
     assert decode_parts(frames[:seq_len]) == ("eth-sign-request", msg)
 
 
+@pytest.mark.parametrize("size, count", [(7680, 64), (7800, 65), (44_345, 128)])
+def test_large_stream_interleaves_direct_fragments_with_fresh_recovery_parts(size, count):
+    message = bytes((i * 13 + 1) % 256 for i in range(size))
+    source = frame_source("eth-sign-request", message)
+    first_pass = [source() for _ in range(count)]
+    assert decode_parts(first_pass) == ("eth-sign-request", message)
+    # Every direct fragment returns within 192 frames; recovery frames remain
+    # fresh. Avoid a 128-frame recovery-only gap when camera reception is poor.
+    direct = []
+    for pair in range(count):
+        one, two, recovery = source(), source(), source()
+        assert (one, two) == (first_pass[(2 * pair) % count], first_pass[(2 * pair + 1) % count])
+        assert _split_part(recovery)[1:3] == (count + 1 + pair, count)
+        direct.extend((one, two))
+    assert decode_parts(direct[:count]) == ("eth-sign-request", message)
+    assert decode_parts(direct[count:]) == ("eth-sign-request", message)
+
+
 def test_fragment_len_caps_parts_for_a_huge_payload():
     # Readable default for a normal-sized payload...
     assert _fragment_len_for(10_000) == 120

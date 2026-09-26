@@ -31,10 +31,19 @@ def ur_animation_version(content: str) -> int | None:
 
 def qr_to_pixmap(
     content: str, *, error: str = "m", scale: int = 1, version: int | None = None,
+    mask_shift: int = 0,
 ) -> QPixmap:
     """Encode without changing the content's case; callers normalize URs only."""
     buf = io.BytesIO()
-    segno.make_qr(content, error=error, version=version).save(
+    qr = segno.make_qr(content, error=error, version=version)
+    if mask_shift % 8:
+        # Change the optical pattern on retries without changing a single UR
+        # byte. The first attempt retains Segno's lowest-penalty standard mask.
+        qr = segno.make_qr(
+            content, error=qr.error, version=qr.version,
+            mask=(qr.mask + mask_shift) % 8, boost_error=False,
+        )
+    qr.save(
         buf, kind="png", scale=scale, border=4, dark="#000", light="#fff"
     )
     pixmap = QPixmap()
@@ -69,8 +78,9 @@ class QRWidget(QWidget):
 
     def set_content(
         self, content: str, *, error: str = "m", version: int | None = None,
+        mask_shift: int = 0,
     ) -> None:
-        self._source = qr_to_pixmap(content, error=error, version=version)
+        self._source = qr_to_pixmap(content, error=error, version=version, mask_shift=mask_shift)
         self._render_key = None
         self.update()
 

@@ -222,6 +222,25 @@ def test_dialog_single_part_renders_once(qtbot):
     assert dlg._shown == "ur:eth-sign-request/const"
 
 
+def test_repeated_fragment_cycles_all_masks_without_changing_its_ur(qtbot):
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    frame = frame_source("eth-sign-request", bytes(2000))()
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=lambda: frame)
+    dlg.show()
+    pictures = []
+    for attempt in range(9):
+        if attempt:
+            dlg._render_frame()
+        dlg._anim.stop()
+        shown = _qimage_to_gray(dlg._qr_label.grab().toImage())
+        assert decode_qr(shown) == frame.upper()
+        pictures.append(shown.tobytes())
+    assert len(set(pictures[:8])) == 8
+    assert pictures[8] == pictures[0]
+
+
 def test_large_transfer_keeps_the_same_qr_grid_across_sequence_digits(qtbot):
     import random
     from qeth.qr.multipart import frame_source

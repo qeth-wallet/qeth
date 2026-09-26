@@ -122,8 +122,9 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   tick via `multipart.frame_source`); right = the live camera preview with the
   decoder running per frame; a complete decode → `accept()` returning the bytes;
   cancel → `None`. The two panes **expand with the window**, starting with a
-  preferred 320 px side. Each centers square content (QR or 1:1 camera view)
-  in its available space. They use equal-width columns in a `QGridLayout` — captions in row 0, panes
+  preferred 560 px QR side and 192 px camera side. Each centers square content
+  (QR or 1:1 camera view) in its available space. A 3:1 column stretch gives the
+  request more space in a `QGridLayout` — captions in row 0, panes
   in row 1 — so they stay aligned however a caption wraps. Spacing is the house
   rhythm: caption↔pane is `item_spacing` (within a paragraph), the between-column
   gap is `group_spacing` (two distinct groups). The shared `QRWidget` caches a
@@ -140,10 +141,21 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   address's case and the `ethereum:` URI.
 - Animated signing requests target **120-byte fragments** (typically QR v9),
   prioritizing larger modules for low-resolution cameras over fewer frames.
-  Requests up to 150 bytes remain static; animation stays at 200 ms per frame
-  with the existing pure/rateless fountain cycle. The receiver's 128-fragment
+  Requests up to 150 bytes remain static. Animation uses 200 ms per frame,
+  or 400 ms for dense codes (version 13+), scheduled after encoding. A fixed
+  QR version reserves room for growing sequence numbers so the grid does not
+  jump during a transfer. Repeated direct fragments cycle through all eight
+  standard QR masks, starting with Segno's preferred mask: the UR bytes stay
+  identical, but a fragment lost to a particular optical pattern gets a new
+  pattern on its next appearance. Static URs are unaffected.
+  After an initial direct-fragment pass, transfers of 64+ fragments interleave
+  two direct fragments with one fresh fountain recovery fragment, avoiding long
+  recovery-only gaps. Smaller transfers retain alternating blocks.
+  The receiver's 128-fragment
   limit takes precedence: above 15,360 bytes, fragments grow to fit that limit.
-  For these large requests, enlarging the window is the main readability aid.
+  Firmware before Keycard Shell 1.2.1 supports only 64 fragments; update it for
+  larger transfers. A ~44 KB request still needs ~347 bytes per fragment and
+  QR version 16; smaller fragments require receiver firmware changes.
   Automated pixel/decoder tests cover rendering; scan reliability and transfer
   time on a physical Keycard Shell must be checked separately.
 - Implement `DialogInteraction.exchange_qr` to open it (already marshaled from

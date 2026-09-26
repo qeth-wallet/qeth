@@ -74,7 +74,9 @@ def test_resize_reuses_encoding_and_new_content_replaces_cache(qtbot, monkeypatc
 def test_mask_variants_preserve_payload_and_grid(qtbot):
     import random
 
-    content = frame_source("eth-sign-request", random.Random(71).randbytes(44_345))().upper()
+    content = frame_source(
+        "eth-sign-request", random.Random(71).randbytes(44_345)
+    )().upper()
     widget = QRWidget()
     qtbot.addWidget(widget)
     widget.resize(720, 720)
@@ -87,3 +89,46 @@ def test_mask_variants_preserve_payload_and_grid(qtbot):
         assert {value for count, value in shown.getcolors()} == {0, 255}
         patterns.add(shown.tobytes())
     assert len(patterns) == 8
+
+
+@pytest.mark.parametrize(
+    "content", ["ethereum:0x1234567890aBcDeF1234567890aBcDeF12345678", "UR:BYTES/AEAD"]
+)
+def test_events_and_rendering_without_dpr_change_enum(qtbot, monkeypatch, content):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QEvent
+    import qeth.qr_widget as qr_widget
+
+    delivered = []
+
+    class EventProbe(QRWidget):
+        def customEvent(self, event):
+            delivered.append(event.type())
+
+    widget = EventProbe()
+    qtbot.addWidget(widget)
+    # Qt 6.4 does not expose this newer enum. Keep real Qt event dispatch and
+    # rendering, but give the module the older enum surface.
+    monkeypatch.setattr(qr_widget, "QEvent", SimpleNamespace(Type=SimpleNamespace()))
+    widget.event(QEvent(QEvent.Type.User))
+    assert delivered == [QEvent.Type.User]  # Still delegates to QWidget.event.
+    widget.set_content(content)
+    widget.resize(320, 320)
+    widget.show()
+    assert decode_qr(_qimage_to_gray(widget.grab().toImage())) == content
+
+
+def test_dpr_change_requests_repaint_when_supported(qtbot, monkeypatch):
+    from PySide6.QtCore import QEvent
+
+    event_type = getattr(QEvent.Type, "DevicePixelRatioChange", None)
+    if event_type is None:
+        pytest.skip("Qt does not provide DevicePixelRatioChange")
+    widget = QRWidget()
+    qtbot.addWidget(widget)
+    updates = []
+    monkeypatch.setattr(widget, "update", lambda: updates.append(True))
+    widget.event(QEvent(QEvent.Type.User))
+    assert updates == []
+    widget.event(QEvent(event_type))
+    assert updates == [True]

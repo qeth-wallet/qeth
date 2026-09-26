@@ -142,7 +142,8 @@ class QRWidget(QWidget):
         return QPixmap(self._rendered)
 
     def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.DevicePixelRatioChange:
+        # Supported system Qt 6.4 builds do not expose this newer event type.
+        if event.type() == getattr(QEvent.Type, "DevicePixelRatioChange", None):
             self.update()
         return super().event(event)
 

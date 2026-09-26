@@ -39,7 +39,35 @@ Per-frame selection can cause substantial footprint changes at those thresholds.
 Neither geometry calculation establishes which effect matters more to Shell.
 Adding white padding would not stabilize the finder-pattern positions inside it.
 
-## Run the comparison
+## Start with a short pilot
+
+The initial 44 KB trial took a user-reported 166.43 seconds for one per-frame
+transfer (see the validation record). Do not start with repeated long transfers.
+First compare one fixed/per-frame pair with a 30-second cap per attempt:
+
+```sh
+uv run python scripts/keycard_fountain_gui.py --fps 15 --compare-framing \
+  --calldata-bytes 2645 --fragment-len 345 --qr-size 340 --timeout 30 \
+  --results /tmp/qeth-framing-short.jsonl
+```
+
+This is a 2,760-byte request with eight 345-byte chunks, versus 128 chunks for
+the original 44,115-byte request. Software inspection of the first 128 frames
+confirms natural versions 15/16 (49/79 frames), with reserved version 16. It
+preserves the dense grid sizes while reducing reconstruction work. At the
+reported DPR of 2, width 340 probes the 8-versus-7-pixels/module threshold.
+Frame the largest symbol and its full white border before starting; hold that
+position for both policies. Press Enter at completion, reset the scanner, then
+R for the second policy. Quit after the pair. A timeout is a recorded outcome;
+do not extend the deadline simply to obtain completion.
+
+This fixture deliberately overrides the normal fragment size. It is a quick
+framing experiment, not a prediction of 44 KB transfer time or proof of a winner.
+If both attempts are slow or time out, stop repeated framing trials and investigate
+scan conditions/cadence first. Only run further balanced blocks if the pilot is
+practical and its result warrants them.
+
+## Original dense comparison (follow-up only)
 
 From `/Users/bryan/src/qeth`:
 
@@ -65,10 +93,11 @@ complete encoding policies, not an isolated laboratory measurement of geometry.
    separately from an optical failure.
    Press R only when the scanner is ready for the next attempt. Enter records
    reaching 100%; X records failure; the timeout is 180 seconds. Q closes.
-3. Complete two four-attempt blocks (four attempts per policy). Do not sign or
-   broadcast the diagnostic transaction. Keep aborted and timed-out attempts in
-   the results. If more attempts are needed, add complete blocks for both policies.
-4. Quit and repeat at `--qr-size 340`, writing to
+3. Start with one pair, not eight attempts. Do not sign or broadcast the
+   diagnostic transaction. Keep aborted and timed-out attempts in the results.
+   Add complete four-attempt blocks only if the time cost is acceptable and more
+   evidence is needed; one pair alone does not establish a reliable winner.
+4. If further comparison is warranted, repeat at `--qr-size 340`, writing to
    `/tmp/qeth-framing-340.jsonl`. This probes an integer-scaling threshold; keep
    distance and other conditions fixed within each size. Record any repositioning
    between sizes. Use `--brightness` and `--distance-cm` to attach measurements.

@@ -120,9 +120,6 @@ class QRExchangeDialog(Dialog):
     # Animated-QR frame cadence (ms). Slow enough for a device camera to lock
     # onto each fragment, fast enough to cycle a few-part request quickly.
     FRAME_MS = 200
-    # Dense codes need more chances to be captured intact. This is a
-    # conservative fallback, not a measured optimum for every device camera.
-    DENSE_FRAME_MS = 400
 
     def __init__(
         self, next_frame: Callable[[], str], *, scanner: Any = None,
@@ -238,8 +235,7 @@ class QRExchangeDialog(Dialog):
                 ur_string.upper(), error="l", version=self._qr_version, mask_shift=mask_shift,
             )
         if self._anim is not None:
-            interval = self.DENSE_FRAME_MS if (self._qr_version or 0) >= 13 else self.FRAME_MS
-            self._anim.start(interval)
+            self._anim.start(self.FRAME_MS)
 
     # --- scanner signals ---------------------------------------------------
 

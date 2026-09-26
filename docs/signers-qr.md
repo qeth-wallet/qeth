@@ -141,8 +141,8 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   address's case and the `ethereum:` URI.
 - Animated signing requests target **120-byte fragments** (typically QR v9),
   prioritizing larger modules for low-resolution cameras over fewer frames.
-  Requests up to 150 bytes remain static. Animation uses 200 ms per frame,
-  or 400 ms for dense codes (version 13+), scheduled after encoding. A fixed
+  Requests up to 150 bytes remain static. All animated frames use a 200 ms
+  display interval, scheduled after encoding regardless of density. A fixed
   QR version reserves room for growing sequence numbers so the grid does not
   jump during a transfer. Repeated direct fragments cycle through all eight
   standard QR masks, starting with Segno's preferred mask: the UR bytes stay

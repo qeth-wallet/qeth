@@ -268,8 +268,8 @@ def test_large_transfer_keeps_the_same_qr_grid_across_sequence_digits(qtbot):
     assert dlg._qr_label.width() > 2 * dlg._preview.width()
 
 
-@pytest.mark.parametrize("payload_size, interval", [(10_000, 200), (44_345, 400)])
-def test_each_frame_gets_full_dwell_after_encoding(qtbot, monkeypatch, payload_size, interval):
+@pytest.mark.parametrize("payload_size", [10_000, 44_345])
+def test_each_frame_gets_200ms_dwell_after_encoding(qtbot, monkeypatch, payload_size):
     import time
     from qeth.qr.multipart import frame_source
     from qeth.qr_widget import QRWidget
@@ -284,7 +284,7 @@ def test_each_frame_gets_full_dwell_after_encoding(qtbot, monkeypatch, payload_s
     dlg = _dialog(qtbot, _FakeScanner(), next_frame=frame_source(
         "eth-sign-request", bytes(payload_size)))
     dlg._render_frame()
-    assert interval - 30 <= dlg._anim.remainingTime() <= interval
+    assert 170 <= dlg._anim.remainingTime() <= 200
 
 
 @pytest.mark.parametrize("payload_size", [120, 10_000])

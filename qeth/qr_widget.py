@@ -11,11 +11,13 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
 def ur_animation_version(content: str) -> int | None:
-    """Reserve space for growing UR sequence numbers, keeping finder positions fixed.
+    """Reserve one version per message for the fixed-framing trial baseline.
 
     Multipart sequence numbers appear both in the URI and in CBOR. Reserve ten
     decimal digits and four additional CBOR bytes (eight Bytewords characters)
     for a uint32 sequence number. This covers years of continuous animation.
+    This stabilizes geometry but can reduce pixels per module. An optical
+    advantage over choosing each frame's smallest version is not established.
     Single-part URs need no reservation.
     """
     fields = content.upper().split("/")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure physical Shell transfers using qeth's production animation path.
 
-Run at --fps 5, 8, 10 and 12 with identical payload and viewing conditions.
+Run at --fps 5, 8, 10, 12 and 15 with identical payload and viewing conditions.
 Enter records 100% completion; X records failure; R starts another attempt.
 These are unsigned diagnostic requests; do not sign or broadcast them.
 """
@@ -23,7 +23,7 @@ from PySide6.QtGui import QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from qeth.qr import eth, multipart
-from qeth.qr_animation import QRAnimation, TARGET_FPS
+from qeth.qr_animation import PreparedFrame, QRAnimation, TARGET_FPS
 from qeth.qr_widget import QRWidget
 
 
@@ -71,6 +71,8 @@ class FountainWindow(QWidget):
         self._finished = False
         self._attempt = 0
         self._frames = 0
+        self._source_sizes: dict[int, int] = {}
+        self._grid_policy = args.grid_policy
         self._animation: QRAnimation | None = None
         self.setWindowTitle(f"qeth QR trial — {args.fps:g} fps")
         layout = QVBoxLayout(self)
@@ -96,7 +98,16 @@ class FountainWindow(QWidget):
         self._started = None
         self._finished = False
         self._frames = 0
+        self._source_sizes = {}
         self._attempt += 1
+        self._grid_policy = (
+            ("fixed", "per-frame", "per-frame", "fixed")[(self._attempt - 1) % 4]
+            if self._args.compare_framing
+            else self._args.grid_policy
+        )
+        self.setWindowTitle(
+            f"qeth QR trial — {self._args.fps:g} fps — {self._grid_policy}"
+        )
         self._status.setText("Preparing QR…")
         self._animation = QRAnimation(
             self._qr,
@@ -107,17 +118,20 @@ class FountainWindow(QWidget):
                 rng=random.Random(self._args.seed),
             ),
             fps=self._args.fps,
+            fixed_version=self._grid_policy == "fixed",
         )
         self._animation.displayed.connect(self._displayed)
         self._animation.failed.connect(self._failed)
 
-    def _displayed(self, frame: object) -> None:
+    def _displayed(self, frame: PreparedFrame) -> None:
         if self._started is None:
             self._started = time.monotonic()
             self._timeout.start(round(self._args.timeout * 1000))
         self._frames += 1
+        side = frame.image.width()
+        self._source_sizes[side] = self._source_sizes.get(side, 0) + 1
         self._status.setText(
-            f"Attempt {self._attempt} · {self._args.fps:g} fps · "
+            f"Attempt {self._attempt} · {self._grid_policy} · {self._args.fps:g} fps · "
             f"{time.monotonic() - self._started:.1f} s · {self._frames} frames"
         )
 
@@ -141,6 +155,9 @@ class FountainWindow(QWidget):
             else None,
             "frames": self._frames,
             "fps": self._args.fps,
+            "grid_policy": self._grid_policy,
+            "compare_framing": self._args.compare_framing,
+            "source_modules_including_border": self._source_sizes,
             "payload_sha256": hashlib.sha256(self._message).hexdigest(),
             "payload_bytes": len(self._message),
             "seed": self._args.seed,
@@ -181,7 +198,22 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=TARGET_FPS)
     parser.add_argument("--fragments", type=int, default=120)
     parser.add_argument("--fragment-len", type=int, default=None)
-    parser.add_argument("--calldata", help="unsigned transaction calldata as hex")
+    payload = parser.add_mutually_exclusive_group()
+    payload.add_argument("--calldata", help="unsigned transaction calldata as hex")
+    payload.add_argument(
+        "--calldata-bytes",
+        type=int,
+        help="generate this many deterministic calldata bytes (seed 892)",
+    )
+    framing = parser.add_mutually_exclusive_group()
+    framing.add_argument(
+        "--grid-policy", choices=("fixed", "per-frame"), default="fixed"
+    )
+    framing.add_argument(
+        "--compare-framing",
+        action="store_true",
+        help="cycle fixed, per-frame, per-frame, fixed on successive attempts",
+    )
     parser.add_argument("--qr-size", type=int, default=320)
     parser.add_argument("--seed", type=int, default=71)
     parser.add_argument("--timeout", type=float, default=180)
@@ -201,6 +233,10 @@ def main() -> int:
             "fragments and timeout must be positive; qr-size must be at least 192"
         )
     calldata = None
+    if args.calldata_bytes is not None:
+        if args.calldata_bytes < 0:
+            parser.error("calldata-bytes must be nonnegative")
+        calldata = random.Random(892).randbytes(args.calldata_bytes)
     if args.calldata:
         calldata = bytes.fromhex(
             Path(args.calldata).read_text().strip().removeprefix("0x")

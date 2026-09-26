@@ -17,7 +17,7 @@ from .qr.fountain import choose_fragments
 from .qr.multipart import MAX_FRAGMENTS, _split_part
 from .qr_widget import QRWidget, qr_to_image, ur_animation_version
 
-TARGET_FPS = 12.0
+TARGET_FPS = 15.0
 PREPARED_FRAMES = 4
 
 
@@ -57,13 +57,16 @@ class FramePreparer:
     widget. A semaphore reserves space *before* consuming the next source part.
     """
 
-    def __init__(self, next_frame: Callable[[], str]) -> None:
+    def __init__(
+        self, next_frame: Callable[[], str], *, fixed_version: bool = True
+    ) -> None:
         self.frames: queue.Queue[PreparedFrame | Exception] = queue.Queue(
             PREPARED_FRAMES
         )
         self.cancelled = threading.Event()
         self._slots = threading.Semaphore(PREPARED_FRAMES)
         self._next_frame = next_frame
+        self._fixed_version = fixed_version
         self.thread = threading.Thread(target=self._run, name="qr-prepare", daemon=True)
         self.thread.start()
 
@@ -90,7 +93,8 @@ class FramePreparer:
             try:
                 content = self._next_frame()
                 if first:
-                    version = ur_animation_version(content)
+                    if self._fixed_version:
+                        version = ur_animation_version(content)
                     first = False
                 static = content.count("/") == 1
                 shift = 0
@@ -134,11 +138,12 @@ class QRAnimation(QObject):
         next_frame: Callable[[], str],
         *,
         fps: float = TARGET_FPS,
+        fixed_version: bool = True,
     ):
         super().__init__(widget)
         self._widget = widget
         self._deadline = FrameDeadline(fps)
-        self._preparer = FramePreparer(next_frame)
+        self._preparer = FramePreparer(next_frame, fixed_version=fixed_version)
         self._stopped = False
         self.shown: PreparedFrame | None = None
         self.timer = QTimer(self)

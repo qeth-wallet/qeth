@@ -6,12 +6,12 @@ import time
 import pytest
 
 from qeth.qr.multipart import frame_source
-from qeth.qr_animation import FrameDeadline, FramePreparer, QRAnimation
+from qeth.qr_animation import FrameDeadline, FramePreparer, QRAnimation, TARGET_FPS
 from qeth.qr_scan import _qimage_to_gray, decode_qr
 from qeth.qr_widget import QRWidget
 
 
-@pytest.mark.parametrize("fps", [5, 8, 10, 12])
+@pytest.mark.parametrize("fps", [5, 8, 10, 12, 15])
 def test_fractional_deadlines_do_not_accumulate_rounding(fps):
     clock = FrameDeadline(fps)
     clock.displayed(100)
@@ -23,12 +23,13 @@ def test_fractional_deadlines_do_not_accumulate_rounding(fps):
     assert clock.delay_ms(clock.next - 0.0001) == 1
 
 
-def test_stall_rebases_instead_of_catching_up():
-    clock = FrameDeadline(12)
+@pytest.mark.parametrize("fps,delay", [(12, 84), (15, 67)])
+def test_stall_rebases_instead_of_catching_up(fps, delay):
+    clock = FrameDeadline(fps)
     clock.displayed(100)
     clock.displayed(100.5)
-    assert clock.next == pytest.approx(100.5 + 1 / 12)
-    assert clock.delay_ms(100.5) == 84
+    assert clock.next == pytest.approx(100.5 + 1 / fps)
+    assert clock.delay_ms(100.5) == delay
 
 
 @pytest.mark.parametrize("fps", [0, -1, float("inf"), float("nan")])
@@ -88,7 +89,7 @@ def test_starvation_retains_image_and_cancellation_drops_pending_frame(qtbot):
         release.set()
         qtbot.waitUntil(lambda: animation.shown is not first)
         qtbot.waitUntil(lambda: len(times) >= 3)
-        assert times[2] - times[1] >= 0.075
+        assert times[2] - times[1] >= 1 / TARGET_FPS - 0.008
         animation.stop()
         last = animation.shown
         qtbot.wait(150)
@@ -174,5 +175,43 @@ def test_alias_retry_continues_the_original_chunks_mask_cycle(qtbot):
                 == (original if i == 0 else alias).upper()
             )
         assert shifts == [0, 1, 2, 3, 4, 5, 6, 7, 0]
+    finally:
+        worker.stop()
+
+
+@pytest.mark.parametrize("fixed_version", [True, False])
+def test_worker_framing_policies_preserve_content_through_high_sequences(
+    qtbot, fixed_version
+):
+    import random
+    import segno
+    from qeth.qr.multipart import _part, _plan, _fragment_len_for
+
+    message = random.Random(892).randbytes(44_345)
+    count, fragments, checksum = _plan(message, _fragment_len_for(len(message)))
+    # Mixed metadata lengths exercise a real QR version boundary.
+    # High numbers cover the alias range and uint32 boundary.
+    contents = [
+        _part("eth-sign-request", sequence, count, len(message), checksum, fragments)
+        for sequence in (1, 10, 1 << 31, (1 << 32) - 1, 1)
+    ]
+    # Independently find the common size needed across the sequence range.
+    natural_sides = [
+        segno.make_qr(c.upper(), error="l").symbol_size()[0] for c in contents
+    ]
+    assert natural_sides == [85, 89, 89, 89, 85]
+    expected_sides = [89] * len(contents) if fixed_version else natural_sides
+    source = iter(contents)
+    worker = FramePreparer(lambda: next(source), fixed_version=fixed_version)
+    try:
+        for content, side in zip(contents, expected_sides, strict=True):
+            qtbot.waitUntil(lambda: not worker.frames.empty())
+            frame = worker.take()
+            assert frame.content == content
+            assert (frame.image.width(), frame.image.height()) == (
+                side,
+                side,
+            )
+            assert decode_qr(_qimage_to_gray(frame.image)) == content.upper()
     finally:
         worker.stop()

@@ -1,5 +1,8 @@
 # 12 fps QR trial validation — 2026-09-25
 
+Historical snapshot of the fixed-grid 12 fps build. The current trial is
+[15 fps with matched framing experiments](qr15-validation.md).
+
 This build targets 12 fps. Faster **physical transfer completion is unverified**.
 No physical Shell attempt was performed during this implementation session.
 
@@ -62,7 +65,7 @@ transfer times. The maintained Python reconstruction regressions are in
 
 ## Physical comparison pending
 
-Use the procedure in [signers-qr.md](signers-qr.md#12-fps-hardware-trial).
+Use the procedure in [signers-qr.md](signers-qr.md#15-fps-hardware-trial).
 Keep the unsigned payload, QR size, brightness, and camera distance constant.
 Record repeated time-to-100% results and all failed attempts at 5, 8, 10, 12 fps.
 The harness writes `/tmp/qeth-qr-trials.jsonl`; it does not infer success from

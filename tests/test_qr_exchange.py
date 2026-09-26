@@ -275,7 +275,9 @@ def test_large_transfer_keeps_the_same_qr_grid_across_sequence_digits(qtbot):
     from qeth.qr_scan import _qimage_to_gray
 
     # The reported multicall is ~44 KB. Its first nine frames fit version 15,
-    # but frame 10 needs version 16: auto-sizing made the finder patterns jump.
+    # but frame 10 needs version 16. Keep the footprint steady so a camera
+    # framed around the code does not need repositioning. This is a geometry
+    # contract, not evidence that fixed versions improve independent decoding.
     payload = random.Random(892).randbytes(44_345)
     source = frame_source("eth-sign-request", payload)
     expected_source = frame_source("eth-sign-request", payload)

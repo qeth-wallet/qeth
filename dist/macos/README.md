@@ -53,16 +53,16 @@ names the offending binary. The usual remaining cause is `--deep` signing not
 reaching something nested; Electrum's `contrib/osx/sign_osx.sh` walks and signs
 each item individually and is the reference for that.
 
-## Separately named 12 fps QR trial
+## Separately named 15 fps QR trial
 
 ```sh
-PYINSTALLER_CONFIG_DIR=/tmp/qeth-qr12-pyinstaller QETH_QR_TRIAL=1 \
-  dist/macos/build.sh --distpath dist/macos/out/qr12 \
-  --workpath dist/macos/out/qr12/build
-open /Users/bryan/src/qeth/dist/macos/out/qr12/qeth-macos-qr12.app
+PYINSTALLER_CONFIG_DIR=/tmp/qeth-qr15-pyinstaller QETH_QR_TRIAL=1 \
+  dist/macos/build.sh --distpath dist/macos/out/qr15 \
+  --workpath dist/macos/out/qr15/build
+open /Users/bryan/src/qeth/dist/macos/out/qr15/qeth-macos-qr15.app
 ```
 
 `QETH_QR_TRIAL` changes the bundle name/display name only; the production QR
-scheduler in this trial source targets 12 fps. The bundle remains ad-hoc signed
+scheduler in this trial source targets 15 fps. The bundle remains ad-hoc signed
 and shares qeth's application identifier and wallet configuration. Hardware
 transfer comparison instructions are in `docs/signers-qr.md`.

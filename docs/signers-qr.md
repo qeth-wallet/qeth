@@ -143,12 +143,16 @@ BC-UR library vs. implementing the (well-specified) registry CBOR ourselves.
   address's case and the `ethereum:` URI.
 - Animated signing requests target **120-byte fragments** (typically QR v9),
   prioritizing larger modules for low-resolution cameras over fewer frames.
-  Requests up to 150 bytes remain static. The trial targets **12 fps** using
+  Requests up to 150 bytes remain static. The trial targets **15 fps** using
   fractional monotonic deadlines. A background worker prepares at most four
   images ahead; only installing/resizing the image happens on the GUI thread.
   If preparation or the GUI falls behind, the current QR stays visible and
-  display resumes without catch-up flashes. A fixed QR version reserves room
-  for growing sequence numbers so the grid does not jump during a transfer.
+  display resumes without catch-up flashes. The wallet retains a fixed QR
+  version per message as the existing comparison baseline, pending physical
+  trials. It reserves room for sequence growth and stabilizes geometry, but
+  can reduce pixels per module on early parts. Shell detects each image
+  independently; fixed version is not established as the better framing policy.
+  The diagnostic can compare it with choosing each frame's smallest version.
   Repeated plain fragments cycle through all eight standard QR masks, including
   degree-one fountain retries; static URs are unaffected.
   After the first pass through every original chunk, all animated transfers
@@ -209,7 +213,7 @@ Still open, lower-stakes (resolve in-flight):
 4. **BC-UR/EIP-4527** — adopt a Python lib if a solid one exists, else implement
    the registry CBOR ourselves (well-specified, bounded). Decide via the 3a spike.
 
-## 12 fps hardware trial
+## 15 fps hardware trial
 
 The success criterion is time to **100% reconstruction on a physical Shell**.
 Software loss simulations and display cadence do not establish optical speed.
@@ -225,6 +229,7 @@ uv run python scripts/keycard_fountain_gui.py --fps 5
 uv run python scripts/keycard_fountain_gui.py --fps 8
 uv run python scripts/keycard_fountain_gui.py --fps 10
 uv run python scripts/keycard_fountain_gui.py --fps 12
+uv run python scripts/keycard_fountain_gui.py --fps 15
 ```
 
 Keep `--qr-size` (default 320 logical pixels), display scaling, brightness,
@@ -243,4 +248,9 @@ silently discard failures. Timing starts at the first image installation and
 ends at the operator's keypress, so it includes manual reaction time.
 
 Physical results for this build are **pending**. No rate is yet established as
-faster on hardware. See `docs/qr12-validation.md` for automated evidence.
+faster on hardware. See `docs/qr15-validation.md` for current automated evidence
+and `docs/qr12-validation.md` for the previous fixed-grid trial.
+
+For the matched fixed-version/per-frame comparison, use
+[the framing trial protocol](qr-framing-trials.md). It holds 15 fps constant
+and includes a dense payload that actually crosses QR version boundaries.

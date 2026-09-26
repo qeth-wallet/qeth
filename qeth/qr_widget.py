@@ -6,7 +6,7 @@ import io
 
 import segno
 from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QPainter, QPaintEvent, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPaintEvent, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
@@ -29,10 +29,14 @@ def ur_animation_version(content: str) -> int | None:
     return int(segno.make_qr(largest, error="l").version)
 
 
-def qr_to_pixmap(
-    content: str, *, error: str = "m", scale: int = 1, version: int | None = None,
+def qr_to_image(
+    content: str,
+    *,
+    error: str = "m",
+    scale: int = 1,
+    version: int | None = None,
     mask_shift: int = 0,
-) -> QPixmap:
+) -> QImage:
     """Encode without changing the content's case; callers normalize URs only."""
     buf = io.BytesIO()
     qr = segno.make_qr(content, error=error, version=version)
@@ -40,15 +44,33 @@ def qr_to_pixmap(
         # Change the optical pattern on retries without changing a single UR
         # byte. The first attempt retains Segno's lowest-penalty standard mask.
         qr = segno.make_qr(
-            content, error=qr.error, version=qr.version,
-            mask=(qr.mask + mask_shift) % 8, boost_error=False,
+            content,
+            error=qr.error,
+            version=qr.version,
+            mask=(qr.mask + mask_shift) % 8,
+            boost_error=False,
         )
-    qr.save(
-        buf, kind="png", scale=scale, border=4, dark="#000", light="#fff"
+    qr.save(buf, kind="png", scale=scale, border=4, dark="#000", light="#fff")
+    return QImage.fromData(buf.getvalue())
+
+
+def qr_to_pixmap(
+    content: str,
+    *,
+    error: str = "m",
+    scale: int = 1,
+    version: int | None = None,
+    mask_shift: int = 0,
+) -> QPixmap:
+    return QPixmap.fromImage(
+        qr_to_image(
+            content,
+            error=error,
+            scale=scale,
+            version=version,
+            mask_shift=mask_shift,
+        )
     )
-    pixmap = QPixmap()
-    pixmap.loadFromData(buf.getvalue())
-    return pixmap
 
 
 class QRWidget(QWidget):
@@ -77,10 +99,22 @@ class QRWidget(QWidget):
         return QSize(192, 192)
 
     def set_content(
-        self, content: str, *, error: str = "m", version: int | None = None,
+        self,
+        content: str,
+        *,
+        error: str = "m",
+        version: int | None = None,
         mask_shift: int = 0,
     ) -> None:
-        self._source = qr_to_pixmap(content, error=error, version=version, mask_shift=mask_shift)
+        self._source = qr_to_pixmap(
+            content, error=error, version=version, mask_shift=mask_shift
+        )
+        self._render_key = None
+        self.update()
+
+    def set_image(self, image: QImage) -> None:
+        """Install a worker-prepared image; QPixmap stays on the GUI thread."""
+        self._source = QPixmap.fromImage(image)
         self._render_key = None
         self.update()
 

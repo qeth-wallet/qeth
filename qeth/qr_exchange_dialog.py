@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from .dialog import Dialog, group_spacing, item_spacing
-from .qr.multipart import MAX_FRAGMENTS
-from .qr_widget import QRWidget, qr_to_pixmap, ur_animation_version
+from .qr_animation import QRAnimation
+from .qr_widget import QRWidget, qr_to_pixmap
 
 # Initial preferred side; the panes expand with the window.
 PANE = 320
@@ -46,8 +46,10 @@ def _fill_square(pixmap: QPixmap, size: QSize) -> QPixmap:
     4:3 image with bars. The QR decoder works on the full frame (qr_scan.py), so
     cropping the preview doesn't shrink the scanned area — it's purely visual."""
     scaled = pixmap.scaled(
-        size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-        Qt.TransformationMode.SmoothTransformation)
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
     x = (scaled.width() - size.width()) // 2
     y = (scaled.height() - size.height()) // 2
     return scaled.copy(x, y, size.width(), size.height())
@@ -117,27 +119,17 @@ class QRExchangeDialog(Dialog):
     side to suit a wide desktop screen. The first scanned ``ur:…`` accepts and is
     returned by :meth:`scanned_ur`."""
 
-    # Animated-QR frame cadence (ms). Slow enough for a device camera to lock
-    # onto each fragment, fast enough to cycle a few-part request quickly.
-    FRAME_MS = 200
-
     def __init__(
-        self, next_frame: Callable[[], str], *, scanner: Any = None,
+        self,
+        next_frame: Callable[[], str],
+        *,
+        scanner: Any = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Scan with your air-gapped wallet")
         self._scanned: str | None = None
         self._scanner = scanner if scanner is not None else _default_scanner()
-        # Pull a fresh UR each animation tick. A small tx returns the same string
-        # (one static QR); a large tx returns an unbounded stream of fresh
-        # fountain parts, so the device keeps getting new frames and converges.
-        self._next_frame = next_frame
-        self._shown: str | None = None
-        self._shown_mask_shift = 0
-        self._qr_version: int | None = None
-        self._pure_frame_visits: dict[int, int] = {}
-
         root = QVBoxLayout(self)
 
         # Captions in row 0, the two square panes in row 1 — the grid keeps the
@@ -167,13 +159,10 @@ class QRExchangeDialog(Dialog):
         grid.addWidget(_view_framed(self._preview), 1, 1)
         root.addLayout(grid, 1)
 
-        self._anim: QTimer | None = QTimer(self)
-        # Start the dwell AFTER encoding each frame; a repeating timer counts
-        # synchronous QR generation against the previous frame's display time.
-        self._anim.setSingleShot(True)
-        self._anim.setTimerType(Qt.TimerType.PreciseTimer)
-        self._anim.timeout.connect(self._render_frame)
-        self._render_frame()   # first frame, schedules the next
+        self._animation = QRAnimation(self._qr_label, next_frame)
+        self._animation.failed.connect(
+            lambda message: show_caption.setText(f"QR preparation failed: {message}")
+        )
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         buttons.rejected.connect(self.reject)
@@ -202,39 +191,10 @@ class QRExchangeDialog(Dialog):
             self._preview.setText("No camera available")
 
     def done(self, result: int) -> None:  # noqa: N802 — Qt override
-        if self._anim is not None:
-            self._anim.stop()
+        self._animation.stop()
         if self._scanner is not None:
             self._scanner.stop()
         super().done(result)
-
-    # --- request animation -------------------------------------------------
-
-    def _render_frame(self) -> None:
-        ur_string = self._next_frame()
-        mask_shift = 0
-        fields = ur_string.split("/")
-        if len(fields) == 3:
-            number, separator, count = fields[1].partition("-")
-            if separator and number.isdecimal() and count.isdecimal():
-                sequence, total = int(number), int(count)
-                if 1 <= sequence <= total <= MAX_FRAGMENTS:
-                    # Repeating an identical bitmap can repeatedly lose the
-                    # same fragment to blur or screen/camera pixel alignment.
-                    # Try each standard QR mask while preserving its UR bytes.
-                    mask_shift = self._pure_frame_visits.get(sequence, 0)
-                    self._pure_frame_visits[sequence] = (mask_shift + 1) % 8
-        if ur_string != self._shown or mask_shift != self._shown_mask_shift:
-            if self._shown is None:
-                self._qr_version = ur_animation_version(ur_string)
-            self._shown = ur_string
-            self._shown_mask_shift = mask_shift
-            # URs are case-insensitive; uppercase uses compact alphanumeric QR.
-            self._qr_label.set_content(
-                ur_string.upper(), error="l", version=self._qr_version, mask_shift=mask_shift,
-            )
-        if self._anim is not None:
-            self._anim.start(self.FRAME_MS)
 
     # --- scanner signals ---------------------------------------------------
 
@@ -262,8 +222,11 @@ class QRScanDialog(Dialog):
     ``scanner`` as :class:`QRExchangeDialog`."""
 
     def __init__(
-        self, *, prompt: str = "Scan your wallet's account QR:",
-        scanner: Any = None, parent: QWidget | None = None,
+        self,
+        *,
+        prompt: str = "Scan your wallet's account QR:",
+        scanner: Any = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Scan air-gapped wallet")
@@ -324,6 +287,7 @@ def _default_scanner() -> Any:
     absent / no device). Kept out of import time."""
     try:
         from .qr_scan import CameraScanner
+
         return CameraScanner()
     except Exception:
         return None

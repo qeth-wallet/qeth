@@ -33,7 +33,10 @@ _libusb = next((p for p in ("/opt/homebrew/opt/libusb/lib/libusb-1.0.dylib",
 if _libusb is None:
     raise SystemExit("libusb not found — brew install libusb (needed for Trezor)")
 _binaries.append((_libusb, "usb1"))
+_trial = os.environ.get("QETH_QR_TRIAL") == "1"
 _name = "qeth-verify-macos" if _helios else "qeth-macos"
+if _trial:
+    _name += "-qr12"
 
 analysis = Analysis(
     [str(macos_dir / "qeth_launcher.py")],
@@ -81,8 +84,8 @@ app = BUNDLE(
     bundle_identifier="io.github.michwill.qeth",
     version=__version__,
     info_plist={
-        "CFBundleDisplayName": "qeth",
-        "CFBundleName": "qeth",
+        "CFBundleDisplayName": "qeth QR 12fps" if _trial else "qeth",
+        "CFBundleName": "qeth QR 12fps" if _trial else "qeth",
         "NSCameraUsageDescription": (
             "qeth uses the camera to scan QR codes from air-gapped wallets."
         ),

@@ -23,7 +23,8 @@ def test_part_cbor_matches_the_spec_vector():
     # BCR-2024-001 worked example, part seqNum=1 of the 256-byte "Wolf" message,
     # maxFragmentLen 30 → seqLen 9, checksum 0x0167aa07, 29-byte fragment.
     fragment = bytes.fromhex(
-        "916ec65cf77cadf55cd7f9cda1a1030026ddd42e905b77adc36e4f2d3c")
+        "916ec65cf77cadf55cd7f9cda1a1030026ddd42e905b77adc36e4f2d3c"
+    )
     part = dumps([1, 9, 256, 0x0167AA07, fragment], canonical=True)
     assert part.hex() == "8501091901001a0167aa07581d" + fragment.hex()
 
@@ -33,21 +34,21 @@ def test_fragmentation_sizing_matches_the_spec():
     # the rateless fountain parts the stream is 2×seqLen = 18.
     parts = encode_parts("t", bytes(256), single_part_max=0, fragment_len=30)
     assert len(parts) == 18
-    assert all(_split_part(p)[2] == 9 for p in parts)   # seqLen 9 in every part
+    assert all(_split_part(p)[2] == 9 for p in parts)  # seqLen 9 in every part
 
 
 def test_small_payload_is_a_single_plain_part():
     parts = encode_parts("eth-sign-request", bytes(range(120)))
     assert len(parts) == 1
     assert parts[0].startswith("ur:eth-sign-request/")
-    assert parts[0].count("/") == 1               # no seqNum-seqLen segment
+    assert parts[0].count("/") == 1  # no seqNum-seqLen segment
 
 
 def test_large_payload_animates_with_pure_plus_rateless():
     msg = bytes((i * 7 + 3) % 256 for i in range(400))
     parts = encode_parts("eth-sign-request", msg, single_part_max=0, fragment_len=150)
-    seq_len = math.ceil(400 / 150)                 # 3
-    assert len(parts) == 2 * seq_len               # 3 pure + 3 rateless
+    seq_len = math.ceil(400 / 150)  # 3
+    assert len(parts) == 2 * seq_len  # 3 pure + 3 rateless
     assert [_split_part(p)[1] for p in parts] == list(range(1, 2 * seq_len + 1))
     assert all(_split_part(p)[2] == seq_len for p in parts)
     # the pure parts (rateless are skipped by decode_parts) reconstruct the msg
@@ -74,48 +75,77 @@ def test_encoded_part_carries_the_right_fields():
 def test_decode_rejects_incomplete():
     parts = encode_parts("x", bytes(range(200)), single_part_max=0, fragment_len=150)
     import pytest
+
     with pytest.raises(ValueError, match="incomplete"):
-        decode_parts(parts[:1])   # only 1 of 2 parts
+        decode_parts(parts[:1])  # only 1 of 2 parts
 
 
 def test_frame_source_small_payload_is_a_constant_single_part():
     nf = frame_source("x", bytes(range(120)))
-    assert nf() == nf()                           # same static QR every tick
-    assert nf().count("/") == 1                   # no seqNum-seqLen segment
+    assert nf() == nf()  # same static QR every tick
+    assert nf().count("/") == 1  # no seqNum-seqLen segment
 
 
-def test_frame_source_reinjects_pure_fragments_every_cycle():
-    # A large payload streams pure fragments (seqNum 1..seqLen), then a batch of
-    # rateless parts (seqNum > seqLen), then the pure fragments AGAIN — so a
-    # device that joined late can still catch a pure fragment.
-    msg = bytes((i * 7 + 3) % 256 for i in range(2000))
-    nf = frame_source("eth-sign-request", msg, fragment_len=150)
-    seq_len = _plan(msg, 150)[0]
-    frames = [nf() for _ in range(3 * seq_len)]
-    seqnums = [_split_part(f)[1] for f in frames]
-    assert seqnums[:seq_len] == list(range(1, seq_len + 1))          # pure block first
-    assert all(s > seq_len for s in seqnums[seq_len:2 * seq_len])    # then rateless
-    assert seqnums[2 * seq_len:] == list(range(1, seq_len + 1))      # pures re-injected
-    # a pure block reconstructs the message on its own
-    assert decode_parts(frames[:seq_len]) == ("eth-sign-request", msg)
+@pytest.mark.parametrize(
+    "size,count", [(400, 4), (7680, 64), (7800, 65), (44_345, 128)]
+)
+def test_shuffled_retry_groups_preserve_coverage_and_standard_recovery(size, count):
+    import random
+    from qeth.qr.fountain import choose_fragments, mix
+    from qeth.qr.multipart import RETRY_SEQUENCE_START
 
-
-@pytest.mark.parametrize("size, count", [(7680, 64), (7800, 65), (44_345, 128)])
-def test_large_stream_interleaves_direct_fragments_with_fresh_recovery_parts(size, count):
-    message = bytes((i * 13 + 1) % 256 for i in range(size))
-    source = frame_source("eth-sign-request", message)
+    message = random.Random(13).randbytes(size)
+    source = frame_source("eth-sign-request", message, rng=random.Random(71))
     first_pass = [source() for _ in range(count)]
     assert decode_parts(first_pass) == ("eth-sign-request", message)
-    # Every direct fragment returns within 192 frames; recovery frames remain
-    # fresh. Avoid a 128-frame recovery-only gap when camera reception is poor.
-    direct = []
-    for pair in range(count):
-        one, two, recovery = source(), source(), source()
-        assert (one, two) == (first_pass[(2 * pair) % count], first_pass[(2 * pair + 1) % count])
-        assert _split_part(recovery)[1:3] == (count + 1 + pair, count)
-        direct.extend((one, two))
-    assert decode_parts(direct[:count]) == ("eth-sign-request", message)
-    assert decode_parts(direct[count:]) == ("eth-sign-request", message)
+    _, fragments, checksum = _plan(message, _fragment_len_for(size))
+    plain = 0
+    positions = set()
+    aliases = 0
+    for group in range(count * 3):
+        recovery_positions = []
+        plain_indexes = []
+        for position in range(3):
+            _, sequence, total, cbor = _split_part(source())
+            fields = loads(cbor)
+            assert fields[:4] == [sequence, count, size, checksum]
+            indexes = choose_fragments(sequence, total, checksum)
+            assert fields[4] == mix(fragments, indexes)
+            if count < sequence < RETRY_SEQUENCE_START:
+                assert sequence == count + group + 1
+                recovery_positions.append(position)
+            else:
+                assert len(indexes) == 1
+                plain_indexes.append(next(iter(indexes)))
+                plain += 1
+                aliases += sequence >= RETRY_SEQUENCE_START
+        assert sorted(plain_indexes) == sorted(
+            [(2 * group) % count, (2 * group + 1) % count]
+        )
+        assert len(recovery_positions) == 1
+        positions.add(recovery_positions[0])
+    assert plain == count * 6
+    assert positions == {0, 1, 2}
+    assert aliases > count
+
+
+def test_retry_search_is_incremental_bounded_and_falls_back(monkeypatch):
+    from qeth.qr import multipart
+
+    calls = []
+
+    def no_singletons(sequence, count, checksum):
+        calls.append(sequence)
+        return {0, 1}
+
+    monkeypatch.setattr(multipart.fountain, "choose_fragments", no_singletons)
+    retries = multipart._PlainRetries(128, 123)
+    assert retries.sequence(42) == 43
+    assert len(calls) == multipart.RETRY_SEARCH_BATCH
+    for _ in range(1000):
+        assert retries.sequence(42) == 43
+    assert len(calls) == 16_384
+    assert len(set(calls)) == 16_384
 
 
 def test_fragment_len_caps_parts_for_a_huge_payload():
@@ -167,5 +197,59 @@ def test_default_frames_are_less_dense_without_losing_payload():
     assert segno.make_qr(old_frame.upper(), error="l").symbol_size() == (73, 73)
     assert all(
         segno.make_qr(frame.upper(), error="l").symbol_size() == (61, 61)
-        for frame in (frames[0], frames[-1], nf())  # Includes a rateless frame.
+        for frame in (frames[0], frames[-1])
     )
+
+
+@pytest.mark.parametrize("size", [1000, 44_345])
+@pytest.mark.parametrize("loss", ["periodic", "random", "bursts", "late"])
+def test_exact_reconstruction_under_losses(size, loss):
+    import random
+    from qeth.qr.fountain import choose_fragments
+
+    message = random.Random(912).randbytes(size)
+    source = frame_source("eth-sign-request", message, rng=random.Random(84))
+    rng = random.Random(117)
+    known = {}
+    pending = []
+    count = math.ceil(size / _fragment_len_for(size))
+    for tick in range(2500):
+        frame = source()
+        if (
+            loss == "periodic"
+            and tick % 3 != 0
+            or loss == "random"
+            and rng.random() < 0.6
+            or loss == "bursts"
+            and tick % 90 < 60
+            or loss == "late"
+            and tick < count * 3
+        ):
+            continue
+        _, seq, total, payload = _split_part(frame)
+        number, n, length, checksum, data = loads(payload)
+        assert (number, n, length, checksum) == (seq, total, size, zlib.crc32(message))
+        pending.append((choose_fragments(seq, total, checksum), data))
+        while True:
+            progress = False
+            remaining = []
+            for indexes, data in pending:
+                indexes = set(indexes)
+                for index in list(indexes):
+                    if index in known:
+                        data = bytes(a ^ b for a, b in zip(data, known[index]))
+                        indexes.remove(index)
+                if len(indexes) == 1:
+                    known[indexes.pop()] = data
+                    progress = True
+                elif indexes:
+                    remaining.append((indexes, data))
+                else:
+                    assert data == bytes(len(data))
+            pending = remaining
+            if not progress:
+                break
+        if len(known) == count:
+            assert b"".join(known[i] for i in range(count))[:size] == message
+            return
+    pytest.fail(f"incomplete {loss} transfer: {len(known)}/{count}")

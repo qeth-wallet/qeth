@@ -227,6 +227,7 @@ files = [
     "qeth/qr_scan.py",
     "qeth/qr_exchange_dialog.py",
     "qeth/qr_widget.py",
+    "qeth/qr_animation.py",
     "qeth/qr/__init__.py",
     "qeth/qr/bytewords.py",
     "qeth/qr/ur.py",

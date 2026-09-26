@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .dialog import Dialog, group_spacing, item_spacing
-from .qr_widget import QRWidget, qr_to_pixmap
+from .qr_widget import QRWidget, qr_to_pixmap, ur_animation_version
 
 # Initial preferred side; the panes expand with the window.
 PANE = 320
@@ -55,8 +55,9 @@ def _fill_square(pixmap: QPixmap, size: QSize) -> QPixmap:
 class _CameraPreview(QLabel):
     """Keep the original camera frame so a resize can refit it immediately."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, preferred_side: int = PANE) -> None:
         super().__init__("Starting camera…")
+        self._preferred_side = preferred_side
         self._frame: QPixmap | None = None
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setWordWrap(True)
@@ -64,7 +65,7 @@ class _CameraPreview(QLabel):
         self.setMinimumSize(self.minimumSizeHint())
 
     def sizeHint(self) -> QSize:  # noqa: N802 — Qt override
-        return QSize(PANE, PANE)
+        return QSize(self._preferred_side, self._preferred_side)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt override
         return QSize(192, 192)
@@ -118,6 +119,9 @@ class QRExchangeDialog(Dialog):
     # Animated-QR frame cadence (ms). Slow enough for a device camera to lock
     # onto each fragment, fast enough to cycle a few-part request quickly.
     FRAME_MS = 200
+    # Dense codes need more chances to be captured intact. This is a
+    # conservative fallback, not a measured optimum for every device camera.
+    DENSE_FRAME_MS = 400
 
     def __init__(
         self, next_frame: Callable[[], str], *, scanner: Any = None,
@@ -132,6 +136,7 @@ class QRExchangeDialog(Dialog):
         # fountain parts, so the device keeps getting new frames and converges.
         self._next_frame = next_frame
         self._shown: str | None = None
+        self._qr_version: int | None = None
 
         root = QVBoxLayout(self)
 
@@ -142,7 +147,7 @@ class QRExchangeDialog(Dialog):
         grid = QGridLayout()
         grid.setVerticalSpacing(item_spacing(self))
         grid.setHorizontalSpacing(group_spacing(self))
-        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 1)
         grid.setRowStretch(1, 1)
         # Use each full column width so Qt's height-for-width calculation
@@ -151,25 +156,33 @@ class QRExchangeDialog(Dialog):
 
         show_caption = QLabel("1. Show this to your wallet's camera:")
         show_caption.setWordWrap(True)
-        self._qr_label = QRWidget(preferred_side=PANE)
+        self._qr_label = QRWidget(preferred_side=560)
         grid.addWidget(show_caption, 0, 0, top)
         grid.addWidget(_view_framed(self._qr_label), 1, 0)
 
         scan_caption = QLabel("2. Point your camera at the wallet's signature QR:")
         scan_caption.setWordWrap(True)
-        self._preview = _CameraPreview()
+        self._preview = _CameraPreview(preferred_side=192)
         grid.addWidget(scan_caption, 0, 1, top)
         grid.addWidget(_view_framed(self._preview), 1, 1)
         root.addLayout(grid, 1)
 
-        self._render_frame()   # first frame
         self._anim: QTimer | None = QTimer(self)
+        # Start the dwell AFTER encoding each frame; a repeating timer counts
+        # synchronous QR generation against the previous frame's display time.
+        self._anim.setSingleShot(True)
+        self._anim.setTimerType(Qt.TimerType.PreciseTimer)
         self._anim.timeout.connect(self._render_frame)
-        self._anim.start(self.FRAME_MS)
+        self._render_frame()   # first frame, schedules the next
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+        # QScrollArea caps its size hint, and Qt's automatic dialog sizing can
+        # shrink even a large QR hint. Start roomy, bounded by the desktop;
+        # users can still shrink the window to its normal layout minimum.
+        self.resize(QSize(840, 680).boundedTo(self.screen().availableGeometry().size()))
 
         if self._scanner is not None:
             self._scanner.decoded.connect(self._on_decoded)
@@ -201,9 +214,14 @@ class QRExchangeDialog(Dialog):
     def _render_frame(self) -> None:
         ur_string = self._next_frame()
         if ur_string != self._shown:      # a constant single part renders once
+            if self._shown is None:
+                self._qr_version = ur_animation_version(ur_string)
             self._shown = ur_string
             # URs are case-insensitive; uppercase uses compact alphanumeric QR.
-            self._qr_label.set_content(ur_string.upper(), error="l")
+            self._qr_label.set_content(ur_string.upper(), error="l", version=self._qr_version)
+        if self._anim is not None:
+            interval = self.DENSE_FRAME_MS if (self._qr_version or 0) >= 13 else self.FRAME_MS
+            self._anim.start(interval)
 
     # --- scanner signals ---------------------------------------------------
 

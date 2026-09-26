@@ -222,6 +222,52 @@ def test_dialog_single_part_renders_once(qtbot):
     assert dlg._shown == "ur:eth-sign-request/const"
 
 
+def test_large_transfer_keeps_the_same_qr_grid_across_sequence_digits(qtbot):
+    import random
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_scan import _qimage_to_gray
+
+    # The reported multicall is ~44 KB. Its first nine frames fit version 15,
+    # but frame 10 needs version 16: auto-sizing made the finder patterns jump.
+    payload = random.Random(892).randbytes(44_345)
+    source = frame_source("eth-sign-request", payload)
+    expected_source = frame_source("eth-sign-request", payload)
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=source)
+    # Use a desktop-sized viewport even when the offscreen test display is
+    # reduced to 400 logical pixels by QT_SCALE_FACTOR=2.
+    dlg.resize(1000, 720)
+    dlg.show()
+    widths = []
+    for index in range(12):
+        if index:
+            dlg._render_frame()
+        dlg._anim.stop()
+        expected = expected_source().upper()
+        widths.append(dlg._qr_label.pixmap().width())
+        assert decode_qr(_qimage_to_gray(dlg._qr_label.grab().toImage())) == expected
+    assert len(set(widths)) == 1
+    assert dlg._qr_label.width() > 2 * dlg._preview.width()
+
+
+@pytest.mark.parametrize("payload_size, interval", [(10_000, 200), (44_345, 400)])
+def test_each_frame_gets_full_dwell_after_encoding(qtbot, monkeypatch, payload_size, interval):
+    import time
+    from qeth.qr.multipart import frame_source
+    from qeth.qr_widget import QRWidget
+
+    original = QRWidget.set_content
+
+    def slow_encode(self, *args, **kwargs):
+        time.sleep(0.12)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(QRWidget, "set_content", slow_encode)
+    dlg = _dialog(qtbot, _FakeScanner(), next_frame=frame_source(
+        "eth-sign-request", bytes(payload_size)))
+    dlg._render_frame()
+    assert interval - 30 <= dlg._anim.remainingTime() <= interval
+
+
 @pytest.mark.parametrize("payload_size", [120, 10_000])
 def test_dialog_qr_grows_and_shrinks_without_consuming_frames(qtbot, payload_size):
     from qeth.qr.multipart import frame_source

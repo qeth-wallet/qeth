@@ -10,10 +10,31 @@ from PySide6.QtGui import QPainter, QPaintEvent, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
-def qr_to_pixmap(content: str, *, error: str = "m", scale: int = 1) -> QPixmap:
+def ur_animation_version(content: str) -> int | None:
+    """Reserve space for growing UR sequence numbers, keeping finder positions fixed.
+
+    Multipart sequence numbers appear both in the URI and in CBOR. Reserve ten
+    decimal digits and four additional CBOR bytes (eight Bytewords characters)
+    for a uint32 sequence number. This covers years of continuous animation.
+    Single-part URs need no reservation.
+    """
+    fields = content.upper().split("/")
+    if len(fields) != 3:
+        return None
+    head, sequence, body = fields
+    number, separator, count = sequence.partition("-")
+    if not separator or not number.isdecimal() or not count.isdecimal():
+        return None
+    largest = f"{head}/4294967295-{count}/{body}{'A' * 8}"
+    return int(segno.make_qr(largest, error="l").version)
+
+
+def qr_to_pixmap(
+    content: str, *, error: str = "m", scale: int = 1, version: int | None = None,
+) -> QPixmap:
     """Encode without changing the content's case; callers normalize URs only."""
     buf = io.BytesIO()
-    segno.make_qr(content, error=error).save(
+    segno.make_qr(content, error=error, version=version).save(
         buf, kind="png", scale=scale, border=4, dark="#000", light="#fff"
     )
     pixmap = QPixmap()
@@ -46,8 +67,10 @@ class QRWidget(QWidget):
         # Even a version-40 QR plus its quiet zone fits at one pixel/module.
         return QSize(192, 192)
 
-    def set_content(self, content: str, *, error: str = "m") -> None:
-        self._source = qr_to_pixmap(content, error=error)
+    def set_content(
+        self, content: str, *, error: str = "m", version: int | None = None,
+    ) -> None:
+        self._source = qr_to_pixmap(content, error=error, version=version)
         self._render_key = None
         self.update()
 

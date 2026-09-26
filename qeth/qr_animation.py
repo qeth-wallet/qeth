@@ -17,7 +17,7 @@ from .qr.fountain import choose_fragments
 from .qr.multipart import MAX_FRAGMENTS, _split_part
 from .qr_widget import QRWidget, qr_to_image, ur_animation_version
 
-TARGET_FPS = 15.0
+TARGET_FPS = 10.0
 PREPARED_FRAMES = 4
 
 

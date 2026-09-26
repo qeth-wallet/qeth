@@ -36,7 +36,7 @@ _binaries.append((_libusb, "usb1"))
 _trial = os.environ.get("QETH_QR_TRIAL") == "1"
 _name = "qeth-verify-macos" if _helios else "qeth-macos"
 if _trial:
-    _name += "-qr15"
+    _name += "-qr10"
 
 analysis = Analysis(
     [str(macos_dir / "qeth_launcher.py")],
@@ -84,8 +84,8 @@ app = BUNDLE(
     bundle_identifier="io.github.michwill.qeth",
     version=__version__,
     info_plist={
-        "CFBundleDisplayName": "qeth QR 15fps" if _trial else "qeth",
-        "CFBundleName": "qeth QR 15fps" if _trial else "qeth",
+        "CFBundleDisplayName": "qeth QR 10fps" if _trial else "qeth",
+        "CFBundleName": "qeth QR 10fps" if _trial else "qeth",
         "NSCameraUsageDescription": (
             "qeth uses the camera to scan QR codes from air-gapped wallets."
         ),

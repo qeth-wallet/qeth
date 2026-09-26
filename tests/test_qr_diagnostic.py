@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("fps", [12, 15])
+@pytest.mark.parametrize("fps", [10, 12, 15])
 @pytest.mark.parametrize("policy", ["fixed", "per-frame", "compare"])
 def test_diagnostic_payload_and_result_records(qtbot, tmp_path, fps, policy):
     harness = runpy.run_path(

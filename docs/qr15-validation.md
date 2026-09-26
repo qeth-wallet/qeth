@@ -1,5 +1,9 @@
 # 15 fps QR trial validation — 2026-09-26
 
+Historical record of the 15 fps build. The current trial targets
+[10 fps with the same fixed framing](qr10-validation.md) after the operator
+reported that 15 fps felt too fast during app testing.
+
 The scheduler target is 15 fps (66⅔ ms per image). Relative to 12 fps, this
 offers 25% more images per second and 20% less dwell time. Thirty sensor frames
 per second does not guarantee two usable camera images per QR: exposure,

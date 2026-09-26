@@ -23,7 +23,7 @@ def test_fractional_deadlines_do_not_accumulate_rounding(fps):
     assert clock.delay_ms(clock.next - 0.0001) == 1
 
 
-@pytest.mark.parametrize("fps,delay", [(12, 84), (15, 67)])
+@pytest.mark.parametrize("fps,delay", [(10, 100), (12, 84), (15, 67)])
 def test_stall_rebases_instead_of_catching_up(fps, delay):
     clock = FrameDeadline(fps)
     clock.displayed(100)

@@ -1073,6 +1073,8 @@ class EnsPanel(QWidget):
         # so a records reload no longer rebuilds them.
         for i in range(item.childCount() - 1, -1, -1):
             ch = item.child(i)
+            if ch is None:
+                continue
             if (ch.data(0, _NAME_ROLE) is None
                     and not ch.data(0, _OWNERSHIP_ROLE)):
                 item.removeChild(ch)
@@ -1106,6 +1108,8 @@ class EnsPanel(QWidget):
         was_expanded = item.isExpanded()
         for i in range(item.childCount() - 1, -1, -1):
             ch = item.child(i)
+            if ch is None:
+                continue
             if ch.data(0, _OWNERSHIP_ROLE):
                 item.removeChild(ch)
         if st is None:
@@ -1348,6 +1352,8 @@ class EnsPanel(QWidget):
             it = stack.pop()
             for i in range(it.childCount()):
                 ch = it.child(i)
+                if ch is None:
+                    continue
                 stack.append(ch)
                 n = ch.data(0, _NAME_ROLE)
                 if isinstance(n, EnsName):

@@ -835,7 +835,10 @@ class ApprovalsPanel(QWidget):
             node = self.tree.topLevelItem(ti)
             if node is None:
                 continue
-            out.extend(node.child(ci) for ci in range(node.childCount()))
+            for ci in range(node.childCount()):
+                child = node.child(ci)
+                if child is not None:
+                    out.append(child)
         return out
 
     def _selectable_leaves(self) -> list[QTreeWidgetItem]:
@@ -907,7 +910,7 @@ class ApprovalsPanel(QWidget):
             self.tree.blockSignals(True)
             for ci in range(item.childCount()):
                 child = item.child(ci)
-                if child.isHidden():
+                if child is not None and child.isHidden():
                     child.setCheckState(0, Qt.CheckState.Unchecked)
             self.tree.blockSignals(False)
         self._update_buttons()
@@ -1002,7 +1005,10 @@ class ApprovalsPanel(QWidget):
             if node is None:
                 continue
             for ci in range(node.childCount()):
-                r = node.child(ci).data(0, _ROW_ROLE)
+                leaf = node.child(ci)
+                if leaf is None:
+                    continue
+                r = leaf.data(0, _ROW_ROLE)
                 if isinstance(r, ApprovalRow):
                     out.append(r)
         return out
@@ -1021,6 +1027,8 @@ class ApprovalsPanel(QWidget):
                 continue
             for ci in range(node.childCount() - 1, -1, -1):
                 leaf = node.child(ci)
+                if leaf is None:
+                    continue
                 r = leaf.data(0, _ROW_ROLE)
                 if (isinstance(r, ApprovalRow)
                         and (r.token.lower(), r.spender.lower()) in pairs):
@@ -1066,7 +1074,10 @@ class ApprovalsPanel(QWidget):
                 continue
             risk = 0.0
             for ci in range(node.childCount()):
-                r = node.child(ci).data(0, _ROW_ROLE)      # all children share the token
+                leaf = node.child(ci)
+                if leaf is None:
+                    continue
+                r = leaf.data(0, _ROW_ROLE)      # all children share the token
                 if isinstance(r, ApprovalRow):
                     usd = _token_risk_usd(r)
                     risk = float(usd) if usd is not None else 0.0
@@ -1145,6 +1156,8 @@ class ApprovalsPanel(QWidget):
                 continue
             for ci in range(node.childCount()):
                 leaf = node.child(ci)
+                if leaf is None:
+                    continue
                 r = leaf.data(0, _ROW_ROLE)
                 if not isinstance(r, ApprovalRow) or not (
                         r.spender_label or r.spender_soft_label):
@@ -1191,6 +1204,8 @@ class ApprovalsPanel(QWidget):
         sp = spender.lower()
         for i in range(node.childCount()):
             leaf = node.child(i)
+            if leaf is None:
+                continue
             r = leaf.data(0, _ROW_ROLE)
             if isinstance(r, ApprovalRow) and r.spender.lower() == sp:
                 return leaf
@@ -1355,7 +1370,10 @@ class ApprovalsPanel(QWidget):
             hay = (str(node.data(0, _TOKEN_ROLE) or "").lower()
                    + " " + node.text(0).lower())
             for ci in range(node.childCount()):       # add the full symbol/name
-                r0 = node.child(ci).data(0, _ROW_ROLE)
+                leaf = node.child(ci)
+                if leaf is None:
+                    continue
+                r0 = leaf.data(0, _ROW_ROLE)
                 if isinstance(r0, ApprovalRow):
                     hay += f" {r0.symbol.lower()} {r0.name.lower()}"
                     break
@@ -1363,6 +1381,8 @@ class ApprovalsPanel(QWidget):
             any_shown = False
             for ci in range(node.childCount()):
                 leaf = node.child(ci)
+                if leaf is None:
+                    continue
                 r = leaf.data(0, _ROW_ROLE)
                 if not isinstance(r, ApprovalRow):
                     continue

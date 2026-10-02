@@ -531,7 +531,10 @@ class EnsTextKeysWorker(QThread):
         self._address = address
 
     def run(self) -> None:
-        self.ready.emit(discover_custom_text_keys(self._chain, self._address))
+        keys = discover_custom_text_keys(
+            self._chain, self._address, cancelled=self.isInterruptionRequested)
+        if not self.isInterruptionRequested():
+            self.ready.emit(keys)
 
 
 class EnsPanel(QWidget):

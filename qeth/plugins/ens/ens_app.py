@@ -1206,7 +1206,8 @@ _SEL_SET_TEXT_HEX = "0x10f13a8c"       # setText(bytes32,string,string)
 
 def discover_custom_text_keys(
         chain: Chain, address: str, *, source=None,
-        max_pages: int = 5, limit: int = 100) -> set[str]:
+        max_pages: int = 5, limit: int = 100,
+        cancelled: Callable[[], bool] | None = None) -> set[str]:
     """Scan an address's recent transactions for ENS ``setText`` calls and
     return the NON-standard text keys it set. ENS text records can't be
     enumerated on-chain, so a key set outside qeth (or before we started
@@ -1214,7 +1215,8 @@ def discover_custom_text_keys(
     own tx history lets us re-query it. Best-effort: returns ``set()`` on any
     failure (unsupported chain, network error, undecodable input). Pure w.r.t.
     Qt; the ``source`` (a ``qeth.transactions.TransactionSource``) is injectable
-    for tests."""
+    for tests. ``cancelled`` stops between pages; an in-flight request finishes
+    under the source's normal network timeout."""
     from eth_abi import decode as abi_decode
     if source is None:
         from ...transactions import BlockscoutTransactionSource
@@ -1229,6 +1231,8 @@ def discover_custom_text_keys(
     # page N by re-walking every row above it.
     cursor: int | None = None
     for _ in range(max_pages):
+        if cancelled is not None and cancelled():
+            break
         try:
             txs = source.list_transactions(chain, address, limit=limit,
                                            before_block=cursor)

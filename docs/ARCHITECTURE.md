@@ -42,6 +42,13 @@ The RPC thread and the UI thread never touch each other's state directly; they
 hand off through the `SignerBridge` (a `QObject` + `concurrent.futures.Future`,
 §6.6).
 
+On quit, `MainWindow` refuses new workers, requests cooperative interruption,
+stops plugin timers, and joins every running worker before Qt destroys its
+thread objects. A fixed deadline cannot safely abandon a live `QThread`: Qt
+aborts the process on destruction. A pending network read may therefore delay
+exit until its timeout; ENS text-key discovery stops between history pages and
+does not emit a cancelled result.
+
 ---
 
 ## 2. Persistence & caching layer

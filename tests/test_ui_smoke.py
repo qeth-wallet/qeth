@@ -52,8 +52,12 @@ def test_join_workers_joins_running_and_skips_finished(mainwindow):
         def isRunning(self):
             return self.running
 
-        def wait(self, ms):
+        def requestInterruption(self):
+            pass
+
+        def wait(self):
             calls[self.name] += 1
+            self.running = False
             return True
 
     mainwindow._active_workers = {_FakeWorker("running", True),

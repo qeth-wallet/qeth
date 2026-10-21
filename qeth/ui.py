@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         # alive). Plugins register workers via host.start_worker(...);
         # they self-evict via the ``finished`` signal.
         self._active_workers: set[QThread] = set()
+        self._shutting_down = False
         # On quit, join any still-running workers before Qt tears them down —
         # the same QThread-alive-on-destroy abort as above, but at shutdown: it
         # SIGABRTs, which on macOS pops a "closed unexpectedly" dialog on Ctrl+C.
@@ -754,22 +755,28 @@ class MainWindow(QMainWindow):
 
     def start_worker(self, worker: QThread) -> QThread:
         """Track a worker so Python doesn't GC it while running."""
+        if self._shutting_down:
+            return worker
         self._active_workers.add(worker)
         worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
 
-    # Total wall-clock budget for joining in-flight workers at quit. Workers run
-    # concurrently, so this bounds the SLOWEST one, not their sum; they do
-    # timeout-bounded network I/O, so most finish well inside it.
-    _SHUTDOWN_JOIN_S = 5.0
-
     def _join_workers(self) -> None:
-        """Wait (bounded) for in-flight background workers on quit so none is
-        still running when Qt destroys its QThread — that aborts (SIGABRT). They
+        """Finish in-flight background workers before Qt destroys its threads.
+
+        A network read can outlast a fixed shutdown deadline. Abandoning its
+        QThread then aborts the process (SIGABRT). Request cooperative stopping
+        and wait for the current timeout-bounded reads to finish. Workers
         self-evict via ``finished``, but at quit there's no event loop left to
         run that, so we join explicitly here."""
+        self._shutting_down = True
+        for worker in list(self._active_workers):
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass          # C++ object already gone
         # Silence every mounted plugin's long-lived poll timers / ws watchers
         # first, so nothing kicks a fresh worker while we drain the in-flight
         # ones. (Iterating self.plugins means a new plugin is covered for free.)
@@ -778,15 +785,10 @@ class MainWindow(QMainWindow):
                 plugin.shutdown()
             except RuntimeError:
                 pass          # C++ side already gone
-        import time as _t
-        deadline = _t.monotonic() + self._SHUTDOWN_JOIN_S
         for w in list(self._active_workers):
-            remaining = deadline - _t.monotonic()
-            if remaining <= 0:
-                break
             try:
                 if w.isRunning():
-                    w.wait(int(remaining * 1000))
+                    w.wait()
             except RuntimeError:
                 pass          # C++ object already gone — nothing to join
 

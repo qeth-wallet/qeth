@@ -982,3 +982,23 @@ def test_discover_custom_text_keys_unsupported_or_failing():
             raise RuntimeError("network down")
 
     assert ea.discover_custom_text_keys(ch, "0xabc", source=BoomSource()) == set()
+
+
+@pytest.mark.parametrize('already_cancelled', [False, True])
+def test_text_key_scan_cancels_before_the_next_history_page(already_cancelled):
+    from qeth.chains import DEFAULT_CHAINS
+    calls = []
+
+    class Source:
+        def supports(self, chain):
+            return True
+
+        def list_transactions(self, chain, address, *, limit, before_block):
+            calls.append(before_block)
+            return [_mk_settext_tx('lt')]
+
+    keys = ea.discover_custom_text_keys(
+        DEFAULT_CHAINS[0], '0xabc', source=Source(), limit=1,
+        cancelled=lambda: already_cancelled or bool(calls))
+    assert calls == ([] if already_cancelled else [None])
+    assert keys == (set() if already_cancelled else {'lt'})

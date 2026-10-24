@@ -97,3 +97,34 @@ def test_exchange_qr_opens_the_dialog_and_returns_the_scan(qtbot, monkeypatch):
     host, _p = _host(qtbot)
     got = host.exchange_qr(lambda: "ur:eth-sign-request/aeadcylabntfgm")
     assert got == "ur:eth-signature/aeadcylabntfgm"
+
+
+def test_cancel_rejects_new_calls_and_allows_cleanup(qtbot):
+    import pytest
+    from qeth.signing import SignerError
+
+    host, _ = _host(qtbot)
+    host.progress("working")
+    host.cancel()
+    assert host._progress is None
+    with pytest.raises(SignerError, match="Application is shutting down"):
+        host.request_secret("Passphrase:")
+    host.close()
+    host.cancel()
+
+
+def test_cancel_during_a_modal_callback_ignores_its_late_result(qtbot, monkeypatch):
+    import pytest
+    from qeth.signing import SignerError
+
+    host, _ = _host(qtbot)
+
+    def prompt(*_a, **_k):
+        # A modal dialog runs a nested GUI loop, which can start shutdown.
+        host.cancel()
+        return "late answer", True
+
+    monkeypatch.setattr(si, "prompt_text", prompt)
+    with pytest.raises(SignerError, match="Application is shutting down"):
+        host.request_secret("Passphrase:")
+    assert not host._pending

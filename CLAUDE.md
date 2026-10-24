@@ -113,10 +113,11 @@ change to consumers.
 - **On/off**: `Store.disabled_plugins` (a set of ids) is read once at startup by
   `registry.enabled_manifests(store)`; a disabled optional plugin is never
   constructed *and* never imported (only the lazy factory imports it).
-  **Restart-to-apply** — toggling only writes the store. Toggles live in two
-  places sharing one builder (`qeth.plugin_toggle.build_plugin_toggle_menu`): the
-  tray "Plugins" submenu and the config **gear** on the right slot's tab row
-  (`Slot.set_corner_widget`). `wallets` + `transactions` are `required=True`
+  **Restart-to-apply** — Settings stages plugin choices until OK. The labeled
+  **Settings** button on the right slot's tab row (`Slot.set_corner_widget`)
+  and the tray's Settings action open the same dialog, with RPC URLs, the
+  Etherscan key, plugin choices, and transaction notifications. `wallets` +
+  `transactions` are `required=True`
   (account source / composer+sign+watcher service layer) and can't be disabled.
 - **Reaching an optional sibling**: `host.plugin(id) -> Plugin | None` (never a
   `host.<name>_plugin` attribute). Callers MUST handle None — e.g. the 7

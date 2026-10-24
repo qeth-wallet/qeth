@@ -309,9 +309,9 @@ Pure, Qt-free display helpers: `format_balance` (6 sig figs, `e-9` →
 
 - `MainWindow` is a `QMainWindow` with a horizontal `QSplitter`: **left slot** =
   Wallets (single plugin, no tab bar); **right slot** = Tokens + Transactions
-  (tab bar appears only with ≥2 plugins). The chain combo and the ⋯ RPC-editor
-  button are **shared widgets** mounted on the right slot's bottom row, so they
-  persist across tab switches.
+  (tab bar appears only with ≥2 plugins). The chain combo is a **shared widget**
+  on the right slot's bottom row. One labeled **Settings** button on the tab
+  row remains available across tab switches, including ENS.
 - **`Slot`** (plugin.py:120+) stacks plugin widgets, hides its tab bar when only
   one plugin is mounted, and fans `broadcast_account_changed` /
   `broadcast_chain_changed` to all mounted plugins.
@@ -375,12 +375,15 @@ event filter on `WindowStateChange` defers a hide via `singleShot(0)`, dropping
 the window from the taskbar). Left-click toggles visibility; right-click gives
 Show/Hide/Exit. The **close [X] still quits** — only minimize is redirected.
 
-### 5.6 Chain-RPC editor dialog — `chain_rpc_dialog.py`
+### 5.6 Settings dialog — `chain_rpc_dialog.py`
 
-Opened from the ⋯ button. Shows the current RPC URL (editable), a **live-probed**
+Opened from **Settings** in the window or tray. A chain selector preserves RPC
+edits while switching between configured chains. Shows an editable RPC URL, a **live-probed**
 picker of chainlist.org HTTP endpoints (≤16 concurrent `eth_chainId` probes,
 ranked by latency, failures unselectable), and the **global Etherscan key**
-field (shown in plaintext — it isn't a secret). The chainlist loader is parented
+field (shown in plaintext — it isn't a secret), optional plugin choices, and
+transaction notifications. OK saves all edits; Cancel discards them. Plugin
+changes apply on the next launch. The chainlist loader is parented
 to the `QApplication`, not the dialog, and its signals are disconnected in
 `done()` so cancelling mid-probe can't abort a QThread and crash the app; the
 loader finishes in the background and self-deletes.

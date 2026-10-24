@@ -47,21 +47,8 @@ class _TrayController(QObject):
         self._show_act = menu.addAction("Show", self._show)
         self._hide_act = menu.addAction("Hide", self._hide)
         menu.addSeparator()
-        # Checkable toggle for the sent/received desktop notifications, backed
-        # by the store flag (persisted). The tray is where notifications live,
-        # so this is the natural home for the switch.
-        self._notify_act = menu.addAction("Transaction notifications")
-        self._notify_act.setCheckable(True)
-        self._notify_act.setChecked(self._notifications_enabled())
-        self._notify_act.toggled.connect(self._on_notify_toggled)
-        # Plugin on/off submenu — same builder as the in-window config gear,
-        # so the two entry points never disagree. Restart-to-apply.
-        store = self._store()
-        if store is not None:
-            from .plugin_toggle import build_plugin_toggle_menu
-            self._plugins_menu = build_plugin_toggle_menu(
-                store, None, on_toggled=self._on_plugin_toggled)
-            menu.addMenu(self._plugins_menu)
+        if callable(getattr(window, "show_settings", None)):
+            menu.addAction("Settings", self._show_settings)
         menu.addSeparator()
         menu.addAction("Exit", app.quit)
         # Refresh enable/disable just before the menu paints —
@@ -88,26 +75,9 @@ class _TrayController(QObject):
             self.tray.showMessage(
                 title, body, QSystemTrayIcon.MessageIcon.Information, msecs)
 
-    def _store(self):
-        return getattr(self._win, "store", None)
-
-    def _notifications_enabled(self) -> bool:
-        store = self._store()
-        return bool(getattr(store, "notifications_enabled", True)) \
-            if store is not None else True
-
-    def _on_notify_toggled(self, on: bool) -> None:
-        store = self._store()
-        if store is None:
-            return
-        store.notifications_enabled = on
-        store.save()
-
-    def _on_plugin_toggled(self, plugin_id: str, enabled: bool) -> None:
-        # The store write is handled by the shared menu builder; here we just
-        # nudge the user that it's restart-to-apply.
-        self.show_message(
-            "qeth", "Restart qeth to apply plugin changes")
+    def _show_settings(self) -> None:
+        self._show()
+        getattr(self._win, "show_settings")()
 
     # --- Qt overrides -----------------------------------------
 

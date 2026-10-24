@@ -152,7 +152,7 @@ class TestPickerIndication:
             "https://slow-sim": (200.0, True, True),
             "https://dead": (None, False, None),
         }
-        dlg._on_probing_done()
+        dlg._loader.probing_done.emit()
         order = [dlg.picker.item(i).data(Qt.UserRole)
                  for i in range(dlg.picker.count())]
         assert order == ["https://slow-sim", "https://fast-no-sim"]

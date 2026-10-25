@@ -35,14 +35,18 @@ def test_diagnostic_payload_and_result_records(qtbot, tmp_path, fps, policy):
     )
     window = harness["FountainWindow"](ur_type, message, args)
     qtbot.addWidget(window)
-    window.show()
     first_frames = []
     for attempt, outcome in enumerate(["complete", "failed", "timeout", "complete"]):
         if attempt:
             window._restart()
-        qtbot.waitUntil(lambda: window._started is not None)
-        first_frames.append(window._animation.shown.content)
-        assert window._animation.shown.image.width() == (
+        with qtbot.waitSignal(window._animation.displayed, timeout=5000) as displayed:
+            if not attempt:
+                window.show()
+        # The animation can advance while Qt processes events. Compare the first
+        # displayed frame itself, rather than whichever frame is now current.
+        first_frame = displayed.args[0]
+        first_frames.append(first_frame.content)
+        assert first_frame.image.width() == (
             89 if window._grid_policy == "fixed" else 85
         )
         window._record(outcome)

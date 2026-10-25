@@ -6,7 +6,7 @@ name = "qeth"
 # was still 0.9.0, so the UA shipped as qeth/0.9.0).
 dynamic = ["version"]
 description = "Qt-based Ethereum wallet with Ledger support, Frame-compatible JSON-RPC"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 # PySide6 is intentionally NOT listed here. On Linux desktops with a configured
@@ -75,7 +75,7 @@ frame = ["cryptography>=42"]
 # not a PyPI dep; a distro package for system installs, bundled in the PyPI
 # PySide6 the flatpak/appimage use). See docs/signers-qr.md. Install with:
 #   uv pip install -e '.[qr]'
-qr = ["cbor2>=5.4", "zxing-cpp>=2", "Pillow>=10"]
+qr = ["cbor2>=5.4", "zxing-cpp>=2", "Pillow>=13.0.0"]
 # Trezor hardware-wallet signer (qeth/trezor.py). trezorlib is SatoshiLabs' own
 # library (LGPL-3.0); it talks USB via libusb1 (the system libusb-1.0) and brings
 # a heavy tree (cryptography, construct, noiseprotocol for THP, mnemonic libs),
@@ -101,7 +101,7 @@ dev = [
     # The qr extra, mirrored so the BC-UR / EIP-4527 codec + QR-decode tests run.
     "cbor2>=5.4",
     "zxing-cpp>=2",
-    "Pillow>=10",
+    "Pillow>=13.0.0",
     # The trezor extra, mirrored so the Trezor signer tests import real trezorlib.
     "trezor>=0.20.2",
 ]
@@ -149,6 +149,9 @@ exclude-newer = "1 week"
 constraint-dependencies = ["certifi>=2026.10.19"]
 
 [tool.uv.exclude-newer-package]
+# Pillow 13 fixes the October 21-22 parser/memory-safety advisories.
+# Remove after 2026-10-29, once the normal one-week cutoff includes the release.
+pillow = "2026-10-23T00:00:00Z"
 # ty is a fast-moving preview tool we run locally (never shipped) and track at
 # its latest; its pin is otherwise unsatisfiable under the 1-week cutoff.
 # Exempt it — effectively no cutoff for ty.

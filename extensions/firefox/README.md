@@ -1,36 +1,32 @@
 # Firefox package
 
-`qeth-0.25.0.xpi` is the Mozilla-signed, self-distributed build — install it via
-*about:addons → gear → Install Add-on From File…*. Release Firefox installs only
-signed extensions, so this file, not a source build, is what works today.
+qeth is listed on AMO at
+[addons.mozilla.org/firefox/addon/qeth](https://addons.mozilla.org/firefox/addon/qeth/),
+which installs the Mozilla-signed build and keeps it updated. That listing is the
+Firefox distribution, so this directory holds no `.xpi`. To build and load one
+yourself, see the main README's *Browser extension* section.
 
-Verify it is genuinely signed before trusting a copy:
+## Moving off the self-distributed `.xpi`
 
-```sh
-unzip -l qeth-0.25.0.xpi | grep META-INF
-# META-INF/cose.sig, META-INF/mozilla.rsa, …
-```
-
-An `.xpi` without those is an unsigned zip that only side-loads through
-`about:debugging` and disappears on restart.
-
-## Two add-on ids are in play — install only one
+From 2026-09-09 to 2026-10-28, while the listing was blocked or behind, qeth
+shipped a signed `.xpi` here instead (0.23.1, then 0.25.0). It was signed under
+a different add-on id:
 
 | id | what it is |
 | --- | --- |
-| `firefox@qeth.eth` | the signed `.xpi` in this directory — self-distributed, works now |
-| `wallet@qeth.eth` | the AMO **listing** (slug `qeth`), where the public submission goes |
-
-The source manifest names `wallet@qeth.eth`, because `build.py sign` reads the
-guid from it and that is the add-on carrying the listing metadata, screenshots
-and the `qeth` slug. The committed `.xpi` predates that and is signed under
-`firefox@qeth.eth`, which is the id Mozilla was willing to sign while the
-listing was blocked.
+| `wallet@qeth.eth` | the AMO **listing** (slug `qeth`) and the source manifest's id — the one to install |
+| `firefox@qeth.eth` | the retired self-distributed `.xpi`, which never updates itself |
 
 **Firefox treats them as two unrelated add-ons.** Installing both leaves two
-copies injecting two providers into every page, so once the listing is approved,
-install from AMO and remove the self-distributed copy — and this directory's
-`.xpi` should be dropped rather than kept alongside it.
+copies injecting two providers into every page, so anyone who installed the
+file should remove it in *about:addons* and install from AMO. Nothing is lost:
+the extension keeps no state of its own; accounts and per-site permissions
+live in the qeth app. (Firefox's host-access grant is per add-on, though, so
+the new copy may ask for it again — *Grant site access* in its toolbar popup.)
+
+Signing follows the source manifest's `gecko.id` (`build.py sign` reads it), so
+nothing builds under `firefox@qeth.eth` any more; `tests/test_webext.py` refuses
+a committed `.xpi` signed under any id but the manifest's.
 
 ## Why the listing was rejected, and what changed
 
@@ -58,6 +54,9 @@ violation. The manifest therefore declares what the reviewer classified:
 `strict_min_version` moved `128.0` → `140.0` because Firefox's built-in consent
 prompt starts at 140; below that an add-on has to ship its own consent screen.
 That costs nothing now — ESR 153 is current and ESR 140 is already end-of-life.
+
+The listing went public with 0.23.3 on 2026-10-22, and 0.25.0 (the first with
+the Tron provider) was approved on 2026-10-28.
 
 ## Block-list residue
 

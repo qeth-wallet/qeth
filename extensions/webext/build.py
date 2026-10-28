@@ -413,8 +413,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # Keep the source files' displayed version in step. The Chrome distributable
     # IS the packaged zip → commit it to extensions/chrome/. The Firefox zip is
-    # only an intermediate (uploaded to AMO); its committed distributable is the
-    # signed .xpi, written to extensions/firefox/ by sign().
+    # what gets uploaded to the AMO listing; nothing is committed for it (sign()
+    # can write an unlisted .xpi to extensions/firefox/, which qeth no longer
+    # ships — see ../README.md).
     sync_versions()
     _replace_dist(CHROME_DIR, "chrome")
     fx_zip = build(args.out, "firefox")

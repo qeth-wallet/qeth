@@ -31,14 +31,13 @@
 # warning), since it depends on a CI run finishing.
 #
 # Browser extensions are not BUILT by this script — they publish to AMO / the
-# Chrome Web Store separately, and their committed packages live in
-# extensions/{firefox,chrome}/. At release time regenerate + republish them per
-# extensions/README.md ("Releasing / publishing"): `build.py sign` produces the
-# AMO-signed Firefox .xpi; upload the chrome zip to the CWS dashboard.
-# Their committed packages ARE attached to the GitHub release afterwards (a
-# plain `gh release upload`), so the README's "latest release" link reaches
-# them — Firefox self-distribution has no store to link to. They carry their
-# own version, which trails the app whenever AMO review is pending.
+# Chrome Web Store separately. At release time regenerate + republish them per
+# extensions/README.md ("Releasing / publishing"): upload the Firefox zip to the
+# AMO listing as an "On this site" version (NOT `build.py sign`, which takes
+# the version string for the unlisted channel), and the chrome zip to the CWS
+# dashboard. The committed chrome zip (extensions/chrome/) IS attached to the
+# GitHub release afterwards (a plain `gh release upload`) for loading unpacked;
+# Firefox has nothing to attach. Store versions trail the app while in review.
 #
 # Usage:
 #   scripts/release.sh              # build host assets + collect + verify (no publish)

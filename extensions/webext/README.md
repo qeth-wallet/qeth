@@ -62,39 +62,38 @@ unpacked** → select this directory. (Or load the built zip.)
 `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick the
 `out/qeth-webext-<version>-firefox.zip` (the source `manifest.json` is
 Chrome-flavoured, so don't load this directory directly in Firefox). Gone on
-restart — for a permanent install use a signed `.xpi` (below).
+restart — for a permanent install use the
+[AMO listing](https://addons.mozilla.org/firefox/addon/qeth/).
 
 **Firefox host access:** host permissions are user-grantable on Firefox, and
 without them the content scripts never inject (dapps won't see qeth). Grant via
 the extension's toolbar popup (**Grant site access**) or `about:addons` →
 qeth → Permissions. Chrome grants them at install.
 
-## Firefox signing (permanent .xpi, unlisted / self-distribution)
+## Firefox signing
 
-Release Firefox refuses unsigned extensions except as temporary add-ons. AMO
-signs an **unlisted** package (free, not listed in the catalog — you host the
-`.xpi` yourself):
+Release Firefox refuses unsigned extensions except as temporary add-ons. qeth's
+signed build is the AMO **listing** (`wallet@qeth.eth`, slug `qeth`): upload
+`out/qeth-<version>-firefox.zip` in the Developer Hub as an "On this site"
+version, and AMO signs it on approval and updates installed copies — see
+`../README.md`, *Releasing / publishing*.
 
-1. Create a free account at <https://addons.mozilla.org> and generate API
-   credentials at <https://addons.mozilla.org/developers/addon/api/key/> — a
-   JWT **issuer** + **secret** pair.
-2. Export them and sign:
+`python build.py sign` is the other route: it uploads to the **unlisted**
+(self-distribution) channel and downloads the signed `.xpi` for you to host.
+With API credentials from
+<https://addons.mozilla.org/developers/addon/api/key/> exported as
+`QETH_AMO_JWT_ISSUER` / `QETH_AMO_JWT_SECRET` (read only from the environment —
+never stored in the repo) it writes `../firefox/qeth-<version>.xpi`; without
+them it just builds the zip. **Don't use it on a release version:** a version
+string belongs to whichever channel gets it first, so an unlisted `<version>`
+can never be listed.
 
-   ```sh
-   export QETH_AMO_JWT_ISSUER='user:12345:67'
-   export QETH_AMO_JWT_SECRET='…'
-   python build.py sign         # → out/qeth-webext-<version>.xpi
-   ```
-
-Credentials are read only from the environment (never stored in the repo).
-Without them, `sign` just builds the zip. The `gecko.id` in the manifest
-(`wallet@qeth.eth`) binds every signed version to the add-on on your AMO
-account and must stay stable — it's an identifier, not a real address, so it
-needn't be a domain you own (AMO validates only its shape). Changing it once
-users have installed breaks their auto-updates, and two ids mean two add-ons
-that install side by side. `extensions/firefox/README.md` covers the second id
-(`firefox@qeth.eth`) the shipped `.xpi` is signed under, and how that collapses
-back to one.
+The `gecko.id` in the manifest (`wallet@qeth.eth`) binds every signed version to
+the add-on on the AMO account and must stay stable — it's an identifier, not a
+real address, so it needn't be a domain you own (AMO validates only its shape).
+Changing it once users have installed breaks their auto-updates, and two ids
+mean two add-ons that install side by side: `extensions/firefox/README.md`
+covers the retired self-distributed build signed under `firefox@qeth.eth`.
 
 Chrome Web Store publishing was a one-time \$5 registration; the store signs and
 hosts the same zip. qeth is live at

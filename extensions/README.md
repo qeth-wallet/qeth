@@ -24,6 +24,8 @@ Both browsers' packages are built from `webext/` — they aren't edited by hand:
 cd webext
 python build.py            # → ../chrome/qeth-<version>-chrome.zip
                            #   + out/qeth-<version>-firefox.zip (the AMO upload)
+python build.py submit     # …then submit the Firefox zip to the AMO listing
+                           #   (needs QETH_AMO_JWT_ISSUER / _SECRET)
 ```
 
 `provider.js` is shared **byte-for-byte** between `webext/` and `falkon/`; a test
@@ -86,20 +88,31 @@ older build keeps working with a newer app.
    Commit the refreshed `chrome/` package (build.py drops the prior `qeth-*` so
    only the current version stays tracked).
 
-2. **Firefox** — upload `out/qeth-<v>-firefox.zip` as a new version of the
-   listing in the [AMO Developer Hub](https://addons.mozilla.org/developers/),
-   picking **"On this site"** on the submission wizard's first screen. "On your
-   own" is the unlisted channel, and a version string is consumed by whichever
-   channel gets it first — an unlisted `<v>` means the listing can never have
-   `<v>` (that cost 0.22.2 and 0.23.2). Once the listed version passes review,
-   AMO signs it and updates installed copies itself; there is no file to commit
-   or attach.
+2. **Firefox** — submit the build as a new **listed** version of the AMO
+   listing, with this version's notes as plain-text files:
 
-   **Don't run `python build.py sign` for a release.** It uploads to the
-   **unlisted** channel of the manifest's add-on, `wallet@qeth.eth` — the
-   listing — so it burns the version string in exactly that way. It is the
-   self-distribution flow qeth no longer ships. (It also rebuilds the
-   committed Chrome zip before touching AMO.)
+   ```sh
+   # AMO creds live in ~/Documents/Mozilla/keys.py (jqt_issuer / jwt_secret):
+   export QETH_AMO_JWT_ISSUER=user:NNNN:NN QETH_AMO_JWT_SECRET=…
+   python build.py submit --release-notes notes.txt --reviewer-notes review.txt
+   ```
+
+   The release notes show on the listing; the reviewer notes tell AMO's
+   reviewer what changed since the last approved version and why any new
+   permission is needed. Both can also be edited in the Developer Hub after
+   submitting. The license carries over from the previous listed version.
+
+   `submit` refuses a version string AMO already holds, on either channel: a
+   string belongs to whichever channel takes it first and can't be reused
+   (unlisted uploads by mistake cost 0.22.2 and 0.23.2). It returns once the
+   version is queued for review — that can take days — and AMO signs it and
+   updates installed copies itself on approval; there is no file to commit or
+   attach.
+
+   The same upload works by hand in the
+   [AMO Developer Hub](https://addons.mozilla.org/developers/): pick **"On this
+   site"** on the submission wizard's first screen ("On your own" is the
+   unlisted channel).
 
    A listed add-on must satisfy the
    [data collection policy](https://extensionworkshop.com/documentation/publish/add-on-policies/#data-collection-and-transmission-disclosure-and-control):
@@ -115,7 +128,9 @@ older build keeps working with a newer app.
 
    With the JWT credentials, a pending version shows in
    `GET /api/v5/addons/addon/wallet@qeth.eth/versions/?filter=all_with_unlisted`
-   as `file.status: unreviewed` until it is approved.
+   as `file.status: unreviewed` until it is approved. The write API throttles
+   hard (and a failed write still counts), so don't retry a failed `submit` in
+   a loop — check that endpoint first.
 
 3. **Chrome** — Google signs at upload; there is no local signing (self-hosted
    `.crx` is blocked for normal users). Upload `chrome/qeth-<v>-chrome.zip` to

@@ -24,9 +24,9 @@ the extension keeps no state of its own; accounts and per-site permissions
 live in the qeth app. (Firefox's host-access grant is per add-on, though, so
 the new copy may ask for it again — *Grant site access* in its toolbar popup.)
 
-Signing follows the source manifest's `gecko.id` (`build.py sign` reads it), so
-nothing builds under `firefox@qeth.eth` any more; `tests/test_webext.py` refuses
-a committed `.xpi` signed under any id but the manifest's.
+Submission follows the source manifest's `gecko.id` (`build.py submit` reads
+it), so nothing builds under `firefox@qeth.eth` any more; `tests/test_webext.py`
+refuses a committed `.xpi` signed under any id but the manifest's.
 
 ## Why the listing was rejected, and what changed
 

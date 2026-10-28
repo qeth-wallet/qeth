@@ -32,10 +32,9 @@
 #
 # Browser extensions are not BUILT by this script — they publish to AMO / the
 # Chrome Web Store separately. At release time regenerate + republish them per
-# extensions/README.md ("Releasing / publishing"): upload the Firefox zip to the
-# AMO listing as an "On this site" version (NOT `build.py sign`, which takes
-# the version string for the unlisted channel), and the chrome zip to the CWS
-# dashboard. The committed chrome zip (extensions/chrome/) IS attached to the
+# extensions/README.md ("Releasing / publishing"): `build.py submit` sends the
+# Firefox zip to the AMO listing as a new listed version, and the chrome zip
+# goes to the CWS dashboard. The committed chrome zip (extensions/chrome/) IS attached to the
 # GitHub release afterwards (a plain `gh release upload`) for loading unpacked;
 # Firefox has nothing to attach. Store versions trail the app while in review.
 #

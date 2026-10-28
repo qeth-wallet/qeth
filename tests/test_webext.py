@@ -349,6 +349,79 @@ class TestBuild:
         ).rstrip(b"=").decode()
         assert want == sig_b64
 
+    def _fake_amo(self, monkeypatch, held=()):
+        """Stand in for the AMO API: ``held`` are the version strings AMO
+        already has. Returns the list of (method, path, data) calls made."""
+        mod = self._build_mod()
+        monkeypatch.setenv("QETH_AMO_JWT_ISSUER", "user:1:2")
+        monkeypatch.setenv("QETH_AMO_JWT_SECRET", "s3cr3t")
+        calls = []
+
+        def fake_api(method, path, token, *, data=None, headers=None):
+            calls.append((method, path, data))
+            if method == "GET" and "/versions/" in path:
+                return {"results": [{"version": v, "channel": "unlisted"}
+                                    for v in held]}
+            if method == "POST" and path == "/addons/upload/":
+                return {"uuid": "up-1"}
+            if method == "GET" and path == "/addons/upload/up-1/":
+                return {"processed": True, "valid": True}
+            if method == "POST" and path.endswith("/versions/"):
+                return {"id": 7, "file": {"status": "unreviewed"}}
+            raise AssertionError(f"unexpected AMO call {method} {path}")
+
+        monkeypatch.setattr(mod, "_api", fake_api)
+        return calls
+
+    def test_submit_uploads_a_listed_version_with_its_notes(self, tmp_path,
+                                                           monkeypatch):
+        mod = self._build_mod()
+        calls = self._fake_amo(monkeypatch)
+        zip_path = tmp_path / "qeth-firefox.zip"
+        zip_path.write_bytes(b"PK")
+        notes = tmp_path / "notes.txt"
+        notes.write_text("Tron support.\n")
+        review = tmp_path / "review.txt"
+        review.write_text("New permission: scripting.\n")
+
+        ver = mod.submit(zip_path, release_notes=notes, reviewer_notes=review)
+
+        assert ver["id"] == 7
+        upload = next(d for m, p, d in calls if p == "/addons/upload/")
+        # the listed channel — an unlisted upload would take the version
+        # string the listing needs
+        assert b'name="channel"\r\n\r\nlisted\r\n' in upload
+        guid = MANIFEST["browser_specific_settings"]["gecko"]["id"]
+        create = next(d for m, p, d in calls
+                      if m == "POST" and p == f"/addons/addon/{guid}/versions/")
+        assert json.loads(create) == {
+            "upload": "up-1",
+            "release_notes": {"en-US": "Tron support."},
+            "approval_notes": "New permission: scripting.",
+        }
+
+    def test_submit_refuses_a_version_amo_already_holds(self, tmp_path,
+                                                        monkeypatch):
+        import pytest
+        mod = self._build_mod()
+        calls = self._fake_amo(monkeypatch, held=[mod.app_version()])
+        zip_path = tmp_path / "qeth-firefox.zip"
+        zip_path.write_bytes(b"PK")
+        with pytest.raises(SystemExit, match="bump __version__"):
+            mod.submit(zip_path)
+        # checked with a read, before any write
+        assert [m for m, _, _ in calls] == ["GET"]
+
+    def test_submit_without_credentials_uploads_nothing(self, tmp_path,
+                                                        monkeypatch):
+        mod = self._build_mod()
+        calls = self._fake_amo(monkeypatch)
+        monkeypatch.delenv("QETH_AMO_JWT_ISSUER")
+        zip_path = tmp_path / "qeth-firefox.zip"
+        zip_path.write_bytes(b"PK")
+        assert mod.submit(zip_path) is None
+        assert calls == []
+
 
 class TestShippedFirefoxPackage:
     """Gates on a committed .xpi in extensions/firefox/.

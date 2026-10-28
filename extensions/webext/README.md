@@ -39,10 +39,10 @@ provider.js ── postMessage ── relay.js ── runtime Port ── backgr
 ## Build
 
 ```sh
-python build.py                # → out/qeth-webext-<version>.zip          (Chrome)
-                               #   out/qeth-webext-<version>-firefox.zip   (Firefox)
+python build.py                # → ../chrome/qeth-<version>-chrome.zip    (Chrome)
+                               #   out/qeth-<version>-firefox.zip         (Firefox)
 python build.py sync           # stamp the app version into the source files
-python build.py sign           # build, then AMO-sign the .xpi (see below)
+python build.py submit         # build, then submit Firefox to AMO (see below)
 ```
 
 **Two packages, one codebase.** Chrome MV3 uses a service-worker background;
@@ -73,20 +73,16 @@ qeth → Permissions. Chrome grants them at install.
 ## Firefox signing
 
 Release Firefox refuses unsigned extensions except as temporary add-ons. qeth's
-signed build is the AMO **listing** (`wallet@qeth.eth`, slug `qeth`): upload
-`out/qeth-<version>-firefox.zip` in the Developer Hub as an "On this site"
-version, and AMO signs it on approval and updates installed copies — see
-`../README.md`, *Releasing / publishing*.
-
-`python build.py sign` is the other route: it uploads to the **unlisted**
-(self-distribution) channel and downloads the signed `.xpi` for you to host.
-With API credentials from
+signed build is the AMO **listing** (`wallet@qeth.eth`, slug `qeth`).
+`python build.py submit` uploads `out/qeth-<version>-firefox.zip` to it as a new
+**listed** version, and AMO signs it on approval and updates installed copies.
+It needs API credentials from
 <https://addons.mozilla.org/developers/addon/api/key/> exported as
 `QETH_AMO_JWT_ISSUER` / `QETH_AMO_JWT_SECRET` (read only from the environment —
-never stored in the repo) it writes `../firefox/qeth-<version>.xpi`; without
-them it just builds the zip. **Don't use it on a release version:** a version
-string belongs to whichever channel gets it first, so an unlisted `<version>`
-can never be listed.
+never stored in the repo); without them it just builds the zip, to upload by
+hand in the Developer Hub as an "On this site" version. `--release-notes` and
+`--reviewer-notes` take this version's notes as plain-text files. See
+`../README.md`, *Releasing / publishing*.
 
 The `gecko.id` in the manifest (`wallet@qeth.eth`) binds every signed version to
 the add-on on the AMO account and must stay stable — it's an identifier, not a

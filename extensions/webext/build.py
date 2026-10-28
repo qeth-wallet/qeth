@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Build (and optionally AMO-sign) the qeth browser extension.
+"""Build (and optionally submit to AMO) the qeth browser extension.
 
 Stdlib only — no node, no npm, matching the project's build story.
 
     python build.py                # → ../chrome/qeth-<version>-chrome.zip
                                    #   (committed Chrome distributable)
+                                   #   + out/qeth-<version>-firefox.zip
     python build.py sync           # stamp the app version (qeth/__init__.py
                                    #   __version__) into manifest.json + the
                                    #   Falkon connector's metadata.desktop
-    python build.py sign           # build, then sign the Firefox .xpi via AMO
-                                   #   → ../firefox/qeth-<version>.xpi if the
-                                   #   QETH_AMO_JWT_ISSUER / _SECRET env vars
-                                   #   are set; otherwise just builds.
+    python build.py submit [--release-notes F] [--reviewer-notes F]
+                                   # build, then submit the Firefox zip as a
+                                   #   new LISTED version of the AMO listing
+                                   #   (needs QETH_AMO_JWT_ISSUER / _SECRET;
+                                   #   without them, just builds)
 
-The committed, distributable packages live in per-browser sibling dirs
-(``extensions/chrome/`` and ``extensions/firefox/``); the shared source is here
-in ``extensions/webext/``. Intermediate zips go to ``out/`` (gitignored).
+The committed Chrome package lives in ``extensions/chrome/``; Firefox commits
+nothing, since AMO signs and distributes the listed version. The shared source
+is here in ``extensions/webext/``. Intermediate zips go to ``out/``
+(gitignored).
 
 Two packages, one codebase: Chrome uses an MV3 service-worker background;
 Firefox MV3 has no service-worker support and needs the event-page form
@@ -41,7 +44,6 @@ import base64
 import copy
 import hashlib
 import hmac
-import io
 import json
 import os
 import re
@@ -56,10 +58,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 FALKON_DESKTOP = HERE.parent / "falkon" / "qeth_connector" / "metadata.desktop"
-# The committed, distributable packages live in per-browser sibling dirs (the
-# shared source is here in webext/). build → chrome zip; sign → signed firefox xpi.
+# The committed Chrome distributable lives in a sibling dir (the shared source
+# is here in webext/). Firefox has none: its build is the AMO listing.
 CHROME_DIR = HERE.parent / "chrome"
-FIREFOX_DIR = HERE.parent / "firefox"
 
 # Exactly what ships. Anything not listed (README, .gitignore, out/, build.py,
 # the source SVG) stays out of the package.
@@ -215,7 +216,13 @@ def sync_versions() -> str:
     return version
 
 
-# --- AMO signing (Firefox .xpi, unlisted / self-distribution) -----------
+# --- AMO submission (Firefox, the listed channel) ------------------------
+#
+# qeth's Firefox build IS the AMO listing (the manifest's gecko id). AMO
+# reviews a listed version before it signs it and pushes it to installed
+# copies, which can take days, so ``submit`` uploads, creates the version
+# and reports its status — it doesn't wait for the signature, and nothing is
+# committed for Firefox.
 
 def _jwt(issuer: str, secret: str) -> str:
     """A short-lived HS256 JWT for the AMO API (no PyJWT dependency)."""
@@ -231,10 +238,8 @@ def _jwt(issuer: str, secret: str) -> str:
 
 
 class AmoError(SystemExit):
-    """An AMO API call failed. Carries the HTTP status so callers can branch
-    (a version-create legitimately 404s for a brand-new add-on and 409s when
-    that exact version already exists). Subclasses SystemExit so an unhandled
-    one still aborts with the message, as before."""
+    """An AMO API call failed, with its HTTP status. Subclasses SystemExit so an
+    unhandled one aborts with the message."""
 
     def __init__(self, message: str, code: int | None = None):
         super().__init__(message)
@@ -296,108 +301,75 @@ def _version_file(version: dict) -> dict:
     return f or {}
 
 
-def _download(url: str, token: str) -> bytes:
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"JWT {token}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return resp.read()
-
-
-def _is_signed(xpi_bytes: bytes) -> bool:
-    """True once AMO has signed the package (its Mozilla signature block is
-    present). A version's download url appears BEFORE auto-signing finishes, so
-    an early fetch returns the unsigned zip — poll on this, not just the url."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(xpi_bytes)) as z:
-            return any(n.startswith("META-INF/mozilla") for n in z.namelist())
-    except zipfile.BadZipFile:
-        return False
-
-
-def _find_version_id(guid: str, version: str, token_for) -> int:
-    """The id of version ``version`` under ``guid``. Needed when the create call
-    reports the version already exists, or when a first-ever submission creates
-    the add-on (whose response is the add-on, not the version). Unlisted
-    versions only appear with the explicit filter."""
+def _existing_version(guid: str, version: str, token: str) -> dict | None:
+    """``version`` as AMO already holds it under ``guid``, on either channel.
+    A version string belongs to whichever channel takes it first and can't be
+    reused, so one that exists can't be submitted. Unlisted versions only
+    appear with the explicit filter."""
     vers = _api("GET",
                 f"/addons/addon/{guid}/versions/?filter=all_with_unlisted",
-                token_for())
+                token)
     for v in vers.get("results", []):
         if v.get("version") == version:
-            return v["id"]
-    raise SystemExit(f"AMO: version {version} not found under {guid}")
+            return v
+    return None
 
 
-def sign(zip_path: Path, out_dir: Path) -> Path | None:
+def submit(zip_path: Path, *, release_notes: Path | None = None,
+           reviewer_notes: Path | None = None) -> dict | None:
+    """Submit ``zip_path`` as a new LISTED version of the manifest's add-on.
+
+    ``release_notes`` (shown on the listing) and ``reviewer_notes`` (AMO's
+    "notes for reviewers": what changed, why a permission is needed) are
+    plain-text files, written per version. The license carries over from the
+    previous listed version; compatibility comes from the manifest."""
     issuer = os.environ.get("QETH_AMO_JWT_ISSUER")
     secret = os.environ.get("QETH_AMO_JWT_SECRET")
     if not issuer or not secret:
         print("AMO credentials not set (QETH_AMO_JWT_ISSUER / QETH_AMO_JWT_SECRET) "
-              "— skipping signing. The zip loads as a temporary add-on; set them "
-              "to produce a permanently installable signed .xpi.")
+              f"— not submitting. Upload {zip_path} in the AMO Developer Hub "
+              "instead, as an \"On this site\" version.")
         return None
 
     guid = _manifest()["browser_specific_settings"]["gecko"]["id"]
     version = app_version()
-    hdrs = {"Content-Type": "application/json"}
-    # A fresh short-lived JWT per call (they expire in 60s and some steps poll
-    # for minutes).
+    # Read the notes before uploading anything: a bad path must not cost an
+    # upload (AMO throttles writes, and failed ones still count).
+    fields: dict = {}
+    if release_notes:
+        fields["release_notes"] = {"en-US": release_notes.read_text().strip()}
+    if reviewer_notes:
+        fields["approval_notes"] = reviewer_notes.read_text().strip()
+
+    # A fresh short-lived JWT per call (they expire in 60s and validation polls).
     def token():
         return _jwt(issuer, secret)
 
-    # 1. upload the package (unlisted / self-distribution channel).
-    body, ctype = _multipart({"channel": "unlisted"}, "upload",
+    held = _existing_version(guid, version, token())
+    if held:
+        raise SystemExit(
+            f"AMO already has {guid} {version} (channel {held.get('channel')!r}, "
+            f"file {_version_file(held).get('status')!r}) — a version string "
+            "can't be submitted twice; bump __version__.")
+
+    # 1. upload the package to the listed channel and wait for validation.
+    body, ctype = _multipart({"channel": "listed"}, "upload",
                              zip_path.name, zip_path.read_bytes())
     up = _api("POST", "/addons/upload/", token(), data=body,
               headers={"Content-Type": ctype})
-    up_uuid = up["uuid"]
-    print(f"AMO upload {up_uuid} — validating…")
-    _poll(f"/addons/upload/{up_uuid}/", token(), want="valid")
+    print(f"AMO upload {up['uuid']} — validating…")
+    _poll(f"/addons/upload/{up['uuid']}/", token(), want="valid")
 
-    # 2. attach it as a version of the add-on, resolving the version id. The
-    #    create endpoint 404s the first time this guid is seen (create the
-    #    add-on, which creates the version) and 409s if the exact version is
-    #    already up (re-fetch it, so a re-run just re-downloads the signed xpi).
-    try:
-        ver = _api("POST", f"/addons/addon/{guid}/versions/", token(),
-                   data=json.dumps({"upload": up_uuid}).encode(), headers=hdrs)
-        version_id = ver["id"]
-    except AmoError as e:
-        if e.code == 409:
-            version_id = _find_version_id(guid, version, token)
-        elif e.code == 404:
-            _api("POST", "/addons/addon/", token(),
-                 data=json.dumps({"version": {"upload": up_uuid}}).encode(),
-                 headers=hdrs)
-            version_id = _find_version_id(guid, version, token)
-        else:
-            raise
-
-    # 3. poll the version until AMO has SIGNED its file, then download the xpi.
-    #    Unlisted files auto-sign, but the download url appears before signing
-    #    finishes — so fetch and check for the signature, not just the url.
-    version_path = f"/addons/addon/{guid}/versions/{version_id}/"
-    xpi_bytes = None
-    for _ in range(60):
-        url = _version_file(_api("GET", version_path, token())).get("url")
-        if url:
-            candidate = _download(url, token())
-            if _is_signed(candidate):
-                xpi_bytes = candidate
-                break
-        time.sleep(5)
-    if xpi_bytes is None:
-        raise SystemExit("AMO signing timed out waiting for the signed file")
-
-    # Clean+write together at the very end, so a failed/aborted sign leaves the
-    # previously committed .xpi intact rather than deleting it up front.
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("qeth-*.xpi"):
-        old.unlink()
-    xpi_path = out_dir / f"qeth-{version}.xpi"
-    xpi_path.write_bytes(xpi_bytes)
-    print(f"signed {xpi_path}  ({xpi_path.stat().st_size} bytes)")
-    return xpi_path
+    # 2. make it a version of the listing, which queues it for review.
+    fields["upload"] = up["uuid"]
+    ver = _api("POST", f"/addons/addon/{guid}/versions/", token(),
+               data=json.dumps(fields).encode(),
+               headers={"Content-Type": "application/json"})
+    print(f"submitted {guid} {version} (listed) — file status "
+          f"{_version_file(ver).get('status')!r}. AMO signs it and updates "
+          "installed copies once review approves it; current_version at "
+          f"{AMO_API}/addons/addon/{guid}/ says when.")
+    return ver
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -405,22 +377,27 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", nargs="?", default="build",
-                    choices=["build", "sync", "sign"])
+                    choices=["build", "sync", "submit"])
     ap.add_argument("--out", type=Path, default=HERE / "out")
+    ap.add_argument("--release-notes", type=Path, metavar="FILE",
+                    help="submit: this version's release notes (plain text, "
+                         "shown on the listing)")
+    ap.add_argument("--reviewer-notes", type=Path, metavar="FILE",
+                    help="submit: notes for the AMO reviewer — what changed, "
+                         "why a new permission is needed")
     args = ap.parse_args(argv)
     if args.command == "sync":
         sync_versions()
         return 0
     # Keep the source files' displayed version in step. The Chrome distributable
     # IS the packaged zip → commit it to extensions/chrome/. The Firefox zip is
-    # what gets uploaded to the AMO listing; nothing is committed for it (sign()
-    # can write an unlisted .xpi to extensions/firefox/, which qeth no longer
-    # ships — see ../README.md).
+    # what goes to the AMO listing; nothing is committed for it.
     sync_versions()
     _replace_dist(CHROME_DIR, "chrome")
     fx_zip = build(args.out, "firefox")
-    if args.command == "sign":
-        sign(fx_zip, FIREFOX_DIR)
+    if args.command == "submit":
+        submit(fx_zip, release_notes=args.release_notes,
+               reviewer_notes=args.reviewer_notes)
     return 0
 
 

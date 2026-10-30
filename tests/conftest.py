@@ -28,6 +28,13 @@ import pytest
 # Must come before pytest-qt's QApplication is created. Leaves an
 # already-set value alone (someone might want to run a visible test).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# On Windows the offscreen plugin's font database scans ONE directory —
+# QT_QPA_FONTDIR, default <Qt libs>/fonts, which PySide6 doesn't ship — so
+# without this every test there runs with no fonts at all (empty families,
+# zero-width text). Point it at the system fonts a real Windows UI gets.
+if sys.platform == "win32":
+    os.environ.setdefault(
+        "QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"))
 
 # Sandbox Qt's *data* dir (QStandardPaths AppData / GenericData) into a throwaway
 # session dir so nothing in the suite can write to the developer's real

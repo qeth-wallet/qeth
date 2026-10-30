@@ -26,10 +26,9 @@ def _raise_open_file_limit(target: int = 8192) -> int | None:
     Unix-only and best-effort: ``resource`` is absent on Windows, and a
     kernel may reject a raise we then swallow. Returns the new soft limit,
     or ``None`` if unchanged / unavailable."""
-    try:
-        import resource
-    except ImportError:
-        return None  # Windows — no POSIX rlimits
+    if sys.platform == "win32":
+        return None  # no POSIX rlimits
+    import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     # hard may be RLIM_INFINITY (-1); clamp the request to a concrete number
     # either way — macOS rejects setrlimit to an unbounded soft value.

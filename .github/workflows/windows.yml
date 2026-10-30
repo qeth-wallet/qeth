@@ -1,0 +1,68 @@
+name: Windows
+
+# Runs the test suite on real Windows. The day-to-day loop is scripts/wine.sh
+# (Windows Python under Wine, same lock); this is the check behind it, since
+# Wine can't vouch for everything Windows does (file locking, HID, the tray).
+#
+# Like macos.yml this uses the PyPI PySide6 wheel (the `bundled` extra) — there
+# is no system Qt to inherit on Windows. Python is pinned to scripts/wine.sh's
+# default so the two runs test the same interpreter.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'qeth/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'qeth/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      # --all-extras covers bundled (PySide6) + simulate + frame + qr + trezor;
+      # the dev group (pytest, ruff, mypy, hypothesis) comes in by default.
+      - name: Install
+        run: uv sync --all-extras --python 3.14
+
+      - name: Versions under test
+        run: |
+          uv run python -c "import sys, platform; print(sys.version); print(platform.platform(), platform.machine())"
+          uv run python -c "import PySide6; from PySide6 import QtCore; print('PySide6', PySide6.__version__, 'Qt', QtCore.qVersion())"
+          uv run python -c "import qeth; print('qeth', qeth.__version__)"
+
+      # conftest forces QT_QPA_PLATFORM=offscreen (and, on Windows, points the
+      # offscreen font database at %WINDIR%\Fonts). Network- and browser-marked
+      # tests are deselected by the addopts default.
+      - name: Test suite
+        run: uv run pytest -q
+
+      # Informational: the same static checks the suite already gates on, run
+      # standalone so a failure reads as "lint/types" rather than a test id.
+      # mypy here checks the win32 platform branches the Linux run can't.
+      - name: Ruff
+        if: always()
+        run: uv run ruff check qeth/ tests/
+
+      - name: mypy
+        if: always()
+        run: uv run mypy

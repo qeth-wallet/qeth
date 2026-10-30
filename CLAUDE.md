@@ -65,6 +65,19 @@ already bit `cryptography` (Frame-import only; now the `frame` extra +
 guarded import). When adding an import, declare it (core dep or an extra);
 don't lean on system-site-packages.
 
+### Windows: Wine locally, GitHub for the final check
+
+`scripts/wine.sh setup` builds a Wine prefix (`~/.wine-qeth`) with Windows uv +
+Python and a venv at `C:\qeth-venv` synced from the same `uv.lock`;
+`scripts/wine.sh pytest` runs the suite there (~2 min), `scripts/wine.sh qeth`
+launches the app. `.github/workflows/windows.yml` is the real-Windows run. The
+script's comments carry the Wine workarounds (an `icuuc.dll` stub —
+`scripts/wine/icuuc_stub.c` — since Qt6Core links Windows' system ICU; the ICC
+profile Qt's windows plugin would choke on; fonts for offscreen Qt; Wine drops
+every host `QT_*` var). Code that's POSIX-only must gate on
+`sys.platform == "win32"` (not `hasattr`/`ImportError`) — mypy narrows on it, and
+the Windows run type-checks the win32 branches.
+
 ### Static checks / gates
 
 `uv run pytest` enforces, over the whole package:

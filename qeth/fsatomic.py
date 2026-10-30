@@ -11,9 +11,16 @@ Files come out 0600 (``mkstemp``'s default) unless ``mode`` is given —
 deliberately tighter than the usual 0644: everything under ``~/.qeth``
 is private financial data, and a wallet has no business writing
 group/world-readable files.
+
+On Windows the mode is moot (privacy there is the user profile's ACL;
+``chmod`` only toggles read-only) and a directory can't be opened to
+fsync — NTFS journals the rename itself, so the swap is still
+all-or-nothing, just not guaranteed to survive a power cut once this
+returns (the old contents may come back).
 """
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,19 +32,20 @@ def _atomic_write(path: Path, data: bytes, mode: int | None) -> None:
     fd, tmp = tempfile.mkstemp(
         dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        if mode is not None:
+        if mode is not None and sys.platform != "win32":
             os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        # Make the rename itself durable (the directory entry).
-        dfd = os.open(str(path.parent), os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        if sys.platform != "win32":
+            # Make the rename itself durable (the directory entry).
+            dfd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
     except BaseException:
         try:
             os.unlink(tmp)

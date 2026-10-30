@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import io
-
 import segno
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QImage, QPainter, QPaintEvent, QPixmap
@@ -31,16 +29,18 @@ def ur_animation_version(content: str) -> int | None:
     return int(segno.make_qr(largest, error="l").version)
 
 
-def qr_to_image(
+def qr_pixels(
     content: str,
     *,
     error: str = "m",
-    scale: int = 1,
     version: int | None = None,
     mask_shift: int = 0,
-) -> QImage:
-    """Encode without changing the content's case; callers normalize URs only."""
-    buf = io.BytesIO()
+) -> tuple[int, bytes]:
+    """The symbol plus its 4-module quiet zone as ``(side, pixels)``, one byte
+    per module (0 dark, 255 light). Pure Python — no Qt — so the animation's
+    worker thread can encode without touching Qt; ``image_from_pixels`` wraps
+    the bytes on the GUI thread. Encodes without changing the content's case;
+    callers normalize URs only."""
     qr = segno.make_qr(content, error=error, version=version)
     if mask_shift % 8:
         # Change the optical pattern on retries without changing a single UR
@@ -52,8 +52,39 @@ def qr_to_image(
             mask=(qr.mask + mask_shift) % 8,
             boost_error=False,
         )
-    qr.save(buf, kind="png", scale=scale, border=4, dark="#000", light="#fff")
-    return QImage.fromData(buf.getvalue())
+    side = int(qr.symbol_size(scale=1, border=4)[0])
+    pixels = bytes(
+        0 if dark else 255
+        for row in qr.matrix_iter(scale=1, border=4)
+        for dark in row
+    )
+    return side, pixels
+
+
+def image_from_pixels(side: int, pixels: bytes) -> QImage:
+    return QImage(pixels, side, side, side, QImage.Format.Format_Grayscale8).copy()
+
+
+def qr_to_image(
+    content: str,
+    *,
+    error: str = "m",
+    scale: int = 1,
+    version: int | None = None,
+    mask_shift: int = 0,
+) -> QImage:
+    image = image_from_pixels(
+        *qr_pixels(content, error=error, version=version, mask_shift=mask_shift)
+    )
+    if scale == 1:
+        return image
+    # Nearest-neighbour: every module stays an exact scale × scale block.
+    return image.scaled(
+        image.width() * scale,
+        image.height() * scale,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.FastTransformation,
+    )
 
 
 def qr_to_pixmap(

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -135,3 +138,20 @@ def test_sigint_shutdown_quits_when_the_window_is_in_the_tray(
     finally:
         timer.stop()
         timer.deleteLater()
+
+
+def test_asyncio_executor_survives_the_qt_import():
+    """Python 3.15 binds concurrent.futures' ThreadPoolExecutor lazily, and
+    once shiboken6 has replaced __import__ the lazy object never resolves —
+    asyncio's run_in_executor (every aiohttp DNS lookup) then fails.
+    qeth/__init__ resolves it first. Checked in a fresh interpreter started
+    the way every entry point starts: qeth, then Qt. A no-op before 3.15."""
+    code = (
+        "import qeth, PySide6.QtCore, asyncio\n"
+        "async def main():\n"
+        "    return await asyncio.get_running_loop().run_in_executor(None, lambda: 42)\n"
+        "print(asyncio.run(main()))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=120)
+    assert out.stdout.strip() == "42", out.stderr

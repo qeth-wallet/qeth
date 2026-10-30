@@ -16,6 +16,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'dist/windows/**'
       - '.github/workflows/windows.yml'
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'dist/windows/**'
 
 defaults:
   run:
@@ -66,3 +68,91 @@ jobs:
       - name: mypy
         if: always()
         run: uv run mypy
+
+  # The PyInstaller onedir build, verified by RUNNING it: a frozen bundle's
+  # usual failure is a module or DLL the analysis missed, which only shows at
+  # launch. Locally, `scripts/wine.sh build` runs the same recipe under Wine.
+  bundle:
+    runs-on: windows-2025
+    env:
+      UV_PYTHON: "3.14"   # what the test job runs; PySide6 6.12 + 3.15 needs a workaround
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build qeth-windows
+        run: ./dist/windows/build.sh
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          D=dist/windows/out/qeth-windows
+          test -f "$D/qeth.exe" || { echo "::error::no qeth.exe"; exit 1; }
+          for f in qwindows.dll ffmpegmediaplugin.dll 'zxingcpp*.pyd' 'hid*.pyd' \
+                   libusb-1.0.dll top_tokens.json; do
+            find "$D" -name "$f" | grep -q . \
+              || { echo "::error::$f missing from the bundle"; exit 1; }
+          done
+          uv run --no-project --with pyinstaller python -m PyInstaller.utils.cliutils.archive_viewer \
+            --list --recursive "$D/qeth.exe" > "$RUNNER_TEMP/pyz.txt"
+          for mod in web3 "eth\." ledgereth trezorlib; do
+            grep -q "'$mod" "$RUNNER_TEMP/pyz.txt" \
+              || { echo "::error::$mod not in the bundle"; exit 1; }
+          done
+          du -sh "$D"
+
+      # Launch the real exe on a fresh profile (Path.home() reads USERPROFILE).
+      # The RPC server answering proves the frozen interpreter, Qt's windows
+      # platform plugin (QApplication comes first) and the aiohttp stack load;
+      # still running a while later, with its own window rather than
+      # PyInstaller's "Unhandled exception" box, covers the main window.
+      - name: Smoke-run qeth.exe
+        run: |
+          set -euo pipefail
+          profile=$(mktemp -d)
+          USERPROFILE=$(cygpath -w "$profile") ./dist/windows/out/qeth-windows/qeth.exe &
+          ok=
+          for i in $(seq 1 45); do
+            if reply=$(curl -fsS --max-time 2 -H 'Content-Type: application/json' \
+                 --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+                 http://127.0.0.1:1248 2>/dev/null) && echo "$reply" | grep -q '"qeth/v'; then
+              ok=1; echo "RPC: $reply"; break
+            fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::qeth.exe never answered on 127.0.0.1:1248"; taskkill //F //IM qeth.exe || true; exit 1; }
+          sleep 15
+          title=$(powershell -NoProfile -Command \
+            "(Get-Process qeth -ErrorAction SilentlyContinue | Where-Object MainWindowTitle | Select-Object -First 1).MainWindowTitle")
+          echo "window: ${title:-<none>}"
+          tasklist //FI "IMAGENAME eq qeth.exe" | grep -qi qeth.exe \
+            || { echo "::error::qeth.exe exited after starting"; exit 1; }
+          taskkill //F //IM qeth.exe > /dev/null
+          # Matched loosely: the em dash in "qeth — Ethereum wallet" may not
+          # survive PowerShell's console code page. Qt's own "no platform
+          # plugin" box (title "qeth") or PyInstaller's traceback box fail here.
+          case "$title" in
+            *"Ethereum wallet"*) ;;
+            *) echo "::error::qeth.exe's main window isn't up (window: ${title:-<none>})"; exit 1 ;;
+          esac
+          echo "fresh profile's ~/.qeth:"; ls "$profile/.qeth" 2>/dev/null || echo "  (nothing written yet)"
+
+      - name: Zip the bundle
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' qeth/__init__.py)
+          cd dist/windows/out
+          7z a -tzip -mx=9 "qeth-$ver-windows-x64.zip" qeth-windows > /dev/null
+          ls -lh ./*.zip
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeth-windows-zip
+          path: dist/windows/out/*.zip
+          retention-days: 14
+          if-no-files-found: error

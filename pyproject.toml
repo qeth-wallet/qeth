@@ -124,6 +124,9 @@ webext = [
 macos-build = [
     "pyinstaller>=6.21",
 ]
+windows-build = [
+    "pyinstaller>=6.21",
+]
 
 [tool.uv]
 # Supply-chain policy: never resolve a package version newer than ~1 week old.

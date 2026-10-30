@@ -70,7 +70,11 @@ don't lean on system-site-packages.
 `scripts/wine.sh setup` builds a Wine prefix (`~/.wine-qeth`) with Windows uv +
 Python and a venv at `C:\qeth-venv` synced from the same `uv.lock`;
 `scripts/wine.sh pytest` runs the suite there (~2 min), `scripts/wine.sh qeth`
-launches the app. `.github/workflows/windows.yml` is the real-Windows run. The
+launches the app. `scripts/wine.sh build` runs the PyInstaller onedir recipe
+(`dist/windows/`, see its README) and `scripts/wine.sh smoke` launches the built
+`qeth.exe` on a clean, Python-less prefix inside `unshare -rn` + Xvfb (own
+loopback, so it never fights a running qeth for port 1248). `.github/workflows/windows.yml`
+is the real-Windows run: tests, then the same build + smoke + zip artifact. The
 script's comments carry the Wine workarounds (an `icuuc.dll` stub —
 `scripts/wine/icuuc_stub.c` — since Qt6Core links Windows' system ICU; the ICC
 profile Qt's windows plugin would choke on; fonts for offscreen Qt; Wine drops

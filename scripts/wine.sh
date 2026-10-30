@@ -8,6 +8,8 @@
 #   scripts/wine.sh pytest [ARGS]  run the test suite on Windows Python
 #   scripts/wine.sh qeth [ARGS]    launch the app
 #   scripts/wine.sh python [ARGS]  the venv's python.exe
+#   scripts/wine.sh build [ARGS]   PyInstaller → dist/windows/out/qeth-windows
+#   scripts/wine.sh smoke          run that build the way CI does, isolated
 #
 # Everything lives in its own prefix (QETH_WINEPREFIX, default ~/.wine-qeth),
 # so Path.home() — and thus ~/.qeth — is C:\users\<you> inside it, never the
@@ -18,15 +20,19 @@
 #
 # Needs: wine (>= 11, 64-bit), the mingw-w64 cross gcc (for the ICU stub),
 # curl, fontconfig's fc-list, and a host uv (its version picks the Windows uv
-# to fetch).
+# to fetch). `smoke` also needs Xvfb, xwininfo and unprivileged user
+# namespaces (unshare -rn).
 #
 # Env: QETH_WINEPREFIX, QETH_WINE_PYTHON (default 3.14), QETH_WINE_DPI (setup
-# writes it as the prefix's LogPixels, e.g. 192 on a 2x screen), WINEDEBUG
+# writes it as the prefix's LogPixels, e.g. 192 on a 2x screen),
+# QETH_SMOKE_LOG (where `smoke` writes the app's output), WINEDEBUG
 # (default -all).
 set -euo pipefail
+self=$(realpath "$0")
 cd "$(dirname "$0")/.."
 
 prefix=${QETH_WINEPREFIX:-$HOME/.wine-qeth}
+smoke_prefix=$prefix-smoke   # no Python in it: a clean Windows box
 pyver=${QETH_WINE_PYTHON:-3.14}
 venv='C:\qeth-venv'
 uv_exe='C:\tools\uv\uv.exe'
@@ -79,7 +85,8 @@ sync() {
     wenv UV_PROJECT_ENVIRONMENT="$venv" wine "$uv_exe" sync --locked --all-extras --python "$pyver"
 }
 
-setup() {
+# What every prefix needs to run Qt — the dev one and the smoke one.
+init_prefix() {
     if [ ! -d "$prefix" ]; then
         echo "== new prefix $prefix"
         # Skip the .NET (mono) and IE (gecko) runtimes — Python needs neither.
@@ -115,12 +122,58 @@ setup() {
             ln -sf "$file" "$fonts/$(basename "$file")"
         done
     done
+}
 
+setup() {
+    init_prefix
     fetch_uv
     echo "== Python $pyver (Windows)"
     wenv wine "$uv_exe" python install "$pyver"
     sync
     wenv "$wine_dir/wineserver" -w
+}
+
+# Run the built bundle the way CI does — the RPC server answers, the main
+# window comes up, the process stays — on the smoke prefix, inside a private
+# network namespace: its own loopback, so port 1248 is free even beside a
+# running qeth (and nothing reaches the outside), with a hidden Xvfb display.
+# Runs as the namespace's root (`unshare -r`), which only maps to you.
+smoke() {
+    local exe=dist/windows/out/qeth-windows/qeth.exe
+    [ -f "$exe" ] || { echo "no $exe — run: scripts/wine.sh build" >&2; exit 1; }
+    [ -e /tmp/.X11-unix/X99 ] && { echo "display :99 is taken" >&2; exit 1; }
+    prefix=$smoke_prefix
+    ip link set lo up
+    Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp > /dev/null 2>&1 &
+    local xvfb=$! i reply rpc= windows alive=
+    for i in $(seq 50); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+    export DISPLAY=:99
+    init_prefix > /dev/null
+
+    echo "== $exe on a clean prefix, isolated"
+    wenv wine "$exe" > "${QETH_SMOKE_LOG:-/dev/null}" 2>&1 &
+    for i in $(seq 1 60); do
+        if reply=$(curl -fsS --max-time 2 -H 'Content-Type: application/json' \
+             --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
+             http://127.0.0.1:1248 2> /dev/null) && [[ $reply == *'"qeth/v'* ]]; then
+            rpc=1; echo "RPC answered after ~$((i * 2)) s: $reply"; break
+        fi
+        sleep 2
+    done
+    sleep 15
+    windows=$(xwininfo -root -tree 2> /dev/null | grep -oE '"[^"]+"' | sort -u || true)
+    pgrep -f 'qeth-windows.qeth\.exe' > /dev/null && alive=1
+    wenv "$wine_dir/wineserver" -k || true
+    kill "$xvfb"
+
+    local ok=1
+    [ -n "$rpc" ] || { echo "FAIL: no answer on 127.0.0.1:1248"; ok=; }
+    [ -n "$alive" ] || { echo "FAIL: qeth.exe exited"; ok=; }
+    [[ $windows == *'"qeth — Ethereum wallet"'* ]] \
+        || { echo "FAIL: no main window (windows: ${windows//$'\n'/ })"; ok=; }
+    [[ $windows == *'Unhandled exception'* ]] && { echo "FAIL: an unhandled exception box"; ok=; }
+    [ -n "$ok" ] && echo "OK: RPC up, main window shown, still running"
+    [ -n "$ok" ]
 }
 
 cmd=${1:-}
@@ -133,5 +186,15 @@ case "$cmd" in
     pytest) wenv wine "$venv\\Scripts\\python.exe" -m pytest -o cache_dir='C:/qeth-pytest-cache' "$@" ;;
     qeth)   wenv wine "$venv\\Scripts\\python.exe" -m qeth "$@" ;;
     python) wenv wine "$venv\\Scripts\\python.exe" "$@" ;;
-    *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    # dist/windows/build.sh's command (keep the two in step), through the
+    # Windows uv — an isolated env, so the dev venv above is untouched.
+    build)  wenv wine "$uv_exe" run --isolated --no-dev \
+                --extra bundled --extra simulate --extra qr --extra trezor \
+                --group windows-build \
+                pyinstaller --noconfirm --clean \
+                --distpath=dist/windows/out --workpath=dist/windows/out/build \
+                "$@" dist/windows/qeth.spec ;;
+    smoke)  exec unshare -rn "$self" _smoke ;;   # → smoke(), in its namespace
+    _smoke) smoke ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

@@ -18,6 +18,8 @@ build/
 /dist/deb/*.deb
 !/dist/macos/
 /dist/macos/out/
+!/dist/windows/
+/dist/windows/out/
 
 # venv
 .venv/

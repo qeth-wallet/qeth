@@ -71,11 +71,16 @@ don't lean on system-site-packages.
 Python and a venv at `C:\qeth-venv` synced from the same `uv.lock`;
 `scripts/wine.sh pytest` runs the suite there (~2 min), `scripts/wine.sh qeth`
 launches the app. `scripts/wine.sh build` runs the PyInstaller onedir recipe
-(`dist/windows/`, see its README) and `scripts/wine.sh smoke` launches the built
-`qeth.exe` on a clean, Python-less prefix inside `unshare -rn` + Xvfb (own
-loopback, so it never fights a running qeth for port 1248). `.github/workflows/windows.yml`
-is the real-Windows run: tests, then the same build + smoke + zip artifact. The
-script's comments carry the Wine workarounds (an `icuuc.dll` stub —
+(`dist/windows/`, see its README), `installer` wraps it with Inno Setup
+(`qeth.iss` — never change its `AppId`), and `smoke [installer]` launches the
+built `qeth.exe` (or installs, runs and uninstalls the setup.exe) on a clean,
+Python-less prefix inside `unshare -rn` + Xvfb (own loopback, so it never
+fights a running qeth for port 1248; the launched app is tracked by PID —
+never `pkill -f`, which matched the calling shell's own command line).
+`.github/workflows/windows.yml` is the real-Windows run: tests, then the same
+build + smoke (`dist/windows/smoke.sh`) + installer round-trip, uploading the
+zip and the setup.exe. `scripts/wine.sh`'s
+comments carry the Wine workarounds (an `icuuc.dll` stub —
 `scripts/wine/icuuc_stub.c` — since Qt6Core links Windows' system ICU; the ICC
 profile Qt's windows plugin would choke on; fonts for offscreen Qt; Wine drops
 every host `QT_*` var). Code that's POSIX-only must gate on

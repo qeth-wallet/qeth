@@ -105,41 +105,12 @@ jobs:
           done
           du -sh "$D"
 
-      # Launch the real exe on a fresh profile (Path.home() reads USERPROFILE).
-      # The RPC server answering proves the frozen interpreter, Qt's windows
-      # platform plugin (QApplication comes first) and the aiohttp stack load;
-      # still running a while later, with its own window rather than
-      # PyInstaller's "Unhandled exception" box, covers the main window.
+      # Launch the real exe (dist/windows/smoke.sh): the RPC server answering
+      # proves the frozen interpreter, Qt's windows platform plugin
+      # (QApplication comes first) and the aiohttp stack load; the main
+      # window, still up 15 s later, covers the rest of startup.
       - name: Smoke-run qeth.exe
-        run: |
-          set -euo pipefail
-          profile=$(mktemp -d)
-          USERPROFILE=$(cygpath -w "$profile") ./dist/windows/out/qeth-windows/qeth.exe &
-          ok=
-          for i in $(seq 1 45); do
-            if reply=$(curl -fsS --max-time 2 -H 'Content-Type: application/json' \
-                 --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
-                 http://127.0.0.1:1248 2>/dev/null) && echo "$reply" | grep -q '"qeth/v'; then
-              ok=1; echo "RPC: $reply"; break
-            fi
-            sleep 2
-          done
-          [ -n "$ok" ] || { echo "::error::qeth.exe never answered on 127.0.0.1:1248"; taskkill //F //IM qeth.exe || true; exit 1; }
-          sleep 15
-          title=$(powershell -NoProfile -Command \
-            "(Get-Process qeth -ErrorAction SilentlyContinue | Where-Object MainWindowTitle | Select-Object -First 1).MainWindowTitle")
-          echo "window: ${title:-<none>}"
-          tasklist //FI "IMAGENAME eq qeth.exe" | grep -qi qeth.exe \
-            || { echo "::error::qeth.exe exited after starting"; exit 1; }
-          taskkill //F //IM qeth.exe > /dev/null
-          # Matched loosely: the em dash in "qeth — Ethereum wallet" may not
-          # survive PowerShell's console code page. Qt's own "no platform
-          # plugin" box (title "qeth") or PyInstaller's traceback box fail here.
-          case "$title" in
-            *"Ethereum wallet"*) ;;
-            *) echo "::error::qeth.exe's main window isn't up (window: ${title:-<none>})"; exit 1 ;;
-          esac
-          echo "fresh profile's ~/.qeth:"; ls "$profile/.qeth" 2>/dev/null || echo "  (nothing written yet)"
+        run: ./dist/windows/smoke.sh ./dist/windows/out/qeth-windows/qeth.exe
 
       - name: Zip the bundle
         run: |
@@ -154,5 +125,57 @@ jobs:
         with:
           name: qeth-windows-zip
           path: dist/windows/out/*.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      # Pinned, like every other fetched tool (same release as scripts/wine.sh);
+      # the digest is GitHub's for that asset.
+      - name: Install Inno Setup
+        run: |
+          set -euo pipefail
+          v=6.7.3
+          exe=innosetup-$v.exe
+          curl -fsSL -o "$RUNNER_TEMP/$exe" \
+            "https://github.com/jrsoftware/issrc/releases/download/is-${v//./_}/$exe"
+          echo "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732  $RUNNER_TEMP/$exe" \
+            | sha256sum -c -
+          MSYS2_ARG_CONV_EXCL='*' "$RUNNER_TEMP/$exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART \
+            "/DIR=$(cygpath -w "$RUNNER_TEMP/innosetup")"
+          test -f "$RUNNER_TEMP/innosetup/ISCC.exe"
+          echo "ISCC=$(cygpath -w "$RUNNER_TEMP/innosetup/ISCC.exe")" >> "$GITHUB_ENV"
+
+      - name: Build the installer
+        run: ./dist/windows/installer.sh
+
+      # The installer the way a user meets it: silent per-user install → Start
+      # menu entry + uninstall registration → the INSTALLED qeth.exe runs →
+      # uninstall removes the whole folder.
+      - name: Install, run, uninstall
+        run: |
+          set -euo pipefail
+          export MSYS2_ARG_CONV_EXCL='*'
+          setup=$(ls dist/windows/out/qeth-*-setup.exe)
+          appid=$(sed -n 's/^AppId={{\(.*\)}$/\1/p' dist/windows/qeth.iss)
+          ls -lh "$setup"
+          "$setup" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER
+          app="$(cygpath -u "$LOCALAPPDATA")/Programs/qeth"
+          test -f "$app/qeth.exe" \
+            || { echo "::error::nothing installed in %LOCALAPPDATA%\\Programs\\qeth"; exit 1; }
+          test -f "$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/qeth.lnk" \
+            || { echo "::error::no Start-menu entry"; exit 1; }
+          reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{$appid}_is1" /v DisplayVersion
+          ./dist/windows/smoke.sh "$app/qeth.exe"
+          # The uninstaller re-launches itself from %TEMP% and returns at once;
+          # that copy removes unins000.exe and the folder last.
+          "$app/unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          for i in $(seq 60); do [ -e "$app" ] || break; sleep 1; done
+          [ ! -e "$app" ] || { echo "::error::uninstalling left: $(ls "$app")"; exit 1; }
+          echo "installed, ran and uninstalled cleanly"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeth-windows-setup
+          path: dist/windows/out/*-setup.exe
           retention-days: 14
           if-no-files-found: error

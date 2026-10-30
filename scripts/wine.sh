@@ -9,7 +9,9 @@
 #   scripts/wine.sh qeth [ARGS]    launch the app
 #   scripts/wine.sh python [ARGS]  the venv's python.exe
 #   scripts/wine.sh build [ARGS]   PyInstaller → dist/windows/out/qeth-windows
-#   scripts/wine.sh smoke          run that build the way CI does, isolated
+#   scripts/wine.sh installer      Inno Setup → dist/windows/out/qeth-<v>-setup.exe
+#   scripts/wine.sh smoke          run the build the way CI does, isolated
+#   scripts/wine.sh smoke installer   …or install, run, uninstall the setup.exe
 #
 # Everything lives in its own prefix (QETH_WINEPREFIX, default ~/.wine-qeth),
 # so Path.home() — and thus ~/.qeth — is C:\users\<you> inside it, never the
@@ -36,6 +38,10 @@ smoke_prefix=$prefix-smoke   # no Python in it: a clean Windows box
 pyver=${QETH_WINE_PYTHON:-3.14}
 venv='C:\qeth-venv'
 uv_exe='C:\tools\uv\uv.exe'
+# The same Inno Setup release windows.yml pins.
+innosetup_version=6.7.3
+innosetup_sha256=9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
+iscc='C:\tools\innosetup\ISCC.exe'
 
 # Gentoo's eselect-wine puts wine on PATH via env.d, which a shell started
 # before the install doesn't have yet.
@@ -79,6 +85,24 @@ fetch_uv() (  # subshell, so the EXIT trap cleans up the download
     python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
         "$tmp/$zip" "$prefix/drive_c/tools/uv"
 )
+
+fetch_innosetup() (  # subshell, for the EXIT trap
+    local tmp exe=innosetup-$innosetup_version.exe
+    local marker=$prefix/drive_c/tools/innosetup/.qeth-version
+    [ "$(cat "$marker" 2> /dev/null)" = "$innosetup_version" ] && exit 0
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    echo "== Inno Setup $innosetup_version"
+    curl -fsSL -o "$tmp/$exe" \
+        "https://github.com/jrsoftware/issrc/releases/download/is-${innosetup_version//./_}/$exe"
+    echo "$innosetup_sha256  $tmp/$exe" | sha256sum -c --quiet
+    wenv wine "$tmp/$exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART '/DIR=C:\tools\innosetup'
+    echo "$innosetup_version" > "$marker"
+)
+
+qeth_version() {
+    sed -n 's/^__version__ = "\(.*\)"/\1/p' qeth/__init__.py
+}
 
 sync() {
     echo "== uv sync → $venv (Python $pyver)"
@@ -130,28 +154,19 @@ setup() {
     echo "== Python $pyver (Windows)"
     wenv wine "$uv_exe" python install "$pyver"
     sync
+    fetch_innosetup
     wenv "$wine_dir/wineserver" -w
 }
 
-# Run the built bundle the way CI does — the RPC server answers, the main
-# window comes up, the process stays — on the smoke prefix, inside a private
-# network namespace: its own loopback, so port 1248 is free even beside a
-# running qeth (and nothing reaches the outside), with a hidden Xvfb display.
-# Runs as the namespace's root (`unshare -r`), which only maps to you.
-smoke() {
-    local exe=dist/windows/out/qeth-windows/qeth.exe
-    [ -f "$exe" ] || { echo "no $exe — run: scripts/wine.sh build" >&2; exit 1; }
-    [ -e /tmp/.X11-unix/X99 ] && { echo "display :99 is taken" >&2; exit 1; }
-    prefix=$smoke_prefix
-    ip link set lo up
-    Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp > /dev/null 2>&1 &
-    local xvfb=$! i reply rpc= windows alive=
-    for i in $(seq 50); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
-    export DISPLAY=:99
-    init_prefix > /dev/null
-
-    echo "== $exe on a clean prefix, isolated"
-    wenv wine "$exe" > "${QETH_SMOKE_LOG:-/dev/null}" 2>&1 &
+# Launch $1 (a qeth.exe) and require what CI does: the RPC server answers, the
+# main window comes up, the process is still there 15 s on. Then stop it.
+run_exe() {
+    local exe=$1 i reply rpc= windows alive= ok=1 pid
+    # Wine keeps the PID: $! IS the Windows process. Track exactly it — never
+    # match by name (`pkill -f qeth.exe` would hit any process whose command
+    # line merely mentions it).
+    wenv wine "$exe" >> "${QETH_SMOKE_LOG:-/dev/null}" 2>&1 &
+    pid=$!
     for i in $(seq 1 60); do
         if reply=$(curl -fsS --max-time 2 -H 'Content-Type: application/json' \
              --data '{"jsonrpc":"2.0","id":1,"method":"web3_clientVersion","params":[]}' \
@@ -162,17 +177,73 @@ smoke() {
     done
     sleep 15
     windows=$(xwininfo -root -tree 2> /dev/null | grep -oE '"[^"]+"' | sort -u || true)
-    pgrep -f 'qeth-windows.qeth\.exe' > /dev/null && alive=1
-    wenv "$wine_dir/wineserver" -k || true
-    kill "$xvfb"
-
-    local ok=1
+    kill -0 "$pid" 2> /dev/null && alive=1
+    # Through Wine's own taskkill: it terminates via the wineserver, which
+    # releases the process's open files before returning — after a bare Unix
+    # kill the uninstaller can still find the bundle in use. Scoped to this
+    # prefix's Wine session, not the host.
+    wenv wine taskkill /F /IM qeth.exe > /dev/null 2>&1 || true
+    for i in $(seq 20); do kill -0 "$pid" 2> /dev/null || break; sleep 0.5; done
     [ -n "$rpc" ] || { echo "FAIL: no answer on 127.0.0.1:1248"; ok=; }
     [ -n "$alive" ] || { echo "FAIL: qeth.exe exited"; ok=; }
     [[ $windows == *'"qeth — Ethereum wallet"'* ]] \
         || { echo "FAIL: no main window (windows: ${windows//$'\n'/ })"; ok=; }
     [[ $windows == *'Unhandled exception'* ]] && { echo "FAIL: an unhandled exception box"; ok=; }
-    [ -n "$ok" ] && echo "OK: RPC up, main window shown, still running"
+    [ -n "$ok" ]
+}
+
+# Run the build the way CI does, on the smoke prefix (no Python: a clean
+# Windows box), inside a private network namespace — its own loopback, so
+# port 1248 is free even beside a running qeth, and nothing reaches the
+# outside — with a hidden Xvfb display. Runs as the namespace's root
+# (`unshare -r`), which only maps to you. `installer` mode installs the
+# setup.exe silently, checks the Start-menu entry and uninstall registration,
+# runs the INSTALLED qeth.exe, then uninstalls and checks it's gone.
+smoke() {
+    local mode=${1:-bundle} exe=dist/windows/out/qeth-windows/qeth.exe setup_exe= i ok=1
+    if [ "$mode" = installer ]; then
+        setup_exe=$(ls dist/windows/out/qeth-*-setup.exe 2> /dev/null | tail -1)
+        [ -n "$setup_exe" ] || { echo "no setup.exe — run: scripts/wine.sh installer" >&2; exit 1; }
+        exe=
+    else
+        [ -f "$exe" ] || { echo "no $exe — run: scripts/wine.sh build" >&2; exit 1; }
+    fi
+    [ -e /tmp/.X11-unix/X99 ] && { echo "display :99 is taken" >&2; exit 1; }
+    prefix=$smoke_prefix
+    ip link set lo up
+    Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp > /dev/null 2>&1 &
+    local xvfb=$!
+    for i in $(seq 50); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+    export DISPLAY=:99
+    init_prefix > /dev/null
+
+    if [ -n "$setup_exe" ]; then
+        local appid
+        appid=$(sed -n 's/^AppId={{\(.*\)}$/\1/p' dist/windows/qeth.iss)
+        echo "== $setup_exe, silently, on a clean prefix, isolated"
+        wenv wine "$setup_exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER
+        exe=$(ls "$prefix"/drive_c/users/*/AppData/Local/Programs/qeth/qeth.exe 2> /dev/null | head -1)
+        [ -n "$exe" ] || { echo "FAIL: nothing installed in %LOCALAPPDATA%\\Programs\\qeth"; ok=; }
+        ls "$prefix"/drive_c/users/*/AppData/Roaming/Microsoft/Windows/'Start Menu'/Programs/qeth.lnk \
+            > /dev/null 2>&1 || { echo "FAIL: no Start-menu entry"; ok=; }
+        wenv wine reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{$appid}_is1" \
+            /v DisplayVersion > /dev/null 2>&1 || { echo "FAIL: not registered for uninstall"; ok=; }
+    else
+        echo "== $exe on a clean prefix, isolated"
+    fi
+    [ -n "$exe" ] && { run_exe "$exe" || ok=; }
+    if [ -n "$setup_exe" ] && [ -n "$exe" ]; then
+        # The uninstaller re-launches itself from %TEMP% and returns at once;
+        # that copy removes unins000.exe and the folder last — wait for it.
+        local app_dir
+        app_dir=$(dirname "$exe")
+        wenv wine "$app_dir/unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+        for i in $(seq 60); do [ -e "$app_dir" ] || break; sleep 1; done
+        [ ! -e "$app_dir" ] || { echo "FAIL: uninstalling left $(ls "$app_dir" | tr '\n' ' ')behind"; ok=; }
+    fi
+    wenv "$wine_dir/wineserver" -k || true
+    kill "$xvfb"
+    [ -n "$ok" ] && echo "OK: $mode — RPC up, main window shown, still running${setup_exe:+; installed + uninstalled cleanly}"
     [ -n "$ok" ]
 }
 
@@ -194,7 +265,10 @@ case "$cmd" in
                 pyinstaller --noconfirm --clean \
                 --distpath=dist/windows/out --workpath=dist/windows/out/build \
                 "$@" dist/windows/qeth.spec ;;
-    smoke)  exec unshare -rn "$self" _smoke ;;   # → smoke(), in its namespace
-    _smoke) smoke ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    installer)
+        [ -d dist/windows/out/qeth-windows ] || { echo "run: scripts/wine.sh build" >&2; exit 1; }
+        wenv wine "$iscc" /Qp "/DAppVersion=$(qeth_version)" 'dist\windows\qeth.iss' ;;
+    smoke)  exec unshare -rn "$self" _smoke "$@" ;;   # → smoke(), in its namespace
+    _smoke) smoke "$@" ;;
+    *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

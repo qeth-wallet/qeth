@@ -34,14 +34,26 @@ def test_diagnostic_payload_and_result_records(qtbot, tmp_path, fps, policy):
         compare_framing=policy == "compare",
     )
     window = harness["FountainWindow"](ur_type, message, args)
+    first_frames = []
+
+    def watch_first_frame():
+        # Capture the first frame AS it's displayed: by the time waitUntil
+        # notices _started, a slow machine may have shown a second one.
+        # FountainWindow._displayed is connected first, so it has counted it.
+        def on_displayed(frame):
+            if window._frames == 1:
+                first_frames.append(frame.content)
+
+        window._animation.displayed.connect(on_displayed)
+
+    watch_first_frame()   # before the event loop runs: nothing displayed yet
     qtbot.addWidget(window)
     window.show()
-    first_frames = []
     for attempt, outcome in enumerate(["complete", "failed", "timeout", "complete"]):
         if attempt:
             window._restart()
+            watch_first_frame()
         qtbot.waitUntil(lambda: window._started is not None)
-        first_frames.append(window._animation.shown.content)
         assert window._animation.shown.image.width() == (
             89 if window._grid_policy == "fixed" else 85
         )

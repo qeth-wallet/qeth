@@ -19,7 +19,7 @@ traps it respects.
 - The 60 s balance sweep **slows to 5 min** when ws is live (still covers
   native + is the floor), rather than being removed.
 - `Chain.ws_url` carries validated explicit endpoints (§8); the picker ws
-  field is deferred (derivation/inheritance covers real cases).
+  field is deferred (explicit defaults and same-origin derivation cover real cases).
 - **Still future work:** native-via-newHeads (§3a) and a unified async
   query path — the probe stays on the ws/raw path for now.
 

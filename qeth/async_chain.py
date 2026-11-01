@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 from . import USER_AGENT
 from .chain import _rpc_urls  # primary + ordered fallbacks (shared resolution)
-from .chains import Chain, DEFAULT_CHAINS
+from .chains import Chain
 
 log = logging.getLogger("qeth.async_chain")
 
@@ -145,21 +145,14 @@ def make_async_web3(
 def ws_urls_for(chain: Chain) -> list[str]:
     """The chain's ws endpoints to try, in order:
 
-      1. the chain's explicit ``ws_url`` — or, for a custom-RPC override of a
-         known chain (one with no ``ws_url`` of its own), the matching
-         ``DEFAULT_CHAINS`` entry's, so overriding Ethereum's http RPC still
-         gets ws;
-      2. else derived from the http primary+fallbacks (``https://host`` →
-         ``wss://host``), which holds when the host serves ws on the same
-         origin (DRPC, publicnode).
+      1. the chain's explicit ``ws_url``;
+      2. else derived from its http primary+fallbacks (``https://host`` →
+         ``wss://host``). A custom RPC override must stay on that origin,
+         rather than restoring the shipped public endpoints cleared by Store.
 
     A chain with no resolvable / working ws simply fails to connect and the
     watcher falls back to http polling (the legacy timers)."""
     explicit = tuple(chain.ws_url)
-    if not explicit:
-        default = next((c for c in DEFAULT_CHAINS
-                        if c.chain_id == chain.chain_id), None)
-        explicit = tuple(default.ws_url) if default else ()
     if explicit:
         candidates: list[str] = list(explicit)
     else:

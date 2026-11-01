@@ -569,17 +569,16 @@ class TestRpcFailover:
     """EthClient rotates to a fallback RPC when the primary errors at the
     transport level (e.g. DRPC's free Gnosis endpoint 400s on eth_call)."""
 
-    def test_rpc_urls_dedup_and_inherit_defaults(self):
+    def test_rpc_urls_dedup_and_respect_custom_origin(self):
         from qeth.chains import Chain
         from qeth.chain import _rpc_urls
         # explicit fallbacks, deduped against the primary
         c = Chain("X", 999, "http://a", fallback_rpcs=("http://b", "http://a"))
         assert _rpc_urls(c) == ["http://a", "http://b"]
-        # a custom override with no fallbacks inherits the matching default
+        # A custom override with no fallbacks stays on that origin.
         custom = Chain("MyGnosis", 100, "http://custom")
         urls = _rpc_urls(custom)
-        assert urls[0] == "http://custom"
-        assert "https://rpc.gnosischain.com" in urls   # from default Gnosis
+        assert urls == ["http://custom"]
 
     def test_failover_rotates_past_transport_error(self, monkeypatch):
         import qeth.chain as ch
@@ -710,3 +709,22 @@ class TestRpcFailover:
             client._broadcast_w3.provider.make_request(
                 "eth_sendRawTransaction", ["0xab"])
         assert tried == [PRIMARY]
+
+
+def test_persisted_private_rpc_failure_does_not_contact_public_fallback(monkeypatch):
+    import qeth.chain as ch
+    from qeth.store import _merge_chain
+
+    ch._ensure_heavy_imports()
+    seen = []
+
+    def unavailable(self, method, params):
+        seen.append(self.endpoint_uri)
+        raise ch.requests.exceptions.ConnectionError("private RPC unavailable")
+
+    monkeypatch.setattr(ch.HTTPProvider, "make_request", unavailable)
+    chain = _merge_chain({"chain_id": 1, "rpc_url": "https://private.example/rpc"})
+    client = ch.EthClient(chain)
+    with pytest.raises(ch.requests.exceptions.ConnectionError):
+        client.rpc("eth_blockNumber", [])
+    assert seen and set(seen) == {"https://private.example/rpc"}

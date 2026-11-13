@@ -102,8 +102,13 @@ the Windows run type-checks the win32 branches.
 in one shot. ty is **not** a gate (it's 0.0.x); run it for extra signal.
 It doesn't follow `include-system-site-packages` into the system PySide6, so
 the script injects that path (derived from PySide6's location) — without it
-ty floods ~100 phantom unresolved-import errors. The package is ty-clean
-when checked that way. mypy, ruff, and ty are all **dev-only** deps
+ty floods ~100 phantom unresolved-import errors. Checked that way the
+package is **not** ty-clean: there's a standing baseline of ~25 diagnostics
+(ty 0.0.104, 2026-11) — mostly ty not narrowing `object`-typed values
+(multicall results' `.success`/`.value`, `object` callables), plus a few
+one-offs and findings from third-party stubs (PySide6 `QtCore.pyi`,
+zxing-cpp). mypy accepts all of it. Treat a jump above that baseline as the
+signal. mypy, ruff, and ty are all **dev-only** deps
 (`[dependency-groups] dev`), so a runtime/`--no-dev` install pulls none of
 them. Optional features that need a heavy dep go behind an extra mirrored
 into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.

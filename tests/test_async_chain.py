@@ -35,13 +35,11 @@ def test_ws_urls_for_uses_explicit_ws_url():
         "wss://eth.drpc.org", "wss://ethereum-rpc.publicnode.com"]
 
 
-def test_ws_urls_for_inherits_default_for_custom_rpc():
+def test_ws_urls_for_derives_from_custom_rpc():
     from qeth.chains import Chain
-    # a custom http RPC override of Ethereum (no ws_url of its own) still gets
-    # the default chain's validated ws endpoints
+    # A custom HTTP RPC stays on that origin for live updates too.
     custom = Chain("Eth-custom", 1, "https://my-eth-node.example")
-    assert ac.ws_urls_for(custom) == [
-        "wss://eth.drpc.org", "wss://ethereum-rpc.publicnode.com"]
+    assert ac.ws_urls_for(custom) == ["wss://my-eth-node.example"]
 
 
 def test_ws_urls_for_derives_for_unknown_chain():
@@ -96,3 +94,16 @@ def test_http_failover_reraises_when_all_dead(monkeypatch):
         assert False, "expected the transport error to propagate"
     except ac.aiohttp.ClientError:                  # type: ignore[attr-defined]
         pass
+
+
+def test_persisted_private_rpc_does_not_restore_public_ws():
+    from qeth.store import _merge_chain
+
+    for rpc_url, expected in (
+        ("https://private.example/rpc", "wss://private.example/rpc"),
+        ("http://localhost:18544/rpc", "ws://localhost:18544/rpc"),
+    ):
+        chain = _merge_chain({"chain_id": 1, "rpc_url": rpc_url})
+        assert chain.fallback_rpcs == ()
+        assert chain.ws_url == ()
+        assert ac.ws_urls_for(chain) == [expected]

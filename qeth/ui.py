@@ -69,8 +69,8 @@ from .chains import EVM, FAMILIES, TRON
 def _apply_gear_icon(btn, tooltip: str) -> None:
     """Give a QToolButton a gear/settings look for a config-style control. Try
     the freedesktop gear names (which one renders varies across KDE / GNOME /
-    Adwaita / Breeze), and fall back to the U+2699 glyph rather than a generic
-    placeholder if none resolves."""
+    Adwaita / Breeze). Keep a text label so it remains clear without an icon."""
+    btn.setText(tooltip)
     icon = QIcon()
     for name in ("configure", "preferences-system", "applications-system",
                  "emblem-system", "system-run", "preferences-other"):
@@ -80,11 +80,6 @@ def _apply_gear_icon(btn, tooltip: str) -> None:
             break
     if not icon.isNull():
         btn.setIcon(icon)
-    else:
-        btn.setText("⚙")
-        f = btn.font()
-        f.setPointSizeF(f.pointSizeF() * 1.15)
-        btn.setFont(f)
     btn.setToolTip(tooltip)
     btn.setAutoRaise(True)
 
@@ -383,40 +378,26 @@ class MainWindow(QMainWindow):
         approved = box.exec() == QMessageBox.StandardButton.Yes
         self.signer_bridge.resolve_chain(fut, approved)
 
-    def _build_chain_rpc_button(self):
-        """Little ⋯ button next to the chain combo: opens the
-        chain-RPC editor so the user can swap a rate-limited
-        endpoint for any chain without re-adding it. The dialog
-        offers manual paste OR a pick-from-chainlist.org list."""
+    def _build_settings_button(self):
+        """One labeled entry point for chain and application preferences."""
         from PySide6.QtWidgets import QToolButton
         btn = QToolButton()
-        _apply_gear_icon(btn, "Edit chain RPC")
-        btn.clicked.connect(self._on_edit_chain_rpc)
+        _apply_gear_icon(btn, "Settings")
+        btn.setText("&Settings")
+        btn.setAccessibleName("Settings")
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        btn.clicked.connect(self.show_settings)
         return btn
 
-    def _build_plugins_gear(self):
-        """The config gear on the right slot's tab row: opens the plugin on/off
-        menu (the same one the tray offers). Restart-to-apply — toggling just
-        writes the store and nudges the user to relaunch."""
-        from PySide6.QtWidgets import QToolButton
-
-        from .plugin_toggle import build_plugin_toggle_menu
-        btn = QToolButton()
-        _apply_gear_icon(btn, "Enable or disable plugins")
-        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        btn.setMenu(build_plugin_toggle_menu(
-            self.store, btn,
-            on_toggled=lambda pid, on: self.status_message(
-                "Restart qeth to apply plugin changes", 6000),
-        ))
-        return btn
-
-    def _on_edit_chain_rpc(self) -> None:
+    def show_settings(self) -> None:
         from .chain_rpc_dialog import ChainRpcDialog
         chain = self.store.current_chain()
         dlg = ChainRpcDialog(
             chain, parent=self,
             etherscan_api_key=self.store.etherscan_api_key or "",
+            chains=self.store.chains,
+            disabled_plugins=self.store.disabled_plugins,
+            notifications_enabled=self.store.notifications_enabled,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -425,11 +406,14 @@ class MainWindow(QMainWindow):
         # changed independently. A "refresh against new endpoint"
         # broadcast covers either change — both affect what the
         # right-slot plugins see on their next discovery.
-        new_url = dlg.rpc_url
-        url_changed = bool(
-            new_url and new_url != chain.rpc_url
-            and self.store.set_chain_rpc_url(chain.chain_id, new_url)
-        )
+        changed_chains = []
+        urls = dlg.rpc_urls
+        for c in self.store.chains:
+            new_url = urls.get(c.chain_id, "")
+            if (new_url and new_url != c.rpc_url
+                    and self.store.set_chain_rpc_url(c.chain_id, new_url)):
+                changed_chains.append(c)
+        url_changed = bool(changed_chains)
         key_changed = self.store.set_etherscan_api_key(dlg.etherscan_api_key)
         if url_changed:
             # Helios bakes the execution-rpc in at spawn, so a running sidecar
@@ -437,9 +421,12 @@ class MainWindow(QMainWindow):
             # the changed RPC, retires the old process and spawns a fresh one on
             # the new endpoint (no-op if the chain isn't Helios-supported).
             from .helios import prewarm as _helios_prewarm
-            _helios_prewarm(self.store.current_chain())
+            if chain in changed_chains:
+                _helios_prewarm(self.store.current_chain())
             self.status_message(
-                f"RPC for {chain.name} updated to {new_url}", 4000,
+                (f"RPC for {changed_chains[0].name} updated to {changed_chains[0].rpc_url}"
+                 if len(changed_chains) == 1
+                 else f"RPC URLs updated for {len(changed_chains)} chains"), 4000,
             )
             # A chain entry changed — chainsChanged carries the whole list,
             # so subscribers pick up the new endpoint's connected state.
@@ -454,6 +441,16 @@ class MainWindow(QMainWindow):
             )
         if url_changed or key_changed:
             self.right_slot.broadcast_chain_changed()
+        if dlg.notifications_enabled != self.store.notifications_enabled:
+            self.store.notifications_enabled = dlg.notifications_enabled
+            self.store.save()
+        plugins_changed = False
+        for pid, enabled in dlg.plugin_enabled.items():
+            if enabled != (pid not in self.store.disabled_plugins):
+                self.store.set_plugin_enabled(pid, enabled)
+                plugins_changed = True
+        if plugins_changed:
+            self.status_message("Restart qeth to apply plugin changes", 6000)
 
     def _build_central(self) -> None:
         self._splitter_outer = outer = QSplitter(Qt.Orientation.Horizontal)
@@ -467,15 +464,12 @@ class MainWindow(QMainWindow):
         # Mount each enabled plugin into its slot, in manifest order.
         for m in sorted(self._manifests.values(), key=lambda m: m.order):
             slots[m.slot].add_plugin(self.plugins[m.id], self)
-        # Config gear on the right slot's tab row (right-aligned) — the
-        # in-window twin of the tray "Plugins" toggle.
-        self.right_slot.set_corner_widget(self._build_plugins_gear())
+        self.settings_btn = self._build_settings_button()
+        self.right_slot.set_corner_widget(self.settings_btn)
         outer.addWidget(self.left_slot)
 
         self.chain_combo = self._build_chain_combo()
         self.right_slot.add_shared_widget(self.chain_combo)
-        self.chain_rpc_btn = self._build_chain_rpc_button()
-        self.right_slot.add_shared_widget(self.chain_rpc_btn)
         # The chain selector is meaningless on the ENS tab — ENS lives only on
         # Ethereum mainnet, so the plugin pins to chain 1 regardless of the
         # selected network. Hide it there (showing it just invites a switch
@@ -1673,13 +1667,12 @@ class MainWindow(QMainWindow):
         return self.wallets_plugin.act_remove
 
     def _on_right_plugin_changed(self, plugin) -> None:
-        """Hide the shared chain controls on tabs where a network choice is
+        """Hide the chain selector on tabs where a network choice is
         meaningless (manifest ``hides_chain_selector`` — the ENS tab, which is
         mainnet-only)."""
         m = self._manifest_for(plugin)
         show = not (m is not None and m.hides_chain_selector)
         self.chain_combo.setVisible(show)
-        self.chain_rpc_btn.setVisible(show)
 
     def _manifest_for(self, plugin) -> "PluginManifest | None":
         """The manifest of a mounted plugin instance, or None."""

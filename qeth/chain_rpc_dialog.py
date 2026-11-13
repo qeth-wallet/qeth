@@ -1,7 +1,6 @@
-"""Dialog for editing the RPC URL of an existing chain.
+"""Settings dialog with per-chain RPC URLs and global preferences.
 
-Opens from the small button next to the chain selector in the
-toolbar. Two ways to set the URL:
+Opens from Settings in the window or tray. Two ways to set the URL:
 
 - Manual paste / edit in the URL field.
 - Click an entry from the chainlist.org-sourced list below the
@@ -28,12 +27,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QCoreApplication, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialogButtonBox, QFormLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialogButtonBox, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QVBoxLayout,
 )
 
 from .dialog import Dialog, item_spacing
+from .plugin_toggle import build_plugin_checkboxes
 
 
 log = logging.getLogger("qeth.chain_rpc_dialog")
@@ -135,10 +135,9 @@ class _UrlProbeWorker(QThread):
 
 
 class ChainRpcDialog(Dialog):
-    """Edit the JSON-RPC URL for one chain, plus the (global)
-    Etherscan v2 API key.
+    """Edit RPC URLs, the global Etherscan key, plugins and notifications.
 
-    Host (MainWindow) reads ``self.rpc_url`` and
+    Host (MainWindow) reads ``self.rpc_urls`` and
     ``self.etherscan_api_key`` after ``exec() == Accepted`` and
     persists them via ``Store.set_chain_rpc_url`` /
     ``Store.set_etherscan_api_key`` respectively. The Etherscan
@@ -146,9 +145,12 @@ class ChainRpcDialog(Dialog):
     supports), but the dialog is reachable from any chain so it
     can be set / changed from wherever the user happens to be."""
 
-    def __init__(self, chain, parent=None, etherscan_api_key: str = ""):
+    def __init__(self, chain, parent=None, etherscan_api_key: str = "", *, chains=None,
+                 disabled_plugins=(), notifications_enabled: bool = True):
         super().__init__(parent)
         self._chain = chain
+        self._chains = list(chains) if chains is not None else [chain]
+        self._rpc_urls = {c.chain_id: c.rpc_url for c in self._chains}
         self._initial_etherscan_key = etherscan_api_key or ""
         # url -> (latency_ms or None, ok, simv1); used to sort the
         # picker once all probes have come back. simv1 is True/False/None
@@ -156,8 +158,8 @@ class ChainRpcDialog(Dialog):
         self._results: dict[str, tuple[float | None, bool, object]] = {}
         self._total_to_probe = 0
         self._done_probing = 0
-        self.setWindowTitle(f"RPC for {chain.name} ({chain.chain_id})")
-        self.resize(640, 540)
+        self.setWindowTitle("Settings")
+        self.resize(640, 600)
 
         outer = QVBoxLayout(self)
         # Margins + paragraph spacing come from the Dialog base (font-derived).
@@ -168,6 +170,11 @@ class ChainRpcDialog(Dialog):
         url_para.setSpacing(item_spacing(self))
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.chain_combo = QComboBox()
+        for c in self._chains:
+            self.chain_combo.addItem(f"{c.name} ({c.chain_id})", c.chain_id)
+        self.chain_combo.setCurrentIndex(self.chain_combo.findData(chain.chain_id))
+        form.addRow("&Chain:", self.chain_combo)
 
         mono = QFont("monospace")
         self.url_edit = QLineEdit(chain.rpc_url)
@@ -230,6 +237,20 @@ class ChainRpcDialog(Dialog):
         )
         outer.addLayout(key_form)
 
+        preferences = QVBoxLayout()
+        preferences.setSpacing(item_spacing(self))
+        self.notifications_check = QCheckBox("Transaction notifications")
+        self.notifications_check.setChecked(notifications_enabled)
+        preferences.addWidget(self.notifications_check)
+        preferences.addWidget(QLabel("Plugins (restart qeth to apply):"))
+        plugin_row = QHBoxLayout()
+        self.plugin_checks = build_plugin_checkboxes(disabled_plugins, self)
+        for check in self.plugin_checks.values():
+            plugin_row.addWidget(check)
+        plugin_row.addStretch()
+        preferences.addLayout(plugin_row)
+        outer.addLayout(preferences)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
         )
@@ -245,16 +266,7 @@ class ChainRpcDialog(Dialog):
         # (b) detach. (b) is friendlier — the dialog closes
         # instantly and the loader runs to completion in the
         # background, then cleans itself up via ``deleteLater``.
-        from PySide6.QtCore import QCoreApplication
-        self._loader = _ChainlistLoader(
-            chain.chain_id, parent=QCoreApplication.instance(),
-        )
-        self._loader.loaded.connect(self._on_chainlist_loaded)
-        self._loader.probed.connect(self._on_probed)
-        self._loader.probing_done.connect(self._on_probing_done)
-        self._loader.failed.connect(self._on_chainlist_failed)
-        self._loader.finished.connect(self._loader.deleteLater)
-        self._loader.start()
+        self._start_chainlist_loader()
 
         # Live URL reachability. Debounce so we probe once typing settles, not
         # per keystroke; workers are tracked so a superseding probe (or the
@@ -265,18 +277,40 @@ class ChainRpcDialog(Dialog):
         self._url_timer.setInterval(600)
         self._url_timer.timeout.connect(self._kick_url_probe)
         self.url_edit.textChanged.connect(self._on_url_edited)
+        self.chain_combo.currentIndexChanged.connect(self._on_chain_changed)
         # Probe whatever's pre-filled (the chain's current RPC) on open, so the
         # user sees straight away whether their existing endpoint still works.
         self._kick_url_probe()
 
-    def done(self, result):  # noqa: N802 — Qt method name
-        # Both Accept and Reject (and any other ``done(...)`` path
-        # like the WM close button) flow through here. Disconnect
-        # before the dialog dies so signals from the still-running
-        # loader don't fire into a half-destroyed receiver and
-        # SEGFAULT. The loader is parented to the QApplication
-        # (see __init__), so cutting it loose is safe — it'll
-        # finish on its own and deleteLater itself.
+    def _start_chainlist_loader(self) -> None:
+        self._loader = _ChainlistLoader(
+            self._chain.chain_id, parent=QCoreApplication.instance(),
+        )
+        self._loader.loaded.connect(self._on_chainlist_loaded)
+        self._loader.probed.connect(self._on_probed)
+        self._loader.probing_done.connect(self._on_probing_done)
+        self._loader.failed.connect(self._on_chainlist_failed)
+        self._loader.finished.connect(self._loader.deleteLater)
+        self._loader.start()
+
+    def _on_chain_changed(self, index: int) -> None:
+        self._rpc_urls[self._chain.chain_id] = self.rpc_url
+        self._disconnect_loader()
+        self._chain = self._chains[index]
+        self._results.clear()
+        self._total_to_probe = self._done_probing = 0
+        self.picker.clear()
+        self.status_lbl.setText("Loading from chainlist.org…")
+        self.url_edit.setText(self._rpc_urls[self._chain.chain_id])
+        self._url_timer.stop()
+        self._set_url_status("", "none")
+        self._start_chainlist_loader()
+        self._kick_url_probe()
+
+    def _disconnect_loader(self) -> None:
+        # Disconnect on chain switches and close. The app owns the loader,
+        # so it can finish safely without updating a different chain's picker
+        # or firing into a half-destroyed dialog.
         if self._loader is not None:
             try:
                 self._loader.loaded.disconnect()
@@ -287,6 +321,10 @@ class ChainRpcDialog(Dialog):
                 # Already disconnected, or the QThread destructor
                 # ran ahead of us — nothing useful to do.
                 pass
+
+    def done(self, result):  # noqa: N802 — Qt method name
+        self._url_timer.stop()
+        self._disconnect_loader()
         # Same reasoning for the URL probe workers (parented to the app, so they
         # outlive the dialog): cut their signal so a late verdict can't fire
         # into a half-destroyed dialog.
@@ -302,12 +340,26 @@ class ChainRpcDialog(Dialog):
         return self.url_edit.text().strip()
 
     @property
+    def rpc_urls(self) -> dict[int, str]:
+        return {**self._rpc_urls, self._chain.chain_id: self.rpc_url}
+
+    @property
     def etherscan_api_key(self) -> str:
         return self.etherscan_edit.text().strip()
+
+    @property
+    def plugin_enabled(self) -> dict[str, bool]:
+        return {pid: check.isChecked() for pid, check in self.plugin_checks.items()}
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self.notifications_check.isChecked()
 
     # --- loader callbacks -------------------------------------
 
     def _on_chainlist_loaded(self, entry) -> None:
+        if self.sender() is not self._loader:
+            return
         if entry is None:
             self.status_lbl.setText(
                 f"No chainlist entry for chain "
@@ -347,6 +399,8 @@ class ChainRpcDialog(Dialog):
     def _on_probed(
         self, url: str, ok: bool, latency_ms, simv1=None,
     ) -> None:
+        if self.sender() is not self._loader:
+            return
         self._results[url] = (
             float(latency_ms) if latency_ms is not None else None, ok, simv1,
         )
@@ -375,6 +429,8 @@ class ChainRpcDialog(Dialog):
             )
 
     def _on_probing_done(self) -> None:
+        if self.sender() is not self._loader:
+            return
         # Drop failed rows, then sort surviving rows by latency
         # ascending. We rebuild item text via the same formatter
         # so the visible row stays consistent.
@@ -410,6 +466,8 @@ class ChainRpcDialog(Dialog):
             )
 
     def _on_chainlist_failed(self, msg: str) -> None:
+        if self.sender() is not self._loader:
+            return
         self.status_lbl.setText(f"chainlist fetch failed: {msg}")
 
     # --- picker behaviour -------------------------------------
@@ -455,6 +513,9 @@ class ChainRpcDialog(Dialog):
         worker.start()
 
     def _on_url_probed(self, url, ok, latency, reason) -> None:
+        worker = self.sender()
+        if isinstance(worker, _UrlProbeWorker) and worker._chain_id != self._chain.chain_id:
+            return
         # Ignore a verdict for a URL that's no longer in the field (the user
         # kept typing / picked another) — only the current URL's result shows.
         if url != self.url_edit.text().strip():

@@ -114,14 +114,13 @@ def test_host_plugin_accessor_resolves_all_and_unknown(mainwindow):
     assert mainwindow.plugin("nope") is None
 
 
-def test_right_slot_has_a_config_gear_corner(mainwindow):
-    # The plugin on/off gear is mounted right-aligned on the right slot's tab
-    # row, and carries the plugin-toggle menu.
+def test_right_slot_has_one_settings_button(mainwindow):
+    # Settings stays on the tab row; the chain selector needs no second gear.
     corner = mainwindow.right_slot._corner
     assert corner.count() == 1
-    gear = corner.itemAt(0).widget()
-    assert gear is not None and gear.menu() is not None
-    assert [a.text() for a in gear.menu().actions()] == ["Tokens", "ENS", "Approvals"]
+    assert corner.itemAt(0).widget() is mainwindow.settings_btn
+    assert mainwindow.settings_btn.text().replace("&", "") == "Settings"
+    assert mainwindow.right_slot._bottom.count() == 3  # actions, stretch, chain
 
 
 def test_switching_tab_swaps_visible_panel(qtbot, mainwindow):
@@ -196,9 +195,9 @@ def test_chain_controls_hidden_on_ens_tab(qtbot, mainwindow):
     mw = mainwindow
     assert not mw.chain_combo.isHidden()          # Tokens active initially
     mw.right_slot.set_active(mw.ens_plugin)
-    assert mw.chain_combo.isHidden() and mw.chain_rpc_btn.isHidden()
+    assert mw.chain_combo.isHidden() and not mw.settings_btn.isHidden()
     mw.right_slot.set_active(mw.tokens_plugin)
-    assert not mw.chain_combo.isHidden() and not mw.chain_rpc_btn.isHidden()
+    assert not mw.chain_combo.isHidden() and not mw.settings_btn.isHidden()
 
 
 # --- Bottom-of-right: single shared row -------------------------------------

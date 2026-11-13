@@ -6,7 +6,7 @@ name = "qeth"
 # was still 0.9.0, so the UA shipped as qeth/0.9.0).
 dynamic = ["version"]
 description = "Qt-based Ethereum wallet with Ledger support, Frame-compatible JSON-RPC"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 # PySide6 is intentionally NOT listed here. On Linux desktops with a configured
@@ -147,8 +147,12 @@ exclude-newer = "1 week"
 # Floors on transitive deps — uv resolution only, not package metadata, so the
 # pip-built packages and a distro's own certifi shim are untouched. They make
 # a resolve that would regress past a security fix FAIL instead of silently
-# downgrading (e.g. dropping the dated certifi entry below too early).
-#   certifi < 2026.10.19 trusts the compromised eMudhra intermediates (below).
+# downgrading (e.g. dropping a dated pull-forward entry below too early).
+#   certifi < 2026.10.19 trusts the compromised eMudhra intermediate CAs
+#   (emudhra.we-have-a-problem.com, 2026-10-17): older bundles ship "emSign ECC
+#   Root CA - G3", which cross-signs them, so requests (web3's HTTP provider) —
+#   and in the AppImage, whose AppRun points SSL_CERT_FILE at certifi's bundle,
+#   ALL of qeth's HTTPS — trusted them.
 constraint-dependencies = ["certifi>=2026.10.19"]
 
 [tool.uv.exclude-newer-package]
@@ -156,13 +160,6 @@ constraint-dependencies = ["certifi>=2026.10.19"]
 # its latest; its pin is otherwise unsatisfiable under the 1-week cutoff.
 # Exempt it — effectively no cutoff for ty.
 ty = "2099-01-01T00:00:00Z"
-# eMudhra intermediate-CA key compromise (emudhra.we-have-a-problem.com,
-# 2026-10-17): certifi <= 2026.7.22 ships "emSign ECC Root CA - G3", which
-# cross-signs the compromised TLS intermediates, so requests (web3's HTTP
-# provider) — and in the AppImage, whose AppRun points SSL_CERT_FILE at
-# certifi's bundle, ALL of qeth's HTTPS — trusted them. 2026.10.19 drops it.
-# Remove this entry after 2026-10-27, once the rolling cutoff has passed it.
-certifi = "2026-10-20T12:00:00Z"
 
 [tool.pytest.ini_options]
 # Network tests exercise real Blockscout / DefiLlama / GoPlus / Curve /
@@ -185,7 +182,7 @@ addopts = "-m 'not network and not browser'"
 qt_api = "pyside6"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 # Resolve the out-of-tree Falkon connector (its own `qeth_connector` package)
 # and the root-level `Falkon.pyi` stub for the browser-plugin API.
 mypy_path = ["extensions/falkon", "."]
@@ -318,7 +315,7 @@ ignore_missing_imports = true
 
 # numpy is never imported by qeth — it arrives transitively from a dependency's
 # stubs, courtesy of --system-site-packages. Its __init__.pyi uses PEP 695
-# `type` statements, which mypy rejects under our python_version = "3.10", and
+# `type` statements, which mypy rejects under our python_version = "3.11", and
 # a stub SYNTAX error aborts the whole run ("errors prevented further
 # checking") — so the gate reported one failure and silently checked NOTHING.
 # That's how a real arg-type error in rpc.py survived. Same treatment as
@@ -330,7 +327,7 @@ follow_imports_for_stubs = true
 ignore_missing_imports = true
 
 [tool.ruff]
-target-version = "py310"    # match [tool.mypy] python_version
+target-version = "py311"    # match [tool.mypy] python_version
 
 [tool.ruff.lint]
 # Start with pyflakes (E9 syntax + F: unused imports/vars, redefinitions,
@@ -346,7 +343,7 @@ target-version = "py310"    # match [tool.mypy] python_version
 # RUF012 (mutable class default → mark ClassVar) is on: it documents that a
 # class-level constant is shared, not a per-instance mutable-default footgun.
 #
-# UP (pyupgrade) keeps annotations on modern py310 syntax: X | None over
+# UP (pyupgrade) keeps annotations on modern py311 syntax: X | None over
 # Optional[X], list/tuple over List/Tuple, unquoted forward refs. UP031
 # (printf → format) is excluded — string formatting is a separate concern,
 # not annotation modernization, and left as-is for now.

@@ -22,7 +22,6 @@ Like ``chain.py``, the heavy web3/aiohttp imports are deferred to first use
 so mypy resolves them.
 """
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -96,7 +95,7 @@ def _http_provider(urls: list[str], *, timeout: float) -> "AsyncHTTPProvider":
                     log.debug("async rpc failover -> %s", urls[i])
                 state["i"] = i
                 return resp
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, TimeoutError) as exc:
                 last = exc
         assert last is not None  # len(members) >= 2, so the loop ran
         raise last

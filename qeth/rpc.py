@@ -347,7 +347,7 @@ class RpcServer:
                     ),
                     timeout=1.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         self._ws_clients.clear()
         self._ws_subscriptions.clear()
@@ -1351,7 +1351,7 @@ class RpcServer:
                 async with ctx as r:
                     status, body = r.status, await r.text()
             except (ClientConnectorError, ClientOSError, ServerDisconnectedError,
-                    asyncio.TimeoutError) as e:
+                    TimeoutError) as e:
                 log.info("tron_node %s via %s: %s", path, base, type(e).__name__)
                 last = "Tron node unreachable"
                 continue
@@ -1414,7 +1414,7 @@ class RpcServer:
                 ClientConnectorError,
                 ClientOSError,
                 ServerDisconnectedError,
-                asyncio.TimeoutError,
+                TimeoutError,
             ) as e:
                 self._host_last_fail[url] = now
                 last_err = e

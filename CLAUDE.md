@@ -93,7 +93,7 @@ the Windows run type-checks the win32 branches.
 
 - **mypy** (types) — `tests/test_typing.py`, config in `[tool.mypy]`.
 - **ruff** (lint) — `tests/test_lint.py`, ruleset in `[tool.ruff.lint]`:
-  `E9` + `F` (pyflakes) + `RUF012` + `UP` (py310 annotation modernization).
+  `E9` + `F` (pyflakes) + `RUF012` + `UP` (py311 annotation modernization).
   `E402` (lazy imports are intentional) and `UP031` are deliberately off.
   ruff is a standalone binary (no `python -m ruff`) — the gate resolves it
   via `shutil.which`.

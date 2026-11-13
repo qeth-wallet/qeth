@@ -242,10 +242,8 @@ def _iso_to_unix(s: str | None) -> int | None:
     try:
         from datetime import datetime
         # fromisoformat is the right tool (flexible on fraction/offset, unlike
-        # a fixed strptime format). The "Z"→"+00:00" swap is only for Python
-        # 3.10 (our floor): 3.10's fromisoformat can't parse a bare "Z" — that
-        # landed in 3.11. Drop this line when the floor moves to 3.11.
-        return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+        # a fixed strptime format); it parses a bare "Z" since 3.11.
+        return int(datetime.fromisoformat(s).timestamp())
     except Exception:
         return None
 

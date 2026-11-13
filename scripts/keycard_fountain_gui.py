@@ -14,7 +14,7 @@ import json
 import random
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import rlp
@@ -149,7 +149,7 @@ class FountainWindow(QWidget):
         if self._animation is not None:
             self._animation.stop()
         result = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "attempt": self._attempt,
             "outcome": outcome,
             "seconds": time.monotonic() - self._started

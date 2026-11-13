@@ -204,10 +204,9 @@ def _parse_blockscout_tx(entry: dict, chain_id: int) -> Transaction | None:
 
 def _iso_timestamp(value: object) -> int:
     """Blockscout v2's ``2026-09-13T07:09:23.000000Z`` → unix seconds (0 when
-    absent/unparseable). The ``Z`` swap is for Python 3.10's fromisoformat."""
+    absent/unparseable)."""
     try:
-        return int(datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")).timestamp())
+        return int(datetime.fromisoformat(str(value)).timestamp())
     except ValueError:
         return 0
 

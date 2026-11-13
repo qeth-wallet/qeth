@@ -109,7 +109,7 @@ class ContractIdentity:
         if not self.deployed_at:
             return None
         return datetime.datetime.fromtimestamp(
-            self.deployed_at, datetime.timezone.utc).strftime("%Y-%m-%d")
+            self.deployed_at, datetime.UTC).strftime("%Y-%m-%d")
 
     def to_dict(self) -> dict:
         return {

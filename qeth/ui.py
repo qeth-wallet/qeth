@@ -770,6 +770,10 @@ class MainWindow(QMainWindow):
         still running when Qt destroys its QThread — that aborts (SIGABRT). They
         self-evict via ``finished``, but at quit there's no event loop left to
         run that, so we join explicitly here."""
+        # Signing workers can be blocked on callbacks queued to this thread.
+        # Release them before joining, while the GUI can still close widgets.
+        for interaction in self.findChildren(DialogInteraction):
+            interaction.cancel()
         # Silence every mounted plugin's long-lived poll timers / ws watchers
         # first, so nothing kicks a fresh worker while we drain the in-flight
         # ones. (Iterating self.plugins means a new plugin is covered for free.)

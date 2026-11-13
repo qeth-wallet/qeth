@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import Future
+from threading import Lock
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication, QProgressDialog, QWidget
 
 from .dialog import prompt_text
+from .signing import SignerError
 
 
 class DialogInteraction(QObject):
@@ -32,27 +34,57 @@ class DialogInteraction(QObject):
         self._title = title
         self._progress: QProgressDialog | None = None
         self._call.connect(self._run)
+        self._lock = Lock()
+        self._pending: set[Future] = set()
+        self._cancelled = False
 
     # --- worker→main marshaling -------------------------------------------
 
     def _run(self, fn: Callable[[], Any], fut: Future) -> None:
         """Runs on the main thread (queued receiver). Deliver fn()'s result —
         or its exception — to the awaiting worker."""
+        with self._lock:
+            if fut.done():
+                return
         try:
-            fut.set_result(fn())
+            result = fn()
         except Exception as e:
-            fut.set_exception(e)
+            with self._lock:
+                if not fut.done():
+                    fut.set_exception(e)
+        else:
+            with self._lock:
+                if not fut.done():
+                    fut.set_result(result)
 
     def _on_main(self, fn: Callable[[], Any]) -> Any:
         """Run ``fn`` on the Qt main thread and block for its result. Direct
         when already on the main thread (a queued round-trip would deadlock —
         the loop that must service it is the caller); queued from a worker."""
-        app = QApplication.instance()
-        if app is None or QThread.currentThread() == app.thread():
-            return fn()
         fut: Future = Future()
-        self._call.emit(fn, fut)
-        return fut.result()
+        with self._lock:
+            if self._cancelled:
+                raise SignerError("Application is shutting down")
+            self._pending.add(fut)
+        try:
+            app = QApplication.instance()
+            if app is None or QThread.currentThread() == app.thread():
+                self._run(fn, fut)
+            else:
+                self._call.emit(fn, fut)
+            return fut.result()
+        finally:
+            with self._lock:
+                self._pending.discard(fut)
+
+    def cancel(self) -> None:
+        """Main-thread shutdown: release waiting workers and reject future calls."""
+        with self._lock:
+            self._cancelled = True
+            for fut in self._pending:
+                if not fut.done():
+                    fut.set_exception(SignerError("Application is shutting down"))
+        self._close_progress()
 
     # --- SignerInteraction -------------------------------------------------
 
@@ -67,7 +99,11 @@ class DialogInteraction(QObject):
 
     def close(self) -> None:
         """Dismiss the spinner (on signing success/failure)."""
-        self._on_main(self._close_progress)
+        try:
+            self._on_main(self._close_progress)
+        except SignerError:
+            # cancel() already closed the spinner; worker cleanup must not wait.
+            pass
 
     # --- main-thread widget ops -------------------------------------------
 

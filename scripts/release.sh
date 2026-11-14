@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # One-command release assembly for qeth.
 #
-# Builds the host-buildable artifacts (AppImage + Flatpak, each in a normal and
-# a -verify variant), collects the .deb / .rpm you built in their target
+# First gates on uv.lock (step 0) — the AppImage and Flatpak install exactly the
+# locked versions, so the lock must be in sync, clean under `uv audit`, and not
+# behind on anything that ships. Then builds the host-buildable artifacts
+# (AppImage + Flatpak, each in a normal and a -verify variant), collects the .deb / .rpm you built in their target
 # environments, checks the full 10-asset set, and — only with --publish — tags
 # v<version>, pushes the tag, and creates the GitHub release with all 10 assets.
 #
@@ -11,6 +13,8 @@
 # .deb needs Debian 13's native PySide6; the .rpm needs Fedora's rpmbuild). Build
 # them there — NORMAL and VERIFY — and drop all six into dist/release/ (or point
 # QETH_PKG_INDIR at them):
+# (For the verify builds, copy the pinned helios from `dist/fetch-helios.sh` to
+# the VM share and pass that path.)
 #   deb:  (on Ubuntu/Mint)  ./dist/deb/build-deb.sh <out>
 #         (verify)          QETH_BUNDLE_HELIOS=/path/helios ./dist/deb/build-deb.sh <out>
 #   deb:  (on LMDE/Debian13)./dist/deb/build-deb-debian.sh <out>
@@ -46,8 +50,10 @@
 #
 # Env:
 #   QETH_PKG_INDIR        where to find the pre-built .deb/.rpm  (default: dist/release)
-#   QETH_BUNDLE_HELIOS    helios binary for the -verify variants (default: ~/.helios/bin/helios)
+#   QETH_BUNDLE_HELIOS    helios binary for the -verify variants (default: the pinned,
+#                         sha256-checked release from dist/fetch-helios.sh)
 #   QETH_RELEASE_NOTES    markdown notes file for --publish      (default: gh --generate-notes)
+#   QETH_ALLOW_STALE_LOCK=1  release even though a shipped package is behind
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,6 +65,44 @@ PUBLISH=0; [ "${1:-}" = "--publish" ] && PUBLISH=1
 mkdir -p "$OUT"
 echo ">> qeth $VERSION  (out: $OUT  publish: $PUBLISH)"
 
+# 0. Lock pre-flight. "Behind" = `uv lock --upgrade` would bump a SHIPPED package
+#    (one in the AppImage/Flatpak export) to a version the 1-week cutoff already
+#    allows; dev-only tools (ruff, mypy, …) don't count. The fix is the usual
+#    bump: uv lock --upgrade && uv sync --inexact && uv audit && uv run pytest,
+#    then commit and re-run.
+echo ">> [0/4] uv.lock pre-flight"
+uv lock --locked --quiet \
+  || { echo "!! uv.lock is out of sync with pyproject.toml — run uv lock"; exit 1; }
+uv audit --locked --preview-features audit-command \
+  || { echo "!! uv audit flagged the locked dependencies"; exit 1; }
+shipped="$(uv export --locked --quiet --no-dev --no-emit-project --no-hashes \
+             --extra bundled --extra simulate --extra qr --extra trezor \
+           | sed -nE 's/^([A-Za-z0-9._-]+)==.*/\1/p' | tr 'A-Z_.' 'a-z--')"
+# Capture first: a failed dry-run (e.g. PyPI unreachable) must stop the release,
+# not read as "nothing to update".
+upgrade="$(uv lock --upgrade --dry-run 2>&1)" \
+  || { printf '%s\n' "$upgrade"; echo "!! couldn't check uv.lock for updates"; exit 1; }
+behind=""
+while read -r verb name rest; do
+    case "$verb" in Update|Add|Remove) ;; *) continue ;; esac
+    norm="$(echo "$name" | tr 'A-Z_.' 'a-z--')"
+    if grep -qx -- "$norm" <<<"$shipped"; then
+        behind+="   $verb $name $rest"$'\n'
+    else
+        echo "   (dev-only, not shipped) $verb $name $rest"
+    fi
+done <<<"$upgrade"
+if [ -n "$behind" ]; then
+    printf '%s' "$behind"
+    if [ "${QETH_ALLOW_STALE_LOCK:-0}" = 1 ]; then
+        echo "!! shipped packages are behind — continuing (QETH_ALLOW_STALE_LOCK=1)"
+    else
+        echo "!! uv.lock is behind on shipped packages: bump it (see above), commit, re-run"
+        echo "   — or QETH_ALLOW_STALE_LOCK=1 to release as locked."
+        exit 1
+    fi
+fi
+
 # 1. AppImage — both variants (build-in-container.sh builds normal + verify).
 echo ">> [1/4] AppImage (normal + verify) in a manylinux container"
 ./dist/appimage/build-in-container.sh
@@ -67,14 +111,14 @@ cp -f "dist/appimage/out/qeth-$VERSION-x86_64.AppImage" \
 
 # 2. Flatpak — both variants.
 echo ">> [2/4] Flatpak (normal)"
+./dist/lock-export.sh dist/.pinned/flatpak simulate qr trezor
 flatpak-builder --user --force-clean --repo="$HOME/.cache/qeth-flatpak/repo" \
   --state-dir "$HOME/.cache/qeth-flatpak/state" \
   "$HOME/.cache/qeth-flatpak/build" dist/flatpak/io.github.michwill.qeth.yml
 flatpak build-bundle "$HOME/.cache/qeth-flatpak/repo" \
   "$OUT/qeth-$VERSION.flatpak" io.github.michwill.qeth
 echo ">> [3/4] Flatpak (verify)"
-QETH_BUNDLE_HELIOS="${QETH_BUNDLE_HELIOS:-$HOME/.helios/bin/helios}" \
-  bash dist/flatpak/build-verify.sh
+bash dist/flatpak/build-verify.sh
 cp -f dist/flatpak/qeth-verify.flatpak "$OUT/qeth-verify-$VERSION.flatpak"
 
 # 3. Collect the externally-built .deb / .rpm.

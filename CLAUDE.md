@@ -52,6 +52,19 @@ evaluated at resolution time — no date to maintain); `ty` is exempted and
 fresh security fixes are pulled forward per-package — see the comments in
 `pyproject.toml`.
 
+**The lock is what ships.** The AppImage and Flatpak install exactly the
+`uv.lock` versions, hash-checked: `dist/lock-export.sh OUTDIR EXTRA…` exports
+`requirements.txt` + a pinned setuptools (`build-backend` group) and the builds
+run pip with `--require-hashes --no-build-isolation` (so even the sdist-only
+deps — ledgerblue, pydes, python-u2flib-host — build with the pinned
+setuptools). Helios comes from `dist/fetch-helios.sh` (pinned version +
+sha256); appimagetool + its runtime and the manylinux image are pinned too.
+`scripts/release.sh` gates on the lock first: in sync, `uv audit` clean, and not
+behind on any shipped package (else bump, test, commit — or
+`QETH_ALLOW_STALE_LOCK=1`). The **.rpm** deliberately doesn't follow the lock —
+it takes most of its stack from Fedora's own packages. The **.debs** still
+`pip install` from PyPI ranges (same fix pending, needs the VMs to test).
+
 `--system-site-packages` is load-bearing on Linux desktops. The PyPI
 `PySide6` wheel ships its own Qt without the qt6ct/KDE platform-theme
 plugin, so the user's qt6ct/Breeze/Kvantum setup is silently ignored.

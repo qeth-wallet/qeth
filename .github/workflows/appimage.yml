@@ -26,49 +26,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The build runs INSIDE the manylinux image via `docker run` (rather than
-      # the job's `container:`) so the host job still has node/gh/docker for the
-      # surrounding steps, and the bundle's only base is the old container.
-      - name: Build AppImage in manylinux_2_34
-        run: |
-          mkdir -p "$PWD/out"
-          docker run --rm \
-            -v "$PWD":/src:ro \
-            -v "$PWD/out":/out \
-            -e PYVER=cp312-cp312 \
-            quay.io/pypa/manylinux_2_34_x86_64 \
-            bash /src/dist/appimage/build-appimage.sh
+      # uv exports the hash-pinned deps from uv.lock on the runner (the
+      # manylinux container has no uv) — dist/lock-export.sh, called by:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
 
-      # "verify" variant: bundle the official Helios release so previews are
-      # proof-verified out of the box. Helios needs glibc >= 2.39, so this
-      # AppImage's floor is 2.39 (vs 2.34 for the normal one) — but it only
-      # gets COPIED into the AppDir here, so the 2.34 build container is fine.
-      - name: Fetch helios release
-        run: |
-          mkdir -p "$PWD/helios"
-          curl -sSL "https://github.com/a16z/helios/releases/latest/download/helios_linux_amd64.tar.gz" \
-            | tar -xzC "$PWD/helios"
-          chmod +x "$PWD/helios/helios"
-          "$PWD/helios/helios" --version
-
-      - name: Build verify AppImage in manylinux_2_34
-        run: |
-          docker run --rm \
-            -v "$PWD":/src:ro \
-            -v "$PWD/out":/out \
-            -e PYVER=cp312-cp312 \
-            -e QETH_BUNDLE_HELIOS=/src/helios/helios \
-            quay.io/pypa/manylinux_2_34_x86_64 \
-            bash /src/dist/appimage/build-appimage.sh
+      # The same wrapper as the local release build: both variants (normal +
+      # verify, with the pinned sha256-checked Helios) INSIDE the digest-pinned
+      # manylinux image via `docker run` (rather than the job's `container:`), so
+      # the host job keeps node/gh/docker and the bundle's only base is the old
+      # container. Helios needs glibc >= 2.39, so the verify AppImage's floor is
+      # 2.39 — it's only COPIED into the AppDir, so the 2.34 container is fine.
+      - name: Build both AppImages in manylinux_2_34
+        run: ./dist/appimage/build-in-container.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: qeth-appimage
-          path: out/*.AppImage
+          path: dist/appimage/out/*.AppImage
           if-no-files-found: error
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" out/*.AppImage --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" dist/appimage/out/*.AppImage --clobber

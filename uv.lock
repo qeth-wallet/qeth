@@ -3136,6 +3136,9 @@ trezor = [
 ]
 
 [package.dev-dependencies]
+build-backend = [
+    { name = "setuptools" },
+]
 dev = [
     { name = "cbor2" },
     { name = "cryptography" },
@@ -3187,6 +3190,7 @@ requires-dist = [
 provides-extras = ["bundled", "simulate", "frame", "qr", "trezor"]
 
 [package.metadata.requires-dev]
+build-backend = [{ name = "setuptools", specifier = ">=68" }]
 dev = [
     { name = "cbor2", specifier = ">=5.4" },
     { name = "cryptography", specifier = ">=42" },

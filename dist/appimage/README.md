@@ -20,7 +20,11 @@ Building on the host would bake in glibc 2.42 *and* native instructions →
 glibc 2.39). So we assemble **inside `quay.io/pypa/manylinux_2_34`**: its
 interpreter, the PyPI manylinux wheels (`[bundled]` PySide6 + the eth stack),
 and the bundled system libs are all old-glibc + generic. **Nothing from the
-host venv is ever copied in** — `build-appimage.sh` does a fresh `pip install`.
+host venv is ever copied in** — `build-appimage.sh` does a fresh `pip install`,
+but only of the `uv.lock` versions, hash-checked (`dist/lock-export.sh` exports
+them on the host first). appimagetool, the type2 runtime it embeds, the bundled
+Helios (`dist/fetch-helios.sh`) and the manylinux image are all pinned too
+(sha256 / digest), so a rebuild of the same commit ships the same bytes' inputs.
 This is the same hermeticity the Flatpak gets from `org.kde.Platform`.
 
 ## glibc floor ↔ PySide6 version (the one lever)
@@ -50,7 +54,8 @@ IMAGE=quay.io/pypa/manylinux_2_28_x86_64 ./dist/appimage/build-in-container.sh  
 ## Files
 
 - `build-appimage.sh` — runs **inside** the container; assembles the AppDir + packs it.
-- `build-in-container.sh` — host wrapper: `docker/podman run` the above.
+- `build-in-container.sh` — host wrapper: exports the pinned deps, fetches the
+  pinned Helios, then `docker/podman run`s the above (normal + verify).
 - `AppRun` — entrypoint; sets `PYTHONHOME`/`LD_LIBRARY_PATH`, launches `python -m qeth`.
 - `io.github.michwill.qeth.desktop` — top-level desktop entry.
 - (app side) `qeth/__main__.py` `_running_bundled_qt()` now also fires on
@@ -68,7 +73,8 @@ IMAGE=quay.io/pypa/manylinux_2_28_x86_64 ./dist/appimage/build-in-container.sh  
 3. **Size** — `[bundled]` pulls all of PySide6 (~150 MB of Qt). Trim unused Qt
    modules before shipping.
 4. **CI gotchas** — `appimagetool` runs with `--appimage-extract-and-run` (no
-   FUSE in the container); revisit if the runtime download or packaging fails.
+   FUSE in the container) and `--runtime-file` (the pinned runtime, so it never
+   downloads one itself).
 
 ## Tradeoff vs the Flatpak
 

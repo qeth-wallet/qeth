@@ -44,8 +44,8 @@ dependencies = [
     # ENSIP-15 normalizer (ens/_normalization.py — unchanged in web3 8.0.0)
     # passes it a list of code points, so normalize_name() raises on EVERY name
     # and name_warning() flags them all as look-alikes. Declared here, not as a
-    # uv constraint, because the pip-built packages resolve fresh from PyPI.
-    # Drop once web3 adapts.
+    # uv constraint, because the .deb/.rpm builds still resolve fresh from PyPI
+    # with pip (the AppImage/Flatpak install from uv.lock). Drop once web3 adapts.
     "pyunormalize<18",
 ]
 
@@ -126,6 +126,12 @@ macos-build = [
 ]
 windows-build = [
     "pyinstaller>=6.21",
+]
+# qeth's build backend, pinned by the lock so the AppImage/Flatpak builds can
+# build qeth (and the few sdist-only deps) with --no-build-isolation instead of
+# letting pip fetch an unpinned setuptools. Exported by dist/lock-export.sh.
+build-backend = [
+    "setuptools>=68",
 ]
 
 [tool.uv]

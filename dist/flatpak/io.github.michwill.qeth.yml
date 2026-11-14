@@ -3,7 +3,9 @@
 # Build intermediates are kept OUT of the repo (~/.cache/qeth-flatpak) so the
 # `dir` source below doesn't copy them back into itself.
 #
-# Build + install locally (run from the repo root):
+# Build + install locally (run from the repo root). First export the pinned
+# Python deps from uv.lock — the build installs exactly those:
+#   dist/lock-export.sh dist/.pinned/flatpak simulate qr trezor
 #   flatpak-builder --user --force-clean --install \
 #       --state-dir ~/.cache/qeth-flatpak/state \
 #       ~/.cache/qeth-flatpak/build \
@@ -22,9 +24,11 @@
 #    Qt 6.10), so it is intentionally NOT a pip dependency. Because the app
 #    uses the *runtime* Qt, Breeze works and a user can layer their own theme
 #    via the org.kde.KStyle.Kvantum extension.
-#  - This build lets pip fetch qeth's other deps from PyPI (--share=network in
-#    the module). That's fine for a self-distributed bundle; Flathub would
-#    instead require offline, hash-pinned sources.
+#  - qeth's other deps are pip-installed from PyPI (--share=network in the
+#    module) but only at the uv.lock versions, hash-checked: the requirements
+#    come from dist/lock-export.sh (release.sh / build-verify.sh run it).
+#    Flathub would additionally want offline sources (a wheel list in the
+#    manifest); for a self-distributed bundle the hash check is the guarantee.
 id: io.github.michwill.qeth
 runtime: org.kde.Platform
 runtime-version: "6.10"
@@ -67,18 +71,24 @@ modules:
     buildsystem: simple
     build-options:
       build-args:
-        - --share=network                # local build → pip may fetch from PyPI
+        - --share=network                # pip downloads the pinned, hash-checked wheels
     build-commands:
-      # qeth + its declared deps (ledgereth, aiohttp, segno, eth-abi, web3 + transitive).
-      # PySide6 is NOT a dependency here — it is provided by the BaseApp
-      # (incl. the QtMultimedia binding; the org.kde.Platform runtime ships the
-      # ffmpeg media plugin + libavdevice for the QR signer's camera).
+      # qeth's declared deps (ledgereth, aiohttp, segno, eth-abi, web3 + transitive)
+      # at the uv.lock versions, for the extras the export was made with:
       # [simulate] = pure-Python py-evm fork engine (previews on simV1-less
       # RPCs; Helios-verified previews when a helios binary is on the host).
       # [qr] = the air-gapped QR signer decode stack (cbor2 + zxing-cpp + Pillow).
       # [trezor] = trezorlib (Trezor hardware wallets); its libusb-1.0 comes from
       # the org.kde.Platform runtime, USB access from --device=all.
-      - pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location '.[simulate,qr,trezor]'
+      # PySide6 is NOT a dependency here — it is provided by the BaseApp
+      # (incl. the QtMultimedia binding; the org.kde.Platform runtime ships the
+      # ffmpeg media plugin + libavdevice for the QR signer's camera).
+      # The pinned setuptools goes to the build dir on PYTHONPATH (never /app),
+      # so building qeth + the sdist-only deps never fetches an unpinned one;
+      # --require-hashes makes pip refuse anything missing from the export.
+      - pip3 install --require-hashes --no-deps --target=${FLATPAK_BUILDER_BUILDDIR}/.build-tools -r dist/.pinned/flatpak/build-requirements.txt
+      - PYTHONPATH=${FLATPAK_BUILDER_BUILDDIR}/.build-tools pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location --require-hashes --no-build-isolation -r dist/.pinned/flatpak/requirements.txt
+      - PYTHONPATH=${FLATPAK_BUILDER_BUILDDIR}/.build-tools pip3 install --prefix=${FLATPAK_DEST} --break-system-packages --no-warn-script-location --no-deps --no-build-isolation --no-index .
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.desktop ${FLATPAK_DEST}/share/applications/io.github.michwill.qeth.desktop
       - install -Dm644 qeth/assets/logos/qeth-icon-rounded.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
       - install -Dm644 dist/flatpak/io.github.michwill.qeth.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.michwill.qeth.metainfo.xml

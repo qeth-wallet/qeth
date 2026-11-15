@@ -8,11 +8,13 @@ the user's qt6ct/Kvantum/Breeze theme applies, and both install a real menu entr
 |---|---|---|---|
 | **Mint / Ubuntu** | Mint 22, Ubuntu 24.04 (Qt 6.4, py3.12) | `build-deb.sh` | `qeth_<v>_amd64.deb` |
 | **LMDE / Debian 13** | LMDE 7 "Gigi", Debian 13 "Trixie" (Qt 6.8, py3.13) | `build-deb-debian.sh` | `qeth_<v>_debian13_amd64.deb` |
+| **Ubuntu 26.04** | Ubuntu 26.04 LTS "Resolute Raccoon" (Qt 6.10, py3.14) | `QETH_DEB_TARGET=ubuntu2604 build-deb-debian.sh` | `qeth_<v>_ubuntu2604_amd64.deb` |
 
-The two are **not interchangeable**: the Mint deb depends on deadsnakes
-`python3.11`, the LMDE deb on Debian 13's native `python3-pyside6.*` — install the
-one matching your distro. The rest of this section is the Mint/Ubuntu build; the
-LMDE build is documented at the bottom.
+They are **not interchangeable**: the Mint deb depends on deadsnakes
+`python3.11`, the other two on their distro's native `python3-pyside6.*` and
+exact `python3` minor version (the vendored wheels are compiled for it) — install
+the one matching your distro. The rest of this section is the Mint/Ubuntu 24.04
+build; the LMDE and Ubuntu 26.04 builds are documented at the bottom.
 
 ## Mint 22 / Ubuntu 24.04
 
@@ -109,6 +111,19 @@ sudo apt install ./qeth_<version>_debian13_amd64.deb
 qeth
 ```
 
-`Depends:` are all stock Debian 13 (`python3 (>= 3.13)`, the five
+`Depends:` are all stock Debian 13 (`python3` 3.13, the five
 `python3-pyside6.*` modules qeth imports, `gstreamer1.0-plugins-good` for the QR
 camera) — **no PPA required**, unlike the Mint build.
+
+## Ubuntu 26.04 LTS
+
+Same recipe as LMDE: Ubuntu 26.04 ships PySide6 6.10 natively (in **universe**)
+for its stock `python3` (3.14), so `build-deb-debian.sh` builds it unchanged
+apart from the target name:
+
+```sh
+sudo apt-get install -y python3-venv python3-pip dpkg-dev \
+    python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets \
+    python3-pyside6.qtnetwork python3-pyside6.qtmultimedia
+QETH_DEB_TARGET=ubuntu2604 ./dist/deb/build-deb-debian.sh   # -> qeth_<v>_ubuntu2604_amd64.deb
+```

@@ -5,13 +5,15 @@
 # locked versions, so the lock must be in sync, clean under `uv audit`, and not
 # behind on anything that ships. Then builds the host-buildable artifacts
 # (AppImage + Flatpak, each in a normal and a -verify variant), collects the .deb / .rpm you built in their target
-# environments, checks the full 10-asset set, and — only with --publish — tags
-# v<version>, pushes the tag, and creates the GitHub release with all 10 assets.
+# environments, checks the full 14-asset Linux set, and — only with --publish —
+# tags v<version>, pushes the tag, and creates the GitHub release with them (plus
+# whichever macOS / Windows CI downloads are present).
 #
 # Why the .deb/.rpm are external: they can't be built portably on the dev host
-# (the Mint/Ubuntu .deb needs Ubuntu/Mint's Qt 6.4 + deadsnakes py3.11; the LMDE
-# .deb needs Debian 13's native PySide6; the .rpm needs Fedora's rpmbuild). Build
-# them there — NORMAL and VERIFY — and drop all six into dist/release/ (or point
+# (the Mint/Ubuntu-24.04 .deb needs Ubuntu/Mint's Qt 6.4 + deadsnakes py3.11; the
+# Debian 13 and Ubuntu 26.04 .debs need that distro's native PySide6 and python3;
+# each .rpm needs its Fedora release's rpmbuild and python3). Build them there —
+# NORMAL and VERIFY — and drop all ten into dist/release/ (or point
 # QETH_PKG_INDIR at them):
 # (For the verify builds, copy the pinned helios from `dist/fetch-helios.sh` to
 # the VM share and pass that path.)
@@ -19,7 +21,10 @@
 #         (verify)          QETH_BUNDLE_HELIOS=/path/helios ./dist/deb/build-deb.sh <out>
 #   deb:  (on LMDE/Debian13)./dist/deb/build-deb-debian.sh <out>
 #         (verify)          QETH_BUNDLE_HELIOS=/path/helios ./dist/deb/build-deb-debian.sh <out>
-#   rpm:  (on Fedora)       rpmbuild -bb dist/rpm/qeth.spec
+#   deb:  (on Ubuntu 26.04) QETH_DEB_TARGET=ubuntu2604 ./dist/deb/build-deb-debian.sh <out>
+#         (verify)          ...plus QETH_BUNDLE_HELIOS=/path/helios
+#   rpm:  (on Fedora 44 AND on Fedora 45 — each python3 minor needs its own)
+#                           rpmbuild -bb dist/rpm/qeth.spec
 #         (verify)          rpmbuild -bb --define "bundle_helios /path/helios" dist/rpm/qeth.spec
 #                           then rename the verify output to qeth-verify-<v>-1.fc*.x86_64.rpm
 #                           (the spec keeps Name: qeth for both — only the file is renamed)
@@ -33,6 +38,13 @@
 # It is ad-hoc signed, NOT notarized: the release notes must tell users to clear
 # com.apple.quarantine. Optional — the release publishes without it (with a
 # warning), since it depends on a CI run finishing.
+#
+# Windows likewise comes from CI (.github/workflows/windows.yml, `bundle` job):
+# the portable zip and the Inno Setup installer, both unsigned (SmartScreen
+# warns on first run). Same rule — optional, fetched from the run for THIS commit:
+#   gh run download <run-id> --name qeth-windows-zip   -D dist/release
+#   gh run download <run-id> --name qeth-windows-setup -D dist/release
+# (qeth-<version>-windows-x64.zip / qeth-<version>-windows-x64-setup.exe)
 #
 # Browser extensions are not BUILT by this script — they publish to AMO / the
 # Chrome Web Store separately. At release time regenerate + republish them per
@@ -121,51 +133,54 @@ echo ">> [3/4] Flatpak (verify)"
 bash dist/flatpak/build-verify.sh
 cp -f dist/flatpak/qeth-verify.flatpak "$OUT/qeth-verify-$VERSION.flatpak"
 
-# 3. Collect the externally-built .deb / .rpm.
+# The 14 Linux assets: 7 formats, each in a normal and a -verify variant.
+FEDORA_RELEASES=(44 45)
+DEB_TARGETS=("" "_debian13" "_ubuntu2604")   # Mint 22/Ubuntu 24.04, Debian 13, Ubuntu 26.04
+LINUX=()
+for var in "" "-verify"; do
+    for fc in "${FEDORA_RELEASES[@]}"; do LINUX+=("qeth$var-$VERSION-1.fc$fc.x86_64.rpm"); done
+    for t in "${DEB_TARGETS[@]}"; do LINUX+=("qeth${var}_${VERSION}${t}_amd64.deb"); done
+    LINUX+=("qeth$var-$VERSION-x86_64.AppImage" "qeth$var-$VERSION.flatpak")
+done
+# Built by CI (macOS + Windows runners) — optional, see the header.
+CI_ASSETS=("qeth-$VERSION-macos-arm64.dmg" "qeth-verify-$VERSION-macos-arm64.dmg"
+           "qeth-$VERSION-windows-x64.zip" "qeth-$VERSION-windows-x64-setup.exe")
+
+# 3. Collect the externally-built .deb / .rpm (and any CI downloads).
 echo ">> [4/4] collecting .deb / .rpm from $INDIR"
 if [ "$INDIR" != "$OUT" ]; then
-    for pat in "qeth_${VERSION}_amd64.deb"      "qeth-verify_${VERSION}_amd64.deb" \
-               "qeth_${VERSION}_debian13_amd64.deb" "qeth-verify_${VERSION}_debian13_amd64.deb" \
-               "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm" \
-               "qeth-${VERSION}-macos-arm64.dmg" "qeth-verify-${VERSION}-macos-arm64.dmg"; do
-        # shellcheck disable=SC2086
-        for f in "$INDIR"/$pat; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
+    for f in "${LINUX[@]}" "${CI_ASSETS[@]}"; do
+        [ -e "$INDIR/$f" ] && cp -f "$INDIR/$f" "$OUT/"
     done
 fi
 
-# 4. Verify the full 10-asset set.
+# 4. Verify the full Linux set.
 missing=0
-for pat in \
-    "qeth-${VERSION}-1.fc"*".x86_64.rpm" "qeth-verify-${VERSION}-1.fc"*".x86_64.rpm" \
-    "qeth_${VERSION}_amd64.deb"          "qeth-verify_${VERSION}_amd64.deb" \
-    "qeth_${VERSION}_debian13_amd64.deb"     "qeth-verify_${VERSION}_debian13_amd64.deb" \
-    "qeth-${VERSION}-x86_64.AppImage"    "qeth-verify-${VERSION}-x86_64.AppImage" \
-    "qeth-${VERSION}.flatpak"            "qeth-verify-${VERSION}.flatpak"; do
-    # shellcheck disable=SC2086
-    ls "$OUT"/$pat >/dev/null 2>&1 || { echo "  MISSING: $pat"; missing=1; }
+for f in "${LINUX[@]}"; do
+    [ -e "$OUT/$f" ] || { echo "  MISSING: $f"; missing=1; }
 done
 if [ "$missing" = 1 ]; then
-    echo "!! Not all 10 assets are present. Build the missing .deb/.rpm in their"
-    echo "   target environments and drop them in $INDIR (or set QETH_PKG_INDIR)."
+    echo "!! Not all ${#LINUX[@]} Linux assets are present. Build the missing .deb/.rpm in"
+    echo "   their target environments and drop them in $INDIR (or set QETH_PKG_INDIR)."
     exit 1
 fi
-ls -la "$OUT"/*.rpm "$OUT"/*.deb "$OUT"/*.AppImage "$OUT"/*.flatpak | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
-echo ">> all 10 Linux assets present"
+size() { ls -la "$@" | awk '{printf "   %-50s %.0f MB\n", $NF, $5/1048576}'; }
+size "${LINUX[@]/#/$OUT/}"
+echo ">> all ${#LINUX[@]} Linux assets present"
 
-# macOS .dmg — built by CI, so it may legitimately not be ready. Publish without
-# it rather than blocking the whole release on a runner.
-mac_asset=()
-for DMG in "$OUT/qeth-$VERSION-macos-arm64.dmg" \
-           "$OUT/qeth-verify-$VERSION-macos-arm64.dmg"; do
-    if [ -e "$DMG" ]; then
-        ls -la "$DMG" | awk '{printf "   %-46s %.0f MB\n", $NF, $5/1048576}'
-        mac_asset+=("$DMG")
+# macOS .dmg / Windows downloads — built by CI, so they may legitimately not be
+# ready. Publish without them rather than blocking the whole release on a runner.
+ci=()
+for f in "${CI_ASSETS[@]}"; do
+    if [ -e "$OUT/$f" ]; then
+        size "$OUT/$f"
+        ci+=("$OUT/$f")
     else
-        echo "!! NOTE: no $(basename "$DMG") — publishing WITHOUT it."
-        echo "   Fetch it from the macOS CI run for this commit (see header)."
+        echo "!! NOTE: no $f — publishing WITHOUT it."
+        echo "   Fetch it from the macOS / Windows CI run for this commit (see header)."
     fi
 done
-[ ${#mac_asset[@]} -gt 0 ] && echo ">> macOS: ${#mac_asset[@]} .dmg included"
+echo ">> CI downloads: ${#ci[@]} of ${#CI_ASSETS[@]} included"
 [ "$PUBLISH" = 1 ] || { echo ">> done (dry run — pass --publish to tag + release)"; exit 0; }
 
 # 5. Publish (opt-in): tag, push, gh release create.
@@ -177,10 +192,5 @@ git push origin "v$VERSION"
 notes_arg=(--generate-notes)
 [ -n "${QETH_RELEASE_NOTES:-}" ] && notes_arg=(--notes-file "$QETH_RELEASE_NOTES")
 gh release create "v$VERSION" --title "qeth $VERSION" "${notes_arg[@]}" \
-  "$OUT"/qeth-"$VERSION"-1.fc*.x86_64.rpm "$OUT"/qeth-verify-"$VERSION"-1.fc*.x86_64.rpm \
-  "$OUT/qeth_${VERSION}_amd64.deb" "$OUT/qeth-verify_${VERSION}_amd64.deb" \
-  "$OUT/qeth_${VERSION}_debian13_amd64.deb" "$OUT/qeth-verify_${VERSION}_debian13_amd64.deb" \
-  "$OUT/qeth-$VERSION-x86_64.AppImage" "$OUT/qeth-verify-$VERSION-x86_64.AppImage" \
-  "$OUT/qeth-$VERSION.flatpak" "$OUT/qeth-verify-$VERSION.flatpak" \
-  ${mac_asset[0]+"${mac_asset[@]}"}
+  "${LINUX[@]/#/$OUT/}" ${ci[0]+"${ci[@]}"}
 gh release view "v$VERSION" --json url --jq '">> published: \(.url)"'

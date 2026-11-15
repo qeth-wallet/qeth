@@ -4,7 +4,7 @@ set -eu
 qeth_repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$qeth_repo_root"
 
-# Compile qeth.iss into dist/windows/out/qeth-<version>-setup.exe from the
+# Compile qeth.iss into dist/windows/out/qeth-<version>-windows-x64-setup.exe from the
 # bundle build.sh produced. ISCC is Inno Setup's compiler (default: on PATH).
 # Locally, `scripts/wine.sh installer` runs the same thing under Wine.
 [ -d dist/windows/out/qeth-windows ] \

@@ -3,7 +3,7 @@
 Two downloads from one PyInstaller **onedir** folder (`qeth-windows/` with
 `qeth.exe` and its `_internal/` runtime):
 
-- `qeth-<version>-setup.exe` — the **installer** (Inno Setup, `qeth.iss`).
+- `qeth-<version>-windows-x64-setup.exe` — the **installer** (Inno Setup, `qeth.iss`).
   Per-user by default into `%LOCALAPPDATA%\Programs\qeth`, no admin prompt
   (machine-wide via its dialog or `/ALLUSERS`); Start-menu entry, optional
   desktop icon, uninstaller in Settings → Apps, in-place upgrades (the fixed
@@ -17,7 +17,7 @@ On Windows (Git Bash), from the repository root:
 
 ```sh
 ./dist/windows/build.sh
-ISCC='C:\path\to\ISCC.exe' ./dist/windows/installer.sh   # → out/qeth-<v>-setup.exe
+ISCC='C:\path\to\ISCC.exe' ./dist/windows/installer.sh   # → out/qeth-<v>-windows-x64-setup.exe
 ```
 
 On Linux, the same recipe runs under Wine (see `scripts/wine.sh`):
@@ -25,7 +25,7 @@ On Linux, the same recipe runs under Wine (see `scripts/wine.sh`):
 ```sh
 scripts/wine.sh setup              # once: the Wine prefix, Windows uv/Python, Inno Setup
 scripts/wine.sh build              # → dist/windows/out/qeth-windows
-scripts/wine.sh installer          # → dist/windows/out/qeth-<v>-setup.exe
+scripts/wine.sh installer          # → dist/windows/out/qeth-<v>-windows-x64-setup.exe
 scripts/wine.sh smoke              # run the bundle the way CI does, isolated
 scripts/wine.sh smoke installer    # install it, run the installed copy, uninstall
 ```

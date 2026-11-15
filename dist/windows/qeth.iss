@@ -1,5 +1,5 @@
 ; Inno Setup script for the Windows installer — wraps the PyInstaller onedir
-; bundle (out\qeth-windows, from build.sh) into qeth-<version>-setup.exe.
+; bundle (out\qeth-windows, from build.sh) into qeth-<version>-windows-x64-setup.exe.
 ; Compile with installer.sh (or `scripts/wine.sh installer`), which passes
 ; /DAppVersion from qeth/__init__.py.
 ;
@@ -37,7 +37,7 @@ WizardStyle=modern
 Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir=out
-OutputBaseFilename=qeth-{#AppVersion}-setup
+OutputBaseFilename=qeth-{#AppVersion}-windows-x64-setup
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

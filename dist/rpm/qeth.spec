@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.25.0
+Version:        0.26.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -135,6 +135,18 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.0-1
+- Windows: an installer and a portable zip (not code-signed yet)
+- New packages: Fedora 45 (Python 3.15) and Ubuntu 26.04 (system PySide6)
+- A custom RPC set for a chain is no longer mixed with the public fallback
+  RPCs, over HTTP or WebSocket
+- Quitting while a signing prompt is open no longer hangs
+- A Helios light client that stops following the chain (e.g. after waking on
+  another network) is restarted instead of leaving previews unverified
+- Animated signing QR codes: fixed an intermittent crash/hang
+- Python 3.15 support; Python 3.11 is now the minimum
+- Security: Pillow 13.0.0 (62 advisories, none reachable from qeth)
+
 * Tue Oct 20 2026 Michael Egorov <michwill@yieldbasis.com> - 0.25.0-1
 - Tron network: TRX / TRC-20 balances, discovery, prices and history; send
   with Tron's bandwidth / activation / energy fees; hot-wallet and Trezor

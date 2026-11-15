@@ -1,5 +1,11 @@
 #!/bin/bash
-# Build a native-themed qeth .deb for LMDE 7 "Gigi" / Debian 13 "Trixie" (x86_64).
+# Build a native-themed qeth .deb for a distro that ships PySide6 itself (x86_64):
+#   QETH_DEB_TARGET=debian13    (default) LMDE 7 "Gigi" / Debian 13 "Trixie" —
+#                               PySide6 6.8, python3.13
+#   QETH_DEB_TARGET=ubuntu2604  Ubuntu 26.04 LTS "Resolute Raccoon" (and the Mint
+#                               release built on it) — PySide6 6.10, python3.14
+# Run it ON the target: the vendored wheels are built for that distro's python3,
+# and the package Depends on exactly that python3 minor version.
 #
 # Why this is FAR simpler than the Mint/Ubuntu build (build-deb.sh): Debian 13
 # ships PySide6 6.8 natively — as the split python3-pyside6.* module packages —
@@ -18,7 +24,8 @@
 # backports) keeps the package installable on any stock Debian 13 with just the
 # main repo. The vendor dir shadows any system copy via PYTHONPATH order.
 #
-# Build prereqs (apt, main repo only):
+# Build prereqs (apt; Debian: main repo only, Ubuntu: main + universe, where
+# its python3-pyside6.* live):
 #   python3 python3-venv python3-pip
 #   python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets \
 #   python3-pyside6.qtnetwork python3-pyside6.qtmultimedia
@@ -32,11 +39,20 @@ VERSION="$(sed -nE 's/^__version__ = "(.*)"/\1/p' "$REPO/qeth/__init__.py")"
 VENV="$(mktemp -d)/venv"
 OUT="${1:-$REPO/dist/deb}"
 PY=python3
+TARGET="${QETH_DEB_TARGET:-debian13}"
+case "$TARGET" in
+    debian13)   DISTRO='LMDE 7 / Debian 13 "Trixie"' ;;
+    ubuntu2604) DISTRO='Ubuntu 26.04 LTS "Resolute Raccoon"' ;;
+    *) echo "unknown QETH_DEB_TARGET: $TARGET (debian13 | ubuntu2604)" >&2; exit 1 ;;
+esac
+# The vendored closure has compiled wheels (pydantic-core, lru-dict, ...) for
+# THIS interpreter's minor version, so pin python3 to it: X.Y <= python3 < X.Y+1.
+PYVER="$("$PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+PYNEXT="$("$PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1] + 1}")')"
 
-echo ">> qeth $VERSION  LMDE/Debian-13 build  (venv: $VENV  out: $OUT)"
-"$PY" --version
+echo ">> qeth $VERSION  $TARGET build ($DISTRO, python $PYVER)  (venv: $VENV  out: $OUT)"
 
-# 1. A plain venv under the SYSTEM python3 (3.13), then the full closure MINUS
+# 1. A plain venv under the SYSTEM python3 (3.13 / 3.14), then the full closure MINUS
 #    PySide6 from PyPI. PySide6 is only in qeth's [bundled] extra, which we do
 #    NOT request, so pip never pulls it — it comes from the system at runtime.
 #    [simulate] = the pure-Python py-evm fork engine (event previews on RPCs
@@ -94,20 +110,20 @@ Package: qeth
 Version: $VERSION
 Architecture: amd64
 Maintainer: Michael Egorov <michwill@yieldbasis.com>
-Depends: python3 (>= 3.13), python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, python3-pyside6.qtmultimedia, gstreamer1.0-plugins-good, libusb-1.0-0
+Depends: python3 (>= $PYVER), python3 (<< $PYNEXT), python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, python3-pyside6.qtmultimedia, gstreamer1.0-plugins-good, libusb-1.0-0
 Installed-Size: $INSTALLED_KB
 Section: utils
 Priority: optional
 Homepage: https://github.com/qeth-wallet/qeth
 Description: Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
  qeth is a PySide6 Ethereum wallet for the Linux desktop with Ledger support and
- a Frame-compatible JSON-RPC server. This build targets LMDE 7 / Debian 13
- "Trixie": it Depends on the system PySide6 6.8 (native theming) and vendors the
- eth stack (web3, eth-*, ledgereth, ...) privately under /usr/lib/qeth/vendor.$DESC_HELIOS
+ a Frame-compatible JSON-RPC server. This build targets $DISTRO:
+ it Depends on the system PySide6 (native theming) and vendors the eth stack
+ (web3, eth-*, ledgereth, ...) privately under /usr/lib/qeth/vendor.$DESC_HELIOS
 EOF
 
 mkdir -p "$OUT"
-DEB="$OUT/qeth${VARIANT}_${VERSION}_debian13_amd64.deb"
+DEB="$OUT/qeth${VARIANT}_${VERSION}_${TARGET}_amd64.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
 rm -rf "$(dirname "$STAGE")" "$(dirname "$VENV")"
 echo ">> built $DEB"

@@ -9,7 +9,7 @@
 #   scripts/wine.sh qeth [ARGS]    launch the app
 #   scripts/wine.sh python [ARGS]  the venv's python.exe
 #   scripts/wine.sh build [ARGS]   PyInstaller → dist/windows/out/qeth-windows
-#   scripts/wine.sh installer      Inno Setup → dist/windows/out/qeth-<v>-setup.exe
+#   scripts/wine.sh installer      Inno Setup → dist/windows/out/qeth-<v>-windows-x64-setup.exe
 #   scripts/wine.sh smoke          run the build the way CI does, isolated
 #   scripts/wine.sh smoke installer   …or install, run, uninstall the setup.exe
 #

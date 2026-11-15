@@ -13,7 +13,7 @@ if sys.version_info >= (3, 15):
     import concurrent.futures
     concurrent.futures.ThreadPoolExecutor  # touching the name resolves it
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 # PySide6 accepts C++ type names as strings in ``Signal(...)`` declarations;
 # ``"qulonglong"`` marshals a chain id through unsigned 64-bit (dapp-added

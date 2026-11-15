@@ -251,6 +251,13 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("qeth")
     app.setOrganizationName("qeth")
+    # The installed desktop entry's id, so a Wayland shell can match our window
+    # to it (dock/taskbar icon + name). Qt sends this as the xdg-toplevel app_id;
+    # unset, it falls back to the executable's name — "python3", since every
+    # package launches `python3 -m qeth` — and GNOME shows a generic icon. X11
+    # matches on WM_CLASS ("qeth", from setApplicationName) instead, which the
+    # entry's StartupWMClass=qeth already covers. Must precede the first window.
+    app.setDesktopFileName("io.github.michwill.qeth")
     # Sandboxed runs only (no-op natively): make theme icons legible and adopt
     # the host's configured font — both before any widget is built.
     _ensure_legible_icon_theme(os.environ)

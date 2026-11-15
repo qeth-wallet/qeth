@@ -155,3 +155,20 @@ def test_asyncio_executor_survives_the_qt_import():
     out = subprocess.run([sys.executable, "-c", code],
                          capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "42", out.stderr
+
+
+def test_desktop_file_name_matches_the_shipped_desktop_entry():
+    # On Wayland the dock/taskbar matches a window to an installed .desktop
+    # entry by the xdg-toplevel app_id, which Qt takes from desktopFileName —
+    # unset, it was "python3" and GNOME showed a generic icon. The name main()
+    # sets must stay the id every package installs the entry under (deb, rpm,
+    # Gentoo and the Flatpak all install dist/flatpak/<id>.desktop).
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "qeth" / "__main__.py").read_text()
+    names = re.findall(r'setDesktopFileName\("([^"]+)"\)', src)
+    assert names == ["io.github.michwill.qeth"]
+    assert (root / "dist" / "flatpak" / f"{names[0]}.desktop").is_file()
+    manifest = (root / "dist" / "flatpak" / "io.github.michwill.qeth.yml").read_text()
+    assert re.search(rf"^id: {re.escape(names[0])}$", manifest, re.M)

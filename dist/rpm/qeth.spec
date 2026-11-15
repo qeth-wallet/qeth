@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.26.0
+Version:        0.26.1
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -150,6 +150,11 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.1-1
+- Wayland: the dock/taskbar shows qeth's icon instead of a generic one (the
+  window now identifies as io.github.michwill.qeth, matching the installed
+  desktop entry, rather than "python3")
+
 * Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.0-1
 - Windows: an installer and a portable zip (not code-signed yet)
 - New packages: Fedora 45 (Python 3.15) and Ubuntu 26.04 (system PySide6)

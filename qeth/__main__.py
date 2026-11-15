@@ -183,17 +183,30 @@ def _adopt_host_qt_font(app, environ) -> None:
             return
 
 
-def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
-    """Route Ctrl+C through the same close path as the window manager.
+def _install_signal_shutdown(app, window, signal_module=signal) -> QTimer:
+    """Route Ctrl+C (SIGINT) and SIGTERM through the window manager's close path.
 
     Qt's event loop sits in C++ long enough that Python's default SIGINT
     handling isn't observed promptly. A 500 ms no-op QTimer gives the
     interpreter regular checkpoints, and the handler schedules
     ``window.close()`` so closeEvent persists UI state, then quits — also
     when the window is hidden in the tray.
-    The previous handler is restored on aboutToQuit. ``signal_module`` is
+
+    SIGTERM (``kill``, ``pkill``, ``timeout``, a task manager's "End process")
+    used to end the interpreter on the spot: atexit never ran, so the Helios
+    sidecar (stopped there) outlived qeth with its log pipe broken, and
+    aborted on its next write — Ubuntu's apport then reported the bundled
+    /usr/lib/qeth/helios as "closed unexpectedly". Now it quits like Ctrl+C.
+    Only the FIRST SIGTERM is graceful: the handler hands SIGTERM straight
+    back to its previous action, so a second one still terminates a qeth
+    whose event loop is wedged (the escape hatch a plain ``kill`` used to
+    be). A repeated Ctrl+C is still ignored, since SIGINT's default action
+    raises KeyboardInterrupt, which is useless in a Qt app.
+
+    Both previous handlers are restored on aboutToQuit. ``signal_module`` is
     injectable for testing."""
-    previous_handler = signal_module.getsignal(signal_module.SIGINT)
+    signums = (signal_module.SIGINT, signal_module.SIGTERM)
+    previous = {sig: signal_module.getsignal(sig) for sig in signums}
     shutdown_requested = False
 
     def shut_down() -> None:
@@ -203,18 +216,22 @@ def _install_sigint_shutdown(app, window, signal_module=signal) -> QTimer:
         # kept running and every further Ctrl+C was swallowed.
         app.quit()
 
-    def request_shutdown(_signum, _frame) -> None:
+    def request_shutdown(signum, _frame) -> None:
         nonlocal shutdown_requested
+        if signum == signal_module.SIGTERM:
+            signal_module.signal(signum, previous[signum])
         if shutdown_requested:
             return
         shutdown_requested = True
         QTimer.singleShot(0, shut_down)
 
-    def restore_handler() -> None:
-        signal_module.signal(signal_module.SIGINT, previous_handler)
+    def restore_handlers() -> None:
+        for sig, handler in previous.items():
+            signal_module.signal(sig, handler)
 
-    signal_module.signal(signal_module.SIGINT, request_shutdown)
-    app.aboutToQuit.connect(restore_handler)
+    for sig in signums:
+        signal_module.signal(sig, request_shutdown)
+    app.aboutToQuit.connect(restore_handlers)
 
     # The interpreter-checkpoint heartbeat: parented to ``app`` so Qt keeps
     # it alive (no Python ref needed).
@@ -323,7 +340,7 @@ def main() -> int:
     win.set_tray(_tray)             # the desktop-notification sink (or None)
     # Ctrl+C → window.close() (persists state) → app quits. Timer is
     # app-parented, so no kept-alive ref needed.
-    _install_sigint_shutdown(app, win)
+    _install_signal_shutdown(app, win)
     try:
         return app.exec()
     finally:

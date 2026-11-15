@@ -26,6 +26,12 @@ ExclusiveArch:  x86_64
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  gcc
+# A vendored dep without a wheel for this Fedora's python3 is compiled from its
+# sdist. On Fedora 45 (python 3.15) that's hidapi (ledgerblue's USB layer): its
+# `hid` module links libusb-1.0 and its `hidraw` module libudev. The runtime
+# libraries are libusb1 (Required below) and systemd-libs (always installed).
+BuildRequires:  pkgconfig(libusb-1.0)
+BuildRequires:  pkgconfig(libudev)
 # System deps present at build time so the --system-site-packages venv treats
 # them as satisfied and pip vendors ONLY what Fedora lacks / pins differently.
 BuildRequires:  python3-pyside6
@@ -104,7 +110,16 @@ python3 -m venv --system-site-packages %{_builddir}/qeth-venv
 
 VENDOR=%{buildroot}%{_prefix}/lib/%{name}/vendor
 install -d "$VENDOR"
-cp -a %{_builddir}/qeth-venv/lib/python*/site-packages/. "$VENDOR/"
+# Both of the venv's site dirs: pure-Python packages go to purelib (lib/...),
+# compiled ones (pycryptodome, cryptography, hidapi, ...) to platlib. On
+# Fedora's python3 platlib is lib64/... — a symlink to lib in a python <= 3.14
+# venv, but a directory of its own from 3.15 (Fedora 45), so copying lib/ alone
+# silently dropped every compiled dep there.
+for sp in $(%{_builddir}/qeth-venv/bin/python -c \
+        'import sysconfig; print(sysconfig.get_path("purelib")); print(sysconfig.get_path("platlib"))' \
+        | sort -u); do
+    cp -a "$sp/." "$VENDOR/"
+done
 # Drop venv/pip bookkeeping — keep qeth + the runtime deps only.
 rm -rf "$VENDOR"/pip "$VENDOR"/pip-*.dist-info \
        "$VENDOR"/setuptools "$VENDOR"/setuptools-*.dist-info \

@@ -1,0 +1,5 @@
+# Check text out as LF everywhere, Windows included. Several files are
+# byte-pinned — the vendored TronWeb bundle (sha256 in build.py), the logo
+# that ships as a data: URI — and a CRLF checkout (core.autocrlf on Windows)
+# silently changes their bytes.
+* text=auto eol=lf

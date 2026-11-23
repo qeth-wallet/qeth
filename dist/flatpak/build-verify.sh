@@ -4,15 +4,17 @@
 # out of the box. This is the ONLY way verified mode reaches the Flatpak —
 # the sandbox can't reach a helios binary on the host.
 #
-# Pass a helios binary path in QETH_BUNDLE_HELIOS (e.g. heliosup's
-# ~/.helios/bin/helios). The script derives a verify manifest from the base
-# one (single source of truth) by adding a helios module + the
-# QETH_HELIOS_BIN env, then builds + bundles to dist/flatpak/qeth-verify.flatpak.
+# Helios is the pinned, sha256-checked release from dist/fetch-helios.sh unless
+# QETH_BUNDLE_HELIOS names another binary explicitly. The script derives a
+# verify manifest from the base one (single source of truth) by adding a helios
+# module + the QETH_HELIOS_BIN env, exports the pinned Python deps from uv.lock,
+# then builds + bundles to dist/flatpak/qeth-verify.flatpak.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BASE="$HERE/io.github.michwill.qeth.yml"
-HELIOS="${QETH_BUNDLE_HELIOS:?set QETH_BUNDLE_HELIOS to a helios binary path}"
+HELIOS="${QETH_BUNDLE_HELIOS:-$("$HERE/../fetch-helios.sh")}"
 [ -x "$HELIOS" ] || { echo "not executable: $HELIOS" >&2; exit 1; }
+"$HERE/../lock-export.sh" "$HERE/../.pinned/flatpak" simulate qr trezor
 
 STATE="${QETH_FLATPAK_STATE:-$HOME/.cache/qeth-flatpak}"
 cp "$HELIOS" "$HERE/helios"        # the file: source the module reads (gitignored)
@@ -37,6 +39,11 @@ awk '
 cat >> "$MANIFEST" <<"YAML"
   - name: helios
     buildsystem: simple
+    build-options:
+      # Ship the sha256-checked release byte-for-byte: flatpak-builder would
+      # otherwise strip it (debuginfo split), so it no longer matched the digest.
+      no-debuginfo: true
+      strip: false
     build-commands:
       - install -Dm0755 helios ${FLATPAK_DEST}/bin/helios
     sources:

@@ -17,9 +17,10 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, cast
+from typing import Protocol, cast
 
 DEFAULT_PATH = "44'/60'/0'/0/0"
 CHILD_TIMEOUT_S = 120.0

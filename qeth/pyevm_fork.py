@@ -32,6 +32,11 @@ Layout:
 from __future__ import annotations
 
 import logging
+# Module level, not inside _batch_seed: on Python 3.15 a function-local
+# `from concurrent.futures import ThreadPoolExecutor` returns an unresolved
+# lazy object once PySide6 is loaded (see qeth/__init__.py); a module global
+# is resolved on use.
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from eth_utils import to_canonical_address, to_checksum_address
@@ -267,7 +272,6 @@ class RpcStateReader(StateReader):
         concurrent individual requests (see _SEED_CONCURRENCY)."""
         import json as _json
         import urllib.request as _u
-        from concurrent.futures import ThreadPoolExecutor
         from . import USER_AGENT
 
         keys: list[tuple] = []

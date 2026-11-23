@@ -60,13 +60,21 @@ PY="$APPDIR/usr/python/bin/python3"
 # runtime AppRun sets the same PYTHONHOME.)
 export PYTHONHOME="$APPDIR/usr/python"
 
-# 3. qeth + bundled PySide6 + the eth stack, installed FRESH from PyPI manylinux
-#    wheels. Anything without a wheel compiles with the container's generic gcc
-#    (old glibc, no -march=native) — still portable.
+# 3. qeth + bundled PySide6 + the eth stack, at EXACTLY the uv.lock versions:
+#    build-in-container.sh exports them hash-pinned (dist/lock-export.sh) into
+#    $PINNED, so the bundle ships what the lock + `uv audit` vouch for, never
+#    whatever PyPI serves on build day. Wheels are manylinux; the three
+#    sdist-only deps (pure Python) build with the container's generic toolchain.
 #    The source is copied to a WRITABLE dir first: pip's egg_info build step
 #    writes into the tree, and /src is mounted read-only. The exclude list keeps
 #    the host .venv/.git/build artifacts out — no host binary ever rides along,
 #    which is the whole point of building in here.
+PINNED="${PINNED:-$SRC/dist/.pinned/appimage}"
+[ -f "$PINNED/requirements.txt" ] && [ -f "$PINNED/build-requirements.txt" ] || {
+    echo "FATAL: no pinned requirements in $PINNED — build via build-in-container.sh,"
+    echo "       which exports them from uv.lock (dist/lock-export.sh)."
+    exit 1
+}
 BUILD_SRC="$WORK/src"
 mkdir -p "$BUILD_SRC"
 tar -C "$SRC" \
@@ -74,16 +82,26 @@ tar -C "$SRC" \
     --exclude=.flatpak-builder --exclude=resume --exclude='__pycache__' \
     --exclude='.env' --exclude='.env.local' \
     -cf - . | tar -C "$BUILD_SRC" -xf -
-"$PY" -m pip install --no-cache-dir --upgrade pip wheel >/dev/null
+# The pinned setuptools goes in a throwaway dir on PYTHONPATH, NOT the bundle:
+# with --no-build-isolation pip builds qeth + the sdists with it instead of
+# fetching an unpinned setuptools into an isolated env.
+TOOLS="$WORK/build-tools"
+"$PY" -m pip install --no-cache-dir --require-hashes --no-deps --target "$TOOLS" \
+    -r "$PINNED/build-requirements.txt"
 # --prefix pins the install into the AppDir copy. manylinux's CPython resolves
 # its own prefix back to /opt/python, so neither the default scheme nor
 # PYTHONHOME reliably redirects pip — --prefix is explicit and deterministic.
+# The pinned set covers [bundled,simulate,qr,trezor]:
 # [simulate] = pure-Python py-evm fork engine (previews on simV1-less RPCs;
 # Helios-verified previews when a helios binary is on the host).
 # [qr] = the air-gapped QR signer decode stack (cbor2 + zxing-cpp + Pillow),
 # from manylinux wheels — pairs with the QtMultimedia camera kept in 3b.
-"$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
-    "${BUILD_SRC}[bundled,simulate,qr,trezor]"
+# --require-hashes also makes pip refuse any dependency missing from the file.
+PYTHONPATH="$TOOLS" "$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
+    --require-hashes --no-build-isolation -r "$PINNED/requirements.txt"
+PYTHONPATH="$TOOLS" "$PY" -m pip install --no-cache-dir --prefix="$APPDIR/usr/python" \
+    --no-deps --no-build-isolation --no-index "$BUILD_SRC"
+"$PY" -m pip check
 # Fail loudly if Qt didn't actually land in the bundle, rather than shipping a
 # tiny empty AppImage.
 if ! ls -d "$APPDIR"/usr/python/lib/python*/site-packages/PySide6 >/dev/null 2>&1; then
@@ -223,14 +241,28 @@ install -Dm644 "$SRC/dist/appimage/io.github.michwill.qeth.desktop" "$APPDIR/io.
 install -Dm644 "$SRC/qeth/assets/logos/qeth-icon-rounded.svg"       "$APPDIR/io.github.michwill.qeth.svg"
 
 # 6. Pack. --appimage-extract-and-run avoids needing FUSE inside the container.
+#    Both appimagetool AND the type2 runtime it prepends to every AppImage (the
+#    loader each user executes first) are pinned releases checked against
+#    GitHub's sha256 for the asset. Without --runtime-file appimagetool would
+#    download the runtime's moving "continuous" build itself. Bump = new tag +
+#    digest (`gh api repos/AppImage/<repo>/releases/tags/<tag>` → .assets[].digest).
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$BUILD_SRC/qeth/__init__.py")"
-# -f so a transient 5xx (GitHub's "continuous" release CDN 504s intermittently)
-# fails the curl instead of saving the HTML error page as the "binary"; retry a
-# few times so a hiccup doesn't sink the whole release build.
-curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$WORK/appimagetool" \
-  "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH}.AppImage"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH}"
+RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+# -f so a transient 5xx fails the curl instead of saving GitHub's HTML error page
+# (the digest check would catch it too, with a less obvious message); retry a few
+# times so a hiccup doesn't sink the whole release build.
+_fetch() {   # url sha256 dest
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$3" "$1"
+    echo "$2  $3" | sha256sum -c --quiet - || { echo "FATAL: sha256 mismatch for $1"; exit 1; }
+}
+_fetch "$APPIMAGETOOL_URL" "$APPIMAGETOOL_SHA256" "$WORK/appimagetool"
+_fetch "$RUNTIME_URL" "$RUNTIME_SHA256" "$WORK/runtime"
 chmod +x "$WORK/appimagetool"
 ARCH="$ARCH" "$WORK/appimagetool" --appimage-extract-and-run \
+  --runtime-file "$WORK/runtime" \
   "$APPDIR" "$OUT/qeth${VARIANT}-${VERSION}-${ARCH}.AppImage"
 _floor="2.34"; [ -n "$VARIANT" ] && _floor="2.39 (bundled helios)"
 echo "OK -> $OUT/qeth${VARIANT}-${VERSION}-${ARCH}.AppImage  (needs glibc >= $_floor, generic x86-64)"

@@ -2,11 +2,16 @@
 
 import os
 import stat
+import sys
+
+import pytest
 
 from qeth.chains import DEFAULT_CHAINS
 from qeth.store import Store, _merge_chain, ensure_private_root
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX permission bits — Windows guards ~/.qeth with the profile's ACL")
 class TestPrivateRoot:
     """~/.qeth must be owner-only (0700) so another local user can't traverse
     into the cache subtree and read wallet addresses / chain ids / metadata

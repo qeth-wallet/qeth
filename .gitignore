@@ -7,6 +7,8 @@ build/
 # Ignore build artifacts under dist/, but keep the Flatpak / AppImage / RPM /
 # deb packaging sources tracked — only the built bundles / output dirs are ignored.
 /dist/*
+!/dist/lock-export.sh
+!/dist/fetch-helios.sh
 !/dist/flatpak/
 /dist/flatpak/qeth.flatpak
 !/dist/appimage/
@@ -18,6 +20,8 @@ build/
 /dist/deb/*.deb
 !/dist/macos/
 /dist/macos/out/
+!/dist/windows/
+/dist/windows/out/
 
 # venv
 .venv/

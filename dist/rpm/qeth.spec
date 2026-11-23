@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.25.0
+Version:        0.26.1
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -26,6 +26,12 @@ ExclusiveArch:  x86_64
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  gcc
+# A vendored dep without a wheel for this Fedora's python3 is compiled from its
+# sdist. On Fedora 45 (python 3.15) that's hidapi (ledgerblue's USB layer): its
+# `hid` module links libusb-1.0 and its `hidraw` module libudev. The runtime
+# libraries are libusb1 (Required below) and systemd-libs (always installed).
+BuildRequires:  pkgconfig(libusb-1.0)
+BuildRequires:  pkgconfig(libudev)
 # System deps present at build time so the --system-site-packages venv treats
 # them as satisfied and pip vendors ONLY what Fedora lacks / pins differently.
 BuildRequires:  python3-pyside6
@@ -104,7 +110,16 @@ python3 -m venv --system-site-packages %{_builddir}/qeth-venv
 
 VENDOR=%{buildroot}%{_prefix}/lib/%{name}/vendor
 install -d "$VENDOR"
-cp -a %{_builddir}/qeth-venv/lib/python*/site-packages/. "$VENDOR/"
+# Both of the venv's site dirs: pure-Python packages go to purelib (lib/...),
+# compiled ones (pycryptodome, cryptography, hidapi, ...) to platlib. On
+# Fedora's python3 platlib is lib64/... — a symlink to lib in a python <= 3.14
+# venv, but a directory of its own from 3.15 (Fedora 45), so copying lib/ alone
+# silently dropped every compiled dep there.
+for sp in $(%{_builddir}/qeth-venv/bin/python -c \
+        'import sysconfig; print(sysconfig.get_path("purelib")); print(sysconfig.get_path("platlib"))' \
+        | sort -u); do
+    cp -a "$sp/." "$VENDOR/"
+done
 # Drop venv/pip bookkeeping — keep qeth + the runtime deps only.
 rm -rf "$VENDOR"/pip "$VENDOR"/pip-*.dist-info \
        "$VENDOR"/setuptools "$VENDOR"/setuptools-*.dist-info \
@@ -135,6 +150,23 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.1-1
+- Wayland: the dock/taskbar shows qeth's icon instead of a generic one (the
+  window now identifies as io.github.michwill.qeth, matching the installed
+  desktop entry, rather than "python3")
+
+* Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.0-1
+- Windows: an installer and a portable zip (not code-signed yet)
+- New packages: Fedora 45 (Python 3.15) and Ubuntu 26.04 (system PySide6)
+- A custom RPC set for a chain is no longer mixed with the public fallback
+  RPCs, over HTTP or WebSocket
+- Quitting while a signing prompt is open no longer hangs
+- A Helios light client that stops following the chain (e.g. after waking on
+  another network) is restarted instead of leaving previews unverified
+- Animated signing QR codes: fixed an intermittent crash/hang
+- Python 3.15 support; Python 3.11 is now the minimum
+- Security: Pillow 13.0.0 (62 advisories, none reachable from qeth)
+
 * Tue Oct 20 2026 Michael Egorov <michwill@yieldbasis.com> - 0.25.0-1
 - Tron network: TRX / TRC-20 balances, discovery, prices and history; send
   with Tron's bandwidth / activation / energy fees; hot-wallet and Trezor

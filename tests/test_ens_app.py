@@ -31,8 +31,8 @@ def test_expiry_status():
 
 
 def _utc(y, mo, d, h, mi, s):
-    from datetime import datetime, timezone
-    return int(datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp())
+    from datetime import UTC, datetime
+    return int(datetime(y, mo, d, h, mi, s, tzinfo=UTC).timestamp())
 
 
 def test_iso_to_unix():

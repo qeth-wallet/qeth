@@ -22,6 +22,11 @@ Design (settled in docs/eth-browsing.md "Helios integration shape"):
   disables the whole feature. A sidecar is respawned when the chain's RPC
   is changed under it (the execution-rpc is fixed at spawn) — otherwise
   verified reads would stay pinned to the old endpoint until restart.
+- **Staleness gate after ready**: readiness is sticky, so every use re-asks
+  ``eth_syncing`` (Helios's own head-age check). A sidecar that stays behind
+  with no progress for ``_STALE_RESPAWN_S`` is replaced — a live process can
+  wedge for good, e.g. waking from suspend on another network: Helios reads
+  ``/etc/resolv.conf`` once at start, so every DNS lookup then times out.
 
 The sidecar's execution-rpc is the chain's configured RPC: the same
 endpoint qeth already uses, just stripped of its power to lie.
@@ -165,6 +170,18 @@ _POLL_INTERVAL_S = 0.5
 # fails from the first line, on any execution-rpc, and never recovers.
 _STUCK_LIMIT = 20
 
+# A READY sidecar whose head has fallen behind (``eth_syncing`` no longer False
+# — Helios's own check: latest block older than 60 s) is replaced once it has
+# shown no progress for this long. Measured on the monotonic clock, which stops
+# during suspend: a sidecar just woken from sleep catches up within a slot or
+# two of the network returning, so it's left alone; one that never resumes (seen
+# live: woke on another Wi-Fi, Helios kept querying the old network's DNS
+# servers, head frozen for hours with zero outbound connections) is respawned
+# on first use after the grace, the fresh process reading the current
+# resolv.conf. Until then reads take the unverified path, as for an unready one.
+_STALE_RESPAWN_S = 90.0
+_HEALTH_TIMEOUT_S = 2.0   # loopback eth_syncing; a hung RPC server is stale too
+
 
 def helios_binary() -> str | None:
     """Path to a usable helios binary, or None (not installed, or the
@@ -228,6 +245,9 @@ class HeliosSidecar:
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._ready = False
+        # monotonic time of the last sign of health: a progress line from
+        # helios, or eth_syncing answering False (see stale_for)
+        self._last_progress = time.monotonic()
         self._stuck = 0          # consecutive problem lines with no progress
         self._gave_up = False
         self._last_warn = ""     # dedupe repeated identical WARNING lines
@@ -286,6 +306,7 @@ class HeliosSidecar:
                         break
                 else:
                     self._stuck = 0        # a progress line → not stuck
+                    self._last_progress = time.monotonic()
                     self._flush_dupes()
                     log.debug("helios[%d]: %s", self.chain_id, line)
         except Exception:
@@ -348,6 +369,7 @@ class HeliosSidecar:
             try:
                 if _rpc(self.url, "eth_syncing") is False:
                     self._ready = True
+                    self._last_progress = time.monotonic()
                     log.info("helios ready for chain %d on %s",
                              self.chain_id, self.url)
                     return True
@@ -367,6 +389,24 @@ class HeliosSidecar:
             log.debug("helios for chain %d not ready (non-blocking probe)",
                       self.chain_id)
         return False
+
+    def is_fresh(self) -> bool:
+        """Whether a READY sidecar still tracks the chain head — Helios's own
+        ``eth_syncing`` is False only while its latest block is under a minute
+        old. Readiness is sticky; this is the per-use re-check behind it. An
+        unreachable RPC server counts as not fresh."""
+        try:
+            fresh = _rpc(self.url, "eth_syncing",
+                         timeout=_HEALTH_TIMEOUT_S) is False
+        except Exception:
+            fresh = False
+        if fresh:
+            self._last_progress = time.monotonic()
+        return fresh
+
+    def stale_for(self) -> float:
+        """Awake seconds since the last sign of progress (see _STALE_RESPAWN_S)."""
+        return time.monotonic() - self._last_progress
 
     def stop(self) -> None:
         if self.alive():
@@ -395,11 +435,16 @@ def _stop_all() -> None:
 atexit.register(_stop_all)
 
 
-def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
+def _ensure_sidecar(chain: Chain, replace: HeliosSidecar | None = None,
+                   ) -> HeliosSidecar | None:
     """The running (not necessarily synced) sidecar for ``chain`` —
     spawning one if needed. None when helios is absent/disabled or the
     chain isn't one Helios supports. Non-blocking (Popen returns
-    immediately; the sync happens inside the helios process)."""
+    immediately; the sync happens inside the helios process).
+
+    ``replace`` is a live sidecar found wedged (see :func:`verified_chain`):
+    it's retired like a stale-RPC one. If another thread already replaced it,
+    its successor is simply reused."""
     if chain.chain_id not in HELIOS_NETWORKS:
         return None
     if chain.chain_id in _unsyncable:
@@ -415,12 +460,12 @@ def _ensure_sidecar(chain: Chain) -> HeliosSidecar | None:
         # default if theirs was proven proof-incapable). A dead sidecar, a
         # swapped RPC (chain-RPC dialog), or a capability re-classification is
         # replaced — otherwise verified reads keep hitting the old node until
-        # app restart.
-        if (sc is not None and sc.alive()
+        # app restart. So is a wedged one the caller asked to ``replace``.
+        if (sc is not None and sc.alive() and sc is not replace
                 and sc.execution_rpc == _execution_rpc(chain)):
             return sc
         if sc is not None and sc.alive():
-            retire = sc          # stale RPC: replace it, tear it down off-lock
+            retire = sc          # stale RPC / wedged: replace, tear down off-lock
         try:
             sc = HeliosSidecar(chain, binary)
         except Exception:
@@ -457,12 +502,29 @@ def verified_chain(chain: Chain, wait_s: float = _READY_TIMEOUT_S,
     The sidecar spawns against the chain's configured RPC unless it was found
     unable to serve historical proofs (see :func:`note_execution_rpc_incapable`),
     in which case Helios reads from the bundled proof-capable default.
+
+    A ready sidecar is re-checked on every call: one behind the head yields
+    None until it catches up, and is respawned (then waited for like a cold
+    start) once it has made no progress for ``_STALE_RESPAWN_S``.
     """
     sc = _ensure_sidecar(chain)
     if sc is None:
         return None
     if not sc.wait_ready(timeout=wait_s):
         return None
+    if not sc.is_fresh():
+        idle = sc.stale_for()
+        if idle < _STALE_RESPAWN_S:
+            log.info("helios for chain %d is behind the chain head (no "
+                     "progress for %.0fs); unverified reads until it catches up",
+                     chain.chain_id, idle)
+            return None
+        log.warning("helios for chain %d has made no progress for %.0fs "
+                    "(e.g. woke from sleep on another network); respawning it",
+                    chain.chain_id, idle)
+        sc = _ensure_sidecar(chain, replace=sc)
+        if sc is None or not sc.wait_ready(timeout=wait_s):
+            return None
     # The shadow chain must read from Helios ONLY. fallback_rpcs is set
     # to the same URL on purpose: an EMPTY tuple makes chain._rpc_urls
     # inherit the matching DEFAULT_CHAINS fallbacks for a known chain id

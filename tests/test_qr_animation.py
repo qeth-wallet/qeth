@@ -2,6 +2,7 @@
 
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -104,14 +105,14 @@ def test_cancel_during_encoding_is_nonblocking_and_never_displays(qtbot, monkeyp
     import qeth.qr_animation as module
 
     entered, release = threading.Event(), threading.Event()
-    encode = module.qr_to_image
+    encode = module.qr_pixels
 
     def slow_encode(*args, **kwargs):
         entered.set()
         release.wait(5)
         return encode(*args, **kwargs)
 
-    monkeypatch.setattr(module, "qr_to_image", slow_encode)
+    monkeypatch.setattr(module, "qr_pixels", slow_encode)
     widget = QRWidget()
     qtbot.addWidget(widget)
     animation = QRAnimation(widget, frame_source("x", bytes(2000)))
@@ -150,6 +151,22 @@ def test_destroying_widget_cancels_its_worker(qtbot):
     widget.deleteLater()
     qtbot.waitUntil(lambda: not worker.thread.is_alive())
     assert worker.cancelled.is_set()
+
+
+def test_no_qt_connection_holds_the_preparer_weakly(qtbot):
+    # The preparer's last reference often drops on its own worker thread
+    # (Thread.run releasing its target). A signal connected to one of its
+    # bound methods makes PySide hold it via a weakref whose callback then
+    # runs Qt connection cleanup on that thread — the Windows CI access
+    # violation. The cancel-on-destroy hook must be a plain closure.
+    widget = QRWidget()
+    qtbot.addWidget(widget)
+    animation = QRAnimation(widget, frame_source("x", bytes(2000)))
+    try:
+        assert weakref.getweakrefcount(animation._preparer) == 0
+        assert weakref.getweakrefcount(animation._preparer.cancelled) == 0
+    finally:
+        animation.stop()
 
 
 def test_alias_retry_continues_the_original_chunks_mask_cycle(qtbot):

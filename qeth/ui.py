@@ -772,6 +772,10 @@ class MainWindow(QMainWindow):
         self-evict via ``finished``, but at quit there's no event loop left to
         run that, so we join explicitly here."""
         self._shutting_down = True
+        # Signing workers can be blocked on callbacks queued to this thread.
+        # Release them before joining, while the GUI can still close widgets.
+        for interaction in self.findChildren(DialogInteraction):
+            interaction.cancel()
         for worker in list(self._active_workers):
             try:
                 worker.requestInterruption()

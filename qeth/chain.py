@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from web3.providers.rpc import HTTPProvider
     from web3.types import BlockIdentifier, RPCEndpoint, TxParams
 
-from .chains import Chain, DEFAULT_CHAINS
+from .chains import Chain
 
 log = logging.getLogger("qeth.chain")
 
@@ -186,15 +186,12 @@ def _build_session() -> Any:
 
 
 def _rpc_urls(chain: Chain) -> list[str]:
-    """Primary RPC followed by its ordered fallbacks, deduped. A chain with
-    no fallbacks of its own (e.g. a user's custom-RPC override) inherits the
-    matching DEFAULT_CHAINS entry's fallbacks, so failover still applies."""
-    fallbacks = chain.fallback_rpcs
-    if not fallbacks:
-        default = next((c for c in DEFAULT_CHAINS
-                        if c.chain_id == chain.chain_id), None)
-        fallbacks = default.fallback_rpcs if default else ()
-    return list(dict.fromkeys(u for u in (chain.rpc_url, *fallbacks) if u))
+    """Primary RPC followed by its resolved, ordered fallbacks, deduped.
+
+    Store already supplies defaults or clears them for a custom RPC override.
+    Never restore public endpoints after that choice.
+    """
+    return list(dict.fromkeys(u for u in (chain.rpc_url, *chain.fallback_rpcs) if u))
 
 
 # JSON-RPC error objects that mean the PROVIDER is refusing/limiting rather

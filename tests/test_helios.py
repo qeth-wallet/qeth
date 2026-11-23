@@ -321,6 +321,107 @@ def test_dead_sidecar_is_respawned(monkeypatch):
     assert second.rpc_url != first.rpc_url    # fresh port, fresh process
 
 
+# --- stale-after-ready respawn ------------------------------------------------
+
+def _stale_rpc(stale_urls):
+    """A fake _rpc where the sidecars at ``stale_urls`` report themselves behind
+    (Helios's eth_syncing object) and every other one is synced."""
+    def fake(url, method, params=None, timeout=5.0):
+        if url in stale_urls:
+            return {"startingBlock": "0x0", "currentBlock": "0x0"}
+        return False
+    return fake
+
+
+def test_stale_sidecar_within_grace_is_left_to_catch_up(monkeypatch):
+    """Just woken from sleep: the head is hours old but the sidecar showed
+    progress moments ago (monotonic time stops during suspend). It gets to
+    catch up on its own — unverified this round, no respawn."""
+    _enable(monkeypatch)
+    spawned = []
+    monkeypatch.setattr(hl.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(argv) or _FakeProc(argv))
+    stale: set[str] = set()
+    monkeypatch.setattr(hl, "_rpc", _stale_rpc(stale))
+    first = hl.verified_chain(ETH, wait_s=5)
+    stale.add(first.rpc_url)                     # head fell behind
+
+    assert hl.verified_chain(ETH, wait_s=5) is None
+    assert len(spawned) == 1                     # left alone
+    assert hl._sidecars[1].alive()
+
+    stale.clear()                                # caught up
+    again = hl.verified_chain(ETH, wait_s=5)
+    assert again is not None and again.rpc_url == first.rpc_url
+    assert len(spawned) == 1
+
+
+def test_wedged_sidecar_is_respawned_after_grace(monkeypatch):
+    """The reported bug: a sidecar alive but frozen for hours (woke on another
+    network — Helios kept the old DNS servers) was reused forever because
+    readiness is sticky. Past the grace it's replaced with a fresh process,
+    which is waited for like a cold start, and the old one is terminated."""
+    import time
+    _enable(monkeypatch)
+    spawned = []
+    monkeypatch.setattr(hl.subprocess, "Popen",
+                        lambda argv, **kw: spawned.append(argv) or _FakeProc(argv))
+    stale: set[str] = set()
+    monkeypatch.setattr(hl, "_rpc", _stale_rpc(stale))
+    first = hl.verified_chain(ETH, wait_s=5)
+    old = hl._sidecars[1]
+    stale.add(first.rpc_url)
+    old._last_progress -= hl._STALE_RESPAWN_S + 1
+
+    second = hl.verified_chain(ETH, wait_s=5)
+    assert second is not None                    # verified again, this call
+    assert second.rpc_url != first.rpc_url       # fresh port, fresh process
+    assert len(spawned) == 2
+    assert hl._sidecars[1] is not old
+    for _ in range(200):                         # retired off-lock in a thread
+        if not old.alive():
+            break
+        time.sleep(0.01)
+    assert not old.alive()
+
+
+def test_unreachable_ready_sidecar_counts_as_stale(monkeypatch):
+    """A health check that errors (RPC server hung / refusing) is not fresh,
+    so a wedged-and-silent sidecar is replaced too."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(hl.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)
+    first = hl.verified_chain(ETH, wait_s=5)
+    old = hl._sidecars[1]
+    old._last_progress -= hl._STALE_RESPAWN_S + 1
+
+    def fake(url, method, params=None, timeout=5.0):
+        if url == first.rpc_url:
+            raise TimeoutError("timed out")
+        return False
+
+    monkeypatch.setattr(hl, "_rpc", fake)
+    assert old.is_fresh() is False
+    second = hl.verified_chain(ETH, wait_s=5)
+    assert second is not None and second.rpc_url != first.rpc_url
+
+
+def test_progress_output_resets_the_stale_clock(monkeypatch):
+    """helios's own progress lines are evidence of health: a sidecar that
+    keeps logging them isn't respawned just because one head check lagged,
+    while problem lines alone don't refresh the clock."""
+    import io
+    monkeypatch.setattr(hl, "_rpc", lambda *a, **k: False)
+    sc = hl.HeliosSidecar(ETH, "/fake/helios", popen=_FakeProc)
+    sc._last_progress -= 1000
+    sc._pump_output(io.StringIO(
+        "2026-01-01T00:00:00Z  WARN helios::consensus: advance error: dns error\n"))
+    assert sc.stale_for() > hl._STALE_RESPAWN_S
+    sc._pump_output(io.StringIO(
+        "2026-01-01T00:00:00Z  INFO helios::client: latest block number=1 age=4s\n"))
+    assert sc.stale_for() < hl._STALE_RESPAWN_S
+
+
 def test_sidecar_respawns_when_rpc_changes(monkeypatch):
     """Swapping the chain's RPC must retire the sidecar spawned against the old
     endpoint and start a fresh one on the new one — otherwise verified reads

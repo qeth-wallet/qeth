@@ -10,7 +10,7 @@ user's Qt theme applies.
 - `qeth/ui.py` — PySide6 main window, dialogs, token panel, QThread workers
 - `qeth/store.py` — JSON config at `~/.qeth/config.json` (accounts, chains, default account, hidden/shown token overrides)
 - `qeth/chain.py` — sync JSON-RPC client (`EthClient`) shaped like `w3.eth.*`; the seam for swapping to web3.py later
-- `qeth/async_chain.py` — async transport (`AsyncWeb3` over a `WebSocketProvider` or async-http failover stack) for the live watcher; mirrors `chain.py`'s UA / failover / PoA plumbing. `ws_urls_for(chain)` resolves explicit `Chain.ws_url` → inherited default → derived `https→wss`.
+- `qeth/async_chain.py` — async transport (`AsyncWeb3` over a `WebSocketProvider` or async-http failover stack) for the live watcher; mirrors `chain.py`'s UA / failover / PoA plumbing. `ws_urls_for(chain)` resolves explicit `Chain.ws_url` → derived `https→wss`; custom RPC overrides never restore public endpoints.
 - `qeth/plugins/transactions/live_watcher.py` — the WebSocket live-update watcher: a `QThread` running one asyncio loop that subscribes per active chain to `newHeads` (→ pending-tx confirmation, the async port of `PendingProbeWorker`) and the on-screen account's ERC-20 `Transfer` logs (→ live token balances). **On by default**; `QETH_LIVE_WS=0` disables it. A pure accelerator over the always-on polling floor. Design + rationale in `docs/ws-subscriptions.md`.
 - `qeth/chains.py` — `Chain` dataclass (incl. `ws_url` for the live watcher; `family` `"evm"`/`"tron"`, `native_decimals`, `api_url`/`api_fallbacks` for a family's own HTTP API, `multicall_address` when Multicall3 isn't at the canonical address) + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, Gnosis, BSC, Robinhood on DRPC/publicnode, and Tron)
 - `qeth/address.py` — per-family address codecs: `codec_for(chain).parse(text)` → internal `0x` hex, `.display(addr)` → EIP-55 or Tron `T…` (base58check); `parse_any` picks the family from the text. `qeth/explorer.py` — `explorer_url(chain, kind, value)`, Etherscan-family paths or Tronscan's `#/` routes.
@@ -52,6 +52,19 @@ evaluated at resolution time — no date to maintain); `ty` is exempted and
 fresh security fixes are pulled forward per-package — see the comments in
 `pyproject.toml`.
 
+**The lock is what ships.** The AppImage and Flatpak install exactly the
+`uv.lock` versions, hash-checked: `dist/lock-export.sh OUTDIR EXTRA…` exports
+`requirements.txt` + a pinned setuptools (`build-backend` group) and the builds
+run pip with `--require-hashes --no-build-isolation` (so even the sdist-only
+deps — ledgerblue, pydes, python-u2flib-host — build with the pinned
+setuptools). Helios comes from `dist/fetch-helios.sh` (pinned version +
+sha256); appimagetool + its runtime and the manylinux image are pinned too.
+`scripts/release.sh` gates on the lock first: in sync, `uv audit` clean, and not
+behind on any shipped package (else bump, test, commit — or
+`QETH_ALLOW_STALE_LOCK=1`). The **.rpm** deliberately doesn't follow the lock —
+it takes most of its stack from Fedora's own packages. The **.debs** still
+`pip install` from PyPI ranges (same fix pending, needs the VMs to test).
+
 `--system-site-packages` is load-bearing on Linux desktops. The PyPI
 `PySide6` wheel ships its own Qt without the qt6ct/KDE platform-theme
 plugin, so the user's qt6ct/Breeze/Kvantum setup is silently ignored.
@@ -65,13 +78,35 @@ already bit `cryptography` (Frame-import only; now the `frame` extra +
 guarded import). When adding an import, declare it (core dep or an extra);
 don't lean on system-site-packages.
 
+### Windows: Wine locally, GitHub for the final check
+
+`scripts/wine.sh setup` builds a Wine prefix (`~/.wine-qeth`) with Windows uv +
+Python and a venv at `C:\qeth-venv` synced from the same `uv.lock`;
+`scripts/wine.sh pytest` runs the suite there (~2 min), `scripts/wine.sh qeth`
+launches the app. `scripts/wine.sh build` runs the PyInstaller onedir recipe
+(`dist/windows/`, see its README), `installer` wraps it with Inno Setup
+(`qeth.iss` — never change its `AppId`), and `smoke [installer]` launches the
+built `qeth.exe` (or installs, runs and uninstalls the setup.exe) on a clean,
+Python-less prefix inside `unshare -rn` + Xvfb (own loopback, so it never
+fights a running qeth for port 1248; the launched app is tracked by PID —
+never `pkill -f`, which matched the calling shell's own command line).
+`.github/workflows/windows.yml` is the real-Windows run: tests, then the same
+build + smoke (`dist/windows/smoke.sh`) + installer round-trip, uploading the
+zip and the setup.exe. `scripts/wine.sh`'s
+comments carry the Wine workarounds (an `icuuc.dll` stub —
+`scripts/wine/icuuc_stub.c` — since Qt6Core links Windows' system ICU; the ICC
+profile Qt's windows plugin would choke on; fonts for offscreen Qt; Wine drops
+every host `QT_*` var). Code that's POSIX-only must gate on
+`sys.platform == "win32"` (not `hasattr`/`ImportError`) — mypy narrows on it, and
+the Windows run type-checks the win32 branches.
+
 ### Static checks / gates
 
 `uv run pytest` enforces, over the whole package:
 
 - **mypy** (types) — `tests/test_typing.py`, config in `[tool.mypy]`.
 - **ruff** (lint) — `tests/test_lint.py`, ruleset in `[tool.ruff.lint]`:
-  `E9` + `F` (pyflakes) + `RUF012` + `UP` (py310 annotation modernization).
+  `E9` + `F` (pyflakes) + `RUF012` + `UP` (py311 annotation modernization).
   `E402` (lazy imports are intentional) and `UP031` are deliberately off.
   ruff is a standalone binary (no `python -m ruff`) — the gate resolves it
   via `shutil.which`.
@@ -80,8 +115,13 @@ don't lean on system-site-packages.
 in one shot. ty is **not** a gate (it's 0.0.x); run it for extra signal.
 It doesn't follow `include-system-site-packages` into the system PySide6, so
 the script injects that path (derived from PySide6's location) — without it
-ty floods ~100 phantom unresolved-import errors. The package is ty-clean
-when checked that way. mypy, ruff, and ty are all **dev-only** deps
+ty floods ~100 phantom unresolved-import errors. Checked that way the
+package is **not** ty-clean: there's a standing baseline of ~25 diagnostics
+(ty 0.0.104, 2026-11) — mostly ty not narrowing `object`-typed values
+(multicall results' `.success`/`.value`, `object` callables), plus a few
+one-offs and findings from third-party stubs (PySide6 `QtCore.pyi`,
+zxing-cpp). mypy accepts all of it. Treat a jump above that baseline as the
+signal. mypy, ruff, and ty are all **dev-only** deps
 (`[dependency-groups] dev`), so a runtime/`--no-dev` install pulls none of
 them. Optional features that need a heavy dep go behind an extra mirrored
 into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.

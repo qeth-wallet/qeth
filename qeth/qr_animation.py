@@ -15,7 +15,7 @@ from PySide6.QtGui import QImage
 
 from .qr.fountain import choose_fragments
 from .qr.multipart import MAX_FRAGMENTS, _split_part
-from .qr_widget import QRWidget, qr_to_image, ur_animation_version
+from .qr_widget import QRWidget, image_from_pixels, qr_pixels, ur_animation_version
 
 TARGET_FPS = 6.0
 PREPARED_FRAMES = 4
@@ -49,8 +49,23 @@ class PreparedFrame:
     static: bool
 
 
+@dataclass(frozen=True)
+class _EncodedFrame:
+    """What the worker produces: the symbol as module bytes, not yet a QImage."""
+
+    content: str
+    side: int
+    pixels: bytes
+    mask_shift: int
+    static: bool
+
+
 class FramePreparer:
-    """One producer, at most four prepared/in-flight frames, no GUI objects.
+    """One producer, at most four prepared/in-flight frames, and no Qt at all
+    on its thread: it encodes to module bytes, and ``take`` (called on the GUI
+    thread) wraps them in a QImage. Decoding a PNG there instead
+    (QImage.fromData — QImageReader, its plugin loader and global locks) once
+    left the worker stuck for good while the GUI thread spun its event loop.
 
     Cancellation never waits for an encoder or callable on the GUI thread.
     The daemon exits after the current preparation; it cannot touch a deleted
@@ -60,7 +75,7 @@ class FramePreparer:
     def __init__(
         self, next_frame: Callable[[], str], *, fixed_version: bool = True
     ) -> None:
-        self.frames: queue.Queue[PreparedFrame | Exception] = queue.Queue(
+        self.frames: queue.Queue[_EncodedFrame | Exception] = queue.Queue(
             PREPARED_FRAMES
         )
         self.cancelled = threading.Event()
@@ -79,7 +94,14 @@ class FramePreparer:
         except queue.Empty:
             return None
         self._slots.release()
-        return frame
+        if isinstance(frame, Exception):
+            return frame
+        return PreparedFrame(
+            frame.content,
+            image_from_pixels(frame.side, frame.pixels),
+            frame.mask_shift,
+            frame.static,
+        )
 
     def _run(self) -> None:
         visits: dict[int, int] = {}
@@ -111,10 +133,10 @@ class FramePreparer:
                             index = next(iter(indexes))
                             shift = visits.get(index, 0)
                             visits[index] = (shift + 1) % 8
-                image = qr_to_image(
+                side, pixels = qr_pixels(
                     content.upper(), error="l", version=version, mask_shift=shift
                 )
-                frame = PreparedFrame(content, image, shift, static)
+                frame = _EncodedFrame(content, side, pixels, shift, static)
             except Exception as exc:
                 if not self.cancelled.is_set():
                     self.frames.put_nowait(exc)
@@ -150,8 +172,14 @@ class QRAnimation(QObject):
         self.timer.setSingleShot(True)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
-        # This callback owns no QObject; destruction also cancels queued work.
-        self.destroyed.connect(self._preparer.stop)
+        # Destruction also cancels queued work — through a plain closure, never
+        # a preparer method: PySide holds a bound method via a weakref on its
+        # object, and the preparer's last reference often drops on its own
+        # worker (Thread.run releasing its target), so the weakref callback ran
+        # PySide's connection cleanup off the GUI thread — an access violation
+        # on Windows CI.
+        cancelled = self._preparer.cancelled
+        self.destroyed.connect(lambda: cancelled.set())
         self.timer.start(0)
 
     def stop(self) -> None:

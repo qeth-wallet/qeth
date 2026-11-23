@@ -2,32 +2,36 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from qeth.__main__ import (
-    _adopt_host_qt_font, _ensure_legible_icon_theme, _install_sigint_shutdown,
+    _adopt_host_qt_font, _ensure_legible_icon_theme, _install_signal_shutdown,
 )
 
 
 class _FakeSignalModule:
-    """Stand-in for the ``signal`` module so the SIGINT wiring is testable
-    without touching the real process-wide handler."""
+    """Stand-in for the ``signal`` module so the SIGINT/SIGTERM wiring is
+    testable without touching the real process-wide handlers."""
 
     SIGINT = object()
+    SIGTERM = object()
 
     def __init__(self):
-        self.previous_handler = object()
-        self.handler = None
+        self.previous = {self.SIGINT: object(), self.SIGTERM: object()}
+        self.handlers = dict(self.previous)
 
     def getsignal(self, sig):
-        assert sig is self.SIGINT
-        return self.previous_handler
+        return self.handlers[sig]
 
     def signal(self, sig, handler):
-        assert sig is self.SIGINT
-        self.handler = handler
-        return self.previous_handler
+        assert sig in self.handlers
+        old, self.handlers[sig] = self.handlers[sig], handler
+        return old
 
 
 def test_icon_theme_is_a_noop_outside_flatpak(qtbot):
@@ -92,12 +96,13 @@ def test_sigint_shutdown_closes_window_via_close_event(qtbot, monkeypatch):
     win.show()
     assert win.isVisible()
 
-    timer = _install_sigint_shutdown(app, win, signal_module=fake_signal)
+    timer = _install_signal_shutdown(app, win, signal_module=fake_signal)
     try:
         assert timer.isActive()
-        assert fake_signal.handler is not None
+        handler = fake_signal.handlers[fake_signal.SIGINT]
+        assert callable(handler)
         # Firing SIGINT schedules window.close() → closeEvent persists state.
-        fake_signal.handler(fake_signal.SIGINT, None)
+        handler(fake_signal.SIGINT, None)
         qtbot.waitUntil(lambda: bool(closed) and not win.isVisible())
     finally:
         timer.stop()
@@ -126,12 +131,127 @@ def test_sigint_shutdown_quits_when_the_window_is_in_the_tray(
     win.show()
     win.hide()                       # what the tray does on minimise
 
-    timer = _install_sigint_shutdown(app, win, signal_module=fake_signal)
+    timer = _install_signal_shutdown(app, win, signal_module=fake_signal)
     try:
-        assert fake_signal.handler is not None
-        fake_signal.handler(fake_signal.SIGINT, None)
+        fake_signal.handlers[fake_signal.SIGINT](fake_signal.SIGINT, None)
         qtbot.waitUntil(lambda: bool(quits))
         assert closed                # closeEvent still persisted the state
     finally:
         timer.stop()
         timer.deleteLater()
+
+
+def test_sigterm_shuts_down_like_ctrl_c(qtbot, monkeypatch):
+    """SIGTERM (kill / pkill / timeout / "End process") used to end the
+    interpreter on the spot, skipping atexit — the Helios sidecar outlived qeth
+    with a broken log pipe and aborted (apport: "closed unexpectedly"). It must
+    close + quit like Ctrl+C, so atexit stops the sidecar."""
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    quits: list[bool] = []
+    monkeypatch.setattr(app, "quit", lambda: quits.append(True))
+    fake_signal = _FakeSignalModule()
+    closed: list[bool] = []
+
+    class Window(QMainWindow):
+        def closeEvent(self, event):  # noqa: N802 - Qt override
+            closed.append(True)
+            super().closeEvent(event)
+
+    win = Window()
+    qtbot.addWidget(win)
+    win.show()
+
+    timer = _install_signal_shutdown(app, win, signal_module=fake_signal)
+    try:
+        handler = fake_signal.handlers[fake_signal.SIGTERM]
+        assert callable(handler)
+        assert fake_signal.handlers[fake_signal.SIGINT] is handler
+        handler(fake_signal.SIGTERM, None)
+        qtbot.waitUntil(lambda: bool(quits))
+        assert closed                # closeEvent persisted the state
+    finally:
+        timer.stop()
+        timer.deleteLater()
+
+
+def test_a_second_sigterm_gets_the_previous_action(qtbot, monkeypatch):
+    """Only the first SIGTERM is graceful: it hands SIGTERM back to its
+    previous action (the default terminate), so a second ``kill`` still ends a
+    qeth whose event loop is wedged and would never run the scheduled quit.
+    SIGINT keeps our handler — its default (KeyboardInterrupt) is useless."""
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    monkeypatch.setattr(app, "quit", lambda: None)
+    fake_signal = _FakeSignalModule()
+    win = QMainWindow()
+    qtbot.addWidget(win)
+
+    timer = _install_signal_shutdown(app, win, signal_module=fake_signal)
+    try:
+        ours = fake_signal.handlers[fake_signal.SIGTERM]
+        ours(fake_signal.SIGTERM, None)
+        assert (fake_signal.handlers[fake_signal.SIGTERM]
+                is fake_signal.previous[fake_signal.SIGTERM])
+        assert fake_signal.handlers[fake_signal.SIGINT] is ours
+    finally:
+        timer.stop()
+        timer.deleteLater()
+
+
+def test_about_to_quit_restores_both_previous_handlers(qtbot):
+    # A stand-in app: emitting the shared QApplication's aboutToQuit would also
+    # fire every handler other tests left connected to it.
+    class FakeApp(QObject):
+        aboutToQuit = Signal()
+
+        def quit(self):
+            pass
+
+    app = FakeApp()
+    fake_signal = _FakeSignalModule()
+    win = QMainWindow()
+    qtbot.addWidget(win)
+
+    timer = _install_signal_shutdown(app, win, signal_module=fake_signal)
+    try:
+        assert fake_signal.handlers != fake_signal.previous
+        app.aboutToQuit.emit()
+        assert fake_signal.handlers == fake_signal.previous
+    finally:
+        timer.stop()
+        timer.deleteLater()
+
+
+def test_asyncio_executor_survives_the_qt_import():
+    """Python 3.15 binds concurrent.futures' ThreadPoolExecutor lazily, and
+    once shiboken6 has replaced __import__ the lazy object never resolves —
+    asyncio's run_in_executor (every aiohttp DNS lookup) then fails.
+    qeth/__init__ resolves it first. Checked in a fresh interpreter started
+    the way every entry point starts: qeth, then Qt. A no-op before 3.15."""
+    code = (
+        "import qeth, PySide6.QtCore, asyncio\n"
+        "async def main():\n"
+        "    return await asyncio.get_running_loop().run_in_executor(None, lambda: 42)\n"
+        "print(asyncio.run(main()))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=120)
+    assert out.stdout.strip() == "42", out.stderr
+
+
+def test_desktop_file_name_matches_the_shipped_desktop_entry():
+    # On Wayland the dock/taskbar matches a window to an installed .desktop
+    # entry by the xdg-toplevel app_id, which Qt takes from desktopFileName —
+    # unset, it was "python3" and GNOME showed a generic icon. The name main()
+    # sets must stay the id every package installs the entry under (deb, rpm,
+    # Gentoo and the Flatpak all install dist/flatpak/<id>.desktop).
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "qeth" / "__main__.py").read_text()
+    names = re.findall(r'setDesktopFileName\("([^"]+)"\)', src)
+    assert names == ["io.github.michwill.qeth"]
+    assert (root / "dist" / "flatpak" / f"{names[0]}.desktop").is_file()
+    manifest = (root / "dist" / "flatpak" / "io.github.michwill.qeth.yml").read_text()
+    assert re.search(rf"^id: {re.escape(names[0])}$", manifest, re.M)

@@ -19,6 +19,9 @@ license-files = ["LICENSE"]
 #   uv pip install -e .[bundled]
 dependencies = [
     "ledgereth>=0.10",
+    # USB-HID for the Ledger: qeth/ledger_app.py speaks the Ethereum app over
+    # it directly (replacing ledgereth — see docs/ledger-clear-signing.md).
+    "hidapi>=0.14",
     "aiohttp>=3.9",
     "segno>=1.6",
     "web3>=7",
@@ -241,6 +244,7 @@ files = [
     "qeth/tray.py",
     "qeth/notify.py",
     "qeth/ledger.py",
+    "qeth/ledger_app.py",
     "qeth/ledger_hid.py",
     "qeth/device_thread.py",
     "qeth/trezor.py",
@@ -291,6 +295,7 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "ledgereth.*",
+    "hid",
     "eth.*",
     "eth_typing.*",
     "segno.*",

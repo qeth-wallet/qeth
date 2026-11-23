@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import rlp
-
 from .qr import eth, multipart
 from .signing import (
     MessageSigningRequest,
@@ -24,6 +22,7 @@ from .signing import (
     SigningRequest,
     TypedDataSigningRequest,
     signed_eip1559_tx,
+    unsigned_eip1559_tx,
 )
 
 if TYPE_CHECKING:
@@ -31,24 +30,11 @@ if TYPE_CHECKING:
     from .signers.interaction import SignerInteraction
 
 
-def _rlp_int(n: int) -> bytes:
-    """A non-negative int as a minimal big-endian byte string (0 → empty)."""
-    if n < 0:
-        raise ValueError("cannot RLP-encode a negative integer")
-    return b"" if n == 0 else n.to_bytes((n.bit_length() + 7) // 8, "big")
-
-
 def _addr_bytes(addr: str | None) -> bytes:
     """A 0x address → 20 bytes; ``None`` / empty → ``b""`` (contract creation)."""
     if not addr:
         return b""
     return bytes.fromhex(addr[2:] if addr.startswith("0x") else addr)
-
-
-def _data_bytes(data: str | None) -> bytes:
-    if not data or data == "0x":
-        return b""
-    return bytes.fromhex(data[2:] if data.startswith("0x") else data)
 
 
 def _recovery_v_27_28(signature: bytes) -> bytes:
@@ -70,29 +56,6 @@ def _typed_data_chain_id(typed_data: dict) -> int:
     if isinstance(cid, str):
         return int(cid, 16) if cid.lower().startswith("0x") else int(cid)
     return int(cid)
-
-
-def unsigned_eip1559(req: SigningRequest, chain_id: int) -> bytes:
-    """The EIP-2718 unsigned serialization a device signs:
-    ``0x02 ‖ rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit,
-    to, value, data, accessList])`` (no access list in this first slice).
-    Cross-checked against eth-account's ``hash()`` in the tests."""
-    if (req.gas is None or req.nonce is None
-            or req.max_fee_per_gas is None
-            or req.max_priority_fee_per_gas is None):
-        raise SignerError("gas, nonce and EIP-1559 fees must be set before signing")
-    fields: list[Any] = [
-        _rlp_int(chain_id),
-        _rlp_int(req.nonce),
-        _rlp_int(req.max_priority_fee_per_gas),
-        _rlp_int(req.max_fee_per_gas),
-        _rlp_int(req.gas),
-        _addr_bytes(req.to_addr),
-        _rlp_int(req.value_wei),
-        _data_bytes(req.data),
-        [],   # accessList
-    ]
-    return b"\x02" + rlp.encode(fields)
 
 
 class QRSigner(Signer):
@@ -117,7 +80,7 @@ class QRSigner(Signer):
         if not getattr(chain, "eip1559", False):
             raise SignerError(
                 "QR signing currently supports EIP-1559 chains only")
-        unsigned = unsigned_eip1559(req, chain.chain_id)
+        unsigned = unsigned_eip1559_tx(req, chain.chain_id)
         signature = self._request_signature(
             sign_data=unsigned,
             data_type=eth.DataType.TYPED_TRANSACTION,

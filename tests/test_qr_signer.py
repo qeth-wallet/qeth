@@ -14,7 +14,8 @@ from eth_keys import keys
 from eth_utils import keccak
 
 from qeth.qr import ur as urmod
-from qeth.qr_signer import QRSigner, unsigned_eip1559
+from qeth.qr_signer import QRSigner
+from qeth.signing import unsigned_eip1559_tx
 from qeth.signing import SignerError, SigningRequest
 
 PRIV = b"\x24" * 32
@@ -102,7 +103,7 @@ def test_unsigned_serialization_matches_eth_account():
         "maxFeePerGas": req.max_fee_per_gas, "gas": req.gas,
         "to": req.to_addr, "value": req.value_wei, "data": b"", "accessList": [],
     })
-    assert keccak(unsigned_eip1559(req, 1)) == td.hash()
+    assert keccak(unsigned_eip1559_tx(req, 1)) == td.hash()
 
 
 def test_sign_roundtrip_recovers_the_signer():

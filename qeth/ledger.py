@@ -1,43 +1,52 @@
-"""Ledger hardware-wallet signing + account discovery.
+"""Ledger hardware-wallet signing + account discovery, on qeth's own
+Ethereum-app client (``ledger_app``).
 
-Every ledgereth/hidapi call here is funnelled through the single-thread
-``ledger_hid`` service (``run_ledger_hid_job``) rather than touching HID from
-the transient Qt worker threads that drive signing/discovery — hidapi's macOS
-backend is only valid on the thread that opened the handle. The service also
-clears ledgereth's dongle cache after every job, so a stale USB-HID handle
-never carries between operations.
+Every device call runs on the single-thread ``ledger_hid`` service
+(``run_ledger_hid_job``) rather than on the transient Qt worker threads that
+drive signing/discovery — hidapi's macOS backend is only valid on the thread
+that opened the handle. Each job opens the device, does its work, and closes
+it, so no USB handle carries between operations.
+
+Signatures are never trusted on the device's word: the y-parity is resolved by
+recovering the signer from the hash qeth computed, which must be the account
+being signed for (``ledger_app.recover_parity``).
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TypeVar
 
+from eth_utils import keccak
 from PySide6.QtCore import QThread, Signal
 
 from .chain import EthClient
 from .chains import Chain
+from .ledger_app import (
+    EthApp, LedgerDevice, LedgerError, LedgerNotFound, LedgerStatusError,
+    connect, list_devices, recover_parity,
+)
 from .ledger_hid import DEFAULT_LEDGER_HID_TIMEOUT_S, run_ledger_hid_job
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
-    TypedDataSigningRequest,
+    TypedDataSigningRequest, signed_eip1559_tx, signed_legacy_tx,
+    unsigned_eip1559_tx, unsigned_legacy_tx,
 )
 
 T = TypeVar("T")
 
+# The Ethereum app's legacy (type-0) parser keeps the EIP-155 chain id in 32
+# bits; ledgereth refused larger ids for the same reason (its issue #41).
+_LEGACY_MAX_CHAIN_ID = 0xFFFFFFFF
+
+_SW_INVALID_DATA = 0x6A80
+
 
 def is_ledger_available() -> tuple[bool, str | None]:
-    """Probe the Ledger device. Returns ``(True, None)`` when the
-    dongle is connected, unlocked, and has the Ethereum app open;
-    otherwise ``(False, reason)`` where ``reason`` is a short
-    human-readable explanation from ledgereth.
-
-    The probe runs on the HID service thread, which clears ledgereth's
-    module-level dongle cache afterwards — so the next real sign /
-    discovery call starts from a fresh ``init_dongle``."""
+    """Probe the connected Ledger(s). Returns ``(True, None)`` when one is
+    connected, unlocked, and has the Ethereum app open; otherwise
+    ``(False, reason)`` with a short, actionable explanation."""
     try:
         run_ledger_hid_job(_probe_ledger_available)
-    except ImportError as e:
-        return False, f"ledgereth not installed: {e}"
     except SignerError as e:
         return False, str(e)
     except Exception as e:
@@ -46,87 +55,29 @@ def is_ledger_available() -> tuple[bool, str | None]:
 
 
 def _probe_ledger_available() -> None:
-    from ledgereth.comms import init_dongle
-
-    init_dongle()
+    """Succeeds if ANY connected Ledger answers with the Ethereum app open."""
+    devices = list_devices()
+    if not devices:
+        raise LedgerNotFound()
+    first_error: Exception | None = None
+    for device in devices:
+        try:
+            with connect(device) as transport:
+                EthApp(transport).get_configuration()
+            return
+        except LedgerError as e:
+            first_error = first_error or e
+    assert first_error is not None
+    raise first_error
 
 
 def _explain_ledger_error(e: Exception) -> str:
-    """Map a ledgereth exception to a single, action-oriented
-    sentence that tells the user what's wrong and what to do.
-    Fallback for unknown error shapes is to surface the raw text
-    along with the SW code when we have one — so future
-    "UNKNOWN" cases stay diagnosable instead of getting hidden."""
-    try:
-        from ledgereth.exceptions import (
-            CommException, LedgerAppNotOpened, LedgerCancel,
-            LedgerErrorCodes, LedgerInvalid, LedgerInvalidADPU,
-            LedgerLocked, LedgerNotFound,
-        )
-    except ImportError:
-        return f"Ledger error: {e}"
-
-    if isinstance(e, LedgerCancel):
-        return "Transaction rejected on the Ledger device."
-    if isinstance(e, LedgerLocked):
-        return (
-            "Your Ledger is locked. Unlock it (enter your PIN) and "
-            "try again."
-        )
-    if isinstance(e, LedgerAppNotOpened):
-        # Covers APP_SLEEP (0x6804), APP_NOT_STARTED (0x6d00),
-        # APP_NOT_FOUND (0x6d02) — i.e. the screensaver dimmed the
-        # device, the user is on the dashboard, or Ethereum isn't
-        # installed.
-        return (
-            "The Ethereum app isn't open on your Ledger. Wake the "
-            "device and open the Ethereum app, then try again."
-        )
-    if isinstance(e, LedgerNotFound):
-        return (
-            "Ledger device not detected. Make sure it's connected "
-            "via USB and unlocked."
-        )
-    if isinstance(e, LedgerInvalid):
-        return (
-            "Ledger rejected the transaction data as invalid. This "
-            "is usually a bug in the wallet — open an issue with "
-            "the tx details."
-        )
-    if isinstance(e, LedgerInvalidADPU):
-        return (
-            "Ledger communication error (APDU size mismatch). This "
-            "is usually a transport-layer bug."
-        )
-    # Find the status word. ledgereth's comms layer catches
-    # CommException and re-raises a generic LedgerError("Unexpected
-    # error: 0x???? UNKNOWN") from err whenever the SW isn't in
-    # ERROR_CODE_EXCEPTIONS — so by the time the exception reaches
-    # us it's a LedgerError, and the CommException carrying the
-    # sw attribute sits on __cause__. Check both.
-    sw = getattr(e, "sw", None)
-    if sw is None:
-        cause = getattr(e, "__cause__", None)
-        if isinstance(cause, CommException):
-            sw = getattr(cause, "sw", None)
-    if sw is not None:
-        name = LedgerErrorCodes.get_by_value(sw)
-        if name is not None:
-            return f"Ledger error: {name} (0x{sw:04x})"
-        # 0x55xx isn't in any public Ledger SW list but the device
-        # emits it reproducibly when the screensaver turns off
-        # (USB still attached). Steer the user there as the cause
-        # instead of a generic "UNKNOWN".
-        if (sw >> 8) == 0x55:
-            return (
-                "Your Ledger is asleep. Wake it up (press a "
-                "button on the device), open the Ethereum app, "
-                "and try again."
-            )
-        return f"Ledger error: unknown status word 0x{sw:04x}"
-    # LedgerError without a more specific subclass and no SW we
-    # could recover, or anything outside the ledgereth hierarchy
-    # (USB layer, etc.).
+    """One sentence for the user. ``LedgerError``s already carry one; anything
+    else (a missing hidapi, an unexpected crash) keeps its own text."""
+    if isinstance(e, LedgerError):
+        return str(e)
+    if isinstance(e, ImportError):
+        return f"Ledger support is unavailable: {e}"
     return f"Ledger error: {e}"
 
 
@@ -208,14 +159,9 @@ class LedgerWorker(QThread):
                         address=address, path=path, index=i, nonce=nonce,
                     ))
             self.finished_ok.emit()
-        except ImportError as e:
-            self.failed.emit(f"ledgereth not installed: {e}")
-        except SignerError as e:
+        except (SignerError, LedgerError) as e:
             self.failed.emit(str(e))
         except Exception as e:
-            # Same decoder as the probe path — surfaces friendly messages for
-            # known errors and the hex SW for unknown ones, instead of the raw
-            # ledgereth "Unexpected error: 0x???? UNKNOWN" leaking through.
             self.failed.emit(_explain_ledger_error(e))
 
     def _scan_auto(self, template: str, max_scan: int) -> None:
@@ -257,69 +203,75 @@ class LedgerWorker(QThread):
             return 0
 
 
+def _single_device() -> LedgerDevice:
+    """The one connected Ledger, for discovery: with several plugged in it
+    would be ambiguous which seed the scanned accounts belong to."""
+    devices = list_devices()
+    if not devices:
+        raise LedgerNotFound()
+    if len(devices) > 1:
+        raise SignerError(
+            "More than one Ledger is connected. Unplug all but the one whose "
+            "accounts you want to add, then scan again.")
+    return devices[0]
+
+
 def _derive_ledger_paths(paths: list[str]) -> list[tuple[str, str]]:
-    """Derive ``(path, address)`` for each path on one shared dongle.
-    Runs on the HID service thread."""
-    from ledgereth.accounts import get_account_by_path
-    from ledgereth.comms import init_dongle
-
-    dongle = init_dongle()
-    return [
-        (path, get_account_by_path(path, dongle=dongle).address)
-        for path in paths
-    ]
+    """Derive ``(path, address)`` for each path in one session. Runs on the
+    HID service thread."""
+    with connect(_single_device()) as transport:
+        app = EthApp(transport)
+        return [(path, app.get_address(path)) for path in paths]
 
 
-def _verify_device_holds_on_hid(address: str, path: str, dongle) -> None:
-    """Refuse to sign unless the *connected* Ledger actually derives
-    ``address`` at ``path`` (runs inside the signing HID job, on the shared
-    dongle).
+def _on_device_holding(address: str, path: str, fn: Callable[[EthApp], T]) -> T:
+    """Run ``fn`` on the connected Ledger that derives ``address`` at ``path``
+    (runs inside one HID job).
 
     qeth records Ledger accounts by address + path with no device or seed
-    identifier, so a *different* Ledger plugged in would otherwise sign at
-    this path as a DIFFERENT address — a valid signature for the wrong
-    account. ``get_account_by_path`` is a silent getAddress read (no
-    on-device confirmation)."""
-    from ledgereth.accounts import get_account_by_path
-
-    derived = get_account_by_path(path, dongle=dongle).address
-    if derived.lower() != address.lower():
+    identifier, so a *different* Ledger would otherwise sign at this path as a
+    DIFFERENT address — a valid signature for the wrong account. With several
+    Ledgers connected, the one holding the account is used; a locked or
+    app-less device is skipped while looking. ``get_address`` is a silent read
+    (no on-device confirmation)."""
+    devices = list_devices()
+    if not devices:
+        raise LedgerNotFound()
+    derived_elsewhere: list[str] = []
+    first_error: LedgerError | None = None
+    for device in devices:
+        try:
+            with connect(device) as transport:
+                app = EthApp(transport)
+                derived = app.get_address(path)
+                if derived.lower() == address.lower():
+                    return fn(app)
+                derived_elsewhere.append(derived)
+        except LedgerStatusError as e:
+            if len(devices) == 1:
+                raise
+            first_error = first_error or e
+    if not derived_elsewhere and first_error is not None:
+        raise first_error
+    if len(devices) == 1:
         raise SignerError(
             f"This Ledger doesn't hold {address} — it derives "
-            f"{derived} at {path}. Connect the device/seed that owns "
-            f"{address} and try again."
-        )
+            f"{derived_elsewhere[0]} at {path}. Connect the device/seed that "
+            f"owns {address} and try again.")
+    raise SignerError(
+        f"None of the connected Ledgers holds {address} at {path}. Connect "
+        "the device/seed that owns it and try again.")
 
 
 def _run_ledger_job(fn: Callable[[], T], *, timeout: float) -> T:
-    """Run ``fn`` on the HID service thread, mapping ledgereth failures to a
+    """Run ``fn`` on the HID service thread, mapping device failures to the
     uniform ``SignerError`` the RPC/UI layers already understand."""
     try:
         return run_ledger_hid_job(fn, timeout=timeout)
-    except ImportError as e:
-        raise SignerError(f"ledgereth not installed: {e}") from e
     except SignerError:
         raise
     except Exception as e:
         raise SignerError(_explain_ledger_error(e)) from e
-
-
-def _raw_transaction_bytes(signed: Any) -> bytes:
-    # ledgereth exposes the encoded signed tx in two shapes that both have
-    # the name ``raw_transaction``-ish: an attribute (``rawTransaction`` — a
-    # hex-string property) and a method (``raw_transaction()``) on different
-    # versions. Don't grab the method object as if it were the payload (web3
-    # chokes on the bound-method with a generic "expected … bytes" error).
-    raw = getattr(signed, "rawTransaction", None)
-    if raw is None:
-        method = getattr(signed, "raw_transaction", None)
-        if callable(method):
-            raw = method()
-    if raw is None:
-        raise SignerError("Signed transaction has no raw payload")
-    if isinstance(raw, str):
-        raw = bytes.fromhex(raw[2:] if raw.startswith("0x") else raw)
-    return raw
 
 
 class LedgerSigner(Signer):
@@ -327,10 +279,10 @@ class LedgerSigner(Signer):
 
     Looks up the right derivation path for ``req.from_addr`` in the
     store's account list (where each Ledger-discovered account is
-    recorded with its ``path``) and asks the dongle to sign — the
+    recorded with its ``path``) and asks the device to sign — the
     user has to confirm on the device, so signing takes a few
     seconds and runs on the HID service thread. The device-holds check
-    and the sign share one dongle inside a single HID job."""
+    and the sign share one session inside a single HID job."""
 
     def __init__(self, store, *, hid_timeout: float = DEFAULT_LEDGER_HID_TIMEOUT_S):
         self._store = store
@@ -347,127 +299,6 @@ class LedgerSigner(Signer):
                 return a
         return None
 
-    def sign(self, req: SigningRequest, chain: Chain) -> bytes:
-        acct = self._lookup(req.from_addr)
-        if acct is None:
-            raise SignerError(
-                f"No Ledger account known for {req.from_addr}"
-            )
-        path = acct.get("path")
-        if not path:
-            raise SignerError(
-                f"Account {req.from_addr} has no derivation path on file"
-            )
-
-        if req.gas is None or req.nonce is None:
-            raise SignerError("gas and nonce must be set before signing")
-
-        kwargs: dict = {
-            "destination": req.to_addr or "",
-            "amount": req.value_wei,
-            "gas": req.gas,
-            "nonce": req.nonce,
-            "data": req.data or "0x",
-            "chain_id": chain.chain_id,
-            "sender_path": path,
-        }
-        if chain.eip1559:
-            if (req.max_fee_per_gas is None
-                    or req.max_priority_fee_per_gas is None):
-                raise SignerError(
-                    "EIP-1559 fees missing — finalise gas suggestion first"
-                )
-            kwargs["max_fee_per_gas"] = req.max_fee_per_gas
-            kwargs["max_priority_fee_per_gas"] = req.max_priority_fee_per_gas
-        else:
-            if req.gas_price is None:
-                raise SignerError(
-                    "Legacy gas_price missing — finalise gas suggestion first"
-                )
-            kwargs["gas_price"] = req.gas_price
-
-        signed = _run_ledger_job(
-            lambda: self._sign_transaction_on_hid(req.from_addr, path, kwargs),
-            timeout=self._hid_timeout,
-        )
-        return _raw_transaction_bytes(signed)
-
-    def _sign_transaction_on_hid(self, address: str, path: str, kwargs: dict):
-        from ledgereth.comms import init_dongle
-        from ledgereth.transactions import create_transaction
-
-        dongle = init_dongle()
-        _verify_device_holds_on_hid(address, path, dongle)
-        return create_transaction(**kwargs, dongle=dongle)
-
-    def sign_message(self, req: MessageSigningRequest) -> bytes:
-        """personal_sign on the Ledger. The device prompts the user
-        to review the message (truncated on screen) and confirm —
-        same UX as MetaMask's "Sign" popup."""
-        path = self._require_path(req.from_addr)
-        signed = _run_ledger_job(
-            lambda: self._sign_message_on_hid(req.from_addr, path, req.raw),
-            timeout=self._hid_timeout,
-        )
-        return _extract_ledger_signature(signed)
-
-    def _sign_message_on_hid(self, address: str, path: str, raw: bytes):
-        from ledgereth.comms import init_dongle
-        from ledgereth.messages import sign_message
-
-        dongle = init_dongle()
-        _verify_device_holds_on_hid(address, path, dongle)
-        return sign_message(raw, sender_path=path, dongle=dongle)
-
-    def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
-        """EIP-712 v4 — the Ledger Ethereum app does the full
-        struct-hash walk on-device when the data is small enough,
-        else falls back to a "blind sign" prompt the user must
-        enable in the device settings."""
-        path = self._require_path(req.from_addr)
-        # ledgereth's draft signer expects the pre-computed domain
-        # separator + message hash. eth_account's encode_typed_data
-        # returns a SignableMessage where ``header`` is the 32-byte
-        # domain separator and ``body`` is the 32-byte struct hash
-        # (the two values the EIP-191 v0x01 prefix wraps). Earlier
-        # versions of this code sliced ``body`` as if it carried both
-        # halves — which the Ledger Ethereum app rejected.
-        try:
-            from eth_account.messages import encode_typed_data
-        except ImportError as e:
-            raise SignerError(f"eth_account missing: {e}") from e
-        try:
-            signable = encode_typed_data(full_message=req.typed_data)
-            domain_hash = signable.header
-            message_hash = signable.body
-            if len(domain_hash) != 32 or len(message_hash) != 32:
-                raise SignerError(
-                    "encode_typed_data produced unexpected shape: "
-                    f"header={len(domain_hash)} body={len(message_hash)}"
-                )
-        except SignerError:
-            raise
-        except Exception as e:
-            raise SignerError(f"failed to hash typed data: {e}") from e
-        signed = _run_ledger_job(
-            lambda: self._sign_typed_data_on_hid(
-                req.from_addr, path, domain_hash, message_hash,
-            ),
-            timeout=self._hid_timeout,
-        )
-        return _extract_ledger_signature(signed)
-
-    def _sign_typed_data_on_hid(self, address: str, path: str,
-                                domain_hash: bytes, message_hash: bytes):
-        from ledgereth.comms import init_dongle
-        from ledgereth.messages import sign_typed_data_draft
-
-        dongle = init_dongle()
-        _verify_device_holds_on_hid(address, path, dongle)
-        return sign_typed_data_draft(
-            domain_hash, message_hash, sender_path=path, dongle=dongle,
-        )
-
     def _require_path(self, address: str) -> str:
         acct = self._lookup(address)
         if acct is None:
@@ -481,24 +312,102 @@ class LedgerSigner(Signer):
             )
         return path
 
+    def sign(self, req: SigningRequest, chain: Chain) -> bytes:
+        path = self._require_path(req.from_addr)
+        if req.gas is None or req.nonce is None:
+            raise SignerError("gas and nonce must be set before signing")
 
-def _extract_ledger_signature(signed) -> bytes:
-    """ledgereth's SignedMessage exposes r/s/v as ints; some
-    versions also have ``.signature``. Build the 65-byte
-    r||s||v blob defensively."""
-    sig = getattr(signed, "signature", None)
-    if isinstance(sig, (bytes, bytearray)) and len(sig) == 65:
-        return bytes(sig)
-    if isinstance(sig, str):
-        return bytes.fromhex(sig[2:] if sig.startswith("0x") else sig)
-    r = int(signed.r).to_bytes(32, "big")
-    s = int(signed.s).to_bytes(32, "big")
-    v = int(signed.v)
-    # Ledger returns v as 27/28 for legacy or chain-id-shifted for
-    # EIP-155. For personal_sign / EIP-712 the conventional v is
-    # 27/28; normalise.
-    if v >= 27:
-        v_byte = bytes([v % 256])
-    else:
-        v_byte = bytes([v + 27])
-    return r + s + v_byte
+        if chain.eip1559:
+            if (req.max_fee_per_gas is None
+                    or req.max_priority_fee_per_gas is None):
+                raise SignerError(
+                    "EIP-1559 fees missing — finalise gas suggestion first"
+                )
+            unsigned = unsigned_eip1559_tx(req, chain.chain_id)
+        else:
+            if req.gas_price is None:
+                raise SignerError(
+                    "Legacy gas_price missing — finalise gas suggestion first"
+                )
+            if chain.chain_id > _LEGACY_MAX_CHAIN_ID:
+                raise SignerError(
+                    f"The Ledger can't sign a legacy transaction for chain id "
+                    f"{chain.chain_id} (above 32 bits).")
+            unsigned = unsigned_legacy_tx(req, chain.chain_id)
+
+        has_data = bool(req.data and req.data not in ("0x", "0X"))
+
+        def job(app: EthApp):
+            config = app.get_configuration()
+            try:
+                return app.sign_transaction(path, unsigned)
+            except LedgerStatusError as e:
+                if (e.sw == _SW_INVALID_DATA and has_data
+                        and not config.blind_signing_enabled):
+                    raise SignerError(
+                        "Blind signing is off in your Ledger's Ethereum app. "
+                        "Turn it on in the app's settings to sign this "
+                        "contract call, then try again.") from e
+                raise
+
+        raw = _run_ledger_job(
+            lambda: _on_device_holding(req.from_addr, path, job),
+            timeout=self._hid_timeout,
+        )
+        parity = self._parity(keccak(unsigned), raw.r, raw.s, req.from_addr)
+        if chain.eip1559:
+            return signed_eip1559_tx(req, chain.chain_id, parity, raw.r, raw.s)
+        return signed_legacy_tx(
+            req, chain.chain_id * 2 + 35 + parity, raw.r, raw.s)
+
+    @staticmethod
+    def _parity(msg_hash: bytes, r: int, s: int, address: str) -> int:
+        try:
+            return recover_parity(msg_hash, r, s, address)
+        except LedgerError as e:
+            raise SignerError(str(e)) from e
+
+    def sign_message(self, req: MessageSigningRequest) -> bytes:
+        """personal_sign on the Ledger. The device applies the EIP-191 prefix,
+        shows the message (truncated on screen) and asks to confirm."""
+        path = self._require_path(req.from_addr)
+        raw = _run_ledger_job(
+            lambda: _on_device_holding(
+                req.from_addr, path,
+                lambda app: app.sign_personal_message(path, req.raw)),
+            timeout=self._hid_timeout,
+        )
+        prefix = b"\x19Ethereum Signed Message:\n" + str(len(req.raw)).encode()
+        parity = self._parity(keccak(prefix + req.raw), raw.r, raw.s,
+                              req.from_addr)
+        return _rsv(raw.r, raw.s, 27 + parity)
+
+    def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
+        """EIP-712 v4 by its domain + message hashes (the app's V0 mode): the
+        device shows the two hashes, behind its blind-signing setting."""
+        path = self._require_path(req.from_addr)
+        try:
+            from eth_account.messages import encode_typed_data
+            signable = encode_typed_data(full_message=req.typed_data)
+        except Exception as e:
+            raise SignerError(f"failed to hash typed data: {e}") from e
+        domain_hash, message_hash = signable.header, signable.body
+        if len(domain_hash) != 32 or len(message_hash) != 32:
+            raise SignerError(
+                "encode_typed_data produced unexpected shape: "
+                f"header={len(domain_hash)} body={len(message_hash)}")
+        raw = _run_ledger_job(
+            lambda: _on_device_holding(
+                req.from_addr, path,
+                lambda app: app.sign_eip712_hashes(
+                    path, domain_hash, message_hash)),
+            timeout=self._hid_timeout,
+        )
+        parity = self._parity(keccak(b"\x19\x01" + domain_hash + message_hash),
+                              raw.r, raw.s, req.from_addr)
+        return _rsv(raw.r, raw.s, 27 + parity)
+
+
+def _rsv(r: int, s: int, v: int) -> bytes:
+    """The 65-byte ``r ‖ s ‖ v`` signature dapps expect."""
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([v])

@@ -43,55 +43,6 @@ def test_jobs_run_on_one_stable_thread_and_are_serialized() -> None:
     assert order == list(range(5))
 
 
-def test_job_cleanup_closes_and_clears_ledgereth_cache(monkeypatch) -> None:
-    comms = pytest.importorskip("ledgereth.comms")
-    service = _service()
-    closed: list[bool] = []
-
-    class FakeDongle:
-        def close(self) -> None:
-            closed.append(True)
-
-    fake = FakeDongle()
-    monkeypatch.setattr(comms, "DONGLE_CACHE", fake)
-    monkeypatch.setattr(comms, "DONGLE_CONFIG_CACHE", object())
-
-    try:
-        assert service.call(lambda: "ok", timeout=1) == "ok"
-    finally:
-        service.shutdown_for_tests()
-
-    assert comms.DONGLE_CACHE is None
-    assert comms.DONGLE_CONFIG_CACHE is None
-    assert closed == [True]
-
-
-def test_job_cleanup_runs_on_failure(monkeypatch) -> None:
-    comms = pytest.importorskip("ledgereth.comms")
-    service = _service()
-    closed: list[bool] = []
-
-    class FakeDongle:
-        def close(self) -> None:
-            closed.append(True)
-
-    monkeypatch.setattr(comms, "DONGLE_CACHE", FakeDongle())
-    monkeypatch.setattr(comms, "DONGLE_CONFIG_CACHE", object())
-
-    def boom() -> None:
-        raise RuntimeError("device failed")
-
-    try:
-        with pytest.raises(RuntimeError, match="device failed"):
-            service.call(boom, timeout=1)
-    finally:
-        service.shutdown_for_tests()
-
-    assert comms.DONGLE_CACHE is None
-    assert comms.DONGLE_CONFIG_CACHE is None
-    assert closed == [True]
-
-
 def test_timeout_returns_signer_error_while_worker_finishes() -> None:
     service = _service()
     from qeth.signing import SignerError

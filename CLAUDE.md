@@ -56,9 +56,9 @@ fresh security fixes are pulled forward per-package — see the comments in
 **The lock is what ships.** The AppImage and Flatpak install exactly the
 `uv.lock` versions, hash-checked: `dist/lock-export.sh OUTDIR EXTRA…` exports
 `requirements.txt` + a pinned setuptools (`build-backend` group) and the builds
-run pip with `--require-hashes --no-build-isolation` (so even the sdist-only
-deps — ledgerblue, pydes, python-u2flib-host — build with the pinned
-setuptools). Helios comes from `dist/fetch-helios.sh` (pinned version +
+run pip with `--require-hashes --no-build-isolation` (so qeth itself, and any
+dep that falls back to its sdist, builds with the pinned setuptools; the lock
+has no sdist-only deps since ledgereth/ledgerblue left it). Helios comes from `dist/fetch-helios.sh` (pinned version +
 sha256); appimagetool + its runtime and the manylinux image are pinned too.
 `scripts/release.sh` gates on the lock first: in sync, `uv audit` clean, and not
 behind on any shipped package (else bump, test, commit — or

@@ -10,9 +10,9 @@
 #                           excluded), every line `==`-pinned with its hashes
 #   build-requirements.txt  setuptools, pinned the same way (the `build-backend`
 #                           group). The builder installs it OUTSIDE the bundle and
-#                           builds with --no-build-isolation, so building qeth and
-#                           the few sdist-only deps (ledgerblue, pydes,
-#                           python-u2flib-host) never fetches an unpinned setuptools.
+#                           builds with --no-build-isolation, so building qeth (and
+#                           any dep that falls back to its sdist) never fetches an
+#                           unpinned setuptools.
 #
 # The builder then runs, in its own interpreter:
 #   pip install --require-hashes --no-deps --target TOOLS -r build-requirements.txt

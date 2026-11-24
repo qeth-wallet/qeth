@@ -1,6 +1,8 @@
 # Ledger: own app client, then clear signing without lookups
 
-Status: **M1–M2 done** on branch `ledger-app` (2026-11-24); M3 next.
+Status: **M1–M3 done** on branch `ledger-app` (2026-11-24); M4 next. M3's
+Linux packages (rpm / deb) still need their VM build check, and the Gentoo
+overlay its vendored-set update at the next bump.
 
 Two goals, in this order:
 
@@ -135,14 +137,18 @@ Run on both devices to pin down what the plan currently assumes:
   to it, for tx / message / typed data.
 - Switch `ledger.py` (signer, discovery, availability probe) to `EthApp`.
 
-### M3 — Remove ledgereth
+### M3 — Remove ledgereth ✅
 
 - `pyproject.toml`: drop `ledgereth` (`hidapi` is already declared); `uv lock`,
   `uv audit`, `uvx deptry .`.
 - The mypy `ledgereth.*` override (the code-side removals landed with M2).
-- Packaging, each verified: AppImage / Flatpak (`dist/lock-export.sh` — the
-  sdist-only list shrinks), rpm spec + launcher, both debs, Windows + macOS
-  workflows (PyInstaller hidden imports), Gentoo overlay (separate repo).
+- Packaging: 142 → 114 locked packages, none sdist-only any more. Windows
+  verified locally under Wine (tests, PyInstaller build with CI's bundle
+  checks, isolated smoke); the CI bundle checks now look for
+  `qeth.ledger_app` (and hidapi's extension on macOS). The rpm drops
+  `python3-pyserial` (it was only for ledgerblue's NFC stack). Pending: the
+  rpm/deb VM builds, AppImage/Flatpak/macOS in CI, the Gentoo overlay
+  (separate repo).
 - Docs: CLAUDE.md, `docs/ARCHITECTURE.md`, `docs/tron.md` (its Ledger-Tron note
   assumes `ledgerblue`; it becomes "another app class on the same transport").
 

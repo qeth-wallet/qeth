@@ -27,7 +27,7 @@ BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  gcc
 # A vendored dep without a wheel for this Fedora's python3 is compiled from its
-# sdist. On Fedora 45 (python 3.15) that's hidapi (ledgerblue's USB layer): its
+# sdist. On Fedora 45 (python 3.15) that's hidapi (the Ledger's USB layer): its
 # `hid` module links libusb-1.0 and its `hidraw` module libudev. The runtime
 # libraries are libusb1 (Required below) and systemd-libs (always installed).
 BuildRequires:  pkgconfig(libusb-1.0)
@@ -39,7 +39,6 @@ BuildRequires:  python3-pydantic
 BuildRequires:  python3-aiohttp
 BuildRequires:  python3-requests
 BuildRequires:  python3-cytoolz
-BuildRequires:  python3-pyserial
 BuildRequires:  python3-pillow
 BuildRequires:  python3-eth-hash
 BuildRequires:  python3-eth-account
@@ -62,7 +61,6 @@ Requires:       python3-pydantic
 Requires:       python3-aiohttp
 Requires:       python3-requests
 Requires:       python3-cytoolz
-Requires:       python3-pyserial
 Requires:       python3-pillow
 Requires:       python3-eth-hash
 Requires:       python3-eth-account
@@ -87,7 +85,7 @@ Recommends:     qt6ct
 qeth is a Qt (PySide6) Ethereum wallet for the Linux desktop with Ledger
 support and a Frame-compatible JSON-RPC server. This package uses the system
 PySide6 and most of the eth stack from Fedora, vendoring only the deps Fedora
-does not ship (web3, ledgereth, …) or whose version web3 pins differently
+does not ship (web3, hidapi, …) or whose version web3 pins differently
 (eth-utils, rlp) into a private directory.
 
 %prep

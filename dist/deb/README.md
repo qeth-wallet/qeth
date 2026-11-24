@@ -82,7 +82,7 @@ system bindings and runs under the system interpreter; the bindings link the
 system Qt, so theming is native.
 
 Debian doesn't package the eth stack (web3 / eth-account / eth-abi / eth-keys /
-rlp / ledgereth), a new-enough `hexbytes` (≥1), or `zxing-cpp`, and some of its
+rlp / hidapi), a new-enough `hexbytes` (≥1), or `zxing-cpp`, and some of its
 `pydantic`/`aiohttp`/`eth-utils` live only in backports — so, like the Mint deb,
 the **full Python closure minus PySide6** is vendored from PyPI wheels under
 `/usr/lib/qeth/vendor` (it shadows any system copy via `PYTHONPATH`). Vendoring

@@ -18,9 +18,8 @@ license-files = ["LICENSE"]
 # If you don't have system PySide6, install the [bundled] extra:
 #   uv pip install -e .[bundled]
 dependencies = [
-    "ledgereth>=0.10",
     # USB-HID for the Ledger: qeth/ledger_app.py speaks the Ethereum app over
-    # it directly (replacing ledgereth — see docs/ledger-clear-signing.md).
+    # it directly (docs/ledger-clear-signing.md).
     "hidapi>=0.14",
     "aiohttp>=3.9",
     "segno>=1.6",
@@ -297,7 +296,6 @@ check_untyped_defs = true
 # "missing import" noise so the check stays focused on our own code.
 [[tool.mypy.overrides]]
 module = [
-    "ledgereth.*",
     "hid",
     "eth.*",
     "eth_typing.*",
@@ -389,6 +387,7 @@ web3 = ["web3", "ens"]
 zxing-cpp = ["zxingcpp"]
 Pillow = ["PIL"]
 trezor = ["trezorlib"]
+hidapi = ["hid"]
 
 [tool.deptry.per_rule_ignores]
 # DEP001 = imported but undeclared; DEP002 = declared but unused.

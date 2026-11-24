@@ -5,7 +5,7 @@
 # no PySide6 that fits its Qt6.4 + py3.12 combo — Debian 13 ships PySide6 6.8
 # natively (the split python3-pyside6.* module packages). So this build DEPENDS
 # on the system bindings and runs under the system python3 (3.13); only the eth
-# stack (web3, eth-*, ledgereth, zxing-cpp, ...), which Debian doesn't package,
+# stack (web3, eth-*, hidapi, zxing-cpp, ...), which Debian doesn't package,
 # is vendored privately. The system PySide6 links the system Qt and finds the
 # system Qt plugins on its own, so — unlike the Mint launcher — no QT_PLUGIN_PATH
 # is needed; the user's qt6ct/Kvantum theme applies natively.

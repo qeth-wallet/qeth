@@ -73,7 +73,7 @@ modules:
       build-args:
         - --share=network                # pip downloads the pinned, hash-checked wheels
     build-commands:
-      # qeth's declared deps (ledgereth, aiohttp, segno, eth-abi, web3 + transitive)
+      # qeth's declared deps (hidapi, aiohttp, segno, eth-abi, web3 + transitive)
       # at the uv.lock versions, for the extras the export was made with:
       # [simulate] = pure-Python py-evm fork engine (previews on simV1-less
       # RPCs; Helios-verified previews when a helios binary is on the host).

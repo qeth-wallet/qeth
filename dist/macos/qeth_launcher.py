@@ -24,7 +24,27 @@ def _bundled_helios() -> Path | None:
     return None
 
 
+def _use_bundled_ca_certs() -> None:
+    """Point OpenSSL at certifi's CA bundle, as the AppImage's AppRun does.
+
+    The app is built with Homebrew's Python, so PyInstaller ships Homebrew's
+    OpenSSL, whose default CA file is baked in at build time:
+    /opt/homebrew/etc/openssl@3/cert.pem. That exists on the CI runner and on
+    Macs with Homebrew's openssl@3, and nowhere else — and OpenSSL can't read
+    the Keychain. Without this, everything verified against the default store
+    failed with "unable to get local issuer certificate": urllib (token
+    discovery, prices, icons, history, the chainlist), aiohttp, websockets.
+    requests was unaffected (it uses certifi itself), which is why RPC calls
+    worked. Must run before anything creates an SSL context. An explicit
+    SSL_CERT_FILE from the environment wins."""
+    if "SSL_CERT_FILE" in os.environ:
+        return
+    import certifi
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
+
 def main() -> int:
+    _use_bundled_ca_certs()
     # Point qeth's resolver at the bundled binary, the way the .deb/.rpm
     # launchers do. Set only when it's actually present, so a normal bundle
     # still falls through to a helios on PATH or ~/.helios/bin. An explicit

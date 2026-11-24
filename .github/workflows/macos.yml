@@ -221,6 +221,14 @@ jobs:
           # Ledger: qeth/ledger_app.py talks USB through hidapi's extension.
           find "$APP" -name 'hid*.so' | grep -q . \
             || { echo "::error::hidapi (Ledger) missing"; exit 1; }
+          # TLS: the bundled (Homebrew) OpenSSL's default CA file is
+          # /opt/homebrew/etc/openssl@N/cert.pem, which only exists where
+          # Homebrew's OpenSSL is installed — like this runner, so a missing
+          # bundle would pass every other check here. qeth_launcher.py points
+          # SSL_CERT_FILE at certifi's file instead; without it, every urllib /
+          # aiohttp HTTPS call on a user's Mac fails certificate verification.
+          find "$APP" -path '*certifi/cacert.pem' | grep -q . \
+            || { echo "::error::certifi CA bundle missing"; exit 1; }
 
           # Pure-Python packages live in the embedded PYZ, not on disk, so
           # check the archive rather than the filesystem: `eth` is py-evm,

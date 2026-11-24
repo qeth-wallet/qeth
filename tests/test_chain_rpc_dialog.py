@@ -81,3 +81,38 @@ def test_empty_url_hides_the_verdict(qtbot, monkeypatch):
     dlg.url_edit.setText("")
     dlg._kick_url_probe()
     assert dlg.url_status_lbl.isHidden()        # empty → collapsed, no stray gap
+
+
+def test_unreachable_says_why(qtbot, monkeypatch):
+    dlg = _dialog(qtbot, monkeypatch)
+    dlg._show_url_verdict("https://x", False, None,
+                          "TLS: unable to get local issuer certificate")
+    assert dlg.url_status_lbl.text() == (
+        "✗ Not reachable — TLS: unable to get local issuer certificate")
+
+
+def test_missing_registry_entry_is_not_overwritten(qtbot, monkeypatch):
+    """With nothing to probe, the loader still signals probing_done; that must
+    not replace 'no entry' with a misleading 'none reachable'."""
+    dlg = _dialog(qtbot, monkeypatch)
+    dlg._on_chainlist_loaded(None)
+    dlg._on_probing_done()
+    assert dlg.status_lbl.text().startswith("No chainlist entry for chain 1")
+
+
+def test_download_failure_is_reported(qtbot, monkeypatch):
+    dlg = _dialog(qtbot, monkeypatch)
+    dlg._on_chainlist_failed("timed out")
+    assert "Couldn't download the public endpoint list (timed out)" in (
+        dlg.status_lbl.text())
+
+
+def test_no_survivors_summarises_why(qtbot, monkeypatch):
+    dlg = _dialog(qtbot, monkeypatch)
+    dlg._on_probed("https://a", False, None, None, "timed out")
+    dlg._on_probed("https://b", False, None, None, "timed out")
+    dlg._on_probed("https://c", False, 30.0, None, "HTTP 403")
+    dlg._on_probing_done()
+    assert dlg.status_lbl.text() == (
+        "None of the 3 public endpoints answered (timed out ×2, HTTP 403 ×1). "
+        "Enter a URL manually above.")

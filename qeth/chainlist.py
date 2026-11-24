@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+import requests
 
 from . import USER_AGENT
 from .fsatomic import atomic_write_bytes
@@ -50,6 +54,11 @@ class RpcEntry:
     is_open_source: bool
 
 
+class ChainlistUnavailable(Exception):
+    """The registry couldn't be downloaded and nothing is cached. The message
+    is a short reason ("timed out", "TLS: …")."""
+
+
 @dataclass
 class ChainEntry:
     chain_id: int
@@ -68,14 +77,16 @@ def fetch_chains(
     """Return every chain in the registry. Reads from disk cache
     when fresh; refetches from chainid.network when stale or
     ``force=True``. Falls back to the cached copy on network
-    failure; returns ``[]`` if nothing is cached and the network
-    is also unreachable."""
+    failure; raises ``ChainlistUnavailable`` (with a short reason)
+    if nothing is cached and the download failed, so the dialog can
+    say so rather than report the chain as unknown."""
     cache = cache_dir if cache_dir is not None else CACHE_DIR
     cache_file = cache / "chains.json"
     fresh = (
         cache_file.exists()
         and (time.time() - cache_file.stat().st_mtime) < ttl_seconds
     )
+    data: bytes | None = None
     if not fresh or force:
         try:
             req = urllib.request.Request(
@@ -87,16 +98,21 @@ def fetch_chains(
             )
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = r.read()
-            atomic_write_bytes(cache_file, data)
         except Exception as e:
             log.warning("chainlist fetch failed: %s", e)
             if not cache_file.exists():
-                return []
+                raise ChainlistUnavailable(_short_reason(e)) from e
+        else:
+            # The download is used even if it can't be cached.
+            try:
+                atomic_write_bytes(cache_file, data)
+            except OSError as e:
+                log.warning("chainlist cache write failed: %s", e)
     try:
-        raw = json.loads(cache_file.read_text())
+        raw = json.loads(data if data is not None else cache_file.read_bytes())
     except Exception as e:
         log.warning("chainlist parse failed: %s", e)
-        return []
+        raise ChainlistUnavailable("unreadable chain registry") from e
     out: list[ChainEntry] = []
     for c in raw:
         if not isinstance(c, dict):
@@ -142,66 +158,136 @@ def fetch_chains(
     return out
 
 
+def _root_cause(exc: BaseException) -> BaseException:
+    """The innermost error behind a failed ``requests`` call. requests wraps
+    urllib3's ``MaxRetryError`` (in ``args[0]``), which keeps the urllib3
+    error in ``.reason``, which chains the stdlib socket/ssl error."""
+    seen: set[int] = set()
+    while id(exc) not in seen:
+        seen.add(id(exc))
+        reason = getattr(exc, "reason", None)
+        first_arg = exc.args[0] if exc.args else None
+        nxt = next((e for e in (reason, first_arg, exc.__cause__, exc.__context__)
+                    if isinstance(e, BaseException)), None)
+        if nxt is None:
+            break
+        exc = nxt
+    return exc
+
+
+def _short_reason(exc: BaseException) -> str:
+    """A failed probe in a few words — enough for the user (or a bug report's
+    screenshot) to tell a TLS-trust problem from a timeout from a dead host."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timed out"
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return "proxy error"
+    root = _root_cause(exc)
+    if isinstance(root, ssl.SSLCertVerificationError):
+        return f"TLS: {root.verify_message or 'certificate verify failed'}"
+    if isinstance(root, ssl.SSLError):
+        return "TLS handshake failed"
+    if isinstance(root, socket.gaierror):
+        return "DNS lookup failed"
+    if isinstance(root, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(root, ConnectionResetError):
+        return "connection reset"
+    if isinstance(root, TimeoutError):
+        return "timed out"
+    return (str(root) or type(root).__name__)[:120]
+
+
+_CHAIN_ID_BODY = json.dumps({
+    "jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": [],
+})
+
+
+def _chain_id_call(session: requests.Session, url: str,
+                   timeout: float) -> tuple[int | None, str | None]:
+    """One ``eth_chainId`` POST → ``(chain_id, None)`` or ``(None, reason)``.
+    Transport errors raise (``requests.RequestException``)."""
+    r = session.post(url, data=_CHAIN_ID_BODY, timeout=timeout)
+    try:
+        obj = r.json()
+    except ValueError:
+        # An HTML stub / auth wall. A JSON-RPC error riding on a 4xx is parsed
+        # below instead, so it reports what the node said.
+        return None, (f"HTTP {r.status_code}" if r.status_code >= 400
+                      else "non-JSON response")
+    if not isinstance(obj, dict):
+        return None, "non-object response"
+    if obj.get("error"):
+        err = obj["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        return None, f"rpc error: {msg}"[:120]
+    if r.status_code >= 400:
+        return None, f"HTTP {r.status_code}"
+    result = obj.get("result")
+    if not isinstance(result, str) or not result.startswith("0x"):
+        return None, "bad result"
+    try:
+        return int(result, 16), None
+    except ValueError:
+        return None, "bad chainid"
+
+
 def probe_rpc(
     url: str, expected_chain_id: int, *,
     timeout: float = 5.0,
 ) -> tuple[bool, float | None, str | None]:
-    """Send a single ``eth_chainId`` JSON-RPC and time the
-    round-trip. Returns ``(ok, latency_ms, reason)``:
+    """Check ``url`` with ``eth_chainId`` and time it. Returns
+    ``(ok, latency_ms, reason)``:
 
     - ``ok=True`` only when the response is a well-formed JSON-RPC
       reply whose ``chainId`` matches ``expected_chain_id``. That
       catches both "requires registration" (auth error / HTML
       stub) and "wrong chain behind this URL".
-    - ``ok=False`` returns ``reason`` as a short error string for
-      debug logging; the dialog discards the row either way.
-    - ``latency_ms`` is the wall-clock time from request send to
-      response receipt, ``None`` when the request itself failed
-      (DNS, TCP, TLS, timeout).
+    - ``ok=False`` returns ``reason`` as a short error string
+      (``_short_reason`` for a transport failure: "timed out",
+      "TLS: certificate has expired", "DNS lookup failed", …), which
+      the dialog shows.
+    - ``latency_ms`` is one request on an already-open connection —
+      what each of EthClient's calls costs, since its Session keeps
+      connections alive. The first call pays DNS + TCP + TLS on top
+      (2.5–4× the round trip on a fast link, ~1 s on a 250 ms one),
+      which said more about the user's distance than the endpoint. If
+      the server won't reuse the connection, the second call pays the
+      setup again — and so would every EthClient call. ``None`` when
+      the request itself failed.
+
+    Sent with ``requests`` like EthClient's, so the verdict uses the same
+    trust store (certifi) and proxy settings as the client that will use
+    the URL.
 
     HTTP only — WebSocket probes need a real WS handshake, so
     ``wss://`` URLs aren't supported here and qeth can't use WS
     as a chain RPC anyway (EthClient is HTTPProvider-only)."""
     if not url.startswith(("http://", "https://")):
         return False, None, "not http"
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 1,
-        "method": "eth_chainId", "params": [],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={
+    with requests.Session() as s:
+        s.headers.update({
             "User-Agent": USER_AGENT,
             "Content-Type": "application/json",
             "Accept": "application/json",
-        },
-    )
-    t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = r.read()
-    except Exception as e:
-        return False, None, str(e)[:120]
-    latency = (time.perf_counter() - t0) * 1000.0
-    try:
-        obj = json.loads(data)
-    except Exception:
-        return False, latency, "non-JSON response"
-    if not isinstance(obj, dict):
-        return False, latency, "non-object response"
-    if obj.get("error"):
-        err = obj["error"]
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        return False, latency, f"rpc error: {msg}"[:120]
-    result = obj.get("result")
-    if not isinstance(result, str) or not result.startswith("0x"):
-        return False, latency, "bad result"
-    try:
-        cid = int(result, 16)
-    except ValueError:
-        return False, latency, "bad chainid"
-    if cid != int(expected_chain_id):
-        return False, latency, f"chain mismatch ({cid})"
+        })
+        t0 = time.perf_counter()
+        try:
+            cid, reason = _chain_id_call(s, url, timeout)
+        except requests.RequestException as e:
+            return False, None, _short_reason(e)
+        latency = (time.perf_counter() - t0) * 1000.0
+        if cid is None:
+            return False, latency, reason
+        if cid != int(expected_chain_id):
+            return False, latency, f"chain mismatch ({cid})"
+        t0 = time.perf_counter()
+        try:
+            again, _ = _chain_id_call(s, url, timeout)
+        except requests.RequestException:
+            again = None
+        if again == cid:
+            latency = (time.perf_counter() - t0) * 1000.0
     return True, latency, None
 
 

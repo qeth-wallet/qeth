@@ -24,6 +24,7 @@ with a ``wide`` flag for fields that hold a full address.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
@@ -67,6 +68,19 @@ def address_field_min_width(widget: QWidget) -> int:
     rendered in, plus a little padding."""
     fm = QFontMetrics(QFont("monospace"))
     return fm.horizontalAdvance("0x" + "F" * 40) + widget.fontMetrics().height() * 3
+
+
+def pin_form_defaults(form: QFormLayout) -> None:
+    """Give ``form`` the layout every other platform defaults to, where macOS's
+    style defaults differ: there a form is centred (``AlignHCenter``) and its
+    fields stay at their size hint (``FieldsStayAtSizeHint``), so a line edit
+    sits as a short box in the middle of a wide dialog and a field filled in
+    after layout never grows. Only those Mac defaults are replaced — a form
+    that chose a different policy keeps it — so this is a no-op elsewhere."""
+    if form.fieldGrowthPolicy() == QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint:
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    if form.formAlignment() & Qt.AlignmentFlag.AlignHCenter:
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
 
 class Dialog(QDialog):
@@ -141,6 +155,8 @@ class Dialog(QDialog):
         if layout is None:
             return
         layout.setContentsMargins(*standard_dialog_margins(self))
+        for form in self.findChildren(QFormLayout):
+            pin_form_defaults(form)
         if not self._auto_spacing:
             return
         # The two coupled house gaps: paragraphs (a form, a section, the button

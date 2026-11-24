@@ -295,6 +295,13 @@ track the user's Qt font, not a pixel count):
   an empty label still claims a font line — `setVisible(bool(text))` it;
   see the status-label note below.)
 
+It also replaces **macOS's QFormLayout defaults** on every form in the dialog
+(`pin_form_defaults`): QMacStyle centres a form and keeps its fields at
+their size hint, so line edits rendered as short boxes mid-dialog (a Mac
+report of the chain-RPC dialog). Only those Mac defaults are replaced, so it's
+a no-op elsewhere and an explicit policy survives. A form OUTSIDE a `Dialog`
+(a main-window panel) doesn't get it — call `pin_form_defaults` yourself.
+
 So just build `VBox[ form, …, buttonBox ]` and inherit it: the button row
 sits a clear gap below the content — no per-dialog `setSpacing`/
 `addSpacing` for the outer rhythm (those fight or double the standard).

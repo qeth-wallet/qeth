@@ -272,8 +272,8 @@ Proxy-filed descriptors are skipped (rule 3).
 
 ## Out of scope here, tracked separately
 
-- **Trezor**: serve definitions from `definitions.tar.xz` via trezorlib's
-  `TarSource` instead of per-signature fetches (removes an existing leak).
+- **Trezor**: done — definitions answered from a local copy of Trezor's
+  archive instead of per-signature fetches (`docs/trezor-clear-signing.md`).
 - **qeth's own sign dialog**: render ERC-7730 from a local mirror of
   `ethereum/clear-signing-erc7730-registry`, EIP-712 first.
 - Ledger Tron app; Bluetooth.

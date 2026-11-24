@@ -204,6 +204,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     import qeth.plugins.tokens.wallet_cache
     import qeth.icons
     import qeth.plugins.tokens.risk
+    import qeth.trezor_definitions
 
     monkeypatch.setattr(qeth.plugins.approvals.cache, "CACHE_DIR",
                         tmp_path / "approvals")
@@ -231,6 +232,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
                         tmp_path / "keystores")
     monkeypatch.setattr(qeth.ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
+    monkeypatch.setattr(qeth.trezor_definitions, "CACHE_DIR", tmp_path / "trezor")
     return tmp_path
 
 

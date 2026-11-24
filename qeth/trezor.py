@@ -21,12 +21,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import io
 
-import requests
 from eth_utils import to_bytes, to_checksum_address
 
 from PySide6.QtCore import QThread, Signal
 
-from . import USER_AGENT
 from .chain import EthClient
 from .device_thread import DEFAULT_DEVICE_TIMEOUT_S, DeviceJobService
 from .ledger import (
@@ -273,41 +271,58 @@ def explain_trezor_error(e: BaseException) -> str:
     return f"Trezor error: {text}"
 
 
-# --- signed network / token definitions -------------------------------------
-
-_DEFINITIONS: dict[str, bytes | None] = {}
-_DEFINITION_TIMEOUT_S = 10.0
-
-
-def _fetch_definition(url: str) -> bytes | None:
-    r = requests.get(url, timeout=_DEFINITION_TIMEOUT_S,
-                     headers={"User-Agent": USER_AGENT})
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.content
+# --- signed network / token / clear-signing definitions -----------------------
 
 
 def _definition_source() -> Any:
-    """Trezor's signed chain / token / clear-signing descriptions from
-    data.trezor.io, fetched when the firmware asks, so the device can show
-    "Ethereum" / "USDC" instead of a raw chain id or contract. Memoized; a
-    failed fetch answers "none" (the device falls back to raw values) rather
-    than aborting the signature."""
-    from trezorlib.definitions import DEFS_BASE_URL, Source
+    """Trezor's signed chain / token / ERC-7730 descriptions, answered from
+    the local copy of Trezor's archive (``trezor_definitions``) when the
+    firmware asks mid-signature, so the device can show "CRV" or "Supply
+    1,000 USDC" instead of raw values — without telling any server what is
+    being signed. A definition the copy lacks is answered with none (the
+    device shows the raw value). ``supplied`` says whether it answered any."""
+    from trezorlib.definitions import Source
 
-    class _Tolerant(Source):
+    from .trezor_definitions import default_definitions
+
+    class _Local(Source):
+        supplied = False
+
         def fetch_path(self, *components: str) -> bytes | None:
-            url = DEFS_BASE_URL + "/".join(components)
-            if url not in _DEFINITIONS:
-                try:
-                    _DEFINITIONS[url] = _fetch_definition(url)
-                except Exception as e:   # noqa: BLE001 — never fail the sign on it
-                    log.info("Trezor definition %s unavailable: %s", url, e)
-                    return None
-            return _DEFINITIONS[url]
+            blob = default_definitions().lookup("/".join(components))
+            self.supplied |= blob is not None
+            return blob
 
-    return _Tolerant()
+    return _Local()
+
+
+def _no_definitions() -> Any:
+    from trezorlib.definitions import NullSource
+    return NullSource()
+
+
+def _refused_definitions(e: BaseException) -> bool:
+    """The firmware refused a definition it was given (an outdated one — it
+    keeps a minimum date — or one it can't use). It does so before it shows
+    anything, and aborts the signature."""
+    from trezorlib import exceptions, messages
+    return (isinstance(e, exceptions.TrezorFailure)
+            and e.code == messages.FailureType.DataError
+            and "definition" in (e.message or "").lower())
+
+
+def _sign_with_definitions(sign: Callable[[Any], T]) -> T:
+    """``sign(definition_source)`` with the local definitions; if the firmware
+    refuses one, again without any — the device then shows raw values rather
+    than refusing to sign."""
+    source = _definition_source()
+    try:
+        return sign(source)
+    except Exception as e:
+        if not (source.supplied and _refused_definitions(e)):
+            raise
+        log.info("Trezor refused a definition (%s); signing without", e)
+    return sign(_no_definitions())
 
 
 # --- device operations (each runs inside a job) ------------------------------
@@ -466,12 +481,12 @@ class TrezorSigner(Signer):
             def sign_1559(session: Any) -> tuple[int, bytes, bytes]:
                 ethereum = _ethereum()
                 _require_holds(session, req.from_addr, path)
-                return ethereum.sign_tx_eip1559(
+                return _sign_with_definitions(lambda source: ethereum.sign_tx_eip1559(
                     session, _address_n(path), nonce=nonce, gas_limit=gas,
                     to=to, value=value, data=data,
                     chain_id=chain.chain_id, max_gas_fee=max_fee,
                     max_priority_fee=tip, supports_definition_request=True,
-                    definition_source=_definition_source())
+                    definition_source=source))
 
             v, r, s = self._run(sign_1559)
             return signed_eip1559_tx(req, chain.chain_id, v,
@@ -485,11 +500,11 @@ class TrezorSigner(Signer):
             ethereum = _ethereum()
             _require_holds(session, req.from_addr, path)
             # trezorlib returns v with the EIP-155 chain offset already applied.
-            return ethereum.sign_tx(
+            return _sign_with_definitions(lambda source: ethereum.sign_tx(
                 session, _address_n(path), nonce=nonce, gas_price=gas_price,
                 gas_limit=gas, to=to, value=value, data=data,
                 chain_id=chain.chain_id, supports_definition_request=True,
-                definition_source=_definition_source())
+                definition_source=source))
 
         v, r, s = self._run(sign_legacy)
         return signed_legacy_tx(req, v, int.from_bytes(r, "big"), int.from_bytes(s, "big"))

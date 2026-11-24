@@ -27,6 +27,7 @@ from trezorlib import exceptions, messages  # noqa: E402
 from trezorlib.transport import TransportException  # noqa: E402
 
 import qeth.trezor as trezor_mod  # noqa: E402
+from qeth import trezor_definitions  # noqa: E402
 from qeth.signing import (  # noqa: E402
     MessageSigningRequest, SignerError, SigningRequest, TypedDataSigningRequest,
 )
@@ -58,6 +59,11 @@ def _address(n: list[int]) -> str:
     return Account.from_key(_derive(n)[0]).address
 
 
+def _definition_refused() -> exceptions.TrezorFailure:
+    return exceptions.TrezorFailure(messages.Failure(
+        code=messages.FailureType.DataError, message="Invalid definition signature"))
+
+
 class FakeEthereum:
     """Stands in for ``trezorlib.ethereum``: same call shapes, real signatures."""
 
@@ -65,6 +71,21 @@ class FakeEthereum:
         self.calls: list[tuple[str, dict]] = []
         self.fail_next: BaseException | None = None
         self.message_v_as_recovery_id = False
+        # Definitions the firmware asks for mid-signature (archive paths),
+        # what it was answered, and whether it refuses any it's given.
+        self.wants: list[str] = []
+        self.answered: list[bytes | None] = []
+        self.refuses_definitions = False
+        self.sign_fails: BaseException | None = None   # after the definitions
+
+    def _ask_definitions(self, kw: dict) -> None:
+        for path in self.wants:
+            blob = kw["definition_source"].fetch_path(*path.split("/"))
+            self.answered.append(blob)
+            if blob is not None and self.refuses_definitions:
+                raise _definition_refused()
+        if self.sign_fails is not None:
+            raise self.sign_fails
 
     def _record(self, name: str, **kw) -> None:
         self.calls.append((name, kw))
@@ -84,6 +105,7 @@ class FakeEthereum:
 
     def sign_tx_eip1559(self, session, n, **kw):
         self._record("sign_tx_eip1559", **kw)
+        self._ask_definitions(kw)
         signed = Account.sign_transaction({
             "type": 2, "chainId": kw["chain_id"], "nonce": kw["nonce"],
             "gas": kw["gas_limit"], "to": kw["to"], "value": kw["value"],
@@ -94,6 +116,7 @@ class FakeEthereum:
 
     def sign_tx(self, session, n, **kw):
         self._record("sign_tx", **kw)
+        self._ask_definitions(kw)
         signed = Account.sign_transaction({
             "chainId": kw["chain_id"], "nonce": kw["nonce"],
             "gas": kw["gas_limit"], "gasPrice": kw["gas_price"], "to": kw["to"],
@@ -135,7 +158,7 @@ class FakeSession:
 
 
 @pytest.fixture
-def device(monkeypatch):
+def device(monkeypatch, tmp_path):
     """A connected fake Trezor. Yields the fake ``ethereum`` module; ``opened``
     counts sessions opened (a reconnect opens a second)."""
     eth = FakeEthereum()
@@ -151,7 +174,8 @@ def device(monkeypatch):
 
     monkeypatch.setattr(trezor_mod, "_ethereum", lambda: eth)
     monkeypatch.setattr(trezor_mod, "_open_session", open_session)
-    monkeypatch.setattr(trezor_mod, "_fetch_definition", lambda url: None)
+    # An empty local copy of Trezor's definitions (never the user's).
+    monkeypatch.setattr(trezor_definitions, "CACHE_DIR", tmp_path / "trezor")
     trezor_mod._CONNECTION.reset()
     yield eth
     trezor_mod._CONNECTION.reset()
@@ -327,22 +351,69 @@ def test_error_messages_are_actionable():
     assert explain(exceptions.TrezorFailure(failure)) == "Wrong PIN."
 
 
-def test_definition_fetch_failure_answers_none_and_success_is_memoized(monkeypatch):
-    fetched: list[str] = []
+# --- definitions: answered from the local copy -----------------------------------
 
-    def flaky(url):
-        fetched.append(url)
-        if "network" in url:
-            raise OSError("offline")
-        return b"signed-token"
-    monkeypatch.setattr(trezor_mod, "_fetch_definition", flaky)
-    monkeypatch.setattr(trezor_mod, "_DEFINITIONS", {})
-    source = trezor_mod._definition_source()
+CRV_PATH = "eth/chain-id/1/token-d533a949740bb3306d119cc777fa900ba034cd52.dat"
+LIDO_PATH = ("eth/chain-id/1/display-format/"
+             "ae7ab96520de3a18e5e111b5eaab095312d7fe84-a1903eab.dat")
 
-    assert source.fetch_path("eth", "chain-id", "1", "network.dat") is None
-    assert source.fetch_path("eth", "chain-id", "1", "token-ab.dat") == b"signed-token"
-    assert source.fetch_path("eth", "chain-id", "1", "token-ab.dat") == b"signed-token"
-    assert len(fetched) == 2        # the token was fetched once; the failure isn't cached
+
+@pytest.fixture
+def local_definitions():
+    """The local copy, built from the sample of real definitions."""
+    from test_trezor_definitions import FakeHttp
+    trezor_definitions.default_definitions().refresh(session=FakeHttp())
+
+
+def test_definitions_are_answered_from_the_local_copy(device, local_definitions):
+    device.wants = [CRV_PATH, LIDO_PATH, "eth/chain-id/1/token-" + "00" * 20 + ".dat"]
+    raw = TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    crv, lido, unknown = device.answered
+    assert crv is not None and trezor_definitions.verify_definition(crv)
+    assert lido is not None and unknown is None
+
+
+def test_without_a_local_copy_the_device_gets_no_definitions(device):
+    device.wants = [CRV_PATH]
+    raw = TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    assert device.answered == [None]
+
+
+@pytest.mark.parametrize("eip1559", [True, False])
+def test_definitions_the_device_refuses_are_dropped_not_the_signature(
+        device, local_definitions, eip1559):
+    """An outdated definition (the firmware keeps a minimum date) aborts the
+    signature before anything shows: signed again without any."""
+    device.wants = [CRV_PATH]
+    device.refuses_definitions = True
+    req = _req(data="0xa9059cbb") if eip1559 else _req(
+        data="0xa9059cbb", gas_price=10**9, max_fee_per_gas=None,
+        max_priority_fee_per_gas=None)
+    raw = TrezorSigner(_account()).sign(req, _chain(eip1559=eip1559))
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    signs = [kw for name, kw in device.calls if name.startswith("sign_tx")]
+    assert len(signs) == 2
+    assert device.answered[0] is not None and device.answered[1] is None
+
+
+def test_a_definition_refusal_without_definitions_isnt_retried(device):
+    """Nothing was supplied: the refusal isn't ours to work around."""
+    device.wants = [CRV_PATH]
+    device.sign_fails = _definition_refused()
+    with pytest.raises(SignerError, match="Invalid definition"):
+        TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert [n for n, _ in device.calls].count("sign_tx_eip1559") == 1
+
+
+def test_other_failures_arent_retried(device, local_definitions):
+    device.wants = [CRV_PATH]
+    device.sign_fails = exceptions.TrezorFailure(messages.Failure(
+        code=messages.FailureType.ActionCancelled, message="Cancelled"))
+    with pytest.raises(SignerError):
+        TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert [n for n, _ in device.calls].count("sign_tx_eip1559") == 1
 
 
 class FakeUI:

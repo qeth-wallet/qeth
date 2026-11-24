@@ -177,15 +177,17 @@ ty = "2099-01-01T00:00:00Z"
 # skipped by default (they need drivers on PATH + a free port 1248):
 #                                    uv run pytest -m browser
 # The `speculos` tests sign on Ledger's emulator running the real Ethereum app;
-# scripts/speculos.sh test starts it and runs them.
+# scripts/speculos.sh test starts it and runs them. Likewise `trezor_emulator`
+# on Trezor's firmware emulator (scripts/trezor-emu.sh test).
 # To run everything (offline + online + browser): uv run pytest -m ''
 markers = [
     "network: requires live network and external services",
     "browser: launches headless Chromium/Firefox with the webext against a stub RpcServer; needs chromedriver/geckodriver on PATH and a free port 1248",
     "speculos: signs on Ledger's Speculos emulator (scripts/speculos.sh test)",
+    "trezor_emulator: signs on Trezor's firmware emulator (scripts/trezor-emu.sh test)",
     "real_tx_saver: opt out of the conftest sync-saver patch to exercise AsyncTransactionSaver's real off-thread write",
 ]
-addopts = "-m 'not network and not browser and not speculos'"
+addopts = "-m 'not network and not browser and not speculos and not trezor_emulator'"
 # pytest-qt: tell it which Qt binding we use. The "offscreen" Qt
 # platform plugin is set in tests/conftest.py before QApplication is
 # created, so UI tests don't pop windows on the developer's screen
@@ -252,6 +254,7 @@ files = [
     "qeth/ledger_hid.py",
     "qeth/device_thread.py",
     "qeth/trezor.py",
+    "qeth/trezor_definitions.py",
     "qeth/signing.py",
     "qeth/signers/__init__.py",
     "qeth/signers/base.py",

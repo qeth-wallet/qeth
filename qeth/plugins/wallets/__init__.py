@@ -50,6 +50,7 @@ from ...dialog import (
 )
 from ...ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
 from .ledger_mirror import LedgerMirrorScheduler
+from .trezor_mirror import TrezorMirrorScheduler
 from ...qr.schemes import (
     QR_ADDRESS_SCHEMES,
     components_to_path,
@@ -390,9 +391,11 @@ class WalletsPlugin(Plugin):
         # Lower-case addresses whose ENS label was resolved through Helios
         # (proof-verified) — drives a "verified" tooltip on the tree row.
         self._ens_verified: set[str] = set()
-        # Keeps the local Ledger token-metadata mirror fresh while a Ledger
-        # account exists (started in attach; ledger_mirror.py).
+        # Keep the local Ledger token mirror / Trezor definitions fresh while
+        # an account of that device exists (started in attach;
+        # ledger_mirror.py, trezor_mirror.py).
         self._ledger_mirror: LedgerMirrorScheduler | None = None
+        self._trezor_mirror: TrezorMirrorScheduler | None = None
 
     # --- Plugin contract ----------------------------------------------------
 
@@ -401,10 +404,14 @@ class WalletsPlugin(Plugin):
         self._ledger_mirror = LedgerMirrorScheduler(
             self._store, host.start_worker, parent=self)
         self._ledger_mirror.start()
+        self._trezor_mirror = TrezorMirrorScheduler(
+            self._store, host.start_worker, parent=self)
+        self._trezor_mirror.start()
 
     def shutdown(self) -> None:
-        if self._ledger_mirror is not None:
-            self._ledger_mirror.stop()
+        for mirror in (self._ledger_mirror, self._trezor_mirror):
+            if mirror is not None:
+                mirror.stop()
 
     def widget(self) -> QWidget:
         if self._container is None:
@@ -1769,6 +1776,9 @@ class WalletsPlugin(Plugin):
                 added.append(record)
         if added_addrs and tid is not None:
             self._store.ensure_tree_label("trezor", tid)
+        if added_addrs and self._trezor_mirror is not None:
+            # Fetch Trezor's definitions now, before the first signature needs them.
+            self._trezor_mirror.check()
         self._rebuild_tree()
         self.default_account_changed.emit()
         switched = self._reveal_added(added)

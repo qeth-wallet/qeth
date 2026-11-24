@@ -68,6 +68,28 @@ ETag.
   without any: the device shows the raw call (with its own "Unknown contract"
   warning) rather than refusing to sign. Only when qeth actually supplied one.
 
+## Typed messages (EIP-712)
+
+A Safe hashes a typed message itself from the fields trezorlib sends, and
+trezorlib reads values more strictly than eth_account — the hash qeth shows
+and checks: a hex amount (`"0xf4240"`), `"true"`, text for `bytes` all made
+it raise *midway through the device's review*. So qeth sends
+`trezor.trezor_typed_data(typed)`: every value read as eth_account reads it
+(`qeth/eip712_values.py`, shared with the Ledger encoder) and put in the form
+trezorlib encodes, `bytesN` padded, and the domain's type built from the
+domain's keys in eth_account's order.
+
+What the firmware can't hash at all — an array of arrays (`uint16[2][]`; its
+encoder has no case for it), a missing value, an unknown type — is refused
+before the device shows anything, with the reason. There is no blind way
+round it on a Safe: core firmware has no hash-signing message (the emulator
+answers `UnexpectedMessage`); only the Trezor One signs the domain and message
+hashes, which it does for every typed message.
+
+Every typed-message signature is recovered against eth_account's hash, as on
+Ledger: one over anything else is refused, and `v` comes from the recovery,
+not the device.
+
 ## Testing
 
 - Hermetic: `tests/test_trezor_definitions.py` (refresh / 304 / split /
@@ -82,7 +104,9 @@ ETag.
   trezor-user-env does), loaded with the test seed "all" × 12. The debug link
   (UDP, next port) reads the screens and presses; qeth reaches the emulator
   through trezorlib's `TREZOR_PATH`. Every flow: ETH / legacy transfers,
-  personal_sign, EIP-712, a rejection, a built-in token, CRV from the copy,
+  personal_sign, EIP-712 (incl. a hex amount and dapp-style values, and an
+  array of arrays refused with nothing shown), a rejection, a built-in token,
+  CRV from the copy,
   Lido and Aave clear-signed from the copy, the same without a copy (raw), and
   the refused-definition fallback. The network guard fails any test that
   fetches a definition during a signature.
@@ -91,6 +115,5 @@ ETag.
 ## Not covered
 
 - Safe 7 (THP pairing) and the Trezor One on the emulator.
-- EIP-712 messages with nested arrays: the firmware refuses them ("Nested
-  arrays are not supported"); qeth reports that, it doesn't fall back to the
-  hashes.
+- EIP-712 messages with arrays of arrays on a Safe: no firmware way to sign
+  them (see above); refused up front.

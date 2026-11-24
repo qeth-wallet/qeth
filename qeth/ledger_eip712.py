@@ -38,6 +38,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+from .eip712_values import (
+    DOMAIN, DOMAIN_FIELDS, Eip712Unsupported, read_address, read_bool,
+    read_bytes, read_int,
+)
 from .ledger_app import MAX_APDU_DATA, apdu, pack_path
 
 INS_EIP712_SEND_STRUCT_DEF = 0x1A
@@ -60,14 +64,6 @@ _V2_NEXT_CHUNK = 0x00
 # Solidity base types, as both versions number them.
 STRUCT, INT, UINT, ADDRESS, BOOL, STRING, BYTES_FIX, BYTES_DYN = range(8)
 
-DOMAIN = "EIP712Domain"
-# eth_account builds the domain's type from the keys the domain has, in this
-# order, whatever ``types.EIP712Domain`` says — so the device gets the same.
-_DOMAIN_FIELDS: tuple[tuple[str, str], ...] = (
-    ("name", "string"), ("version", "string"), ("chainId", "uint256"),
-    ("verifyingContract", "address"), ("salt", "bytes32"),
-)
-
 # Device limits (doc/eip712.md "Implementation limits"): V1 sends an array
 # length and a fixed dimension in one byte, V2 caps both at 255 too.
 _MAX_ARRAY = 255
@@ -80,12 +76,6 @@ _MAX_TLV = 0xFFFF        # V2's payload length is 2 bytes
 _ARRAY_SUFFIX = re.compile(r"^(.*)\[(\d*)\]$")
 _INT_TYPE = re.compile(r"^(u?)int(\d+)$")
 _BYTES_TYPE = re.compile(r"^bytes(\d+)$")
-_HEX = re.compile(r"^0x[0-9a-fA-F]*$")
-_ADDRESS = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
-
-
-class Eip712Unsupported(ValueError):
-    """The message can't go to the device whole; sign its hashes instead."""
 
 
 @dataclass(frozen=True)
@@ -129,7 +119,7 @@ def parse_typed_data(typed: Mapping[str, Any]) -> Eip712Message:
     names = {name for name in types if name != DOMAIN}
     structs: dict[str, tuple[Eip712Field, ...]] = {
         DOMAIN: tuple(_field(name, type_, names)
-                      for name, type_ in _DOMAIN_FIELDS if name in domain)}
+                      for name, type_ in DOMAIN_FIELDS if name in domain)}
     for name, fields in types.items():
         if name == DOMAIN:
             continue
@@ -238,7 +228,7 @@ def _leaf(field: Eip712Field, value: Any) -> bytes:
     t = field.type
     if t in (INT, UINT):
         assert field.size is not None
-        n = _to_int(field.name, value)
+        n = read_int(field.name, value)
         bits = field.size * 8
         low, high = ((-(1 << (bits - 1)), 1 << (bits - 1)) if t == INT
                      else (0, 1 << bits))
@@ -248,55 +238,20 @@ def _leaf(field: Eip712Field, value: Any) -> bytes:
             return n.to_bytes(field.size, "big", signed=True)
         return n.to_bytes(max(1, (n.bit_length() + 7) // 8), "big")
     if t == ADDRESS:
-        if isinstance(value, bytes) and len(value) == 20:
-            return value
-        if isinstance(value, str) and _ADDRESS.match(value):
-            return bytes.fromhex(value[2:])
-        raise Eip712Unsupported(f"{field.name} isn't an address")
+        return read_address(field.name, value)
     if t == BOOL:
-        return b"\x00" if not value or value in ("False", "false", "0") else b"\x01"
+        return b"\x01" if read_bool(value) else b"\x00"
     if t == STRING:
         if not isinstance(value, str):
             raise Eip712Unsupported(f"{field.name} isn't a string")
         return value.encode()
-    data = _to_bytes(field.name, value)
+    data = read_bytes(field.name, value)
     if t == BYTES_FIX:
         assert field.size is not None
         if len(data) > field.size:
             raise Eip712Unsupported(f"{field.name} is longer than bytes{field.size}")
         return data.ljust(field.size, b"\x00")     # as eth_abi pads bytesN
     return data
-
-
-def _to_int(name: str, value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise Eip712Unsupported(f"{name} isn't an integer")
-    if isinstance(value, int):
-        return value
-    try:
-        if _HEX.match(value):
-            return int(value[2:], 16)
-        return int(value)
-    except ValueError as e:
-        raise Eip712Unsupported(f"{name} isn't an integer") from e
-
-
-def _to_bytes(name: str, value: Any) -> bytes:
-    """eth_account's reading of a ``bytes``/``bytesN`` value: hex when
-    ``0x``-prefixed, else the text's UTF-8; an integer as big-endian."""
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, str):
-        if _HEX.match(value):
-            digits = value[2:]
-            return bytes.fromhex("0" * (len(digits) % 2) + digits)
-        return value.encode()
-    if isinstance(value, bool):
-        return b"\x01" if value else b"\x00"
-    if isinstance(value, int):
-        n = max(value, 0)
-        return n.to_bytes(max(1, (n.bit_length() + 7) // 8), "big")
-    raise Eip712Unsupported(f"{name} isn't bytes")
 
 
 # --- V1: one command per struct, field and value ------------------------------

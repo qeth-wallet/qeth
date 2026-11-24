@@ -227,6 +227,22 @@ class TypedDataSigningRequest:
     origin: str | None = None
 
 
+def typed_data_hashes(typed_data: dict) -> tuple[bytes, bytes]:
+    """eth_account's domain and message hashes of an EIP-712 message — what
+    qeth shows, and what a hardware wallet's signature must recover against."""
+    try:
+        from eth_account.messages import encode_typed_data
+        signable = encode_typed_data(full_message=typed_data)
+    except Exception as e:
+        raise SignerError(f"failed to hash typed data: {e}") from e
+    domain_hash, message_hash = signable.header, signable.body
+    if len(domain_hash) != 32 or len(message_hash) != 32:
+        raise SignerError(
+            "encode_typed_data produced unexpected shape: "
+            f"header={len(domain_hash)} body={len(message_hash)}")
+    return domain_hash, message_hash
+
+
 @dataclass
 class TronSigningRequest:
     """A Tron transaction to sign: the fully assembled ``TronTx`` (qeth.tron),

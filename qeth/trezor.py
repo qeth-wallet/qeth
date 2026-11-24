@@ -16,17 +16,22 @@ qeth runs normally and the Trezor add / sign flows explain how to install it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import io
 
-from eth_utils import to_bytes, to_checksum_address
+from eth_utils import keccak, to_bytes, to_checksum_address
 
 from PySide6.QtCore import QThread, Signal
 
 from .chain import EthClient
 from .device_thread import DEFAULT_DEVICE_TIMEOUT_S, DeviceJobService
+from .eip712_values import (
+    DOMAIN, DOMAIN_FIELDS, Eip712Unsupported, read_address, read_bool,
+    read_bytes, read_int,
+)
 from .ledger import (
     AUTO_DETECT_BATCH_SIZE,
     AUTO_DETECT_HARD_CAP,
@@ -37,6 +42,7 @@ from .ledger import (
     DiscoveredAccount,
 )
 from .address import tron_from_hex, tron_to_hex
+from .ledger_app import LedgerError, recover_parity
 from .qr.derive import derive_address
 from .signing import (
     MessageSigningRequest,
@@ -47,6 +53,7 @@ from .signing import (
     TypedDataSigningRequest,
     signed_eip1559_tx,
     signed_legacy_tx,
+    typed_data_hashes,
 )
 from .tron.client import TronClient, TronError
 from .tron.paths import PATH_SCHEMES as TRON_PATH_SCHEMES
@@ -430,6 +437,94 @@ def _require_holds(session: Any, address: str, path: str) -> None:
         f"at {path}. {hint}")
 
 
+# --- EIP-712 as trezorlib can send it ------------------------------------------
+
+_ARRAY = re.compile(r"^(.*)\[(\d*)\]$")
+_INT_TYPE = re.compile(r"^(u?)int(\d+)$")
+_BYTES_TYPE = re.compile(r"^bytes(\d+)$")
+# trezorlib reads a type by these names before it looks at the structs.
+_BUILTIN_TYPE = re.compile(r"^(u?int\d*|bytes\d*|string|bool|address)$")
+_MAX_TREZOR_ARRAY = 0xFFFF          # trezorlib sends an array's length in 2 bytes
+
+
+def trezor_typed_data(typed: Mapping[str, Any]) -> dict[str, Any]:
+    """The dapp's typed data as trezorlib sends it and the firmware hashes it
+    the way qeth does (eth_account): every value in the form trezorlib
+    encodes — integers as ints (dapps send ``"0xf4240"``), bools as bools
+    (``"true"``), bytes and addresses as hex, ``bytesN`` padded — and the
+    domain's type as eth_account builds it from the domain's keys. Raises
+    ``Eip712Unsupported`` for what the firmware can't hash at all: an array of
+    arrays, a missing value, a type it doesn't know."""
+    try:
+        types, domain = typed["types"], typed["domain"]
+        message, primary = typed["message"], typed["primaryType"]
+    except (KeyError, TypeError) as e:
+        raise Eip712Unsupported(f"typed data without {e}") from e
+    if not all(isinstance(x, Mapping) for x in (types, domain, message)):
+        raise Eip712Unsupported("malformed typed data")
+    out_types: dict[str, list[dict[str, str]]] = {
+        DOMAIN: [{"name": n, "type": t} for n, t in DOMAIN_FIELDS if n in domain]}
+    for name, fields in types.items():
+        if name == DOMAIN:
+            continue
+        if _BUILTIN_TYPE.match(name):
+            raise Eip712Unsupported(f"struct {name} is named like a built-in type")
+        if not isinstance(fields, list) or not all(
+                isinstance(f, Mapping) and isinstance(f.get("name"), str)
+                and isinstance(f.get("type"), str) for f in fields):
+            raise Eip712Unsupported(f"struct {name} has a malformed field")
+        out_types[name] = [{"name": f["name"], "type": f["type"]} for f in fields]
+    if primary == DOMAIN or primary not in out_types:
+        raise Eip712Unsupported(f"primary type {primary!r} isn't defined")
+
+    def struct(name: str, value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise Eip712Unsupported(f"{name} isn't a struct")
+        return {f["name"]: field(f["name"], f["type"], value.get(f["name"]))
+                for f in out_types[name]}
+
+    def field(name: str, type_: str, value: Any) -> Any:
+        if value is None:
+            raise Eip712Unsupported(f"no value for {name}")
+        if (m := _ARRAY.match(type_)) is not None:
+            inner, size = m.group(1), m.group(2)
+            if _ARRAY.match(inner):
+                raise Eip712Unsupported(
+                    f"{name} is an array of arrays, which Trezor's firmware can't hash")
+            if (not isinstance(value, list) or len(value) > _MAX_TREZOR_ARRAY
+                    or (size and len(value) != int(size))):
+                raise Eip712Unsupported(f"{name} isn't an array of {inner}")
+            return [field(name, inner, v) for v in value]
+        if type_ in out_types:
+            return struct(type_, value)
+        if type_ == "address":
+            return "0x" + read_address(name, value).hex()
+        if type_ == "bool":
+            return read_bool(value)
+        if type_ == "string":
+            if not isinstance(value, str):
+                raise Eip712Unsupported(f"{name} isn't a string")
+            return value
+        if type_ == "bytes":
+            return "0x" + read_bytes(name, value).hex()
+        if (m := _INT_TYPE.match(type_)) is not None and int(m.group(2)) in range(8, 257, 8):
+            n, bits = read_int(name, value), int(m.group(2))
+            low, high = ((0, 1 << bits) if m.group(1)
+                         else (-(1 << (bits - 1)), 1 << (bits - 1)))
+            if not low <= n < high:
+                raise Eip712Unsupported(f"{name} is out of range for {type_}")
+            return n
+        if (m := _BYTES_TYPE.match(type_)) is not None and 1 <= int(m.group(1)) <= 32:
+            data, size = read_bytes(name, value), int(m.group(1))
+            if len(data) > size:
+                raise Eip712Unsupported(f"{name} is longer than {type_}")
+            return "0x" + data.ljust(size, b"\x00").hex()
+        raise Eip712Unsupported(f"{name} has type {type_}")
+
+    return {"types": out_types, "primaryType": primary,
+            "domain": struct(DOMAIN, domain), "message": struct(primary, message)}
+
+
 def _signature_v27(signature: bytes) -> bytes:
     """personal_sign / EIP-712 convention: v as 27/28."""
     if len(signature) != 65:
@@ -524,23 +619,46 @@ class TrezorSigner(Signer):
 
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
         """EIP-712 v4. Trezor T / Safe models walk the typed data and show its
-        fields; a Trezor One can only sign the domain + message hashes."""
+        fields — sent as ``trezor_typed_data`` reads it, so they hash what qeth
+        hashes; a message they can't hash (an array of arrays) is refused
+        before the device shows anything, since only a Trezor One can sign
+        the domain + message hashes instead. Either way the signature must
+        recover to the account over eth_account's hash."""
         path = self._path()
+        domain_hash, message_hash = typed_data_hashes(req.typed_data)
+        try:
+            typed: dict[str, Any] | None = trezor_typed_data(req.typed_data)
+            unsupported = ""
+        except Eip712Unsupported as e:
+            typed, unsupported = None, str(e)
 
         def job(session: Any) -> bytes:
             ethereum = _ethereum()
             _require_holds(session, req.from_addr, path)
             if session.client.features.model == "1":
-                from eth_account.messages import encode_typed_data
-                signable = encode_typed_data(full_message=req.typed_data)
                 return bytes(ethereum.sign_typed_data_hash(
-                    session, _address_n(path), signable.header,
-                    signable.body).signature)
+                    session, _address_n(path), domain_hash, message_hash).signature)
+            if typed is None:
+                raise SignerError(
+                    f"This Trezor can't sign this typed message: {unsupported}. "
+                    "Its firmware has no way to sign a typed message by its "
+                    "hashes (only the Trezor One has).")
             return bytes(ethereum.sign_typed_data(
-                session, _address_n(path), req.typed_data,
-                metamask_v4_compat=True).signature)
+                session, _address_n(path), typed, metamask_v4_compat=True).signature)
 
-        return _signature_v27(self._run(job))
+        signature = self._run(job)
+        if len(signature) != 65:
+            raise SignerError(f"expected a 65-byte signature, got {len(signature)}")
+        r, s = signature[:32], signature[32:64]
+        try:
+            parity = recover_parity(keccak(b"\x19\x01" + domain_hash + message_hash),
+                                    int.from_bytes(r, "big"), int.from_bytes(s, "big"),
+                                    req.from_addr)
+        except LedgerError as e:
+            raise SignerError(
+                "The Trezor's signature doesn't match this message as qeth hashes "
+                "it — refused, nothing was returned to the site.") from e
+        return r + s + bytes([27 + parity])
 
     def sign_tron(self, req: TronSigningRequest) -> bytes:
         """A Tron transaction, via the firmware's Tron app. The device shows

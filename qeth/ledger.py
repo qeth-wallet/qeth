@@ -40,7 +40,7 @@ from .ledger_metadata import (
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
     TypedDataSigningRequest, signed_eip1559_tx, signed_legacy_tx,
-    unsigned_eip1559_tx, unsigned_legacy_tx,
+    typed_data_hashes, unsigned_eip1559_tx, unsigned_legacy_tx,
 )
 
 T = TypeVar("T")
@@ -432,7 +432,7 @@ class LedgerSigner(Signer):
         it can't carry) the device signs the domain and message hashes instead
         (the V0 mode), showing those."""
         path = self._require_path(req.from_addr)
-        domain_hash, message_hash = _typed_data_hashes(req.typed_data)
+        domain_hash, message_hash = typed_data_hashes(req.typed_data)
         try:
             message: Eip712Message | None = parse_typed_data(req.typed_data)
         except Eip712Unsupported as e:
@@ -451,22 +451,6 @@ class LedgerSigner(Signer):
         parity = self._parity(keccak(b"\x19\x01" + domain_hash + message_hash),
                               raw.r, raw.s, req.from_addr)
         return _rsv(raw.r, raw.s, 27 + parity)
-
-
-def _typed_data_hashes(typed_data: dict) -> tuple[bytes, bytes]:
-    """eth_account's domain and message hashes — what qeth shows, and what
-    the signature must recover against."""
-    try:
-        from eth_account.messages import encode_typed_data
-        signable = encode_typed_data(full_message=typed_data)
-    except Exception as e:
-        raise SignerError(f"failed to hash typed data: {e}") from e
-    domain_hash, message_hash = signable.header, signable.body
-    if len(domain_hash) != 32 or len(message_hash) != 32:
-        raise SignerError(
-            "encode_typed_data produced unexpected shape: "
-            f"header={len(domain_hash)} body={len(message_hash)}")
-    return domain_hash, message_hash
 
 
 @dataclass(frozen=True)
@@ -627,7 +611,7 @@ def typed_data_review_text(typed_data: dict) -> str:
     describes it, and the hashes, for the screens that show them instead of
     fields (a Nano S's, an older app's) — in the device's own format."""
     try:
-        domain_hash, message_hash = _typed_data_hashes(typed_data)
+        domain_hash, message_hash = typed_data_hashes(typed_data)
     except SignerError:
         return "Confirm on your Ledger device…"
     try:

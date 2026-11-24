@@ -246,3 +246,37 @@ def test_a_definition_the_device_refuses_falls_back_to_raw(emu, definitions, mon
     monkeypatch.setattr(trezor_definitions.DefinitionMirror, "lookup", damaged)
     _tx(emu, to=LIDO, value=10**18, data=LIDO_SUBMIT)
     assert "stake eth" not in emu.text()
+
+
+# --- typed messages as dapps write them -------------------------------------------
+
+
+def _sign_typed(emu: Emulator, typed: dict) -> None:
+    sig = emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
+        from_addr=ADDRESS.lower(), typed_data=typed)))
+    assert Account.recover_message(
+        encode_typed_data(full_message=typed), signature=sig) == ADDRESS
+
+
+def test_a_hex_amount_signs(emu):
+    """trezorlib refuses "0xf4240" for a uint256 — midway through the review,
+    as it was — so qeth sends the value as eth_account reads it."""
+    import json
+    from pathlib import Path
+    typed = json.loads((Path(__file__).parent / "data" / "ledger_eip712_golden.json")
+                       .read_text())["messages"]["permit"]["typed_data"]
+    typed["message"]["value"] = "0xf4240"
+    _sign_typed(emu, typed)
+
+
+def test_dapp_style_values_sign(emu):
+    from test_trezor import DAPP_STYLE
+    _sign_typed(emu, DAPP_STYLE)
+
+
+def test_an_array_of_arrays_is_refused_before_the_device_shows_anything(emu):
+    from test_trezor import NESTED
+    with pytest.raises(SignerError, match="array of arrays"):
+        emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
+            from_addr=ADDRESS.lower(), typed_data=NESTED)))
+    assert all("qeth test" in screen for screen in emu.screens), emu.screens

@@ -12,6 +12,7 @@ recovering the signer from the hash qeth computed, which must be the account
 being signed for (``ledger_app.recover_parity``).
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -26,6 +27,7 @@ from .ledger_app import (
     connect, list_devices, recover_parity,
 )
 from .ledger_hid import DEFAULT_LEDGER_HID_TIMEOUT_S, run_ledger_hid_job
+from .ledger_metadata import TokenDescriptor, default_mirror, erc20_call_kind
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
     TypedDataSigningRequest, signed_eip1559_tx, signed_legacy_tx,
@@ -33,6 +35,8 @@ from .signing import (
 )
 
 T = TypeVar("T")
+
+log = logging.getLogger(__name__)
 
 # The Ethereum app's legacy (type-0) parser keeps the EIP-155 chain id in 32
 # bits; ledgereth refused larger ids for the same reason (its issue #41).
@@ -336,9 +340,15 @@ class LedgerSigner(Signer):
             unsigned = unsigned_legacy_tx(req, chain.chain_id)
 
         has_data = bool(req.data and req.data not in ("0x", "0X"))
+        # Local lookup only (docs/ledger-clear-signing.md): the mirror was
+        # filled on a schedule, so nothing about this tx leaves the machine.
+        token = (default_mirror().lookup(chain.chain_id, req.to_addr)
+                 if has_data else None)
 
         def job(app: EthApp):
             config = app.get_configuration()
+            if token is not None and config.wants_token_info:
+                _provide_token(app, token)
             try:
                 return app.sign_transaction(path, unsigned)
             except LedgerStatusError as e:
@@ -406,6 +416,34 @@ class LedgerSigner(Signer):
         parity = self._parity(keccak(b"\x19\x01" + domain_hash + message_hash),
                               raw.r, raw.s, req.from_addr)
         return _rsv(raw.r, raw.s, 27 + parity)
+
+
+def _provide_token(app: EthApp, token: TokenDescriptor) -> None:
+    """Hand the device the token's signed ticker/decimals before the sign. A
+    refusal (an app too old for it, a descriptor it rejects) only costs the
+    clear display — the signature itself proceeds as before."""
+    try:
+        app.provide_erc20_token_info(token.apdu_payload())
+    except LedgerStatusError as e:
+        log.info("Ledger refused token info for %s on %s: %s",
+                 token.address, token.chain_id, e)
+
+
+def device_review_text(req: SigningRequest, chain: Chain) -> str:
+    """What the user will see on the Ledger for ``req``, known before the
+    device is touched — shown while the signature is pending. Local lookup
+    only."""
+    if not req.data or req.data in ("0x", "0X"):
+        return "Confirm on your Ledger device…"
+    kind = erc20_call_kind(req.data)
+    token = default_mirror().lookup(chain.chain_id, req.to_addr) if kind else None
+    if token is not None:
+        verb = "transfer" if kind == "transfer" else "approval"
+        return (f"Confirm on your Ledger device — it shows this as a "
+                f"{token.ticker} {verb}…")
+    return ("Confirm on your Ledger device — it can't decode this contract "
+            "call, so it asks you to blind sign (turn on \"Blind signing\" "
+            "in the Ethereum app's settings if it refuses)…")
 
 
 def _rsv(r: int, s: int, v: int) -> bytes:

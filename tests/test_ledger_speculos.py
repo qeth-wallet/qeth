@@ -48,7 +48,9 @@ TO = "0x" + "11" * 20
 # without token metadata.
 ERC20_TRANSFER = ("0xa9059cbb" + "00" * 12 + "22" * 20 + "00" * 31 + "64")
 
-_APPROVE = ("accept", "approve", "sign message", "sign transaction",
+# Confirm screens only — not "approve": an ERC-20 approval's REVIEW screens
+# read "Type: Approve" / "Approve 0 USDC".
+_APPROVE = ("accept", "sign message", "sign transaction",
             "sign typed message", "and sign", "press both")
 _REJECT = ("reject", "cancel")
 
@@ -287,3 +289,48 @@ def test_typed_data_by_hashes(emu):
         emu.set_blind_signing(False)
     assert Account.recover_message(
         encode_typed_data(full_message=TYPED), signature=sig) == _seed_address(PATH)
+
+
+# --- M4: token info from the local mirror ------------------------------------------
+
+USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+# Ledger's real, prod-signed USDC descriptor (CAL, 2026-11-24).
+USDC_ENTRY = (
+    "55534443a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000600000001:"
+    "3045022100b2e358726e4e6a6752cf344017c0e9d45b9a904120758d45f61b2804f9ad5299"
+    "022015161ef28d8c4481bd9432c13562def9cce688bcfec896ef244c9a213f106cdd")
+
+
+@pytest.fixture
+def usdc_mirror(tmp_path, monkeypatch):
+    from qeth import ledger_metadata
+    monkeypatch.setattr(ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
+    path = tmp_path / "ledger" / "tokens" / "1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"tokens": {USDC: USDC_ENTRY}}))
+
+
+@pytest.mark.parametrize("selector,amount", [
+    ("a9059cbb", 1234560000),      # transfer 1234.56 USDC
+    ("095ea7b3", 0),               # approve 0 — the Approvals tab's revoke
+])
+def test_known_token_call_is_clear_signed_without_blind_signing(
+        emu, usdc_mirror, selector, amount):
+    """With the token's descriptor in the local mirror, an ERC-20 transfer /
+    approval signs with blind signing OFF — the device shows the token amount
+    instead of refusing."""
+    emu.set_blind_signing(False)
+    data = "0x" + selector + "00" * 12 + "22" * 20 + amount.to_bytes(32, "big").hex()
+    seen: list[str] = []
+    original = emu.press
+
+    def press_and_record(button):
+        seen.append(emu.screen())
+        original(button)
+    emu.press = press_and_record     # type: ignore[method-assign]
+    raw = emu.drive(lambda: _signer().sign(
+        _tx(to_addr=USDC, value_wei=0, gas=60000, data=data,
+            max_fee_per_gas=2 * 10**9, max_priority_fee_per_gas=10**8),
+        _chain(1, True)))
+    assert Account.recover_transaction(raw) == _seed_address(PATH)
+    assert any("usdc" in screen for screen in seen), seen

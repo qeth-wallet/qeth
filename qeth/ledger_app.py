@@ -50,6 +50,7 @@ INS_GET_ADDRESS = 0x02
 INS_SIGN_TX = 0x04
 INS_GET_CONFIGURATION = 0x06
 INS_PERSONAL_SIGN = 0x08
+INS_PROVIDE_ERC20 = 0x0A
 INS_EIP712_SIGN = 0x0C
 
 P1_FIRST_CHUNK = 0x00
@@ -467,6 +468,14 @@ class EthApp:
         confirm it on the device."""
         return parse_address_response(
             self._send(apdu(INS_GET_ADDRESS, int(display), 0, pack_path(path))))
+
+    def provide_erc20_token_info(self, payload: bytes) -> None:
+        """PROVIDE ERC 20 TOKEN INFORMATION (legacy format, P1 = 00): a
+        Ledger-signed ticker/decimals for the token the next transaction calls
+        (``ledger_metadata.TokenDescriptor.apdu_payload``). The app keeps it
+        for that signature, so it shows a transfer/approval in the token's
+        units instead of asking to blind sign."""
+        self._send(apdu(INS_PROVIDE_ERC20, 0, 0, payload))
 
     def sign_transaction(self, path: str, unsigned_tx: bytes) -> RawSignature:
         """Sign an unsigned serialized tx (legacy EIP-155 RLP, or a typed

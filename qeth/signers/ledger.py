@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 from .base import SignerPlugin
 
 if TYPE_CHECKING:
-    from ..signing import Signer
+    from ..chains import Chain
+    from ..signing import Signer, SigningRequest
     from ..store import Store
     from .interaction import SignerInteraction
 
@@ -18,6 +19,11 @@ class LedgerSignerPlugin(SignerPlugin):
     source_id = "ledger"
     display_name = "Ledger"
     progress_text = "Confirm on your Ledger device…"
+
+    def tx_progress_text(self, req: SigningRequest, chain: Chain) -> str:
+        # Local mirror lookup only — never asks a server (ledger_metadata).
+        from ..ledger import device_review_text
+        return device_review_text(req, chain)
 
     def make_signer(
         self, store: Store, account: dict[str, Any], ui: SignerInteraction,

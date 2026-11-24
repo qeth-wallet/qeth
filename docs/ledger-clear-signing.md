@@ -1,6 +1,6 @@
 # Ledger: own app client, then clear signing without lookups
 
-Status: **M1–M3 done** on branch `ledger-app` (2026-11-24); M4 next. M3's
+Status: **M1–M4 done** on branch `ledger-app` (2026-11-24); M5 next. M3's
 Linux packages (rpm / deb) still need their VM build check, and the Gentoo
 overlay its vendored-set update at the next bump.
 
@@ -152,21 +152,36 @@ Run on both devices to pin down what the plan currently assumes:
 - Docs: CLAUDE.md, `docs/ARCHITECTURE.md`, `docs/tron.md` (its Ledger-Tron note
   assumes `ledgerblue`; it becomes "another app class on the same transport").
 
-### M4 — Token info: sending tokens, approve, revoke shown clearly
+### M4 — Token info: sending tokens, approve, revoke shown clearly ✅
 
-- `ledger_metadata.py`: mirror Ledger's token list per network
-  (`cal/v1/tokens?network=…&output=contract_address,descriptor`, cursor from
-  the `x-ledger-next` header; mainnet ≈ 15k tokens / 7 MB raw) into a compact
-  `~/.qeth/ledger/tokens/<chain_id>.json` (address → descriptor + signature).
-  All of qeth's EVM chains are mirrored, not just the ones in use.
-- Before signing a tx whose `to` (or ERC-20 `approve`/`transfer` target) is in
-  the mirror: `PROVIDE ERC 20 TOKEN INFORMATION` (legacy format — works on both
-  devices, no certificate), then sign.
-- Sign dialog line, known before the device is touched: "Ledger will show:
-  USDC transfer" / "Ledger will ask to blind sign" (+ "enable blind signing in
-  the Ethereum app" when the config flag says it is off).
-- Tests: mirror paging/compaction with a fake HTTP layer (hermetic), host-side
-  signature check, APDU order; Speculos run for the screen text where feasible.
+- `qeth/ledger_metadata.py` mirrors Ledger's token list for **every** EVM chain
+  in the store (used or not), from the keyless
+  `cal/v1/tokens?network=…&output=contract_address,descriptor` (cursor from the
+  `x-ledger-next` header), into `~/.qeth/ledger/tokens/<chain_id>.json`
+  (address → `data:signature` hex). Chain → network comes from the bulk
+  `cal/v1/networks` list (family `ethereum`), never a per-chain query. Only
+  well-formed, prod-signed descriptors for that exact (address, chain) are
+  kept — Gnosis, for one, has only test-signed ones, so it mirrors empty.
+  Default chains: ~9 MB, ~3–11 s.
+- Revalidation: the networks list's ETag is the dataset commit; when every
+  chain was fetched at it, an `If-None-Match` answers 304 — one request, 0.1 s.
+  A new commit re-downloads; a chain added to the store fetches just that one.
+- Scheduling (`plugins/wallets/ledger_mirror.py`): hourly checks (the first a
+  minute or two after start, jittered), refresh when older than 24 h — only
+  while the store holds a Ledger account, plus once right after adding one.
+  Never triggered by a signature.
+- Lookup at signing time is local; the descriptor's Ledger signature is
+  verified on the host (sha256 + the key in app-ethereum `doc/apdu.md`), so a
+  tampered mirror is never sent. When `to` is a mirrored token and the app's
+  config asks for external token info, `PROVIDE ERC 20 TOKEN INFORMATION`
+  (legacy format — no certificate, works on the Nano S's 1.16) precedes the
+  sign; a refusal only costs the clear display.
+- The signing spinner says what the device will show (`SignerPlugin.
+  tx_progress_text` → `ledger.device_review_text`): "it shows this as a USDC
+  transfer/approval" or "it asks you to blind sign".
+- Speculos: a USDC transfer and an approve(0) sign with blind signing **off**
+  on the Nano S, Nano X and Nano S Plus, the device showing "USDC 1234.56" /
+  "Approve 0 USDC".
 
 ### M5 — Full EIP-712
 

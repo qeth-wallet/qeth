@@ -395,8 +395,11 @@ class SoftLedger:
     """Parses the Ethereum app's APDUs and signs like the device would."""
 
     def __init__(self, seed: str = "soft", *, version=(1, 16, 0), flags=0x01,
-                 sign_sw: int | None = None, locked: bool = False):
+                 sign_sw: int | None = None, locked: bool = False,
+                 token_sw: int = 0x9000):
         self.seed = seed
+        self.token_sw = token_sw
+        self.tokens: list[bytes] = []
         self.version = version
         self.flags = flags
         self.sign_sw = sign_sw
@@ -427,6 +430,9 @@ class SoftLedger:
         ins, p1, data = command[1], command[2], command[5:]
         if ins == 0x06:
             return 0x9000, bytes([self.flags, *self.version])
+        if ins == 0x0A:
+            self.tokens.append(data)
+            return self.token_sw, b""
         if ins == 0x02:
             path, _ = self._path(data)
             pub = _key_for(self.seed, path).public_key.to_bytes()
@@ -713,3 +719,104 @@ def test_unsigned_serializers_hash_like_eth_account():
         "to": to_checksum_address(TO), "value": 10**17,
         "data": "0xdead", "chainId": 56})
     assert keccak(unsigned_legacy_tx(req, 56)) == legacy.hash()
+
+
+# --- M4: token info from the local mirror ---------------------------------------
+
+USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+# Ledger's real, prod-signed USDC descriptor (CAL, 2026-11-24).
+USDC_ENTRY = (
+    "55534443a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000600000001:"
+    "3045022100b2e358726e4e6a6752cf344017c0e9d45b9a904120758d45f61b2804f9ad5299"
+    "022015161ef28d8c4481bd9432c13562def9cce688bcfec896ef244c9a213f106cdd")
+TRANSFER_DATA = "0xa9059cbb" + "00" * 12 + "22" * 20 + (10**6).to_bytes(32, "big").hex()
+APPROVE_DATA = "0x095ea7b3" + "00" * 12 + "22" * 20 + "00" * 32
+
+
+@pytest.fixture
+def usdc_mirror(tmp_path, monkeypatch):
+    from qeth import ledger_metadata
+    monkeypatch.setattr(ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
+    path = tmp_path / "ledger" / "tokens" / "1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"tokens": {USDC: USDC_ENTRY}}))
+    return path
+
+
+def _usdc_tx(address: str, data: str) -> SigningRequest:
+    return _tx_req(address, to_addr=USDC, value_wei=0, data=data,
+                   max_fee_per_gas=10**9, max_priority_fee_per_gas=1)
+
+
+def test_signer_sends_token_info_before_signing(monkeypatch, usdc_mirror):
+    led = SoftLedger(flags=0x02)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    raw = _signer(address).sign(_usdc_tx(address, TRANSFER_DATA), _chain(1, True))
+    assert Account.recover_transaction(raw) == address
+    # holds-check, config, token info, then the sign.
+    assert [c[1] for c in led.apdus][:4] == [0x02, 0x06, 0x0A, 0x04]
+    [payload] = led.tokens
+    assert payload[0] == 4 and payload[1:5] == b"USDC"
+
+
+def test_signer_skips_token_info_when_the_app_doesnt_want_it(monkeypatch, usdc_mirror):
+    led = SoftLedger(flags=0x01)       # an app with its own token list
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    _signer(address).sign(_usdc_tx(address, TRANSFER_DATA), _chain(1, True))
+    assert led.tokens == []
+
+
+def test_signer_signs_anyway_when_the_device_refuses_token_info(monkeypatch, usdc_mirror):
+    led = SoftLedger(flags=0x02, token_sw=0x6A80)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    raw = _signer(address).sign(_usdc_tx(address, APPROVE_DATA), _chain(1, True))
+    assert Account.recover_transaction(raw) == address
+
+
+def test_signer_never_sends_a_tampered_descriptor(monkeypatch, usdc_mirror):
+    data_hex, sig_hex = USDC_ENTRY.split(":")
+    forged = data_hex.replace("00000006", "00000012") + ":" + sig_hex  # 18 decimals
+    usdc_mirror.write_text(json.dumps({"tokens": {USDC: forged}}))
+    led = SoftLedger(flags=0x02)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    _signer(address).sign(_usdc_tx(address, TRANSFER_DATA), _chain(1, True))
+    assert led.tokens == []
+
+
+def test_plain_transfer_never_consults_the_mirror(monkeypatch, usdc_mirror):
+    led = SoftLedger(flags=0x02)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    _signer(address).sign(
+        _tx_req(address, to_addr=USDC, max_fee_per_gas=10**9,
+                max_priority_fee_per_gas=1), _chain(1, True))
+    assert led.tokens == []
+
+
+@pytest.mark.parametrize("data,needle", [
+    ("0x", "Confirm on your Ledger device…"),
+    (TRANSFER_DATA, "USDC transfer"),
+    (APPROVE_DATA, "USDC approval"),
+    ("0xdeadbeef", "blind sign"),
+])
+def test_device_review_text(usdc_mirror, data, needle):
+    text = ledger_mod.device_review_text(_usdc_tx(TO, data), _chain(1, True))
+    assert needle in text
+
+
+def test_device_review_text_unknown_token_is_blind(usdc_mirror):
+    req = _tx_req(TO, to_addr="0x" + "33" * 20, data=TRANSFER_DATA)
+    assert "blind sign" in ledger_mod.device_review_text(req, _chain(1, True))
+
+
+def test_ledger_plugin_progress_text_says_what_the_device_shows(usdc_mirror):
+    from qeth.signers.ledger import LedgerSignerPlugin
+    from qeth.signers.hot import HotWalletSignerPlugin
+    req = _usdc_tx(TO, TRANSFER_DATA)
+    assert "USDC transfer" in LedgerSignerPlugin().tx_progress_text(req, _chain(1, True))
+    hot = HotWalletSignerPlugin()
+    assert hot.tx_progress_text(req, _chain(1, True)) == hot.progress_text

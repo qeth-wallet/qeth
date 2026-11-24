@@ -49,6 +49,7 @@ from ...dialog import (
     Dialog, address_field_min_width, item_spacing, prompt_text,
 )
 from ...ledger import DiscoveredAccount, LedgerWorker, PATH_SCHEMES
+from .ledger_mirror import LedgerMirrorScheduler
 from ...qr.schemes import (
     QR_ADDRESS_SCHEMES,
     components_to_path,
@@ -389,8 +390,21 @@ class WalletsPlugin(Plugin):
         # Lower-case addresses whose ENS label was resolved through Helios
         # (proof-verified) — drives a "verified" tooltip on the tree row.
         self._ens_verified: set[str] = set()
+        # Keeps the local Ledger token-metadata mirror fresh while a Ledger
+        # account exists (started in attach; ledger_mirror.py).
+        self._ledger_mirror: LedgerMirrorScheduler | None = None
 
     # --- Plugin contract ----------------------------------------------------
+
+    def attach(self, host) -> None:
+        super().attach(host)
+        self._ledger_mirror = LedgerMirrorScheduler(
+            self._store, host.start_worker, parent=self)
+        self._ledger_mirror.start()
+
+    def shutdown(self) -> None:
+        if self._ledger_mirror is not None:
+            self._ledger_mirror.stop()
 
     def widget(self) -> QWidget:
         if self._container is None:
@@ -1698,6 +1712,9 @@ class WalletsPlugin(Plugin):
         added_addrs = [r["address"] for r in added]
         if added_addrs and tid is not None:
             self._store.ensure_tree_label("ledger", tid)
+        if added_addrs and self._ledger_mirror is not None:
+            # Fill the token mirror now, before the first signature needs it.
+            self._ledger_mirror.check()
         self._rebuild_tree()
         self.default_account_changed.emit()
         switched = self._reveal_added(added)

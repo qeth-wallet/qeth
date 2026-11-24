@@ -2864,10 +2864,10 @@ requires-dist = [
     { name = "cbor2", marker = "extra == 'qr'", specifier = ">=5.4" },
     { name = "cryptography", marker = "extra == 'frame'", specifier = ">=42" },
     { name = "eth-abi", specifier = ">=5.0" },
-    { name = "eth-account", specifier = ">=0.11" },
+    { name = "eth-account", specifier = ">=0.11,<0.14" },
     { name = "eth-keys", specifier = ">=0.5" },
     { name = "eth-typing", specifier = ">=4" },
-    { name = "eth-utils", specifier = ">=4" },
+    { name = "eth-utils", specifier = ">=4,<6" },
     { name = "hexbytes", specifier = ">=1" },
     { name = "hidapi", specifier = ">=0.14" },
     { name = "pillow", marker = "extra == 'qr'", specifier = ">=10" },
@@ -2875,11 +2875,11 @@ requires-dist = [
     { name = "pyside6", marker = "extra == 'bundled'", specifier = ">=6.6" },
     { name = "pyunormalize", specifier = "<18" },
     { name = "requests", specifier = ">=2.31" },
-    { name = "rlp", specifier = ">=4" },
+    { name = "rlp", specifier = ">=4,<5" },
     { name = "segno", specifier = ">=1.6" },
     { name = "trezor", marker = "extra == 'trezor'", specifier = ">=0.20.2" },
     { name = "ujson", specifier = ">=5" },
-    { name = "web3", specifier = ">=7" },
+    { name = "web3", specifier = ">=7,<8" },
     { name = "zxing-cpp", marker = "extra == 'qr'", specifier = ">=2" },
 ]
 provides-extras = ["bundled", "simulate", "frame", "qr", "trezor"]
@@ -3042,14 +3042,14 @@ wheels = [
 
 [[package]]
 name = "rlp"
-version = "4.0.1"
+version = "4.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0f/49/bcd4d3f9210ed78749eab04d236eeb98f98fbcc16977f308ee4637c1bad8/rlp-4.0.1.tar.gz", hash = "sha256:bcefb11013dfadf8902642337923bd0c786dc8a27cb4c21da6e154e52869ecb1", size = 33710, upload-time = "2024-04-24T16:40:46.068Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/2d/439b0728a92964a04d9c88ea1ca9ebb128893fbbd5834faa31f987f2fd4c/rlp-4.1.0.tar.gz", hash = "sha256:be07564270a96f3e225e2c107db263de96b5bc1f27722d2855bd3459a08e95a9", size = 33429, upload-time = "2025-02-04T22:05:59.089Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/03/3ae09a1c43657d17530dd98de6e381cc66ac514daa67000ccf99afc808fc/rlp-4.0.1-py3-none-any.whl", hash = "sha256:ff6846c3c27b97ee0492373aa074a7c3046aadd973320f4fffa7ac45564b0258", size = 20639, upload-time = "2024-04-24T16:40:43.962Z" },
+    { url = "https://files.pythonhosted.org/packages/99/fb/e4c0ced9893b84ac95b7181d69a9786ce5879aeb3bbbcbba80a164f85d6a/rlp-4.1.0-py3-none-any.whl", hash = "sha256:8eca394c579bad34ee0b937aecb96a57052ff3716e19c7a578883e767bc5da6f", size = 19973, upload-time = "2025-02-04T22:05:57.05Z" },
 ]
 
 [[package]]

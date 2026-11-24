@@ -23,19 +23,25 @@ dependencies = [
     "hidapi>=0.14",
     "aiohttp>=3.9",
     "segno>=1.6",
-    "web3>=7",
+    # Capped at the majors uv.lock (and so the test suite) uses: the .deb/.rpm
+    # builds resolve fresh from PyPI with pip (the AppImage/Flatpak install
+    # uv.lock), and without these caps they took web3 8, eth-account 0.14,
+    # eth-utils 6, rlp 5 (and through them trie 4, websockets 17) — a stack
+    # nothing here has run against. Lift them together, in the change that
+    # moves the lock to web3 8.
+    "web3>=7,<8",
     # The eth stack web3 pulls in, but which qeth ALSO imports directly —
     # declared explicitly (not leaned on as web3 transitives) so a self-
     # contained install can't break when web3's dependency graph shifts. Same
     # discipline that the `frame`/cryptography split enforced; deptry checks it.
     "eth-abi>=5.0",
-    "eth-account>=0.11",
+    "eth-account>=0.11,<0.14",
     "eth-keys>=0.5",     # secp256k1 point math for BIP32 CKDpub (qeth/qr/derive)
     "eth-typing>=4",
-    "eth-utils>=4",
+    "eth-utils>=4,<6",
     "hexbytes>=1",
     "requests>=2.31",
-    "rlp>=4",
+    "rlp>=4,<5",
     # Fast C JSON codec for the transaction cache (qeth/transactions_cache.py):
     # a busy wallet's 10k-tx / 13 MB cache serialized on the main thread while
     # scrolling; ujson roughly halves encode/decode vs stdlib and is

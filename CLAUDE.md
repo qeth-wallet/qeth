@@ -79,6 +79,23 @@ already bit `cryptography` (Frame-import only; now the `frame` extra +
 guarded import). When adding an import, declare it (core dep or an extra);
 don't lean on system-site-packages.
 
+### Ledger: Speculos locally, a real device for the final check
+
+`scripts/speculos.sh test [nanos|nanox|nanosp]` runs `tests/test_ledger_speculos.py`
+(marker `speculos`, off by default) against Ledger's Speculos emulator running
+the real Ethereum app: it signs every flow through the production path
+(`LedgerSigner` → `run_ledger_hid_job` → `ledger_app` over Speculos' APDU
+socket), presses the device's buttons through the REST API, and recovers each
+signature against Speculos' test seed. Containers only (podman or docker — the
+Speculos image bundles qemu-arm). Pins: the Nano S app is built from app-ethereum
+1.16.0 (its last; Ledger dropped the Nano S in 1.17 and in Speculos 0.25.7) in
+`ledger-app-builder-lite:4.3.0` and emulated by Speculos 0.25.5; the Nano X /
+S Plus run the 1.24.0 release ELFs (sha256-pinned) on Speculos 0.27.4, pinned by
+digest (no version tag past 0.25.13; app 1.24 needs API level 27). Stax/Flex
+(touchscreens) aren't driven yet. `scripts/speculos.sh qeth MODEL` launches qeth
+itself against the emulator (`QETH_LEDGER_SPECULOS=host:port`). A real Nano S /
+Nano X only has to confirm the USB-HID layer.
+
 ### Windows: Wine locally, GitHub for the final check
 
 `scripts/wine.sh setup` builds a Wine prefix (`~/.wine-qeth`) with Windows uv +

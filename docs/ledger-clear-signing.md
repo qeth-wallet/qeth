@@ -90,11 +90,14 @@ qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hoo
 - **Unit (gate)**: golden APDU vectors captured from ledgereth
   (`tests/data/ledger_golden_apdus.json`) and `SoftLedger`, an in-memory
   Ethereum app signing with real keys (`tests/test_ledger_app.py`).
-- **Speculos (not a gate, like `scripts/wine.sh`)**: Ledger's emulator running
-  the real Ethereum app — built with Ledger's app-builder container at the last
-  Nano S release (1.16) and the current Nano X one — driven over TCP with its
-  REST API pressing the buttons. Both run in containers (the Speculos image
-  bundles `qemu-arm`), so no host qemu is needed.
+- **Speculos (not a gate, like `scripts/wine.sh`)**: `scripts/speculos.sh test`
+  signs every flow on Ledger's emulator running the real Ethereum app — Nano S
+  (app 1.16.0, built from source in `ledger-app-builder-lite:4.3.0`, on
+  Speculos 0.25.5, the last with Nano S), Nano X and Nano S Plus (1.24.0
+  release ELFs on Speculos 0.27.4) — pressing the buttons through its REST API.
+  Both run in containers (the Speculos image bundles `qemu-arm`), so no host
+  qemu is needed. Stax/Flex are touchscreens; the driver only presses buttons
+  so far.
 - **Real devices**: one short final check per device of the USB layer only.
 
 ## Milestones

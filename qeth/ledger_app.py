@@ -320,7 +320,7 @@ class TcpTransport:
         host, _, port = address.rpartition(":")
         try:
             self._sock = socket.create_connection((host or "127.0.0.1", int(port)))
-        except OSError as e:
+        except (OSError, ValueError) as e:
             raise LedgerTransportError(
                 f"Couldn't reach the Speculos emulator at {address}.") from e
 

@@ -1,8 +1,10 @@
 # Trezor: clear signing without lookups
 
 Status: **done** on branch `ledger-app` (2026-11-24), verified on Trezor's
-emulator (Safe 3 and Safe 5, firmware 2.13.1). The final check is a signature
-on a real Safe 3.
+emulator (Safe 3 and Safe 5, firmware 2.13.1) and on a real Safe 3 (firmware
+2.13.0): the device shows the descriptions qeth answers from its local copy, a
+typed message with a hex amount signs, and an array of arrays is refused with
+nothing shown.
 
 The Ledger counterpart is `docs/ledger-clear-signing.md`; the same privacy
 rules apply: nothing is fetched because of a signature, and there is no online

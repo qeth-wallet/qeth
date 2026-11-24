@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.26.1
+Version:        0.27.0
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -148,6 +148,20 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Tue Nov 24 2026 Michael Egorov <michwill@yieldbasis.com> - 0.27.0-1
+- Ledger: qeth talks to the Ethereum app itself (ledgereth and its 28
+  dependencies are gone); ERC-20 transfers and approvals show the token and
+  amount, typed messages (EIP-712) are listed field by field, and the ones
+  Ledger describes sign with blind signing off — from token data and filters
+  qeth keeps locally, so no server learns what you sign
+- Trezor: token names and contract-call descriptions (Lido, Aave, ...) come
+  from a local copy of Trezor's signed definitions instead of a download per
+  signature; typed messages with hex amounts sign, and ones the firmware
+  can't hash are refused before the device shows anything
+- Every Ledger and Trezor typed-message signature is checked against the
+  message qeth showed
+- Quitting on SIGTERM stops the Helios light client cleanly
+
 * Sun Nov 15 2026 Michael Egorov <michwill@yieldbasis.com> - 0.26.1-1
 - Wayland: the dock/taskbar shows qeth's icon instead of a generic one (the
   window now identifies as io.github.michwill.qeth, matching the installed

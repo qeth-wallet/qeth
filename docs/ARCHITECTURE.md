@@ -626,9 +626,14 @@ device can't carry) the device signs the two hashes instead (V0,
 both halves, which the app rejected with "invalid data" — why Holyheld-style v4
 signing once failed on a Nano S.) Either way the signature is recovered against
 eth_account's hash, so a device that hashed anything else is refused. Without
-Ledger's signed descriptors the app treats it all as blind signing; the
-spinner lists the hashes in the device's format for the screens that show
-them. Details in M5 of `docs/ledger-clear-signing.md`.
+a Ledger description the app treats it all as blind signing; the spinner lists
+the hashes in the device's format for the screens that show them. A message in
+qeth's shipped snapshot of Ledger's signed EIP-712 filters
+(`ledger_metadata.Eip712FilterSet`, looked up locally — ~70 dapps: Permit2,
+UniswapX, token permits, …) goes as V1 with them from app 1.12: reviewed
+through Ledger's labels, not blind signing, so it signs with "Blind signing"
+off; a refusal of the filters sends it undescribed. Details in M5 / M5b of
+`docs/ledger-clear-signing.md`.
 
 ---
 

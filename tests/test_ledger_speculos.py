@@ -15,6 +15,7 @@ derives at the path.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import threading
@@ -160,7 +161,10 @@ class Emulator:
 
 
 @pytest.fixture(params=MODELS)
-def emu(request, monkeypatch) -> Emulator:
+def emu(request, monkeypatch, tmp_path) -> Emulator:
+    from qeth import ledger_metadata
+    # An empty token mirror, never the user's (usdc_mirror fills this one).
+    monkeypatch.setattr(ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
     model = request.param
     apdu = os.environ.get(f"QETH_SPECULOS_{model.upper()}")
     api = os.environ.get(f"QETH_SPECULOS_{model.upper()}_API")
@@ -298,6 +302,13 @@ def blind_on(emu):
     emu.set_blind_signing(False)
 
 
+@pytest.fixture
+def undescribed(monkeypatch):
+    """Without Ledger's filters (its snapshot describes the "permit" vector,
+    USDC's own permit): the flows below are the undescribed ones."""
+    monkeypatch.setattr(ledger_mod, "_ledger_filters", lambda message: None)
+
+
 def _sign_typed(emu: Emulator, typed: dict) -> None:
     sig = emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
         from_addr=_seed_address(PATH), typed_data=typed)), timeout=240)
@@ -306,7 +317,7 @@ def _sign_typed(emu: Emulator, typed: dict) -> None:
 
 
 @pytest.mark.parametrize("key", sorted(EIP712))
-def test_typed_message_on_screen(emu, blind_on, key):
+def test_typed_message_on_screen(emu, blind_on, undescribed, key):
     """App 1.24 (Nano X / S Plus) takes the message whole (V2) and lists
     every field; the Nano S's 1.16 has no full EIP-712 and signs the hashes.
     The signature recovering is the proof the device hashed what qeth did."""
@@ -321,7 +332,7 @@ def test_typed_message_on_screen(emu, blind_on, key):
 
 
 @pytest.mark.parametrize("key", sorted(EIP712))
-def test_typed_message_over_v1(emu, blind_on, monkeypatch, key):
+def test_typed_message_over_v1(emu, blind_on, undescribed, monkeypatch, key):
     """The V1 commands, as apps 1.9.19–1.23 get them (1.24 still takes
     them): the device lists the domain, then shows the message hash."""
     if emu.model == "nanos":
@@ -337,7 +348,7 @@ def test_typed_message_with_blind_signing_off_explains(emu):
     with pytest.raises(SignerError, match="Blind signing is off"):
         emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
             from_addr=_seed_address(PATH),
-            typed_data=EIP712["permit"]["typed_data"])))
+            typed_data=EIP712["mail_arrays"]["typed_data"])))
     emu.home()
 
 
@@ -378,3 +389,71 @@ def test_known_token_call_is_clear_signed_without_blind_signing(
         _chain(1, True)))
     assert Account.recover_transaction(raw) == _seed_address(PATH)
     assert any("usdc" in screen for screen in seen), seen
+
+
+# --- M5b: messages Ledger describes (its filters, from qeth's snapshot) -------------
+
+# Ledger's reference-client vectors for filtered messages: Permit2, UniswapX
+# orders with two outputs and with none (filters inside an empty array), and
+# USDC's own permit (the amount joins the verifying contract).
+FILTERED = json.loads((Path(__file__).parent / "data" / "ledger_eip712_filter_golden.json")
+                      .read_text())["messages"]
+# Ledger's name for each message, a label, and the amount in USDC.
+_DESCRIBED = {
+    "permit2_single": ("permit2", "amount allowance", "1234 usdc"),
+    "uniswapx_two_outputs": ("uniswapx exclusive dutch order", "tokens to receive",
+                             "1000 usdc"),
+    "uniswapx_no_outputs": ("uniswapx exclusive dutch order", "to swap", "1000 usdc"),
+    "usdc_permit": ("permit usdc transfers", "amount allowance", "1 usdc"),
+}
+
+
+@pytest.mark.parametrize("key", sorted(FILTERED))
+def test_described_message_signs_with_blind_signing_off(emu, usdc_mirror, key):
+    """The Nano X / S Plus review a message Ledger describes through its
+    labels and sign it with blind signing OFF — Ledger's signatures from the
+    snapshot accepted by the real app. The Nano S has no full EIP-712: for it
+    the message is still blind signing."""
+    emu.set_blind_signing(False)
+    typed = FILTERED[key]["typed_data"]
+    if emu.model == "nanos":
+        with pytest.raises(SignerError, match="Blind signing is off"):
+            emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
+                from_addr=_seed_address(PATH), typed_data=typed)))
+        emu.home()
+        return
+    seen = _record(emu)
+    _sign_typed(emu, typed)
+    text = " ".join(seen)
+    for needle in _DESCRIBED[key]:
+        assert needle in text, (needle, seen)
+    assert "hash" not in text and "blind" not in text, seen
+
+
+def test_filters_the_device_refuses_send_the_message_undescribed(
+        emu, blind_on, usdc_mirror, monkeypatch):
+    """A filter the app refuses mid-message (here, a bad signature slipped past
+    the host's check): nothing of the filtered review was shown, and the
+    message follows undescribed (V2, every field)."""
+    if emu.model == "nanos":
+        pytest.skip("the Nano S app has no full EIP-712")
+    real = ledger_mod._ledger_filters
+
+    def tampered(message):
+        filters = real(message)
+        assert filters is not None
+        fields = []
+        for f in filters.fields:
+            if f.format == "datetime":
+                sig = bytearray(f.signature)
+                sig[10] ^= 1
+                f = dataclasses.replace(f, signature=bytes(sig))
+            fields.append(f)
+        return dataclasses.replace(filters, fields=tuple(fields))
+    monkeypatch.setattr(ledger_mod, "_ledger_filters", tampered)
+    seen = _record(emu)
+    _sign_typed(emu, FILTERED["permit2_single"]["typed_data"])
+    text = " ".join(seen)
+    assert "amount allowance" not in text, seen
+    assert "sigdeadline" in text, seen
+

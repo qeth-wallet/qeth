@@ -40,7 +40,9 @@ from qeth.ledger_app import (
     explain_status, frame_apdu, model_for_product_id, pack_path,
     parse_address_response, recover_parity, split_status,
 )
-from qeth.ledger_eip712 import parse_typed_data, v1_commands, v2_commands
+from qeth.ledger_eip712 import (
+    filtered_v1_commands, parse_typed_data, v1_commands, v2_commands,
+)
 from qeth.signing import (
     MessageSigningRequest, SignerError, SigningRequest, TypedDataSigningRequest,
     unsigned_eip1559_tx, unsigned_legacy_tx,
@@ -407,6 +409,10 @@ class SoftLedger:
         self.typed_data = typed_data
         self.eip712_sw = eip712_sw or {}    # nth EIP-712 command → its status
         self._eip712_seen = 0
+        # Ledger's filters reached the message info: the review is described,
+        # not blind signing. (Their signatures are checked by the encoder's
+        # tests and on Speculos, not here.)
+        self.described = False
         self.token_sw = token_sw
         self.tokens: list[bytes] = []
         self.version = version
@@ -474,16 +480,19 @@ class SoftLedger:
                 v = 27 + sig.v
             return 0x9000, bytes([v]) + sig.r.to_bytes(32, "big") + \
                 sig.s.to_bytes(32, "big")
-        if ins in (0x1A, 0x1C, 0x0C) and (ins != 0x0C or command[3] != 0x00):
+        if ins in (0x1A, 0x1C, 0x1E, 0x0C) and (ins != 0x0C or command[3] != 0x00):
             if self.typed_data is None:
                 return 0x6D00, b""
             n = self._eip712_seen
             self._eip712_seen += 1
             if n in self.eip712_sw:
+                self.described = False
                 return self.eip712_sw[n], b""
+            if ins == 0x1E and command[3] == 0x0F:
+                self.described = True
             if ins != 0x0C:
                 return 0x9000, b""
-            if not self.flags & 0x01:
+            if not self.flags & 0x01 and not self.described:
                 return 0x6A80, b""
             signable = encode_typed_data(full_message=self.typed_data)
             path = self._path(data)[0] if command[3] == 0x01 else PATH
@@ -630,6 +639,25 @@ def _typed(led: SoftLedger, typed: dict = PERMIT) -> bytes:
 
 def _eip712_commands(led: SoftLedger) -> list[bytes]:
     return [c for c in led.apdus if c[1] in (0x1A, 0x1C, 0x0C)]
+
+
+_REAL_LEDGER_FILTERS = ledger_mod._ledger_filters
+
+
+@pytest.fixture(autouse=True)
+def _ledger_metadata(monkeypatch, tmp_path):
+    """An empty token mirror (never the user's), and no filters: Ledger's
+    snapshot describes PERMIT (USDC's permit), so the tests of the
+    undescribed flows run without it and the filter tests opt back in
+    (``ledger_filters``)."""
+    from qeth import ledger_metadata
+    monkeypatch.setattr(ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
+    monkeypatch.setattr(ledger_mod, "_ledger_filters", lambda message: None)
+
+
+@pytest.fixture
+def ledger_filters(monkeypatch):
+    monkeypatch.setattr(ledger_mod, "_ledger_filters", _REAL_LEDGER_FILTERS)
 
 
 def test_typed_data_goes_whole_as_v2_from_app_1_24(monkeypatch):
@@ -1007,3 +1035,140 @@ def test_ledger_plugin_progress_text_says_what_the_device_shows(usdc_mirror):
     assert "USDC transfer" in LedgerSignerPlugin().tx_progress_text(req, _chain(1, True))
     hot = HotWalletSignerPlugin()
     assert hot.tx_progress_text(req, _chain(1, True)) == hot.progress_text
+
+
+# --- Ledger's filters: a message Ledger describes --------------------------------
+
+PERMIT2 = json.loads(
+    (Path(__file__).parent / "data" / "ledger_eip712_filter_golden.json")
+    .read_text())["messages"]["permit2_single"]["typed_data"]
+USDC_TOKEN_INFO = bytes([4]) + bytes.fromhex(USDC_ENTRY.replace(":", ""))
+
+
+def _filtered(typed: dict, tokens: tuple[bytes, ...] = ()) -> list[bytes]:
+    msg = parse_typed_data(typed)
+    filters = _REAL_LEDGER_FILTERS(msg)
+    assert filters is not None
+    return filtered_v1_commands(msg, PATH, filters, tokens)
+
+
+def _session(led: SoftLedger) -> list[bytes]:
+    """The commands from the first EIP-712 one on, token info included."""
+    first = next(i for i, c in enumerate(led.apdus) if c[1] == 0x1A)
+    return led.apdus[first:]
+
+
+def _eip712_index(commands: list[bytes], ins: int, p2s: tuple[int, ...]) -> int:
+    """Where the first such command falls among the EIP-712 commands (what
+    ``SoftLedger.eip712_sw`` counts — token info isn't one)."""
+    eip712 = [c for c in commands if c[1] != 0x0A]
+    return next(i for i, c in enumerate(eip712) if c[1] == ins and c[3] in p2s)
+
+
+def test_a_message_ledger_describes_signs_with_blind_signing_off(
+        monkeypatch, ledger_filters, usdc_mirror):
+    led = SoftLedger(version=(1, 24, 0), flags=0x02, typed_data=PERMIT2)
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    assert _session(led) == _filtered(PERMIT2, (USDC_TOKEN_INFO,))
+
+
+def test_a_described_message_without_its_tokens_info(monkeypatch, ledger_filters):
+    """No USDC in the mirror: still described, the amount just goes without
+    the token's name."""
+    led = SoftLedger(version=(1, 24, 0), flags=0x02, typed_data=PERMIT2)
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    assert _session(led) == _filtered(PERMIT2)
+
+
+def test_an_app_not_asking_for_token_info_gets_none(
+        monkeypatch, ledger_filters, usdc_mirror):
+    led = SoftLedger(version=(1, 24, 0), flags=0x00, typed_data=PERMIT2)
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    assert _session(led) == _filtered(PERMIT2)
+
+
+def test_a_refused_token_info_still_signs_described(
+        monkeypatch, ledger_filters, usdc_mirror):
+    led = SoftLedger(version=(1, 24, 0), flags=0x02, typed_data=PERMIT2,
+                     token_sw=0x6A80)
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    assert _session(led) == _filtered(PERMIT2, (USDC_TOKEN_INFO,))
+
+
+def test_an_app_before_1_12_gets_the_message_undescribed(
+        monkeypatch, ledger_filters, usdc_mirror):
+    led = SoftLedger(version=(1, 11, 3), typed_data=PERMIT2)
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    assert _eip712_commands(led) == v1_commands(parse_typed_data(PERMIT2), PATH)
+    assert all(c[1] not in (0x1E, 0x0A) for c in led.apdus)
+
+
+@pytest.mark.parametrize(("ins", "p2s"), [
+    (0x1E, (0x00,)),                       # filtering on
+    (0x1E, (0x0F,)),                       # the message info
+    (0x1E, (0xFC, 0xFD, 0xFE, 0xFF)),      # a field's filter
+    (0x1A, (0x00,)),                       # the first definition
+])
+def test_refused_filters_send_the_message_undescribed(
+        monkeypatch, ledger_filters, usdc_mirror, ins, p2s):
+    filtered = _filtered(PERMIT2, (USDC_TOKEN_INFO,))
+    refused = _eip712_index(filtered, ins, p2s)
+    led = SoftLedger(version=(1, 24, 0), flags=0x03, typed_data=PERMIT2,
+                     eip712_sw={refused: 0x6A80})
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    v2 = v2_commands(parse_typed_data(PERMIT2), PATH)
+    session = _session(led)
+    assert session[-len(v2):] == v2
+    attempt = session[:-len(v2)]
+    assert attempt == filtered[:len(attempt)]
+    assert [c for c in attempt if c[1] != 0x0A][-1] == \
+        [c for c in filtered if c[1] != 0x0A][refused]
+
+
+def test_refused_filters_with_blind_signing_off_explain(
+        monkeypatch, ledger_filters, usdc_mirror):
+    refused = _eip712_index(_filtered(PERMIT2), 0x1E, (0x0F,))
+    led = SoftLedger(version=(1, 24, 0), flags=0x02, typed_data=PERMIT2,
+                     eip712_sw={refused: 0x6A80})
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError, match="Blind signing is off"):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT2))
+
+
+def test_a_rejection_during_the_filters_is_a_rejection(
+        monkeypatch, ledger_filters, usdc_mirror):
+    refused = _eip712_index(_filtered(PERMIT2), 0x1E, (0xFC,))
+    led = SoftLedger(version=(1, 24, 0), flags=0x02, typed_data=PERMIT2,
+                     eip712_sw={refused: 0x6985})
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError, match="rejected"):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT2))
+    assert led.apdus[-1][1] == 0x1E        # nothing after it, no second review
+
+
+def test_a_nano_s_signs_a_described_message_as_hashes(monkeypatch, ledger_filters):
+    led = SoftLedger(version=(1, 16, 1))   # no full EIP-712: 0x6D00
+    _plug(monkeypatch, led)
+    _typed(led, PERMIT2)
+    sign = led.apdus[-1]
+    assert sign[1] == 0x0C and sign[3] == 0x00
+    assert all(c[1] != 0x1E for c in led.apdus)
+
+
+def test_review_text_says_what_ledger_calls_the_message(ledger_filters):
+    text = ledger_mod.typed_data_review_text(PERMIT2)
+    assert "Ledger describes this message as \u201cPermit2\u201d" in text
+    assert "Message hash: 0x" in text
+    elsewhere = copy.deepcopy(PERMIT)
+    elsewhere["domain"]["chainId"] = 5
+    assert "describes" not in ledger_mod.typed_data_review_text(elsewhere)

@@ -29,11 +29,14 @@ from .ledger_app import (
     LedgerStatusError, RawSignature, connect, list_devices, recover_parity,
 )
 from .ledger_eip712 import (
-    Eip712Message, Eip712Unsupported, parse_typed_data, v1_commands,
-    v2_commands,
+    INS_PROVIDE_ERC20, Eip712Message, Eip712Unsupported, MessageFilters,
+    check_filters, domain_binding, filter_token_addresses, filtered_v1_commands,
+    parse_typed_data, schema_hash, v1_commands, v2_commands,
 )
 from .ledger_hid import DEFAULT_LEDGER_HID_TIMEOUT_S, run_ledger_hid_job
-from .ledger_metadata import TokenDescriptor, default_mirror, erc20_call_kind
+from .ledger_metadata import (
+    TokenDescriptor, default_eip712_filters, default_mirror, erc20_call_kind,
+)
 from .signing import (
     MessageSigningRequest, Signer, SignerError, SigningRequest,
     TypedDataSigningRequest, signed_eip1559_tx, signed_legacy_tx,
@@ -49,6 +52,7 @@ log = logging.getLogger(__name__)
 _LEGACY_MAX_CHAIN_ID = 0xFFFFFFFF
 
 _SW_INVALID_DATA = 0x6A80
+_SW_REJECTED = 0x6985
 
 # A typed message goes to the device whole, for it to hash and list: the V1
 # commands since app 1.9.19, V2 since 1.24.0 (checked whole before the review,
@@ -59,6 +63,10 @@ _EIP712_V2_APP = (1, 24, 0)
 # An app without either (the Nano S's) refuses the first command so, showing
 # nothing: the hashes follow.
 _SW_NO_FULL_EIP712 = (0x6D00, 0x6B00)
+# A message Ledger describes (its signed filters, in qeth's snapshot) goes as
+# V1 with them: reviewed with Ledger's labels, not blind signing. 1.12 has
+# every filter kind the snapshot uses, and filters inside empty arrays.
+_EIP712_FILTER_APP = (1, 12, 0)
 # A message is a long review on a Nano, one field per screen.
 _TYPED_DATA_TIMEOUT_S = 600.0
 
@@ -418,9 +426,11 @@ class LedgerSigner(Signer):
 
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
         """EIP-712 v4. The whole message goes to the device, which hashes it
-        and lists the fields; where the app can't take it (a Nano S, an app
-        before 1.9.19, a message it can't carry) the device signs the domain
-        and message hashes instead (the V0 mode), showing those."""
+        and lists the fields — through Ledger's labels when Ledger describes
+        it (its filters, from qeth's snapshot), which needs no blind signing;
+        where the app can't take it (a Nano S, an app before 1.9.19, a message
+        it can't carry) the device signs the domain and message hashes instead
+        (the V0 mode), showing those."""
         path = self._require_path(req.from_addr)
         domain_hash, message_hash = _typed_data_hashes(req.typed_data)
         try:
@@ -428,11 +438,14 @@ class LedgerSigner(Signer):
         except Eip712Unsupported as e:
             log.info("typed message goes to the Ledger as hashes: %s", e)
             message = None
+        # Local lookups only: the snapshot ships with qeth, the token mirror
+        # was filled on a schedule.
+        described = _described(message) if message is not None else None
         raw = _run_ledger_job(
             lambda: _on_device_holding(
                 req.from_addr, path,
                 lambda app: _sign_typed(app, path, message, domain_hash,
-                                        message_hash)),
+                                        message_hash, described)),
             timeout=max(self._hid_timeout, _TYPED_DATA_TIMEOUT_S),
         )
         parity = self._parity(keccak(b"\x19\x01" + domain_hash + message_hash),
@@ -456,14 +469,56 @@ def _typed_data_hashes(typed_data: dict) -> tuple[bytes, bytes]:
     return domain_hash, message_hash
 
 
+@dataclass(frozen=True)
+class _Described:
+    """Ledger's filters for a message, and the info of its tokens."""
+
+    filters: MessageFilters
+    tokens: tuple[TokenDescriptor, ...]
+
+
+def _ledger_filters(message: Eip712Message) -> MessageFilters | None:
+    """Ledger's filters for ``message`` from the snapshot, if it has some the
+    device can apply."""
+    binding = domain_binding(message)
+    if binding is None:
+        return None
+    filters = default_eip712_filters().lookup(*binding, schema_hash(message))
+    if filters is None:
+        return None
+    try:
+        check_filters(message, filters)
+    except Eip712Unsupported as e:
+        log.info("Ledger's filters for %s don't fit the message: %s",
+                 filters.name, e)
+        return None
+    return filters
+
+
+def _described(message: Eip712Message) -> _Described | None:
+    filters = _ledger_filters(message)
+    if filters is None:
+        return None
+    mirror = default_mirror()
+    tokens = [mirror.lookup(filters.chain_id, a)
+              for a in filter_token_addresses(message, filters)]
+    return _Described(filters, tuple(t for t in tokens if t is not None))
+
+
 def _sign_typed(app: EthApp, path: str, message: Eip712Message | None,
-                domain_hash: bytes, message_hash: bytes) -> RawSignature:
-    """Inside the HID job: the whole message where the app takes it, else the
-    hashes."""
+                domain_hash: bytes, message_hash: bytes,
+                described: _Described | None = None) -> RawSignature:
+    """Inside the HID job: the whole message where the app takes it (with
+    Ledger's filters when it describes it), else the hashes."""
     config = app.get_configuration()
     try:
         if message is not None and config.version >= _EIP712_V1_APP:
-            raw = _sign_full_eip712(app, config, path, message)
+            raw = None
+            if described is not None and config.version >= _EIP712_FILTER_APP:
+                raw = _sign_described_eip712(app, config, path, message,
+                                             described)
+            if raw is None:
+                raw = _sign_full_eip712(app, config, path, message)
             if raw is not None:
                 return raw
         return app.sign_eip712_hashes(path, domain_hash, message_hash)
@@ -471,6 +526,37 @@ def _sign_typed(app: EthApp, path: str, message: Eip712Message | None,
         if e.sw == _SW_INVALID_DATA and not config.blind_signing_enabled:
             raise SignerError(_TYPED_DATA_BLIND_OFF) from e
         raise
+
+
+def _sign_described_eip712(app: EthApp, config: AppConfig, path: str,
+                           message: Eip712Message,
+                           described: _Described) -> RawSignature | None:
+    """The message as V1 with Ledger's filters; ``None`` when the device
+    refused them before the signature request, so it can go undescribed. The
+    app shows a filtered review only at that request, and dismisses whatever
+    a refused command left on screen."""
+    tokens = ([t.apdu_payload() for t in described.tokens]
+              if config.wants_token_info else [])
+    try:
+        commands = filtered_v1_commands(message, path, described.filters, tokens)
+    except Eip712Unsupported as e:
+        log.info("typed message goes to the Ledger undescribed: %s", e)
+        return None
+    *setup, sign = commands
+    for command in setup:
+        try:
+            app.send(command)
+        except LedgerStatusError as e:
+            if command[1] == INS_PROVIDE_ERC20:
+                # Costs only the token's name and decimals on screen.
+                log.info("Ledger refused token info for a typed message: %s", e)
+                continue
+            if e.sw == _SW_REJECTED:
+                raise
+            log.info("Ledger refused its filters for %s (0x%04x); sending the "
+                     "message undescribed", described.filters.name, e.sw)
+            return None
+    return RawSignature.parse(app.send(sign))
 
 
 def _sign_full_eip712(app: EthApp, config: AppConfig, path: str,
@@ -537,14 +623,23 @@ def device_review_text(req: SigningRequest, chain: Chain) -> str:
 
 
 def typed_data_review_text(typed_data: dict) -> str:
-    """The spinner label for a typed message: the hashes, for the screens
-    that show them instead of fields (a Nano S's, an older app's) — in the
-    device's own format."""
+    """The spinner label for a typed message: what Ledger calls it when it
+    describes it, and the hashes, for the screens that show them instead of
+    fields (a Nano S's, an older app's) — in the device's own format."""
     try:
         domain_hash, message_hash = _typed_data_hashes(typed_data)
     except SignerError:
         return "Confirm on your Ledger device…"
-    return ("Confirm on your Ledger device…\n\n"
+    try:
+        filters = _ledger_filters(parse_typed_data(typed_data))
+    except Eip712Unsupported:
+        filters = None
+    lead = "Confirm on your Ledger device…"
+    if filters is not None:
+        lead = (f"Confirm on your Ledger device — Ledger describes this "
+                f"message as \u201c{filters.name}\u201d, so a Nano X or Nano S "
+                f"Plus lists it with Ledger's labels…")
+    return (f"{lead}\n\n"
             "Where it shows hashes instead of fields, they must read:\n"
             f"Domain hash: 0x{domain_hash.hex().upper()}\n"
             f"Message hash: 0x{message_hash.hex().upper()}")

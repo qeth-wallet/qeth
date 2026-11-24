@@ -1,5 +1,6 @@
-"""Ledger's signed token metadata, mirrored locally so signing never asks a
-server what is being signed (docs/ledger-clear-signing.md, milestone M4).
+"""Ledger's signed metadata, kept locally so signing never asks a server what
+is being signed (docs/ledger-clear-signing.md): the token mirror (milestone M4)
+and the EIP-712 filter snapshot (M5b, ``Eip712FilterSet``, at the end).
 
 A Ledger shows an ERC-20 transfer or approval with its ticker and decimals
 only when it is handed a descriptor signed by Ledger. Instead of looking one up
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .fsatomic import atomic_write_text
+from .ledger_eip712 import FILTER_FORMATS, FieldFilter, MessageFilters
 
 log = logging.getLogger(__name__)
 
@@ -344,3 +346,96 @@ def default_mirror() -> TokenMirror:
         if _MIRROR is None or _MIRROR_ROOT != CACHE_DIR:
             _MIRROR, _MIRROR_ROOT = TokenMirror(CACHE_DIR), CACHE_DIR
         return _MIRROR
+
+
+# --- EIP-712 filters: a frozen snapshot shipped with qeth ---------------------
+#
+# Ledger's signed names and field labels for the typed messages of ~70 dapps
+# (Permit2, UniswapX, 1inch, token permits, …), from Ledger Live's npm package
+# (qeth/data/ledger_eip712_filters.SOURCE.txt). Ledger no longer publishes the
+# file, and its live service needs a partner token and is asked per message —
+# so the snapshot is all there is, and it never goes stale in a harmful way:
+# each entry is bound to one schema on one contract, the device checks
+# Ledger's signature again, and a dapp whose message changed just isn't found.
+
+EIP712_FILTERS_FILE = (Path(__file__).resolve().parent / "data"
+                       / "ledger_eip712_filters.json")
+
+
+class Eip712FilterSet:
+    """``<chainId>:<verifyingContract>:<schema hash>`` → Ledger's filters,
+    each entry's signatures checked on first use."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._entries: dict[str, Any] | None = None
+        self._checked: dict[str, MessageFilters | None] = {}
+
+    def _all(self) -> dict[str, Any]:
+        with self._lock:
+            if self._entries is None:
+                try:
+                    entries = json.loads(self._path.read_text())
+                except (OSError, ValueError) as e:
+                    log.warning("ledger EIP-712 filters unreadable: %s", e)
+                    entries = {}
+                self._entries = entries if isinstance(entries, dict) else {}
+            return self._entries
+
+    def lookup(self, chain_id: int, contract: str,
+               schema_hash: bytes) -> MessageFilters | None:
+        """Ledger's filters for this message schema on this contract, if
+        Ledger signed some and they verify. Local only."""
+        key = f"{chain_id}:{contract.lower()}:{schema_hash.hex()}"
+        with self._lock:
+            if key in self._checked:
+                return self._checked[key]
+        entry = self._all().get(key)
+        filters = (None if entry is None else
+                   _parse_filters(chain_id, contract.lower(), schema_hash, entry))
+        if filters is not None and not all(
+                verify_legacy_signature(data, sig) for data, sig in filters.signed()):
+            log.warning("ledger EIP-712 filters: bad signature in %s", key)
+            filters = None
+        with self._lock:
+            self._checked[key] = filters
+        return filters
+
+
+def _parse_filters(chain_id: int, contract: str, schema_hash: bytes,
+                   entry: Any) -> MessageFilters | None:
+    """One snapshot entry, or ``None`` when it isn't well-formed."""
+    try:
+        name = entry["contractName"]
+        fields = []
+        for f in entry["fields"]:
+            fmt, coin_ref = f["format"], f.get("coin_ref")
+            if fmt not in FILTER_FORMATS or not isinstance(f["path"], str) \
+                    or not isinstance(f["label"], str):
+                return None
+            if fmt in ("token", "amount"):
+                if not isinstance(coin_ref, int) or not 0 <= coin_ref <= 0xFF:
+                    return None
+            else:
+                coin_ref = None
+            fields.append(FieldFilter(f["path"], f["label"], fmt, coin_ref,
+                                      bytes.fromhex(f["signature"])))
+        if not isinstance(name["label"], str):
+            return None
+        return MessageFilters(chain_id, contract, schema_hash, name["label"],
+                              bytes.fromhex(name["signature"]), tuple(fields))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+_FILTERS: Eip712FilterSet | None = None
+
+
+def default_eip712_filters() -> Eip712FilterSet:
+    """The process-wide snapshot."""
+    global _FILTERS
+    with _MIRROR_LOCK:
+        if _FILTERS is None:
+            _FILTERS = Eip712FilterSet(EIP712_FILTERS_FILE)
+        return _FILTERS

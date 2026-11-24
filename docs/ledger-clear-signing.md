@@ -1,6 +1,6 @@
 # Ledger: own app client, then clear signing without lookups
 
-Status: **M0–M5 done** on branch `ledger-app` (2026-11-24); both real devices
+Status: **M0–M5b done** on branch `ledger-app` (2026-11-24); both real devices
 pass the USB check (`scripts/ledger_probe.py --sign`); M6 is blocked on Ledger. M3's
 Linux packages (rpm / deb) still need their VM build check, and the Gentoo
 overlay its vendored-set update at the next bump.
@@ -57,7 +57,9 @@ Not chosen:
 
 ```
 qeth/ledger_app.py       Qt-free. Transport protocol + EthApp commands + status words.
-qeth/ledger_metadata.py  Qt-free. Bulk mirror + local lookup of signed metadata.
+qeth/ledger_metadata.py  Qt-free. Bulk mirror + local lookup of signed metadata
+                         (the token mirror; the shipped EIP-712 filter snapshot).
+qeth/ledger_eip712.py    Qt-free. Typed data as V1 / V2 / filtered V1 commands.
 qeth/ledger.py           LedgerSigner / LedgerWorker (unchanged surface), now on EthApp.
 qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hook removed.
 ```
@@ -210,8 +212,7 @@ device that hashed anything else is caught. Per app (verified on Speculos):
 - Still blind signing to Ledger's app: with no Ledger description of the
   message, it needs the "Blind signing" setting (or "Raw messages"), shows its
   warning, and refuses with `0x6A80` and an on-device notice otherwise — qeth
-  says so. Filters/descriptors (the clear, labelled review) need Ledger's
-  signed metadata, the same partner-token wall as M6.
+  says so. Messages Ledger does describe go with its filters (M5b).
 - The spinner lists the domain and message hashes in the device's own format
   (`0x` + upper-case hex) for the screens that show hashes.
 - Encodings are pinned by golden vectors from Ledger's reference client
@@ -219,6 +220,42 @@ device that hashed anything else is caught. Per app (verified on Speculos):
   against eth_account (hypothesis-generated values too), and Speculos signing
   a Permit, nested structs with arrays, and every scalar type, over both V2
   and V1.
+
+### M5b — Ledger's EIP-712 filters, from a shipped snapshot ✅
+
+With Ledger's signed filters a message is reviewed through Ledger's labels
+("Contract: Permit2", "Amount allowance: 1234 USDC", "Approval expire: …"),
+its other fields hidden, and the app doesn't count it as blind signing — so it
+signs with "Blind signing" off. Ledger Live gets them from `cal/v1/dapps`, per
+message (leaking chain + contract; 403 without a partner token), with a static
+file as fallback. That file is the snapshot qeth ships:
+
+- `qeth/data/ledger_eip712_filters.json`, byte-for-byte `eip712_v2.json` of
+  npm `@ledgerhq/cryptoassets-evm-signatures@13.7.1` (2025-11-20; provenance,
+  hashes and license next to it). 154 messages of 73 dapps: Permit2, UniswapX,
+  1inch, Paraswap, OpenSea, token permits (USDC, DAI, Aave, …), DAO
+  governors. **Frozen**: Ledger has since removed the file it was built from,
+  so it won't grow. A dapp whose message changed simply isn't found.
+- Keyed `chainId:verifyingContract:schemaHash` (sha224 of the types JSON,
+  structs sorted by name). `ledger_eip712.schema_hash` computes it from what
+  the device receives, which hashes the same definitions itself.
+- Every signature is checked on the host first (the legacy CAL key, as for
+  tokens) and every filter against the message (`check_filters`: it must lead
+  to a value it can format), so the device never gets one it would refuse.
+  The device checks the signatures again.
+- Filters are V1-only (`INS 0x1E`): `filtered_v1_commands` sends the
+  definitions by name, filtering on, the tokens' info from the M4 mirror, the
+  domain, the message info, then each value after its filter — the filters of
+  an empty array as "discarded" (app 1.12+). Pinned byte-for-byte to Ledger's
+  reference client (`tests/data/ledger_eip712_filter_golden.json`).
+- `LedgerSigner` uses it from app 1.12 when the message is in the snapshot.
+  A refusal before the signature request (the app shows a filtered review
+  only then) sends the message undescribed as in M5; a rejection is a
+  rejection. The Nano S has no full EIP-712, so nothing changes for it.
+- Speculos (1.24, Nano X + S Plus, blind signing off): Permit2, UniswapX
+  orders with two outputs and with none, and USDC's own permit sign with the
+  labels on screen; a filter the app refuses falls back to the undescribed
+  review with nothing shown before it.
 
 ### M6 — ERC-7730 contract calls on the device (blocked on Ledger)
 

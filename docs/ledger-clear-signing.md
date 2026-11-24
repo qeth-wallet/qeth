@@ -100,7 +100,9 @@ qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hoo
   Both run in containers (the Speculos image bundles `qemu-arm`), so no host
   qemu is needed. Stax/Flex are touchscreens; the driver only presses buttons
   so far.
-- **Real devices**: one short final check per device of the USB layer only.
+- **Real devices**: one short final check per device of the USB layer only:
+  `uv run python scripts/ledger_probe.py --sign` (read-only without `--sign`;
+  no funds move either way), then the in-app send / approve check.
 
 ## Milestones
 
@@ -108,7 +110,8 @@ Each one is shippable on its own and ends with `uv run pytest` green.
 
 ### M0 — Device facts (read-only probe)
 
-`scripts/ledger_probe.py`: model, app version, config flags, nothing signed.
+`scripts/ledger_probe.py` (written): model, app version, config flags, the first
+address; nothing signed unless `--sign`, which signs a text message.
 Run on both devices to pin down what the plan currently assumes:
 
 | Assumption to confirm | Nano S | Nano X |

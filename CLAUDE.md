@@ -95,7 +95,9 @@ S Plus run the 1.24.0 release ELFs (sha256-pinned) on Speculos 0.27.4, pinned by
 digest (no version tag past 0.25.13; app 1.24 needs API level 27). Stax/Flex
 (touchscreens) aren't driven yet. `scripts/speculos.sh qeth MODEL` launches qeth
 itself against the emulator (`QETH_LEDGER_SPECULOS=host:port`). A real Nano S /
-Nano X only has to confirm the USB-HID layer.
+Nano X only has to confirm the USB-HID layer: `scripts/ledger_probe.py [--sign]`
+(model, app version + settings, first address; `--sign` signs a text message and
+checks it recovers).
 
 ### Windows: Wine locally, GitHub for the final check
 

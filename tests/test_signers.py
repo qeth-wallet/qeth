@@ -150,6 +150,19 @@ class TestDispatchThroughMainWindow:
             mainwindow, addr, FakeInteraction(), tx=(req, DEFAULT_CHAINS[0]))
         assert "blind sign" in progress
 
+    def test_ledger_progress_text_lists_typed_data_hashes(self, mainwindow):
+        from qeth.signing import TypedDataSigningRequest
+        addr = self._add(mainwindow, "ledger", scheme="Ledger Live",
+                         path="m/44'/60'/0'/0/0")
+        typed = {"types": {"EIP712Domain": [{"name": "name", "type": "string"}],
+                           "M": [{"name": "x", "type": "uint8"}]},
+                 "primaryType": "M", "domain": {"name": "q"},
+                 "message": {"x": 1}}
+        req = TypedDataSigningRequest(from_addr=addr, typed_data=typed)
+        _signer, progress = mainwindow._pick_signer_for(
+            mainwindow, addr, FakeInteraction(), message=req)
+        assert "Domain hash: 0x" in progress and "Message hash: 0x" in progress
+
     def test_hot_source_prompts_then_returns_a_hot_signer(self, mainwindow):
         from qeth.hot_wallet import HotWalletSigner
         addr = self._add(mainwindow, "hot")

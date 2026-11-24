@@ -1,7 +1,7 @@
 # Ledger: own app client, then clear signing without lookups
 
-Status: **M0–M4 done** on branch `ledger-app` (2026-11-24); both real devices
-pass the USB check (`scripts/ledger_probe.py --sign`); M5 next. M3's
+Status: **M0–M5 done** on branch `ledger-app` (2026-11-24); both real devices
+pass the USB check (`scripts/ledger_probe.py --sign`); M6 is blocked on Ledger. M3's
 Linux packages (rpm / deb) still need their VM build check, and the Gentoo
 overlay its vendored-set update at the next bump.
 
@@ -188,14 +188,37 @@ Run on both devices (2026-11-24):
   on the Nano S, Nano X and Nano S Plus, the device showing "USDC 1234.56" /
   "Approve 0 USDC".
 
-### M5 — Full EIP-712
+### M5 — Full EIP-712 ✅
 
-- Send the whole typed message so the device lists domain + every field
-  (spender, amount, deadline). V1 protocol for older apps, V2 for app ≥ 1.24.
-  Where unsupported (Nano S, per M0) the hash-only path stays, and the sign
-  dialog says the device will show hashes only.
-- Without Ledger's labels this is still behind the app's blind-signing /
-  raw-messages setting; it is the values on the trusted screen that matter.
+`qeth/ledger_eip712.py` sends the whole typed message, and the device hashes it
+and shows it. The signature is recovered against eth_account's hash, so a
+device that hashed anything else is caught. Per app (verified on Speculos):
+
+| App | Commands | The device shows |
+|---|---|---|
+| ≥ 1.24 (Nano X / S Plus today) | V2: schema + values as two TLV payloads, checked whole before the review | every domain and message field |
+| 1.9.19 – 1.23 | V1: one command per struct / field / value, the review streaming | the domain fields, then the message hash (every field only with the app's "Raw messages" setting) |
+| Nano S (1.16.1), older apps | V0: the two hashes (unchanged) | domain hash + message hash |
+
+- The Nano S's app answers the first V1 / V2 command `0x6D00` and shows
+  nothing, so the hashes follow in the same session; a V2 payload or review
+  the device refuses before showing anything falls back the same way. A V1
+  error mid-review does not (the user was already reading it).
+- A message the device can't carry (a missing value, an unsized `uint`, a
+  non-ASCII or delimiter-holding name, an array past 255 entries, a V2
+  payload past 64 KB) goes as hashes from the start.
+- Still blind signing to Ledger's app: with no Ledger description of the
+  message, it needs the "Blind signing" setting (or "Raw messages"), shows its
+  warning, and refuses with `0x6A80` and an on-device notice otherwise — qeth
+  says so. Filters/descriptors (the clear, labelled review) need Ledger's
+  signed metadata, the same partner-token wall as M6.
+- The spinner lists the domain and message hashes in the device's own format
+  (`0x` + upper-case hex) for the screens that show hashes.
+- Encodings are pinned by golden vectors from Ledger's reference client
+  (`tests/data/ledger_eip712_golden.json`), a re-hash of the parsed message
+  against eth_account (hypothesis-generated values too), and Speculos signing
+  a Permit, nested structs with arrays, and every scalar type, over both V2
+  and V1.
 
 ### M6 — ERC-7730 contract calls on the device (blocked on Ledger)
 

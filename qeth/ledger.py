@@ -9,7 +9,9 @@ it, so no USB handle carries between operations.
 
 Signatures are never trusted on the device's word: the y-parity is resolved by
 recovering the signer from the hash qeth computed, which must be the account
-being signed for (``ledger_app.recover_parity``).
+being signed for (``ledger_app.recover_parity``). For a typed message the
+device hashes it itself (``ledger_eip712``), so that recovery is also what
+proves it hashed the message qeth showed.
 """
 
 import logging
@@ -23,8 +25,12 @@ from PySide6.QtCore import QThread, Signal
 from .chain import EthClient
 from .chains import Chain
 from .ledger_app import (
-    EthApp, LedgerDevice, LedgerError, LedgerNotFound, LedgerStatusError,
-    connect, list_devices, recover_parity,
+    AppConfig, EthApp, LedgerDevice, LedgerError, LedgerNotFound,
+    LedgerStatusError, RawSignature, connect, list_devices, recover_parity,
+)
+from .ledger_eip712 import (
+    Eip712Message, Eip712Unsupported, parse_typed_data, v1_commands,
+    v2_commands,
 )
 from .ledger_hid import DEFAULT_LEDGER_HID_TIMEOUT_S, run_ledger_hid_job
 from .ledger_metadata import TokenDescriptor, default_mirror, erc20_call_kind
@@ -43,6 +49,24 @@ log = logging.getLogger(__name__)
 _LEGACY_MAX_CHAIN_ID = 0xFFFFFFFF
 
 _SW_INVALID_DATA = 0x6A80
+
+# A typed message goes to the device whole, for it to hash and list: the V1
+# commands since app 1.9.19, V2 since 1.24.0 (checked whole before the review,
+# and on a Nano it lists every field — V1 lists the domain, then shows the
+# message hash unless the app's "Raw messages" setting is on).
+_EIP712_V1_APP = (1, 9, 19)
+_EIP712_V2_APP = (1, 24, 0)
+# An app without either (the Nano S's) refuses the first command so, showing
+# nothing: the hashes follow.
+_SW_NO_FULL_EIP712 = (0x6D00, 0x6B00)
+# A message is a long review on a Nano, one field per screen.
+_TYPED_DATA_TIMEOUT_S = 600.0
+
+_TYPED_DATA_BLIND_OFF = (
+    "Blind signing is off in your Ledger's Ethereum app. The app counts any "
+    "typed message Ledger hasn't described as blind signing, even when it "
+    "lists the fields. Turn on \"Blind signing\" in the app's settings, then "
+    "try again.")
 
 
 def is_ledger_available() -> tuple[bool, str | None]:
@@ -393,29 +417,95 @@ class LedgerSigner(Signer):
         return _rsv(raw.r, raw.s, 27 + parity)
 
     def sign_typed_data(self, req: TypedDataSigningRequest) -> bytes:
-        """EIP-712 v4 by its domain + message hashes (the app's V0 mode): the
-        device shows the two hashes, behind its blind-signing setting."""
+        """EIP-712 v4. The whole message goes to the device, which hashes it
+        and lists the fields; where the app can't take it (a Nano S, an app
+        before 1.9.19, a message it can't carry) the device signs the domain
+        and message hashes instead (the V0 mode), showing those."""
         path = self._require_path(req.from_addr)
+        domain_hash, message_hash = _typed_data_hashes(req.typed_data)
         try:
-            from eth_account.messages import encode_typed_data
-            signable = encode_typed_data(full_message=req.typed_data)
-        except Exception as e:
-            raise SignerError(f"failed to hash typed data: {e}") from e
-        domain_hash, message_hash = signable.header, signable.body
-        if len(domain_hash) != 32 or len(message_hash) != 32:
-            raise SignerError(
-                "encode_typed_data produced unexpected shape: "
-                f"header={len(domain_hash)} body={len(message_hash)}")
+            message: Eip712Message | None = parse_typed_data(req.typed_data)
+        except Eip712Unsupported as e:
+            log.info("typed message goes to the Ledger as hashes: %s", e)
+            message = None
         raw = _run_ledger_job(
             lambda: _on_device_holding(
                 req.from_addr, path,
-                lambda app: app.sign_eip712_hashes(
-                    path, domain_hash, message_hash)),
-            timeout=self._hid_timeout,
+                lambda app: _sign_typed(app, path, message, domain_hash,
+                                        message_hash)),
+            timeout=max(self._hid_timeout, _TYPED_DATA_TIMEOUT_S),
         )
         parity = self._parity(keccak(b"\x19\x01" + domain_hash + message_hash),
                               raw.r, raw.s, req.from_addr)
         return _rsv(raw.r, raw.s, 27 + parity)
+
+
+def _typed_data_hashes(typed_data: dict) -> tuple[bytes, bytes]:
+    """eth_account's domain and message hashes — what qeth shows, and what
+    the signature must recover against."""
+    try:
+        from eth_account.messages import encode_typed_data
+        signable = encode_typed_data(full_message=typed_data)
+    except Exception as e:
+        raise SignerError(f"failed to hash typed data: {e}") from e
+    domain_hash, message_hash = signable.header, signable.body
+    if len(domain_hash) != 32 or len(message_hash) != 32:
+        raise SignerError(
+            "encode_typed_data produced unexpected shape: "
+            f"header={len(domain_hash)} body={len(message_hash)}")
+    return domain_hash, message_hash
+
+
+def _sign_typed(app: EthApp, path: str, message: Eip712Message | None,
+                domain_hash: bytes, message_hash: bytes) -> RawSignature:
+    """Inside the HID job: the whole message where the app takes it, else the
+    hashes."""
+    config = app.get_configuration()
+    try:
+        if message is not None and config.version >= _EIP712_V1_APP:
+            raw = _sign_full_eip712(app, config, path, message)
+            if raw is not None:
+                return raw
+        return app.sign_eip712_hashes(path, domain_hash, message_hash)
+    except LedgerStatusError as e:
+        if e.sw == _SW_INVALID_DATA and not config.blind_signing_enabled:
+            raise SignerError(_TYPED_DATA_BLIND_OFF) from e
+        raise
+
+
+def _sign_full_eip712(app: EthApp, config: AppConfig, path: str,
+                      message: Eip712Message) -> RawSignature | None:
+    """The message for the device to hash and list; ``None`` when it refused
+    it before showing anything, so the hashes can follow."""
+    v2 = config.version >= _EIP712_V2_APP
+    try:
+        commands = v2_commands(message, path) if v2 else v1_commands(message, path)
+    except Eip712Unsupported as e:
+        log.info("typed message goes to the Ledger as hashes: %s", e)
+        return None
+    *setup, sign = commands
+    for i, command in enumerate(setup):
+        try:
+            app.send(command)
+        except LedgerStatusError as e:
+            # V2's schema and values show nothing; V1 reviews as it goes, so
+            # only a refusal of its first command leaves the screen untouched.
+            if v2 or (i == 0 and e.sw in _SW_NO_FULL_EIP712):
+                log.info("Ledger refused the whole typed message (0x%04x); "
+                         "signing its hashes", e.sw)
+                return None
+            raise
+    try:
+        return RawSignature.parse(app.send(sign))
+    except LedgerStatusError as e:
+        # V2 refuses a review it can't build with 0x6A80 and shows nothing.
+        # With blind signing off the same word means that setting, and the
+        # hashes would be refused too.
+        if v2 and e.sw == _SW_INVALID_DATA and config.blind_signing_enabled:
+            log.info("Ledger couldn't review the whole typed message; "
+                     "signing its hashes")
+            return None
+        raise
 
 
 def _provide_token(app: EthApp, token: TokenDescriptor) -> None:
@@ -444,6 +534,20 @@ def device_review_text(req: SigningRequest, chain: Chain) -> str:
     return ("Confirm on your Ledger device — it can't decode this contract "
             "call, so it asks you to blind sign (turn on \"Blind signing\" "
             "in the Ethereum app's settings if it refuses)…")
+
+
+def typed_data_review_text(typed_data: dict) -> str:
+    """The spinner label for a typed message: the hashes, for the screens
+    that show them instead of fields (a Nano S's, an older app's) — in the
+    device's own format."""
+    try:
+        domain_hash, message_hash = _typed_data_hashes(typed_data)
+    except SignerError:
+        return "Confirm on your Ledger device…"
+    return ("Confirm on your Ledger device…\n\n"
+            "Where it shows hashes instead of fields, they must read:\n"
+            f"Domain hash: 0x{domain_hash.hex().upper()}\n"
+            f"Message hash: 0x{message_hash.hex().upper()}")
 
 
 def _rsv(r: int, s: int, v: int) -> bytes:

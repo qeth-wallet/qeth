@@ -615,18 +615,20 @@ typed-data (renders UTF-8 or hex, pretty-prints EIP-712 domain+message), and a
 EIP-712 from the pasted content. Result dialog shows the 65-byte `r‖s‖v`
 signature with copy.
 
-**EIP-712 on Ledger** (`LedgerSigner.sign_typed_data`) — qeth
-hashes the typed data with `eth_account.encode_typed_data` and passes the
-**domain separator (`header`) and struct hash (`body`) as two separate 32-byte
-values** to the app's V0 EIP-712 command (`EthApp.sign_eip712_hashes`). This
-matters: an earlier version sliced
-`body` as if it held both halves (sending the struct hash *as* the domain and
-empty bytes *as* the message), which the Ledger Ethereum app rejected with an
-"invalid data" status word — which is why Holyheld-style v4 signing failed on a
-Nano S while Frame worked. In this mode the device shows the two hashes, behind
-its blind-signing setting; sending the full message so the device lists the
-fields is milestone M5 of `docs/ledger-clear-signing.md`. (Lengths are asserted == 32 before
-sending, so a malformed encode fails loudly rather than reaching the device.)
+**EIP-712 on Ledger** (`LedgerSigner.sign_typed_data`) — the whole message
+goes to the device (`ledger_eip712.py`), which hashes it and lists it: V2
+(app 1.24+, every field on screen) or V1 (1.9.19+, the domain then the message
+hash). Where the app can't take it (the Nano S, an older app, a message the
+device can't carry) the device signs the two hashes instead (V0,
+`EthApp.sign_eip712_hashes`): the **domain separator (`header`) and struct hash
+(`body`) as two separate 32-byte values** from
+`eth_account.encode_typed_data`. (An early version sliced `body` as if it held
+both halves, which the app rejected with "invalid data" — why Holyheld-style v4
+signing once failed on a Nano S.) Either way the signature is recovered against
+eth_account's hash, so a device that hashed anything else is refused. Without
+Ledger's signed descriptors the app treats it all as blind signing; the
+spinner lists the hashes in the device's format for the screens that show
+them. Details in M5 of `docs/ledger-clear-signing.md`.
 
 ---
 

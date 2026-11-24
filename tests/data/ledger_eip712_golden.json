@@ -1,0 +1,365 @@
+{
+ "source": "LedgerHQ/app-ethereum 1.24.0 client/ (InputData.process_data, json_to_tlv, CommandBuilder), unfiltered",
+ "messages": {
+  "permit": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "version",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ],
+     "Permit": [
+      {
+       "name": "owner",
+       "type": "address"
+      },
+      {
+       "name": "spender",
+       "type": "address"
+      },
+      {
+       "name": "value",
+       "type": "uint256"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      }
+     ]
+    },
+    "primaryType": "Permit",
+    "domain": {
+     "name": "USD Coin",
+     "version": "2",
+     "chainId": 1,
+     "verifyingContract": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    },
+    "message": {
+     "owner": "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D",
+     "spender": "0x1111111254EEB25477B68fb85Ed929f73A960582",
+     "value": "1000000",
+     "nonce": 0,
+     "deadline": 1700000000
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "v1": [
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff09050776657273696f6e",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a0000065065726d6974",
+    "e01a00ff0703056f776e6572",
+    "e01a00ff0903077370656e646572",
+    "e01a00ff0842200576616c7565",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0a000855534420436f696e",
+    "e01c00ff03000132",
+    "e01c00ff03000101",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01c0000065065726d6974",
+    "e01c00ff160014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d",
+    "e01c00ff1600141111111254eeb25477b68fb85ed929f73a960582",
+    "e01c00ff0500030f4240",
+    "e01c00ff03000100",
+    "e01c00ff0600046553f100",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ],
+   "v2": [
+    "e01a0102cc00ca000101015f000101010c454950373132446f6d61696e020c00010101046e616d65020105020f000101010776657273696f6e02010502120001010107636861696e496402010203012002190001010111766572696679696e67436f6e7472616374020103016400010101065065726d6974020d00010101056f776e6572020103020f00010101077370656e6465720201030210000101010576616c7565020102030120021000010101056e6f6e636502010203012002130001010108646561646c696e65020102030120",
+    "e01c010287008500010101065065726d697402148000002c8000003c8000000000000000000000000326000855534420436f696e0001320001010014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48043a0014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d00141111111254eeb25477b68fb85ed929f73a96058200030f424000010000046553f100",
+    "e00c000200"
+   ]
+  },
+  "mail_arrays": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "version",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ],
+     "Person": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "wallets",
+       "type": "address[]"
+      }
+     ],
+     "Mail": [
+      {
+       "name": "from",
+       "type": "Person"
+      },
+      {
+       "name": "to",
+       "type": "Person[]"
+      },
+      {
+       "name": "contents",
+       "type": "string"
+      },
+      {
+       "name": "grid",
+       "type": "uint16[2][]"
+      }
+     ]
+    },
+    "primaryType": "Mail",
+    "domain": {
+     "name": "Ether Mail",
+     "version": "1",
+     "chainId": 137,
+     "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+    },
+    "message": {
+     "from": {
+      "name": "Cow",
+      "wallets": [
+       "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826",
+       "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"
+      ]
+     },
+     "to": [
+      {
+       "name": "Bob",
+       "wallets": [
+        "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"
+       ]
+      },
+      {
+       "name": "Nobody",
+       "wallets": []
+      }
+     ],
+     "contents": "Hello, Bob!",
+     "grid": [
+      [
+       1,
+       2
+      ],
+      [
+       3,
+       65535
+      ]
+     ]
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "v1": [
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff09050776657273696f6e",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a000006506572736f6e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff0b8301000777616c6c657473",
+    "e01a0000044d61696c",
+    "e01a00ff0d0006506572736f6e0466726f6d",
+    "e01a00ff0d8006506572736f6e010002746f",
+    "e01a00ff0a0508636f6e74656e7473",
+    "e01a00ff0bc202020102000467726964",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0c000a4574686572204d61696c",
+    "e01c00ff03000131",
+    "e01c00ff03000189",
+    "e01c00ff160014cccccccccccccccccccccccccccccccccccccccc",
+    "e01c0000044d61696c",
+    "e01c00ff050003436f77",
+    "e01c000f0102",
+    "e01c00ff160014cd2a3d9f938e13cd947ec05abc7fe734df8dd826",
+    "e01c00ff160014deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "e01c000f0102",
+    "e01c00ff050003426f62",
+    "e01c000f0101",
+    "e01c00ff160014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "e01c00ff0800064e6f626f6479",
+    "e01c000f0100",
+    "e01c00ff0d000b48656c6c6f2c20426f6221",
+    "e01c000f0102",
+    "e01c000f0102",
+    "e01c00ff03000101",
+    "e01c00ff03000102",
+    "e01c000f0102",
+    "e01c00ff03000103",
+    "e01c00ff040002ffff",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ],
+   "v2": [
+    "e01a0102f300f1000101015f000101010c454950373132446f6d61696e020c00010101046e616d65020105020f000101010776657273696f6e02010502120001010107636861696e496402010203012002190001010111766572696679696e67436f6e7472616374020103012c0001010106506572736f6e020c00010101046e616d650201050211000101010777616c6c6574730201030400015d00010101044d61696c0214000101010466726f6d0201000506506572736f6e02140001010102746f02010004000506506572736f6e02100001010108636f6e74656e747302010502140001010104677269640201020301020401020400",
+    "e01c0102d000ce00010101044d61696c02148000002c8000003c8000000000000000000000000328000a4574686572204d61696c0001310001890014cccccccccccccccccccccccccccccccccccccccc04818201330003436f77012c0014cd2a3d9f938e13cd947ec05abc7fe734df8dd8260014deadbeefdeadbeefdeadbeefdeadbeefdeadbeef012b011d0003426f6201160014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb010a00064e6f626f64790100000b48656c6c6f2c20426f62210111010600010100010201070001030002ffff",
+    "e00c000200"
+   ]
+  },
+  "scalars": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      },
+      {
+       "name": "salt",
+       "type": "bytes32"
+      }
+     ],
+     "Order": [
+      {
+       "name": "flag",
+       "type": "bool"
+      },
+      {
+       "name": "off",
+       "type": "bool"
+      },
+      {
+       "name": "delta",
+       "type": "int8"
+      },
+      {
+       "name": "big",
+       "type": "int256"
+      },
+      {
+       "name": "zero",
+       "type": "uint8"
+      },
+      {
+       "name": "max",
+       "type": "uint256"
+      },
+      {
+       "name": "tag",
+       "type": "bytes4"
+      },
+      {
+       "name": "blob",
+       "type": "bytes"
+      },
+      {
+       "name": "note",
+       "type": "string"
+      },
+      {
+       "name": "hexInt",
+       "type": "uint64"
+      }
+     ]
+    },
+    "primaryType": "Order",
+    "domain": {
+     "name": "Scalars",
+     "chainId": "0x2105",
+     "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+     "salt": "0xabababababababababababababababababababababababababababababababab"
+    },
+    "message": {
+     "flag": true,
+     "off": false,
+     "delta": -5,
+     "big": "-123456789012345678901234567890",
+     "zero": 0,
+     "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+     "tag": "0x12ab",
+     "blob": "0xc0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
+     "note": "long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long ",
+     "hexInt": "0xdeadbeef"
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "v1": [
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a00ff0746200473616c74",
+    "e01a0000054f72646572",
+    "e01a00ff060404666c6167",
+    "e01a00ff0504036f6666",
+    "e01a00ff0841010564656c7461",
+    "e01a00ff06412003626967",
+    "e01a00ff074201047a65726f",
+    "e01a00ff064220036d6178",
+    "e01a00ff06460403746167",
+    "e01a00ff060704626c6f62",
+    "e01a00ff0605046e6f7465",
+    "e01a00ff09420806686578496e74",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0900075363616c617273",
+    "e01c00ff0400022105",
+    "e01c00ff160014000000000022d473030f116ddee9f6b43ac78ba3",
+    "e01c00ff220020abababababababababababababababababababababababababababababababab",
+    "e01c0000054f72646572",
+    "e01c00ff03000101",
+    "e01c00ff03000100",
+    "e01c00ff030001fb",
+    "e01c00ff220020fffffffffffffffffffffffffffffffffffffffe7116f0093c8c1f11b1c0f52e",
+    "e01c00ff03000100",
+    "e01c00ff220020ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "e01c00ff06000412ab0000",
+    "e01c01ffff012cc0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0",
+    "e01c00ff2fdec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
+    "e01c01ffff015e6c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e",
+    "e01c00ff6167206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e6720",
+    "e01c00ff060004deadbeef",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ],
+   "v2": [
+    "e01a0102ff010e000101015f000101010c454950373132446f6d61696e020c00010101046e616d6502010502120001010107636861696e496402010203012002190001010111766572696679696e67436f6e7472616374020103020f000101010473616c740201060301200181a700010101054f72646572020c0001010104666c6167020104020b00010101036f66660201040210000101010564656c7461020101030101020e0001010103626967020101030120020f00010101047a65726f020102030101020e00010101036d6178020102030120020e0001010103746167020106030104020c0001010104626c6f62020107020c00010101046e6f74650201050211",
+    "e01a0002110001010106686578496e74020102030108",
+    "e01c0102ff035900010101054f7264657202148000002c8000003c800000000000000000000000034500075363616c617273000221050014000000000022d473030f116ddee9f6b43ac78ba30020abababababababababababababababababababababababababababababababab048202ee0001010001000001fb0020fffffffffffffffffffffffffffffffffffffffe7116f0093c8c1f11b1c0f52e0001000020ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff000412ab00000082012cc0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
+    "e01c0002ffc0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de0082015e6c6f6e67206c6f",
+    "e01c0002ff6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f",
+    "e01c00025e6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67206c6f6e67200004deadbeef",
+    "e00c000200"
+   ]
+  }
+ }
+}

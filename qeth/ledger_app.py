@@ -445,7 +445,9 @@ class EthApp:
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
 
-    def _send(self, command: bytes) -> bytes:
+    def send(self, command: bytes) -> bytes:
+        """One command; its data, or ``LedgerStatusError`` on any other status
+        than success."""
         sw, data = self._transport.exchange(command)
         if sw != SW_OK:
             raise LedgerStatusError(sw, data)
@@ -454,11 +456,11 @@ class EthApp:
     def _send_all(self, commands: list[bytes]) -> bytes:
         data = b""
         for command in commands:
-            data = self._send(command)
+            data = self.send(command)
         return data
 
     def get_configuration(self) -> AppConfig:
-        data = self._send(apdu(INS_GET_CONFIGURATION))
+        data = self.send(apdu(INS_GET_CONFIGURATION))
         if len(data) < 4:
             raise LedgerTransportError("Ledger returned a malformed app config.")
         return AppConfig(flags=data[0], version=(data[1], data[2], data[3]))
@@ -467,7 +469,7 @@ class EthApp:
         """The checksummed address at ``path``. ``display`` asks the user to
         confirm it on the device."""
         return parse_address_response(
-            self._send(apdu(INS_GET_ADDRESS, int(display), 0, pack_path(path))))
+            self.send(apdu(INS_GET_ADDRESS, int(display), 0, pack_path(path))))
 
     def provide_erc20_token_info(self, payload: bytes) -> None:
         """PROVIDE ERC 20 TOKEN INFORMATION (legacy format, P1 = 00): a
@@ -475,7 +477,7 @@ class EthApp:
         (``ledger_metadata.TokenDescriptor.apdu_payload``). The app keeps it
         for that signature, so it shows a transfer/approval in the token's
         units instead of asking to blind sign."""
-        self._send(apdu(INS_PROVIDE_ERC20, 0, 0, payload))
+        self.send(apdu(INS_PROVIDE_ERC20, 0, 0, payload))
 
     def sign_transaction(self, path: str, unsigned_tx: bytes) -> RawSignature:
         """Sign an unsigned serialized tx (legacy EIP-155 RLP, or a typed
@@ -495,7 +497,7 @@ class EthApp:
         hashes, not the fields."""
         if len(domain_hash) != 32 or len(message_hash) != 32:
             raise ValueError("EIP-712 hashes must be 32 bytes each")
-        return RawSignature.parse(self._send(apdu(
+        return RawSignature.parse(self.send(apdu(
             INS_EIP712_SIGN, 0, P2_EIP712_V0,
             pack_path(path) + domain_hash + message_hash)))
 

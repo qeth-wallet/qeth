@@ -22,6 +22,7 @@ import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -267,28 +268,77 @@ def test_contract_call_with_blind_signing_on(emu):
     assert Account.recover_transaction(raw) == _seed_address(PATH)
 
 
-TYPED = {
-    "types": {
-        "EIP712Domain": [{"name": "name", "type": "string"},
-                         {"name": "chainId", "type": "uint256"}],
-        "Mail": [{"name": "contents", "type": "string"}],
-    },
-    "primaryType": "Mail",
-    "domain": {"name": "qeth", "chainId": 1},
-    "message": {"contents": "hello"},
-}
+def _record(emu: Emulator) -> list[str]:
+    """Every screen the driver presses a button on, from now on."""
+    seen: list[str] = []
+    original = emu.press
+
+    def press_and_record(button: str) -> None:
+        seen.append(emu.screen())
+        original(button)
+    emu.press = press_and_record     # type: ignore[method-assign]
+    return seen
 
 
-def test_typed_data_by_hashes(emu):
+# --- M5: the whole typed message ------------------------------------------------
+
+# Ledger's reference-client vectors: a Permit, nested structs with arrays, and
+# every scalar type (long values, negative ints, bytesN padding).
+EIP712 = json.loads((Path(__file__).parent / "data" / "ledger_eip712_golden.json")
+                    .read_text())["messages"]
+# A field of the MESSAGE (not the domain) each review must show.
+_MESSAGE_FIELD = {"permit": "spender", "mail_arrays": "hello, bob!",
+                  "scalars": "hexint"}
+
+
+@pytest.fixture
+def blind_on(emu):
     emu.set_blind_signing(True)
-    try:
-        sig = emu.drive(lambda: _signer().sign_typed_data(
-            TypedDataSigningRequest(from_addr=_seed_address(PATH),
-                                    typed_data=TYPED)))
-    finally:
-        emu.set_blind_signing(False)
+    yield
+    emu.set_blind_signing(False)
+
+
+def _sign_typed(emu: Emulator, typed: dict) -> None:
+    sig = emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
+        from_addr=_seed_address(PATH), typed_data=typed)), timeout=240)
     assert Account.recover_message(
-        encode_typed_data(full_message=TYPED), signature=sig) == _seed_address(PATH)
+        encode_typed_data(full_message=typed), signature=sig) == _seed_address(PATH)
+
+
+@pytest.mark.parametrize("key", sorted(EIP712))
+def test_typed_message_on_screen(emu, blind_on, key):
+    """App 1.24 (Nano X / S Plus) takes the message whole (V2) and lists
+    every field; the Nano S's 1.16 has no full EIP-712 and signs the hashes.
+    The signature recovering is the proof the device hashed what qeth did."""
+    seen = _record(emu)
+    _sign_typed(emu, EIP712[key]["typed_data"])
+    text = " ".join(seen)
+    if emu.model == "nanos":
+        assert "domain hash" in text and "message hash" in text
+    else:
+        assert "hash" not in text
+        assert _MESSAGE_FIELD[key] in text
+
+
+@pytest.mark.parametrize("key", sorted(EIP712))
+def test_typed_message_over_v1(emu, blind_on, monkeypatch, key):
+    """The V1 commands, as apps 1.9.19–1.23 get them (1.24 still takes
+    them): the device lists the domain, then shows the message hash."""
+    if emu.model == "nanos":
+        pytest.skip("the Nano S app has no full EIP-712")
+    monkeypatch.setattr(ledger_mod, "_EIP712_V2_APP", (99, 0, 0))
+    seen = _record(emu)
+    _sign_typed(emu, EIP712[key]["typed_data"])
+    assert "message hash" in " ".join(seen)
+
+
+def test_typed_message_with_blind_signing_off_explains(emu):
+    emu.set_blind_signing(False)
+    with pytest.raises(SignerError, match="Blind signing is off"):
+        emu.drive(lambda: _signer().sign_typed_data(TypedDataSigningRequest(
+            from_addr=_seed_address(PATH),
+            typed_data=EIP712["permit"]["typed_data"])))
+    emu.home()
 
 
 # --- M4: token info from the local mirror ------------------------------------------
@@ -321,13 +371,7 @@ def test_known_token_call_is_clear_signed_without_blind_signing(
     instead of refusing."""
     emu.set_blind_signing(False)
     data = "0x" + selector + "00" * 12 + "22" * 20 + amount.to_bytes(32, "big").hex()
-    seen: list[str] = []
-    original = emu.press
-
-    def press_and_record(button):
-        seen.append(emu.screen())
-        original(button)
-    emu.press = press_and_record     # type: ignore[method-assign]
+    seen = _record(emu)
     raw = emu.drive(lambda: _signer().sign(
         _tx(to_addr=USDC, value_wei=0, gas=60000, data=data,
             max_fee_per_gas=2 * 10**9, max_priority_fee_per_gas=10**8),

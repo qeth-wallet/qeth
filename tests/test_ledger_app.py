@@ -15,6 +15,7 @@ The emulated-device run (Speculos) lives in tests/test_ledger_speculos.py.
 
 from __future__ import annotations
 
+import copy
 import json
 import socket
 import struct
@@ -39,6 +40,7 @@ from qeth.ledger_app import (
     explain_status, frame_apdu, model_for_product_id, pack_path,
     parse_address_response, recover_parity, split_status,
 )
+from qeth.ledger_eip712 import parse_typed_data, v1_commands, v2_commands
 from qeth.signing import (
     MessageSigningRequest, SignerError, SigningRequest, TypedDataSigningRequest,
     unsigned_eip1559_tx, unsigned_legacy_tx,
@@ -396,8 +398,15 @@ class SoftLedger:
 
     def __init__(self, seed: str = "soft", *, version=(1, 16, 0), flags=0x01,
                  sign_sw: int | None = None, locked: bool = False,
-                 token_sw: int = 0x9000):
+                 token_sw: int = 0x9000, typed_data: dict | None = None,
+                 eip712_sw: dict[int, int] | None = None):
         self.seed = seed
+        # Full EIP-712: the message the device "receives" (it signs that
+        # message's hash; the commands are checked against the encoder by the
+        # tests). None = an app without it, answering 0x6D00 like a Nano S.
+        self.typed_data = typed_data
+        self.eip712_sw = eip712_sw or {}    # nth EIP-712 command → its status
+        self._eip712_seen = 0
         self.token_sw = token_sw
         self.tokens: list[bytes] = []
         self.version = version
@@ -465,7 +474,26 @@ class SoftLedger:
                 v = 27 + sig.v
             return 0x9000, bytes([v]) + sig.r.to_bytes(32, "big") + \
                 sig.s.to_bytes(32, "big")
+        if ins in (0x1A, 0x1C, 0x0C) and (ins != 0x0C or command[3] != 0x00):
+            if self.typed_data is None:
+                return 0x6D00, b""
+            n = self._eip712_seen
+            self._eip712_seen += 1
+            if n in self.eip712_sw:
+                return self.eip712_sw[n], b""
+            if ins != 0x0C:
+                return 0x9000, b""
+            if not self.flags & 0x01:
+                return 0x6A80, b""
+            signable = encode_typed_data(full_message=self.typed_data)
+            path = self._path(data)[0] if command[3] == 0x01 else PATH
+            sig = self._sign(path, keccak(b"\x19\x01" + signable.header
+                                          + signable.body))
+            return 0x9000, bytes([27 + sig.v]) + sig.r.to_bytes(32, "big") + \
+                sig.s.to_bytes(32, "big")
         if ins == 0x0C:
+            if not self.flags & 0x01:
+                return 0x6A80, b""
             path, body = self._path(data)
             sig = self._sign(path, keccak(b"\x19\x01" + body[:64]))
             return 0x9000, bytes([27 + sig.v]) + sig.r.to_bytes(32, "big") + \
@@ -585,6 +613,165 @@ def test_signer_typed_data_round_trip(monkeypatch):
         from_addr=address, typed_data=TYPED))
     assert Account.recover_message(
         encode_typed_data(full_message=TYPED), signature=sig) == address
+
+
+PERMIT = json.loads((Path(__file__).parent / "data" / "ledger_eip712_golden.json")
+                    .read_text())["messages"]["permit"]["typed_data"]
+
+
+def _typed(led: SoftLedger, typed: dict = PERMIT) -> bytes:
+    address = led.address(PATH)
+    sig = _signer(address).sign_typed_data(TypedDataSigningRequest(
+        from_addr=address, typed_data=typed))
+    assert Account.recover_message(
+        encode_typed_data(full_message=typed), signature=sig) == address
+    return sig
+
+
+def _eip712_commands(led: SoftLedger) -> list[bytes]:
+    return [c for c in led.apdus if c[1] in (0x1A, 0x1C, 0x0C)]
+
+
+def test_typed_data_goes_whole_as_v2_from_app_1_24(monkeypatch):
+    led = SoftLedger(version=(1, 24, 0), typed_data=PERMIT)
+    _plug(monkeypatch, led)
+    _typed(led)
+    assert _eip712_commands(led) == v2_commands(parse_typed_data(PERMIT), PATH)
+
+
+def test_typed_data_goes_whole_as_v1_before_app_1_24(monkeypatch):
+    led = SoftLedger(version=(1, 23, 0), typed_data=PERMIT)
+    _plug(monkeypatch, led)
+    _typed(led)
+    assert _eip712_commands(led) == v1_commands(parse_typed_data(PERMIT), PATH)
+
+
+@pytest.mark.parametrize("version", [(1, 16, 1), (1, 24, 0)])
+def test_an_app_without_full_eip712_signs_the_hashes(monkeypatch, version):
+    """A Nano S answers the first command 0x6D00 and shows nothing; the
+    hashes follow in the same session."""
+    led = SoftLedger(version=version)       # typed_data=None: no full EIP-712
+    _plug(monkeypatch, led)
+    _typed(led)
+    first, sign = _eip712_commands(led)
+    assert first[1] == 0x1A and sign[1] == 0x0C and sign[3] == 0x00
+
+
+def test_an_app_before_1_9_19_gets_only_the_hashes(monkeypatch):
+    led = SoftLedger(version=(1, 9, 18), typed_data=PERMIT)
+    _plug(monkeypatch, led)
+    _typed(led)
+    [sign] = _eip712_commands(led)
+    assert sign[3] == 0x00
+
+
+def test_a_message_the_device_cant_carry_goes_as_hashes(monkeypatch):
+    typed = copy.deepcopy(TYPED)
+    typed["types"]["Mail"][0]["name"] = "contenü"
+    typed["message"] = {"contenü": "hello"}
+    led = SoftLedger(version=(1, 24, 0), typed_data=typed)
+    _plug(monkeypatch, led)
+    _typed(led, typed)
+    [sign] = _eip712_commands(led)
+    assert sign[3] == 0x00
+
+
+@pytest.mark.parametrize("refused", [0, 1])     # the schema, the values
+def test_v2_payload_refused_before_review_falls_back_to_hashes(
+        monkeypatch, refused):
+    led = SoftLedger(version=(1, 24, 0), typed_data=PERMIT,
+                     eip712_sw={refused: 0x6A80})
+    _plug(monkeypatch, led)
+    _typed(led)
+    assert _eip712_commands(led)[-1][3] == 0x00
+
+
+def test_v2_review_the_device_cant_build_falls_back_to_hashes(monkeypatch):
+    led = SoftLedger(version=(1, 24, 0), typed_data=PERMIT,
+                     eip712_sw={2: 0x6A80})
+    _plug(monkeypatch, led)
+    _typed(led)
+    assert [c[3] for c in _eip712_commands(led)][-2:] == [0x02, 0x00]
+
+
+@pytest.mark.parametrize("version,typed", [
+    ((1, 24, 0), PERMIT), ((1, 23, 0), PERMIT), ((1, 16, 1), None)])
+def test_blind_signing_off_says_so_and_sends_nothing_more(
+        monkeypatch, version, typed):
+    led = SoftLedger(version=version, flags=0x02, typed_data=typed)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError, match="Blind signing is off"):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT))
+    # The refused sign is the last command: no hashes after a full message.
+    last = led.apdus[-1]
+    assert last[1] == 0x0C
+    assert last[3] == {(1, 24, 0): 0x02, (1, 23, 0): 0x01, (1, 16, 1): 0x00}[version]
+
+
+def test_a_v1_rejection_mid_review_is_a_rejection(monkeypatch):
+    led = SoftLedger(version=(1, 23, 0), typed_data=PERMIT,
+                     eip712_sw={15: 0x6985})
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError, match="rejected"):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT))
+    assert len(_eip712_commands(led)) == 16          # stopped right there
+
+
+def test_a_v1_error_mid_review_doesnt_restart_as_hashes(monkeypatch):
+    led = SoftLedger(version=(1, 23, 0), typed_data=PERMIT,
+                     eip712_sw={12: 0x6A80})
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT))
+    assert all(c[1] != 0x0C for c in _eip712_commands(led))
+
+
+def test_a_device_hashing_another_message_is_refused(monkeypatch):
+    other = copy.deepcopy(PERMIT)
+    other["message"]["value"] = "999999999"
+    led = SoftLedger(version=(1, 24, 0), typed_data=other)
+    _plug(monkeypatch, led)
+    address = led.address(PATH)
+    with pytest.raises(SignerError, match="doesn't belong"):
+        _signer(address).sign_typed_data(TypedDataSigningRequest(
+            from_addr=address, typed_data=PERMIT))
+
+
+def test_typed_data_gets_a_long_review_timeout(monkeypatch):
+    seen = []
+
+    def fake_job(fn, *, timeout):
+        seen.append(timeout)
+        return fn()
+    monkeypatch.setattr(ledger_mod, "run_ledger_hid_job", fake_job)
+    led = SoftLedger(version=(1, 24, 0), typed_data=PERMIT)
+    _plug(monkeypatch, led)
+    _typed(led)
+    assert seen == [600.0]
+
+
+def test_typed_data_review_text_shows_the_hashes_as_the_device_does():
+    signable = encode_typed_data(full_message=PERMIT)
+    text = ledger_mod.typed_data_review_text(PERMIT)
+    assert f"Domain hash: 0x{signable.header.hex().upper()}" in text
+    assert f"Message hash: 0x{signable.body.hex().upper()}" in text
+    assert ledger_mod.typed_data_review_text({"bogus": 1}) == \
+        "Confirm on your Ledger device…"
+
+
+def test_ledger_plugin_progress_text_for_messages():
+    from qeth.signers.ledger import LedgerSignerPlugin
+    plugin = LedgerSignerPlugin()
+    typed = TypedDataSigningRequest(from_addr=TO, typed_data=PERMIT)
+    assert "Message hash: 0x" in plugin.message_progress_text(typed)
+    personal = MessageSigningRequest(from_addr=TO, raw=b"hi")
+    assert plugin.message_progress_text(personal) == plugin.progress_text
 
 
 def test_signer_refuses_a_ledger_without_the_account(monkeypatch):

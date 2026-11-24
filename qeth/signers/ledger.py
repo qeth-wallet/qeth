@@ -25,6 +25,13 @@ class LedgerSignerPlugin(SignerPlugin):
         from ..ledger import device_review_text
         return device_review_text(req, chain)
 
+    def message_progress_text(self, req: Any) -> str:
+        from ..ledger import typed_data_review_text
+        from ..signing import TypedDataSigningRequest
+        if isinstance(req, TypedDataSigningRequest):
+            return typed_data_review_text(req.typed_data)
+        return self.progress_text
+
     def make_signer(
         self, store: Store, account: dict[str, Any], ui: SignerInteraction,
     ) -> Signer:

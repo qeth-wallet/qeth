@@ -248,6 +248,7 @@ files = [
     "qeth/ledger.py",
     "qeth/ledger_app.py",
     "qeth/ledger_metadata.py",
+    "qeth/ledger_eip712.py",
     "qeth/ledger_hid.py",
     "qeth/device_thread.py",
     "qeth/trezor.py",

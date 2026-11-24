@@ -1416,6 +1416,7 @@ class MainWindow(QMainWindow):
     def _pick_signer_for(
         self, dialog, address: str, interaction, path: str | None = None,
         family: str = EVM, tx: "tuple[SigningRequest, Chain] | None" = None,
+        message: object = None,
     ) -> tuple[Signer | None, str]:
         """Pick a Signer for the account's ``source`` via the signer REGISTRY
         (``qeth.signers``). The plugin drives ``interaction`` for any up-front
@@ -1427,7 +1428,8 @@ class MainWindow(QMainWindow):
         the prompt or the source has no signer (shows the "no signer" warning
         in that case). With ``tx`` (the request + chain about to be signed),
         the progress text is the backend's per-transaction one — a Ledger
-        says what its screen will show."""
+        says what its screen will show; with ``message`` (a message request),
+        its per-message one."""
         acct = self.store.account_for_signing(address, path, family=family)
         source = acct.get("source") if acct else None
         from .signers import signer_for_source
@@ -1446,6 +1448,8 @@ class MainWindow(QMainWindow):
             return None, ""   # user cancelled the unlock prompt
         if tx is not None:
             return signer, plugin.tx_progress_text(*tx)
+        if message is not None:
+            return signer, plugin.message_progress_text(message)
         return signer, plugin.progress_text
 
     def _launch_message_sign(self, req, fut, family: str = EVM) -> None:
@@ -1483,7 +1487,7 @@ class MainWindow(QMainWindow):
         from .signing import SignMessageWorker
         interaction = DialogInteraction(dialog, title="Signing Message")
         signer, progress_text = self._pick_signer_for(
-            dialog, req.from_addr, interaction, family=family,
+            dialog, req.from_addr, interaction, family=family, message=req,
         )
         if signer is None:
             return

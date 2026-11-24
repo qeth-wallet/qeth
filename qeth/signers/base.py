@@ -44,6 +44,11 @@ class SignerPlugin(ABC):
         this as a USDC transfer" vs "asks you to blind sign")."""
         return self.progress_text
 
+    def message_progress_text(self, req: Any) -> str:
+        """The spinner label for signing message ``req`` (personal_sign or
+        typed data) — a Ledger lists the hashes its screen may show."""
+        return self.progress_text
+
     def can_sign(self) -> bool:
         """False for a source that holds addresses but can't produce a
         signature (watch-only), so the dispatch warns instead of building a

@@ -5,7 +5,7 @@
 # app itself, and a real device only has to confirm the USB layer.
 #
 #   scripts/speculos.sh fetch          download the pinned Nano X / S Plus apps (release ELFs)
-#   scripts/speculos.sh build-nanos    build the last Nano S app (1.16.0) from source
+#   scripts/speculos.sh build-nanos    build the last Nano S app (1.16.1) from source
 #   scripts/speculos.sh run MODEL      start the emulator (MODEL: nanos | nanox | nanosp)
 #   scripts/speculos.sh stop [MODEL]   stop it (default: both)
 #   scripts/speculos.sh test [MODEL]   run tests/test_ledger_speculos.py (default: all)
@@ -13,7 +13,8 @@
 #
 # Ledger stopped shipping the Nano S in app 1.17.0 and in Speculos 0.25.7, and
 # its release ELFs only start at 1.22.0, so the Nano S app is built from the
-# 1.16.0 tag in the app-builder image of the same day (4.3.0) and emulated by
+# 1.16.1-lns tag (its last, a Nano S-only patch of 1.16.0; real Nano S devices
+# run it) in the app-builder image of 1.16.0's day (4.3.0) and emulated by
 # Speculos 0.25.5. The Nano X and Nano S Plus run the current release on
 # current Speculos. (Stax / Flex are touchscreens; the test driver only
 # presses buttons so far.)
@@ -43,8 +44,8 @@ fi
 seed="glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin"
 
 builder_image=ghcr.io/ledgerhq/ledger-app-builder/ledger-app-builder-lite:4.3.0
-nanos_app_tag=1.16.0
-nanos_app_commit=ab139cb228336af463084dbc6c89e8b9a600a0e1
+nanos_app_tag=1.16.1-lns
+nanos_app_commit=0f72615959133372ad81e3e6098d694536d1494c
 nanox_app_version=1.24.0
 nanox_app_sha256=484f6621fe569cf7cd0edacb352a8f0dac36f164f8b167b6db61e00782340e49
 # The release names the Nano S Plus "nanos2".

@@ -1,6 +1,7 @@
 # Ledger: own app client, then clear signing without lookups
 
-Status: **M1–M4 done** on branch `ledger-app` (2026-11-24); M5 next. M3's
+Status: **M0–M4 done** on branch `ledger-app` (2026-11-24); both real devices
+pass the USB check (`scripts/ledger_probe.py --sign`); M5 next. M3's
 Linux packages (rpm / deb) still need their VM build check, and the Gentoo
 overlay its vendored-set update at the next bump.
 
@@ -94,7 +95,7 @@ qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hoo
   Ethereum app signing with real keys (`tests/test_ledger_app.py`).
 - **Speculos (not a gate, like `scripts/wine.sh`)**: `scripts/speculos.sh test`
   signs every flow on Ledger's emulator running the real Ethereum app — Nano S
-  (app 1.16.0, built from source in `ledger-app-builder-lite:4.3.0`, on
+  (app 1.16.1-lns, built from source in `ledger-app-builder-lite:4.3.0`, on
   Speculos 0.25.5, the last with Nano S), Nano X and Nano S Plus (1.24.0
   release ELFs on Speculos 0.27.4) — pressing the buttons through its REST API.
   Both run in containers (the Speculos image bundles `qemu-arm`), so no host
@@ -108,17 +109,18 @@ qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hoo
 
 Each one is shippable on its own and ends with `uv run pytest` green.
 
-### M0 — Device facts (read-only probe)
+### M0 — Device facts (read-only probe) ✅
 
 `scripts/ledger_probe.py` (written): model, app version, config flags, the first
 address; nothing signed unless `--sign`, which signs a text message.
-Run on both devices to pin down what the plan currently assumes:
+Run on both devices (2026-11-24):
 
-| Assumption to confirm | Nano S | Nano X |
+| Fact | Nano S | Nano X |
 |---|---|---|
-| Newest Ethereum app | ≤ 1.16 (support removed in 1.17) | current (1.24) |
-| Legacy token info (`P1=00`) | yes | yes |
-| Full EIP-712 (V1) | believed **no** → hash-only stays | yes |
+| Ethereum app (real devices, 2026-11-24) | 1.16.1 (`1.16.1-lns`, its last) | 1.24.0 |
+| Legacy token info (`P1=00`) | yes (flag 0x02) | yes (flag 0x02) |
+| USB-HID via `ledger_app` (`ledger_probe.py --sign`) | ✅ | ✅ |
+| Full EIP-712 (V1) | **no** — the app's changelog lists EIP-712 clear signing for LNX / LNS+ only → hash-only stays | yes |
 | Ledger PKI certificates | believed no | yes |
 | ERC-7730 generic parser | no | yes (≥ 1.14) |
 

@@ -1,5 +1,5 @@
 """qeth's Ledger signer against the real Ethereum app on Ledger's Speculos
-emulator — Nano S (app 1.16, its last), Nano X and Nano S Plus (current app).
+emulator — Nano S (app 1.16.1, its last), Nano X and Nano S Plus (current app).
 
 Not part of the default run (marker ``speculos``). ``scripts/speculos.sh test``
 starts the emulators and sets, per model, ``QETH_SPECULOS_<MODEL>`` (the APDU
@@ -198,7 +198,7 @@ def test_app_version(emu):
     with connect(device) as transport:
         config = EthApp(transport).get_configuration()
     if emu.model == "nanos":
-        assert config.version == (1, 16, 0)
+        assert config.version == (1, 16, 1)
     else:
         assert config.version >= (1, 24, 0)
 

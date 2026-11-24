@@ -154,9 +154,13 @@ into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.
   Run after touching imports/deps.
 - `uvx detect-secrets scan --baseline .secrets.baseline` — secret scan. The
   committed `.secrets.baseline` records the known test-fixture keys/hex (e.g.
-  `_TEST_PRIV`), so a run flags only NEW potential secrets. Regenerate with
-  `uvx detect-secrets scan > .secrets.baseline` after adding intentional
-  fixtures.
+  `_TEST_PRIV`), so a run flags only NEW potential secrets. It also holds the
+  scan's settings, incl. an `--exclude-files` pattern for the Ledger data files
+  (`qeth/data/ledger_eip712_filters.json`, `tests/data/ledger_*.json` — public
+  signatures and APDUs by the thousand). After adding intentional fixtures,
+  update it with the same `--baseline` command (it keeps those settings and
+  adds the new findings — review them); a fresh `scan > .secrets.baseline`
+  would drop the exclusion.
 
 ## Conventions
 

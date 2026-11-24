@@ -18,7 +18,9 @@ license-files = ["LICENSE"]
 # If you don't have system PySide6, install the [bundled] extra:
 #   uv pip install -e .[bundled]
 dependencies = [
-    "ledgereth>=0.10",
+    # USB-HID for the Ledger: qeth/ledger_app.py speaks the Ethereum app over
+    # it directly (docs/ledger-clear-signing.md).
+    "hidapi>=0.14",
     "aiohttp>=3.9",
     "segno>=1.6",
     "web3>=7",
@@ -174,13 +176,18 @@ ty = "2099-01-01T00:00:00Z"
 # The `browser` tests launch a real headless Chromium/Firefox and are likewise
 # skipped by default (they need drivers on PATH + a free port 1248):
 #                                    uv run pytest -m browser
+# The `speculos` tests sign on Ledger's emulator running the real Ethereum app;
+# scripts/speculos.sh test starts it and runs them. Likewise `trezor_emulator`
+# on Trezor's firmware emulator (scripts/trezor-emu.sh test).
 # To run everything (offline + online + browser): uv run pytest -m ''
 markers = [
     "network: requires live network and external services",
     "browser: launches headless Chromium/Firefox with the webext against a stub RpcServer; needs chromedriver/geckodriver on PATH and a free port 1248",
+    "speculos: signs on Ledger's Speculos emulator (scripts/speculos.sh test)",
+    "trezor_emulator: signs on Trezor's firmware emulator (scripts/trezor-emu.sh test)",
     "real_tx_saver: opt out of the conftest sync-saver patch to exercise AsyncTransactionSaver's real off-thread write",
 ]
-addopts = "-m 'not network and not browser'"
+addopts = "-m 'not network and not browser and not speculos and not trezor_emulator'"
 # pytest-qt: tell it which Qt binding we use. The "offscreen" Qt
 # platform plugin is set in tests/conftest.py before QApplication is
 # created, so UI tests don't pop windows on the developer's screen
@@ -241,9 +248,14 @@ files = [
     "qeth/tray.py",
     "qeth/notify.py",
     "qeth/ledger.py",
+    "qeth/ledger_app.py",
+    "qeth/ledger_metadata.py",
+    "qeth/ledger_eip712.py",
+    "qeth/eip712_values.py",
     "qeth/ledger_hid.py",
     "qeth/device_thread.py",
     "qeth/trezor.py",
+    "qeth/trezor_definitions.py",
     "qeth/signing.py",
     "qeth/signers/__init__.py",
     "qeth/signers/base.py",
@@ -290,7 +302,7 @@ check_untyped_defs = true
 # "missing import" noise so the check stays focused on our own code.
 [[tool.mypy.overrides]]
 module = [
-    "ledgereth.*",
+    "hid",
     "eth.*",
     "eth_typing.*",
     "segno.*",
@@ -381,6 +393,7 @@ web3 = ["web3", "ens"]
 zxing-cpp = ["zxingcpp"]
 Pillow = ["PIL"]
 trezor = ["trezorlib"]
+hidapi = ["hid"]
 
 [tool.deptry.per_rule_ignores]
 # DEP001 = imported but undeclared; DEP002 = declared but unused.
@@ -401,4 +414,5 @@ version = {attr = "qeth.__version__"}
 include = ["qeth*"]
 
 [tool.setuptools.package-data]
-qeth = ["assets/native/*.png", "assets/chains/*.png", "assets/logos/*.svg", "data/top_tokens.json"]
+qeth = ["assets/native/*.png", "assets/chains/*.png", "assets/logos/*.svg", "data/top_tokens.json",
+        "data/ledger_eip712_filters.json", "data/ledger_eip712_filters.*.txt"]

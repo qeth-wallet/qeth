@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Any
 from ..chains import EVM
 
 if TYPE_CHECKING:
-    from ..signing import Signer
+    from ..chains import Chain
+    from ..signing import Signer, SigningRequest
     from ..store import Store
     from .interaction import SignerInteraction
 
@@ -36,6 +37,17 @@ class SignerPlugin(ABC):
     # (device confirm vs. keystore decrypt); the caller shows it via the
     # interaction host's ``progress``.
     progress_text: str = ""
+
+    def tx_progress_text(self, req: SigningRequest, chain: Chain) -> str:
+        """The spinner label for signing transaction ``req`` — a backend that
+        can say what its device will show overrides this (Ledger: "it shows
+        this as a USDC transfer" vs "asks you to blind sign")."""
+        return self.progress_text
+
+    def message_progress_text(self, req: Any) -> str:
+        """The spinner label for signing message ``req`` (personal_sign or
+        typed data) — a Ledger lists the hashes its screen may show."""
+        return self.progress_text
 
     def can_sign(self) -> bool:
         """False for a source that holds addresses but can't produce a

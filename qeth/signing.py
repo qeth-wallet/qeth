@@ -227,6 +227,22 @@ class TypedDataSigningRequest:
     origin: str | None = None
 
 
+def typed_data_hashes(typed_data: dict) -> tuple[bytes, bytes]:
+    """eth_account's domain and message hashes of an EIP-712 message — what
+    qeth shows, and what a hardware wallet's signature must recover against."""
+    try:
+        from eth_account.messages import encode_typed_data
+        signable = encode_typed_data(full_message=typed_data)
+    except Exception as e:
+        raise SignerError(f"failed to hash typed data: {e}") from e
+    domain_hash, message_hash = signable.header, signable.body
+    if len(domain_hash) != 32 or len(message_hash) != 32:
+        raise SignerError(
+            "encode_typed_data produced unexpected shape: "
+            f"header={len(domain_hash)} body={len(message_hash)}")
+    return domain_hash, message_hash
+
+
 @dataclass
 class TronSigningRequest:
     """A Tron transaction to sign: the fully assembled ``TronTx`` (qeth.tron),
@@ -367,6 +383,39 @@ def parse_typed_data_params(
     return TypedDataSigningRequest(
         from_addr=from_addr, typed_data=typed, origin=origin,
     )
+
+
+def unsigned_eip1559_tx(req: SigningRequest, chain_id: int) -> bytes:
+    """The EIP-2718 unsigned serialization a device signs:
+    ``0x02 ‖ rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit,
+    to, value, data, accessList])``; its keccak is the signing hash. What QR
+    wallets and the Ledger app take."""
+    import rlp
+    from eth_utils import to_bytes
+    if (req.gas is None or req.nonce is None
+            or req.max_fee_per_gas is None
+            or req.max_priority_fee_per_gas is None):
+        raise SignerError("gas, nonce and EIP-1559 fees must be set before signing")
+    return b"\x02" + rlp.encode([
+        chain_id, req.nonce, req.max_priority_fee_per_gas, req.max_fee_per_gas,
+        req.gas, to_bytes(hexstr=req.to_addr) if req.to_addr else b"",
+        req.value_wei, to_bytes(hexstr=req.data or "0x"), [],
+    ])
+
+
+def unsigned_legacy_tx(req: SigningRequest, chain_id: int) -> bytes:
+    """The EIP-155 unsigned legacy serialization
+    ``rlp([nonce, gasPrice, gas, to, value, data, chainId, 0, 0])``; its keccak
+    is the signing hash."""
+    import rlp
+    from eth_utils import to_bytes
+    if req.nonce is None or req.gas is None or req.gas_price is None:
+        raise SignerError("gas, nonce and gas price must be set before signing")
+    return rlp.encode([
+        req.nonce, req.gas_price, req.gas,
+        to_bytes(hexstr=req.to_addr) if req.to_addr else b"",
+        req.value_wei, to_bytes(hexstr=req.data or "0x"), chain_id, 0, 0,
+    ])
 
 
 def signed_eip1559_tx(

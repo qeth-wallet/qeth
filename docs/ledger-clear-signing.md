@@ -1,0 +1,294 @@
+# Ledger: own app client, then clear signing without lookups
+
+Status: **M0–M5b done** on branch `ledger-app` (2026-11-24); both real devices
+pass the USB check (`scripts/ledger_probe.py --sign`); M6 is blocked on Ledger. M3's
+Linux packages (rpm / deb) still need their VM build check, and the Gentoo
+overlay its vendored-set update at the next bump.
+
+Two goals, in this order:
+
+1. Replace `ledgereth` with a small Ledger Ethereum-app client of our own
+   (`qeth/ledger_app.py`), straight on `hidapi`.
+2. On top of it, make the Ledger show what is being signed (token transfers,
+   approvals, EIP-712 messages, later ERC-7730 contract calls) **without telling
+   any server what the user is about to sign**.
+
+Devices that must work throughout: **Nano S** (original) and **Nano X**.
+
+## Why leave ledgereth
+
+- Unmaintained: last release 0.10.0 (2024-11), no commits since.
+- Pins `ledgerblue==0.1.48` exactly, blocking upstream fixes.
+- Has none of what clear signing needs: no token-info command, no full EIP-712
+  (hash-only), no challenge / certificate loading, no store-only / start-flow
+  signing modes.
+- 28 locked packages exist only because of it, incl. Bluetooth/NFC stacks
+  (`bleak`, `nfcpy`, `dbus-fast`, `winrt-*`, `pyobjc-*`) and the three
+  sdist-only packages (`ledgerblue`, `pydes`, `python-u2flib-host`) behind the
+  pinned-setuptools builds.
+
+Not chosen:
+
+- Ledger's `ledger_app_clients.ethereum` as a dependency (it requires
+  `ragger[speculos]`, a test framework). It is Apache-2.0 and is the reference
+  we port encoders from, with attribution.
+- `ledgercomm` as the transport: its HID reader loops forever if the device
+  stops mid-reply, validates packets with `assert` (stripped under `-O`),
+  skips continuation sequence checks, doesn't pad the last report (Windows
+  needs full reports) and doesn't expose the product id we need to tell a
+  Nano S from a Nano X. Ledger's framing is ~60 lines; we own it. Specs: `LedgerHQ/app-ethereum`
+`doc/apdu.md`, `doc/eip712.md`, `doc/gcs.md`, `doc/tlv_structs.md`.
+
+## Privacy rules (apply to every milestone)
+
+1. **Nothing is fetched because of a signature.** Metadata is mirrored in bulk
+   on a schedule (daily, jittered) and looked up locally.
+2. **No online fallback.** Missing locally → the device behaves as today (blind
+   sign); qeth's own dialog still decodes and simulates.
+3. **Never send calldata, a selector, or a recipient** to a metadata service.
+   That rules out Ledger's proxy lookup (POSTs calldata), "transaction checks",
+   signing reports, and challenge-bound trusted names (ENS on device).
+4. The mirror runs only when the store has a Ledger account.
+5. Signed blobs need no trusted source — the device verifies them. qeth also
+   verifies the legacy token signature on the host before use, so a corrupt
+   mirror is dropped, not sent.
+
+## Architecture
+
+```
+qeth/ledger_app.py       Qt-free. Transport protocol + EthApp commands + status words.
+qeth/ledger_metadata.py  Qt-free. Bulk mirror + local lookup of signed metadata
+                         (the token mirror; the shipped EIP-712 filter snapshot).
+qeth/ledger_eip712.py    Qt-free. Typed data as V1 / V2 / filtered V1 commands.
+qeth/ledger.py           LedgerSigner / LedgerWorker (unchanged surface), now on EthApp.
+qeth/ledger_hid.py       The one device thread (unchanged rule); cache-clear hook removed.
+```
+
+- **Transport**: a two-method protocol (`exchange(apdu) -> (sw, data)`,
+  `close()`). Implementations: `HidTransport` (hidapi, production),
+  `TcpTransport` (the Speculos emulator; `QETH_LEDGER_SPECULOS=host:port` also
+  points qeth itself at one), and in-memory fakes for unit tests. Opened and
+  closed inside each `run_ledger_hid_job`, so no handle outlives a job — which
+  is what the ledgereth cache-clear hack emulated.
+- **Signatures are verified on the host**: the y-parity is recovered against
+  the account being signed for, never read from the device's `v` byte (legacy
+  txs get only the low byte of the EIP-155 `v`). A signature that doesn't
+  recover to the account is refused.
+- **Several Ledgers** (Nano S + Nano X plugged in together): signing uses the
+  one that derives the account, skipping a locked one; discovery refuses to
+  guess.
+- **EthApp**: one method per command; chunking and path encoding in one place.
+  Capabilities are derived once per job from `GET APP CONFIGURATION` (version +
+  flags: blind signing enabled, token info wanted) and the USB product id
+  (model). Every optional step is gated on a capability, never on a model name
+  alone.
+- **Errors**: our own status-word table → the same user sentences
+  `_explain_ledger_error` produces now (rejected, locked, app not open, asleep
+  `0x55xx`, blind signing disabled, unknown SW shown in hex).
+- **Transaction bytes**: unsigned RLP built by the helpers Trezor and QR already
+  use (`signing.signed_eip1559_tx` / `signed_legacy_tx` assemble the result).
+- **Metadata failure never aborts a signature**: any refused or missing
+  metadata step falls back to the plain sign.
+
+## Testing
+
+- **Unit (gate)**: golden APDU vectors captured from ledgereth
+  (`tests/data/ledger_golden_apdus.json`) and `SoftLedger`, an in-memory
+  Ethereum app signing with real keys (`tests/test_ledger_app.py`).
+- **Speculos (not a gate, like `scripts/wine.sh`)**: `scripts/speculos.sh test`
+  signs every flow on Ledger's emulator running the real Ethereum app — Nano S
+  (app 1.16.1-lns, built from source in `ledger-app-builder-lite:4.3.0`, on
+  Speculos 0.25.5, the last with Nano S), Nano X and Nano S Plus (1.24.0
+  release ELFs on Speculos 0.27.4) — pressing the buttons through its REST API.
+  Both run in containers (the Speculos image bundles `qemu-arm`), so no host
+  qemu is needed. Stax/Flex are touchscreens; the driver only presses buttons
+  so far.
+- **Real devices**: one short final check per device of the USB layer only:
+  `uv run python scripts/ledger_probe.py --sign` (read-only without `--sign`;
+  no funds move either way), then the in-app send / approve check.
+
+## Milestones
+
+Each one is shippable on its own and ends with `uv run pytest` green.
+
+### M0 — Device facts (read-only probe) ✅
+
+`scripts/ledger_probe.py` (written): model, app version, config flags, the first
+address; nothing signed unless `--sign`, which signs a text message.
+Run on both devices (2026-11-24):
+
+| Fact | Nano S | Nano X |
+|---|---|---|
+| Ethereum app (real devices, 2026-11-24) | 1.16.1 (`1.16.1-lns`, its last) | 1.24.0 |
+| Legacy token info (`P1=00`) | yes (flag 0x02) | yes (flag 0x02) |
+| USB-HID via `ledger_app` (`ledger_probe.py --sign`) | ✅ | ✅ |
+| Full EIP-712 (V1) | **no** — the app's changelog lists EIP-712 clear signing for LNX / LNS+ only → hash-only stays | yes |
+| Ledger PKI certificates | believed no | yes |
+| ERC-7730 generic parser | no | yes (≥ 1.14) |
+
+### M1 — `ledger_app.py`: transport, address, config, errors ✅
+
+- Transport protocol + HID (hidapi) / TCP (Speculos) + fakes.
+- `get_address(path)`, `get_configuration()`, status-word table.
+- Tests: golden APDU bytes for each command, checked against what ledgereth
+  emits while it is still installed; error-table tests.
+
+### M2 — Signing parity, then switch ✅
+
+- `sign_transaction` (legacy + EIP-1559, chunked), `sign_personal_message`,
+  `sign_eip712_hashed` (V0).
+- Unit tests: APDU streams byte-identical to ledgereth for a fixture set
+  (short/long calldata, chunk-boundary cases incl. the known "RLP ends exactly
+  on a chunk edge" trap, high chain ids).
+- Device check on Nano S and Nano X: same address, and signatures that recover
+  to it, for tx / message / typed data.
+- Switch `ledger.py` (signer, discovery, availability probe) to `EthApp`.
+
+### M3 — Remove ledgereth ✅
+
+- `pyproject.toml`: drop `ledgereth` (`hidapi` is already declared); `uv lock`,
+  `uv audit`, `uvx deptry .`.
+- The mypy `ledgereth.*` override (the code-side removals landed with M2).
+- Packaging: 142 → 114 locked packages, none sdist-only any more. Windows
+  verified locally under Wine (tests, PyInstaller build with CI's bundle
+  checks, isolated smoke); the CI bundle checks now look for
+  `qeth.ledger_app` (and hidapi's extension on macOS). The rpm drops
+  `python3-pyserial` (it was only for ledgerblue's NFC stack). Pending: the
+  rpm/deb VM builds, AppImage/Flatpak/macOS in CI, the Gentoo overlay
+  (separate repo).
+- Docs: CLAUDE.md, `docs/ARCHITECTURE.md`, `docs/tron.md` (its Ledger-Tron note
+  assumes `ledgerblue`; it becomes "another app class on the same transport").
+
+### M4 — Token info: sending tokens, approve, revoke shown clearly ✅
+
+- `qeth/ledger_metadata.py` mirrors Ledger's token list for **every** EVM chain
+  in the store (used or not), from the keyless
+  `cal/v1/tokens?network=…&output=contract_address,descriptor` (cursor from the
+  `x-ledger-next` header), into `~/.qeth/ledger/tokens/<chain_id>.json`
+  (address → `data:signature` hex). Chain → network comes from the bulk
+  `cal/v1/networks` list (family `ethereum`), never a per-chain query. Only
+  well-formed, prod-signed descriptors for that exact (address, chain) are
+  kept — Gnosis, for one, has only test-signed ones, so it mirrors empty.
+  Default chains: ~9 MB, ~3–11 s.
+- Revalidation: the networks list's ETag is the dataset commit; when every
+  chain was fetched at it, an `If-None-Match` answers 304 — one request, 0.1 s.
+  A new commit re-downloads; a chain added to the store fetches just that one.
+- Scheduling (`plugins/wallets/ledger_mirror.py`): hourly checks (the first a
+  minute or two after start, jittered), refresh when older than 24 h — only
+  while the store holds a Ledger account, plus once right after adding one.
+  Never triggered by a signature.
+- Lookup at signing time is local; the descriptor's Ledger signature is
+  verified on the host (sha256 + the key in app-ethereum `doc/apdu.md`), so a
+  tampered mirror is never sent. When `to` is a mirrored token and the app's
+  config asks for external token info, `PROVIDE ERC 20 TOKEN INFORMATION`
+  (legacy format — no certificate, works on the Nano S's 1.16) precedes the
+  sign; a refusal only costs the clear display.
+- The signing spinner says what the device will show (`SignerPlugin.
+  tx_progress_text` → `ledger.device_review_text`): "it shows this as a USDC
+  transfer/approval" or "it asks you to blind sign".
+- Speculos: a USDC transfer and an approve(0) sign with blind signing **off**
+  on the Nano S, Nano X and Nano S Plus, the device showing "USDC 1234.56" /
+  "Approve 0 USDC".
+
+### M5 — Full EIP-712 ✅
+
+`qeth/ledger_eip712.py` sends the whole typed message, and the device hashes it
+and shows it. The signature is recovered against eth_account's hash, so a
+device that hashed anything else is caught. Per app (verified on Speculos):
+
+| App | Commands | The device shows |
+|---|---|---|
+| ≥ 1.24 (Nano X / S Plus today) | V2: schema + values as two TLV payloads, checked whole before the review | every domain and message field |
+| 1.9.19 – 1.23 | V1: one command per struct / field / value, the review streaming | the domain fields, then the message hash (every field only with the app's "Raw messages" setting) |
+| Nano S (1.16.1), older apps | V0: the two hashes (unchanged) | domain hash + message hash |
+
+- The Nano S's app answers the first V1 / V2 command `0x6D00` and shows
+  nothing, so the hashes follow in the same session; a V2 payload or review
+  the device refuses before showing anything falls back the same way. A V1
+  error mid-review does not (the user was already reading it).
+- A message the device can't carry (a missing value, an unsized `uint`, a
+  non-ASCII or delimiter-holding name, an array past 255 entries, a V2
+  payload past 64 KB) goes as hashes from the start.
+- Still blind signing to Ledger's app: with no Ledger description of the
+  message, it needs the "Blind signing" setting (or "Raw messages"), shows its
+  warning, and refuses with `0x6A80` and an on-device notice otherwise — qeth
+  says so. Messages Ledger does describe go with its filters (M5b).
+- The spinner lists the domain and message hashes in the device's own format
+  (`0x` + upper-case hex) for the screens that show hashes.
+- Encodings are pinned by golden vectors from Ledger's reference client
+  (`tests/data/ledger_eip712_golden.json`), a re-hash of the parsed message
+  against eth_account (hypothesis-generated values too), and Speculos signing
+  a Permit, nested structs with arrays, and every scalar type, over both V2
+  and V1.
+
+### M5b — Ledger's EIP-712 filters, from a shipped snapshot ✅
+
+With Ledger's signed filters a message is reviewed through Ledger's labels
+("Contract: Permit2", "Amount allowance: 1234 USDC", "Approval expire: …"),
+its other fields hidden, and the app doesn't count it as blind signing — so it
+signs with "Blind signing" off. Ledger Live gets them from `cal/v1/dapps`, per
+message (leaking chain + contract; 403 without a partner token), with a static
+file as fallback. That file is the snapshot qeth ships:
+
+- `qeth/data/ledger_eip712_filters.json`, byte-for-byte `eip712_v2.json` of
+  npm `@ledgerhq/cryptoassets-evm-signatures@13.7.1` (2025-11-20; provenance,
+  hashes and license next to it). 154 messages of 73 dapps: Permit2, UniswapX,
+  1inch, Paraswap, OpenSea, token permits (USDC, DAI, Aave, …), DAO
+  governors. **Frozen**: Ledger has since removed the file it was built from,
+  so it won't grow. A dapp whose message changed simply isn't found.
+- Keyed `chainId:verifyingContract:schemaHash` (sha224 of the types JSON,
+  structs sorted by name). `ledger_eip712.schema_hash` computes it from what
+  the device receives, which hashes the same definitions itself.
+- Every signature is checked on the host first (the legacy CAL key, as for
+  tokens) and every filter against the message (`check_filters`: it must lead
+  to a value it can format), so the device never gets one it would refuse.
+  The device checks the signatures again.
+- Filters are V1-only (`INS 0x1E`): `filtered_v1_commands` sends the
+  definitions by name, filtering on, the tokens' info from the M4 mirror, the
+  domain, the message info, then each value after its filter — the filters of
+  an empty array as "discarded" (app 1.12+). Pinned byte-for-byte to Ledger's
+  reference client (`tests/data/ledger_eip712_filter_golden.json`).
+- `LedgerSigner` uses it from app 1.12 when the message is in the snapshot.
+  A refusal before the signature request (the app shows a filtered review
+  only then) sends the message undescribed as in M5; a rejection is a
+  rejection. The Nano S has no full EIP-712, so nothing changes for it.
+- Speculos (1.24, Nano X + S Plus, blind signing off): Permit2, UniswapX
+  orders with two outputs and with none, and USDC's own permit sign with the
+  labels on screen; a filter the app refuses falls back to the undescribed
+  review with nothing shown before it.
+
+### M6 — ERC-7730 contract calls on the device (blocked on Ledger)
+
+Needs Ledger's partner "origin token" (`cal/v1/dapps` is 403 without it).
+Questions for Ledger before any code:
+
+1. Can the full signed descriptor set be downloaded in bulk?
+2. May qeth redistribute it from its own mirror (CI-built bundle, token kept
+   in CI rather than in every build)?
+
+If both are yes: mirror descriptors + certificates, then the store-only →
+operation info → fields → start-flow sequence (`doc/gcs.md`). Nano X only.
+Proxy-filed descriptors are skipped (rule 3).
+
+## Out of scope here, tracked separately
+
+- **Trezor**: done — definitions answered from a local copy of Trezor's
+  archive instead of per-signature fetches (`docs/trezor-clear-signing.md`).
+- **qeth's own sign dialog**: render ERC-7730 from a local mirror of
+  `ethereum/clear-signing-erc7730-registry`, EIP-712 first.
+- Ledger Tron app; Bluetooth.
+
+## Risks
+
+- **Wrong signature for the wrong account** — unchanged guard: every signing
+  job first checks the device derives the expected address; a serialization bug
+  yields a signature that fails recovery, checked on the host before broadcast.
+- **macOS HID threading** — same single service thread;
+  `scripts/repro_hidapi_macos.py` now drives the new transport (run it on a
+  Mac with a device).
+- **Nano S limits** — small APDU buffers and an old app; M0 decides gating
+  before any feature work.
+- **Ledger changes or closes the token endpoint** — the mirror keeps the last
+  good copy; a qeth-hosted bundle is the fallback.
+- **Packaging breadth** — M3 touches every format; it is its own milestone so a
+  packaging problem can't hold back M1–M2.

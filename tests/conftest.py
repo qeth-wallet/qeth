@@ -195,6 +195,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     import qeth.plugins.approvals.cache
     import qeth.plugins.ens.ens_app
     import qeth.hot_wallet
+    import qeth.ledger_metadata
     import qeth.store
     import qeth.token_metadata
     import qeth.token_discovery.tokenlists
@@ -203,6 +204,7 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     import qeth.plugins.tokens.wallet_cache
     import qeth.icons
     import qeth.plugins.tokens.risk
+    import qeth.trezor_definitions
 
     monkeypatch.setattr(qeth.plugins.approvals.cache, "CACHE_DIR",
                         tmp_path / "approvals")
@@ -229,6 +231,8 @@ def tmp_qeth(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(qeth.plugins.ens.ens_app, "CACHE_DIR", tmp_path / "ens")
     monkeypatch.setattr(qeth.hot_wallet, "KEYSTORE_DIR",
                         tmp_path / "keystores")
+    monkeypatch.setattr(qeth.ledger_metadata, "CACHE_DIR", tmp_path / "ledger")
+    monkeypatch.setattr(qeth.trezor_definitions, "CACHE_DIR", tmp_path / "trezor")
     return tmp_path
 
 
@@ -350,6 +354,7 @@ def hermetic_mainwindow(monkeypatch):
     from qeth.plugins import ens as ens_plugin
     from qeth.plugins import tokens as tokens_plugin
     from qeth.plugins import transactions as transactions_plugin
+    from qeth.plugins.wallets import ledger_mirror as ledger_mirror_mod
     from qeth import icons as icons_mod
 
     def _noop_run(self):  # pragma: no cover - simple no-op
@@ -369,6 +374,8 @@ def hermetic_mainwindow(monkeypatch):
         # Not plugin workers, so they were missed by the per-plugin lists above
         # and only showed up on a machine with an empty icon cache.
         (icons_mod, ["_IconFetchWorker", "_ChainIconFetchWorker"]),
+        # The Ledger token-metadata mirror (Ledger's CAL service).
+        (ledger_mirror_mod, ["LedgerMirrorWorker"]),
     ):
         for cls_name in cls_names:
             cls = getattr(mod, cls_name, None)

@@ -6,16 +6,15 @@ qeth drives Ledger work from transient Qt worker threads (the signing
 worker, the account-discovery worker, the availability probe), and letting
 each touch HID directly corrupts that state and crashes/hangs on macOS.
 
-The fix: funnel every ledgereth/hidapi call through ONE process-lifetime
-thread. Callers submit a closure and block on a Future; the service runs
-jobs strictly serialized on its own thread and clears ledgereth's global
-dongle cache after each (close + null the handle), so a stale USB-HID
-handle never carries between operations.
+The fix: funnel every hidapi call through ONE process-lifetime thread.
+Callers submit a closure and block on a Future; the service runs jobs strictly
+serialized on its own thread. Each job opens the device and closes it
+(``ledger_app.connect``), so a stale USB-HID handle never carries between
+operations.
 """
 
 from __future__ import annotations
 
-import sys
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -30,32 +29,10 @@ DEFAULT_LEDGER_HID_TIMEOUT_S = DEFAULT_DEVICE_TIMEOUT_S
 
 
 class LedgerHidService(DeviceJobService):
-    """Runs Ledger/HID jobs on one process-lifetime worker thread, clearing
-    ledgereth's dongle cache after every job."""
+    """Runs Ledger/HID jobs on one process-lifetime worker thread."""
 
     def __init__(self, *, name: str = "qeth-ledger-hid") -> None:
-        super().__init__(
-            name=name, device_label="Ledger", after_job=_clear_ledgereth_cache)
-
-
-def _clear_ledgereth_cache() -> None:
-    """Close and clear ledgereth's process-global dongle cache.
-
-    ledgereth keeps the Dongle handle in module-level slots across calls;
-    reusing one between operations is unreliable (the USB-HID session goes
-    stale and the next exchange fails without waking the device). Reading
-    via ``sys.modules`` avoids importing ledgereth when it isn't installed."""
-    _comms = sys.modules.get("ledgereth.comms")
-    if _comms is None:
-        return
-    cached = getattr(_comms, "DONGLE_CACHE", None)
-    setattr(_comms, "DONGLE_CACHE", None)
-    setattr(_comms, "DONGLE_CONFIG_CACHE", None)
-    if cached is not None:
-        try:
-            cached.close()
-        except Exception:
-            pass
+        super().__init__(name=name, device_label="Ledger")
 
 
 _SERVICE: LedgerHidService | None = None

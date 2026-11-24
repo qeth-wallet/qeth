@@ -32,11 +32,11 @@ Four threads matter:
   receipts, signing). Tracked in a `set` and self-evicting (§7).
 - **`qeth-rpc` asyncio thread** — the aiohttp JSON-RPC server (§6).
 - **`qeth-ledger-hid` thread** — one process-lifetime thread that runs **all**
-  ledgereth/hidapi work, serialized (`qeth/ledger_hid.py`). hidapi isn't
+  Ledger/hidapi work, serialized (`qeth/ledger_hid.py`). hidapi isn't
   thread-safe (its macOS backend ties the handle to the opening thread's
   run-loop), so the signing/discovery workers don't touch HID directly — they
-  submit a closure via `run_ledger_hid_job()` and block on its `Future`. The
-  service clears ledgereth's dongle cache after every job.
+  submit a closure via `run_ledger_hid_job()` and block on its `Future`. Each
+  job opens and closes the device itself.
 
 The RPC thread and the UI thread never touch each other's state directly; they
 hand off through the `SignerBridge` (a `QObject` + `concurrent.futures.Future`,
@@ -579,17 +579,21 @@ key for hot wallet, eye for watch-only, import glyph for Brownie/Frame).
 
 - **`ledger.py`** — `LedgerWorker` enumerates accounts across derivation
   templates (Ledger Live / Legacy / BIP44), auto-detecting until 3 consecutive
-  empty-nonce accounts (cap 100). One fresh dongle handle per run.
+  empty-nonce accounts (cap 100). One fresh device handle per HID job. It
+  talks to the Ethereum app through qeth's own client, `ledger_app.py`
+  (USB-HID framing on hidapi + the app's APDUs; see
+  `docs/ledger-clear-signing.md`).
   - **Availability pre-check** (`is_ledger_available()`, ledger.py:14) — before
     a scan or a sign, the device is probed (connected + unlocked + Ethereum app
     open). If it isn't ready the UI shows a "connect your Ledger" prompt
     **instead of letting the operation fail** — so a dapp signing request isn't
     lost to a sleeping device and doesn't need re-submitting from the browser.
-    The probe deliberately clears ledgereth's module-level dongle cache so the
-    next real call starts fresh (the "fresh handle per call" invariant — reusing
-    a cached handle is what made every *second* sign fail until a restart).
-  - **Error decoding** (`_explain_ledger_error`, ledger.py:47) — maps ledgereth
-    exceptions to one action-oriented sentence; the screensaver/sleep family
+    Every job opens and closes the device (the "fresh handle per call"
+    invariant — reusing a cached handle is what made every *second* sign fail
+    until a restart, back on ledgereth). With several Ledgers connected, the
+    probe succeeds if any is ready.
+  - **Error decoding** (`ledger_app.explain_status`) — maps the device's
+    status words to one action-oriented sentence; the screensaver/sleep family
     (`0x6804`, `0x6d00`, …) and the otherwise-undocumented `0x55xx` range are
     named explicitly rather than surfacing a raw "0x5515 UNKNOWN". Unknown
     shapes still print the raw SW code so future cases stay diagnosable.
@@ -611,17 +615,25 @@ typed-data (renders UTF-8 or hex, pretty-prints EIP-712 domain+message), and a
 EIP-712 from the pasted content. Result dialog shows the 65-byte `r‖s‖v`
 signature with copy.
 
-**EIP-712 on Ledger** (`LedgerSigner.sign_typed_data`, ledger.py:363) — qeth
-hashes the typed data with `eth_account.encode_typed_data` and passes the
-**domain separator (`header`) and struct hash (`body`) as two separate 32-byte
-values** to `sign_typed_data_draft`. This matters: an earlier version sliced
-`body` as if it held both halves (sending the struct hash *as* the domain and
-empty bytes *as* the message), which the Ledger Ethereum app rejected with an
-"invalid data" status word — which is why Holyheld-style v4 signing failed on a
-Nano S while Frame worked. The Ethereum app does the full struct-hash walk
-on-device for small payloads; larger ones fall back to a **blind-sign** prompt
-the user must enable in device settings. (Lengths are asserted == 32 before
-sending, so a malformed encode fails loudly rather than reaching the device.)
+**EIP-712 on Ledger** (`LedgerSigner.sign_typed_data`) — the whole message
+goes to the device (`ledger_eip712.py`), which hashes it and lists it: V2
+(app 1.24+, every field on screen) or V1 (1.9.19+, the domain then the message
+hash). Where the app can't take it (the Nano S, an older app, a message the
+device can't carry) the device signs the two hashes instead (V0,
+`EthApp.sign_eip712_hashes`): the **domain separator (`header`) and struct hash
+(`body`) as two separate 32-byte values** from
+`eth_account.encode_typed_data`. (An early version sliced `body` as if it held
+both halves, which the app rejected with "invalid data" — why Holyheld-style v4
+signing once failed on a Nano S.) Either way the signature is recovered against
+eth_account's hash, so a device that hashed anything else is refused. Without
+a Ledger description the app treats it all as blind signing; the spinner lists
+the hashes in the device's format for the screens that show them. A message in
+qeth's shipped snapshot of Ledger's signed EIP-712 filters
+(`ledger_metadata.Eip712FilterSet`, looked up locally — ~70 dapps: Permit2,
+UniswapX, token permits, …) goes as V1 with them from app 1.12: reviewed
+through Ledger's labels, not blind signing, so it signs with "Blind signing"
+off; a refusal of the filters sends it undescribed. Details in M5 / M5b of
+`docs/ledger-clear-signing.md`.
 
 ---
 

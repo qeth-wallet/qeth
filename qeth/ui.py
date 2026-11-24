@@ -32,6 +32,7 @@ from .plugins.transactions import SignTransactionDialog
 from .plugins.wallets import ACCOUNT_LABEL_ROLE, TREE_LABEL_ROLE
 
 if TYPE_CHECKING:
+    from .chains import Chain
     from .plugins.ens import EnsPlugin
     from .plugins.tokens import TokensPlugin
     from .plugins.transactions import TransactionsPlugin
@@ -58,7 +59,7 @@ from .alerts import warn
 from .hot_wallet import UNLOCKED
 from .signer_interaction import DialogInteraction
 from .signing import (
-    SignAndBroadcastWorker, Signer, SignerBridge, SignerError,
+    SignAndBroadcastWorker, Signer, SignerBridge, SignerError, SigningRequest,
     TronMessageSigningRequest, TronSignAndBroadcastWorker, TronSigningRequest,
     TronSignWorker, TronTypedDataSigningRequest,
 )
@@ -1367,7 +1368,8 @@ class MainWindow(QMainWindow):
         interaction = DialogInteraction(dialog, title="Signing Transaction")
         signing_path = self._signing_path_for(signing_key, finalised.from_addr)
         signer, progress_text = self._pick_signer_for(
-            dialog, finalised.from_addr, interaction, path=signing_path)
+            dialog, finalised.from_addr, interaction, path=signing_path,
+            tx=(finalised, chain))
         if signer is None:
             return
         if not signer.can_sign(finalised.from_addr):
@@ -1413,7 +1415,8 @@ class MainWindow(QMainWindow):
 
     def _pick_signer_for(
         self, dialog, address: str, interaction, path: str | None = None,
-        family: str = EVM,
+        family: str = EVM, tx: "tuple[SigningRequest, Chain] | None" = None,
+        message: object = None,
     ) -> tuple[Signer | None, str]:
         """Pick a Signer for the account's ``source`` via the signer REGISTRY
         (``qeth.signers``). The plugin drives ``interaction`` for any up-front
@@ -1423,7 +1426,10 @@ class MainWindow(QMainWindow):
         the connected default's remembered record is used. Returns
         ``(signer, progress_text)``, or ``(None, None)`` if the user cancelled
         the prompt or the source has no signer (shows the "no signer" warning
-        in that case)."""
+        in that case). With ``tx`` (the request + chain about to be signed),
+        the progress text is the backend's per-transaction one — a Ledger
+        says what its screen will show; with ``message`` (a message request),
+        its per-message one."""
         acct = self.store.account_for_signing(address, path, family=family)
         source = acct.get("source") if acct else None
         from .signers import signer_for_source
@@ -1440,6 +1446,10 @@ class MainWindow(QMainWindow):
         signer = plugin.make_signer(self.store, account=acct, ui=interaction)
         if signer is None:
             return None, ""   # user cancelled the unlock prompt
+        if tx is not None:
+            return signer, plugin.tx_progress_text(*tx)
+        if message is not None:
+            return signer, plugin.message_progress_text(message)
         return signer, plugin.progress_text
 
     def _launch_message_sign(self, req, fut, family: str = EVM) -> None:
@@ -1477,7 +1487,7 @@ class MainWindow(QMainWindow):
         from .signing import SignMessageWorker
         interaction = DialogInteraction(dialog, title="Signing Message")
         signer, progress_text = self._pick_signer_for(
-            dialog, req.from_addr, interaction, family=family,
+            dialog, req.from_addr, interaction, family=family, message=req,
         )
         if signer is None:
             return

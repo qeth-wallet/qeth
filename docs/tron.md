@@ -184,12 +184,13 @@ signing**. trezorlib 0.20.2 (already our `trezor` extra) has `trezorlib.tron`:
 - Path `m/44'/195'/0'/0/i` (Trezor Suite, TronLink). Ledger Live uses
   `44'/195'/i'/0/0`.
 
-**Ledger.** `ledgereth` only speaks the Ethereum app, and there is **no Python
-library** for the Ledger Tron app. Tron on Ledger would need its own APDU
-client, about 200 lines, over `ledgerblue` inside `run_ledger_hid_job`:
+**Ledger.** There is **no Python library** for the Ledger Tron app. Tron on
+Ledger would need its own APDU client, about 200 lines — a sibling of
+`ledger_app.EthApp` on the same transport (`ledger_app.connect`), inside
+`run_ledger_hid_job`:
 
-- **Transport:** not `ledgereth.init_dongle`, whose version check rejects the
-  Tron app.
+- **Transport:** `ledger_app`'s HID transport is app-agnostic (the old
+  `ledgereth.init_dongle` version check rejected the Tron app).
 - **Transaction signing:** GET_PUBLIC_KEY E0 02 (with chain code, so
   discovery can derive on the host) and SIGN E0 04. Raw_data is streamed in
   chunks of ≤ 250 bytes, split at top-level protobuf field boundaries. The
@@ -389,9 +390,8 @@ same code.
 
 ## Later phases
 
-- **Ledger Tron app.** Its own APDU client over `ledgerblue` (see Hardware
-  wallets above). Also declare `ledgerblue` as a dependency; today it's only
-  transitive.
+- **Ledger Tron app.** Its own APDU client on `ledger_app`'s transport (see
+  Hardware wallets above).
 - **Keystone 3.** The `tron-sign-request` / `tron-signature` UR types.
 - **TRC-20 approvals.** The Approvals tab needs a Tron `Approval`-log source.
   TronGrid `/v1/contracts/{addr}/events`, or `eth_getLogs` over `/jsonrpc`

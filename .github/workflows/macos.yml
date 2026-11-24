@@ -218,13 +218,16 @@ jobs:
           # Trezor: without the bundled libusb, trezorlib finds no device.
           find "$APP" -name 'libusb-1.0*.dylib' | grep -q . \
             || { echo "::error::libusb (Trezor) missing"; exit 1; }
+          # Ledger: qeth/ledger_app.py talks USB through hidapi's extension.
+          find "$APP" -name 'hid*.so' | grep -q . \
+            || { echo "::error::hidapi (Ledger) missing"; exit 1; }
 
           # Pure-Python packages live in the embedded PYZ, not on disk, so
           # check the archive rather than the filesystem: `eth` is py-evm,
           # whose absence would silently cost the pre-broadcast preview.
           uv run --with pyinstaller python -m PyInstaller.utils.cliutils.archive_viewer \
             --list --recursive "$APP/Contents/MacOS/qeth" > /tmp/pyz.txt
-          for mod in web3 "eth\." ledgereth trezorlib; do
+          for mod in web3 "eth\." qeth.ledger_app trezorlib; do
             grep -q "'$mod" /tmp/pyz.txt \
               || { echo "::error::$mod not in the bundle"; exit 1; }
           done

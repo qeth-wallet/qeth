@@ -139,6 +139,30 @@ class TestDispatchThroughMainWindow:
         assert isinstance(signer, LedgerSigner)
         assert progress
 
+    def test_ledger_progress_text_describes_the_tx(self, mainwindow):
+        from qeth.chains import DEFAULT_CHAINS
+        from qeth.signing import SigningRequest
+        addr = self._add(mainwindow, "ledger", scheme="Ledger Live",
+                         path="m/44'/60'/0'/0/0")
+        req = SigningRequest(chain_id=1, from_addr=addr, to_addr=addr,
+                             data="0xdeadbeef")
+        _signer, progress = mainwindow._pick_signer_for(
+            mainwindow, addr, FakeInteraction(), tx=(req, DEFAULT_CHAINS[0]))
+        assert "blind sign" in progress
+
+    def test_ledger_progress_text_lists_typed_data_hashes(self, mainwindow):
+        from qeth.signing import TypedDataSigningRequest
+        addr = self._add(mainwindow, "ledger", scheme="Ledger Live",
+                         path="m/44'/60'/0'/0/0")
+        typed = {"types": {"EIP712Domain": [{"name": "name", "type": "string"}],
+                           "M": [{"name": "x", "type": "uint8"}]},
+                 "primaryType": "M", "domain": {"name": "q"},
+                 "message": {"x": 1}}
+        req = TypedDataSigningRequest(from_addr=addr, typed_data=typed)
+        _signer, progress = mainwindow._pick_signer_for(
+            mainwindow, addr, FakeInteraction(), message=req)
+        assert "Domain hash: 0x" in progress and "Message hash: 0x" in progress
+
     def test_hot_source_prompts_then_returns_a_hot_signer(self, mainwindow):
         from qeth.hot_wallet import HotWalletSigner
         addr = self._add(mainwindow, "hot")
@@ -233,21 +257,29 @@ class TestBeginSignWiring:
         monkeypatch.setattr(
             ui, "DialogInteraction", self._spy_interaction_cls(instances))
         signer = SimpleNamespace(can_sign=lambda a: True)
-        monkeypatch.setattr(
-            mainwindow, "_pick_signer_for",
-            lambda dlg, addr, it, path=None: (signer, "Signing…"))
+        picked = []
+
+        def pick(dlg, addr, it, path=None, tx=None):
+            picked.append(tx)
+            return signer, "Signing…"
+        monkeypatch.setattr(mainwindow, "_pick_signer_for", pick)
         started = []
         monkeypatch.setattr(mainwindow, "start_worker", started.append)
         sip = []
+        finalised = SimpleNamespace(from_addr=ADDR)
+        chain = SimpleNamespace(chain_id=1, is_evm=True)
         dialog = SimpleNamespace(
-            finalised_request=lambda: SimpleNamespace(from_addr=ADDR),
+            finalised_request=lambda: finalised,
             set_signing_in_progress=sip.append)
 
         mainwindow._begin_sign(
-            dialog, SimpleNamespace(chain_id=1, is_evm=True),
+            dialog, chain,
             on_broadcast=lambda h: None, on_fail=lambda m: None)
 
         assert sip == [True]                          # entered signing state
+        # The request + chain reach the signer pick, so a backend can say
+        # what its device will show (the Ledger's per-tx progress text).
+        assert picked == [(finalised, chain)]
         assert instances[0].progress_calls == ["Signing…"]   # spinner shown
         assert len(started) == 1
         assert isinstance(started[0], SignAndBroadcastWorker)

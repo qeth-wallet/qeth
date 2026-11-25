@@ -9,12 +9,15 @@ and the reconnect-on-stale-session logic are the real ones.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 from types import SimpleNamespace
 
 import pytest
 from eth_account import Account
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from eth_account.messages import encode_defunct, encode_typed_data
 from eth_account.typed_transactions import TypedTransaction
 from eth_keys import keys
@@ -27,6 +30,7 @@ from trezorlib import exceptions, messages  # noqa: E402
 from trezorlib.transport import TransportException  # noqa: E402
 
 import qeth.trezor as trezor_mod  # noqa: E402
+from qeth import trezor_definitions  # noqa: E402
 from qeth.signing import (  # noqa: E402
     MessageSigningRequest, SignerError, SigningRequest, TypedDataSigningRequest,
 )
@@ -58,6 +62,34 @@ def _address(n: list[int]) -> str:
     return Account.from_key(_derive(n)[0]).address
 
 
+def trezorlib_encodes(data: dict) -> None:
+    """Walk ``data`` as trezorlib's ``sign_typed_data`` does — every type
+    through ``get_field_type``, every value through ``encode_data`` — raising
+    where it would (mid-review, on a real device)."""
+    from trezorlib import ethereum
+    types = data["types"]
+    for fields in types.values():
+        for f in fields:
+            ethereum.get_field_type(f["type"], types)
+
+    def walk(type_: str, value) -> None:
+        if ethereum.is_array(type_):
+            for v in value:
+                walk(ethereum.typeof_array(type_), v)
+        elif type_ in types:
+            for f in types[type_]:
+                walk(f["type"], value[f["name"]])
+        else:
+            ethereum.encode_data(value, type_)
+    walk("EIP712Domain", data["domain"])
+    walk(data["primaryType"], data["message"])
+
+
+def _definition_refused() -> exceptions.TrezorFailure:
+    return exceptions.TrezorFailure(messages.Failure(
+        code=messages.FailureType.DataError, message="Invalid definition signature"))
+
+
 class FakeEthereum:
     """Stands in for ``trezorlib.ethereum``: same call shapes, real signatures."""
 
@@ -65,6 +97,21 @@ class FakeEthereum:
         self.calls: list[tuple[str, dict]] = []
         self.fail_next: BaseException | None = None
         self.message_v_as_recovery_id = False
+        # Definitions the firmware asks for mid-signature (archive paths),
+        # what it was answered, and whether it refuses any it's given.
+        self.wants: list[str] = []
+        self.answered: list[bytes | None] = []
+        self.refuses_definitions = False
+        self.sign_fails: BaseException | None = None   # after the definitions
+
+    def _ask_definitions(self, kw: dict) -> None:
+        for path in self.wants:
+            blob = kw["definition_source"].fetch_path(*path.split("/"))
+            self.answered.append(blob)
+            if blob is not None and self.refuses_definitions:
+                raise _definition_refused()
+        if self.sign_fails is not None:
+            raise self.sign_fails
 
     def _record(self, name: str, **kw) -> None:
         self.calls.append((name, kw))
@@ -84,6 +131,7 @@ class FakeEthereum:
 
     def sign_tx_eip1559(self, session, n, **kw):
         self._record("sign_tx_eip1559", **kw)
+        self._ask_definitions(kw)
         signed = Account.sign_transaction({
             "type": 2, "chainId": kw["chain_id"], "nonce": kw["nonce"],
             "gas": kw["gas_limit"], "to": kw["to"], "value": kw["value"],
@@ -94,6 +142,7 @@ class FakeEthereum:
 
     def sign_tx(self, session, n, **kw):
         self._record("sign_tx", **kw)
+        self._ask_definitions(kw)
         signed = Account.sign_transaction({
             "chainId": kw["chain_id"], "nonce": kw["nonce"],
             "gas": kw["gas_limit"], "gasPrice": kw["gas_price"], "to": kw["to"],
@@ -111,6 +160,7 @@ class FakeEthereum:
 
     def sign_typed_data(self, session, n, data, *, metamask_v4_compat):
         self._record("sign_typed_data", metamask_v4_compat=metamask_v4_compat)
+        trezorlib_encodes(data)
         return SimpleNamespace(signature=bytes(
             Account.sign_typed_data(_derive(n)[0], full_message=data).signature))
 
@@ -135,7 +185,7 @@ class FakeSession:
 
 
 @pytest.fixture
-def device(monkeypatch):
+def device(monkeypatch, tmp_path):
     """A connected fake Trezor. Yields the fake ``ethereum`` module; ``opened``
     counts sessions opened (a reconnect opens a second)."""
     eth = FakeEthereum()
@@ -151,7 +201,8 @@ def device(monkeypatch):
 
     monkeypatch.setattr(trezor_mod, "_ethereum", lambda: eth)
     monkeypatch.setattr(trezor_mod, "_open_session", open_session)
-    monkeypatch.setattr(trezor_mod, "_fetch_definition", lambda url: None)
+    # An empty local copy of Trezor's definitions (never the user's).
+    monkeypatch.setattr(trezor_definitions, "CACHE_DIR", tmp_path / "trezor")
     trezor_mod._CONNECTION.reset()
     yield eth
     trezor_mod._CONNECTION.reset()
@@ -268,6 +319,36 @@ TYPED = {
     "message": {"contents": "hi"},
 }
 
+# How dapps write values — all read by eth_account (qeth's hash), most
+# refused by trezorlib as they are: a hex amount, "true", a decimal string,
+# text for bytes, a short bytes4, the domain's fields in another order.
+DAPP_STYLE = {
+    "types": {
+        "EIP712Domain": [{"name": "chainId", "type": "uint256"},
+                         {"name": "name", "type": "string"},
+                         {"name": "verifyingContract", "type": "address"}],
+        "Item": [{"name": "n", "type": "uint8"}],
+        "Order": [{"name": "flag", "type": "bool"}, {"name": "off", "type": "bool"},
+                  {"name": "amount", "type": "uint256"}, {"name": "delta", "type": "int8"},
+                  {"name": "tag", "type": "bytes4"}, {"name": "blob", "type": "bytes"},
+                  {"name": "who", "type": "address"}, {"name": "items", "type": "Item[]"},
+                  {"name": "ids", "type": "uint16[2]"}],
+    },
+    "primaryType": "Order",
+    "domain": {"name": "Shop", "chainId": "0x1",
+               "verifyingContract": "0x" + "cc" * 20},
+    "message": {"flag": "true", "off": "false", "amount": "0xf4240", "delta": "-5",
+                "tag": "0x12ab", "blob": "hello", "who": "0x" + "dd" * 20,
+                "items": [{"n": "7"}], "ids": ["0x01", 2], "extra": 1},
+}
+NESTED = {
+    "types": {"EIP712Domain": [{"name": "name", "type": "string"}],
+              "Grid": [{"name": "cells", "type": "uint16[2][]"}]},
+    "primaryType": "Grid",
+    "domain": {"name": "qeth"},
+    "message": {"cells": [[1, 2], [3, 4]]},
+}
+
 
 @pytest.mark.parametrize("model,call", [
     ("Safe 3", "sign_typed_data"),        # walks the fields on-device
@@ -281,6 +362,110 @@ def test_typed_data_recovers_on_each_model(device, model, call):
     assert Account.recover_message(
         encode_typed_data(full_message=TYPED), signature=sig) == _address(N_PATH)
     assert device.calls[-1][0] == call
+
+
+def _hashes(typed: dict) -> tuple[bytes, bytes]:
+    signable = encode_typed_data(full_message=typed)
+    return signable.header, signable.body
+
+
+def test_dapp_style_values_go_as_trezorlib_takes_them_and_hash_the_same():
+    with pytest.raises(ValueError):
+        trezorlib_encodes(DAPP_STYLE)               # what qeth used to send
+    sent = trezor_mod.trezor_typed_data(DAPP_STYLE)
+    trezorlib_encodes(sent)
+    assert _hashes(sent) == _hashes(DAPP_STYLE)
+    assert [f["name"] for f in sent["types"]["EIP712Domain"]] == \
+        ["name", "chainId", "verifyingContract"]     # as eth_account builds it
+
+
+@settings(max_examples=60, deadline=None)
+@given(n=st.integers(0, 2**256 - 1), form=st.sampled_from(["int", "hex", "dec"]),
+       i=st.integers(-(2**63), 2**63 - 1), raw=st.binary(max_size=40))
+def test_integers_and_bytes_in_any_form_hash_the_same(n, form, i, raw):
+    amount = {"int": n, "hex": hex(n), "dec": str(n)}[form]
+    typed = {
+        "types": {"EIP712Domain": [{"name": "name", "type": "string"}],
+                  "M": [{"name": "a", "type": "uint256"}, {"name": "b", "type": "int64"},
+                        {"name": "c", "type": "bytes"}, {"name": "d", "type": "bytes32"}]},
+        "primaryType": "M", "domain": {"name": "x"},
+        "message": {"a": amount, "b": str(i), "c": "0x" + raw.hex(),
+                    "d": "0x" + raw[:32].hex()},
+    }
+    sent = trezor_mod.trezor_typed_data(typed)
+    trezorlib_encodes(sent)
+    assert _hashes(sent) == _hashes(typed)
+
+
+def test_a_dapp_style_message_signs(device):
+    sig = TrezorSigner(_account()).sign_typed_data(
+        TypedDataSigningRequest(from_addr=_address(N_PATH), typed_data=DAPP_STYLE))
+    assert Account.recover_message(
+        encode_typed_data(full_message=DAPP_STYLE), signature=sig) == _address(N_PATH)
+
+
+@pytest.mark.parametrize("change", [
+    lambda t: t.update(NESTED),                                   # array of arrays
+    lambda t: t["message"].pop("amount"),                         # a missing value
+    lambda t: t["types"].update({"uint8": [{"name": "x", "type": "bool"}]}),
+    lambda t: t["types"]["Order"].append({"name": "q", "type": "uint"})
+    or t["message"].update(q=1),
+    lambda t: t["types"]["Order"].append({"name": "q", "type": "fixed128x18"})
+    or t["message"].update(q=1),
+    lambda t: t["message"].update(ids=[1, 2, 3]),                 # uint16[2] of 3
+    lambda t: t["message"].update(delta=200),                     # out of int8
+    lambda t: t["message"].update(tag="0x" + "11" * 5),           # longer than bytes4
+    lambda t: t.update(primaryType="EIP712Domain"),
+])
+def test_what_the_firmware_cant_hash_is_refused_up_front(change):
+    typed = copy.deepcopy(DAPP_STYLE)
+    change(typed)
+    with pytest.raises(trezor_mod.Eip712Unsupported):
+        trezor_mod.trezor_typed_data(typed)
+
+
+def test_a_safe_refuses_an_array_of_arrays_before_showing_anything(device):
+    with pytest.raises(SignerError, match="array of arrays"):
+        TrezorSigner(_account()).sign_typed_data(
+            TypedDataSigningRequest(from_addr=_address(N_PATH), typed_data=NESTED))
+    assert [name for name, _ in device.calls] == ["get_address"]
+
+
+def test_a_trezor_one_signs_an_array_of_arrays_by_its_hashes(device):
+    device.model = "1"
+    sig = TrezorSigner(_account()).sign_typed_data(
+        TypedDataSigningRequest(from_addr=_address(N_PATH), typed_data=NESTED))
+    assert Account.recover_message(
+        encode_typed_data(full_message=NESTED), signature=sig) == _address(N_PATH)
+    assert device.calls[-1][0] == "sign_typed_data_hash"
+
+
+def test_a_signature_over_another_message_is_refused(device, monkeypatch):
+    other = copy.deepcopy(TYPED)
+    other["message"]["contents"] = "something else"
+
+    def sign_other(self, session, n, data, *, metamask_v4_compat):
+        return SimpleNamespace(signature=bytes(
+            Account.sign_typed_data(_derive(n)[0], full_message=other).signature))
+    monkeypatch.setattr(FakeEthereum, "sign_typed_data", sign_other)
+    with pytest.raises(SignerError, match="doesn't match"):
+        TrezorSigner(_account()).sign_typed_data(
+            TypedDataSigningRequest(from_addr=_address(N_PATH), typed_data=TYPED))
+
+
+def test_the_v_byte_comes_from_recovery_not_the_device(device, monkeypatch):
+    real = FakeEthereum.sign_typed_data
+
+    def recovery_id_v(self, session, n, data, *, metamask_v4_compat):
+        sig = bytes(real(self, session, n, data,
+                         metamask_v4_compat=metamask_v4_compat).signature)
+        return SimpleNamespace(signature=sig[:64] + bytes([sig[64] - 27]))
+    monkeypatch.setattr(FakeEthereum, "sign_typed_data", recovery_id_v)
+    sig = TrezorSigner(_account()).sign_typed_data(
+        TypedDataSigningRequest(from_addr=_address(N_PATH), typed_data=TYPED))
+    assert sig[64] in (27, 28)
+    assert Account.recover_message(
+        encode_typed_data(full_message=TYPED), signature=sig) == _address(N_PATH)
 
 
 # --- connection handling ---------------------------------------------------------
@@ -327,22 +512,69 @@ def test_error_messages_are_actionable():
     assert explain(exceptions.TrezorFailure(failure)) == "Wrong PIN."
 
 
-def test_definition_fetch_failure_answers_none_and_success_is_memoized(monkeypatch):
-    fetched: list[str] = []
+# --- definitions: answered from the local copy -----------------------------------
 
-    def flaky(url):
-        fetched.append(url)
-        if "network" in url:
-            raise OSError("offline")
-        return b"signed-token"
-    monkeypatch.setattr(trezor_mod, "_fetch_definition", flaky)
-    monkeypatch.setattr(trezor_mod, "_DEFINITIONS", {})
-    source = trezor_mod._definition_source()
+CRV_PATH = "eth/chain-id/1/token-d533a949740bb3306d119cc777fa900ba034cd52.dat"
+LIDO_PATH = ("eth/chain-id/1/display-format/"
+             "ae7ab96520de3a18e5e111b5eaab095312d7fe84-a1903eab.dat")
 
-    assert source.fetch_path("eth", "chain-id", "1", "network.dat") is None
-    assert source.fetch_path("eth", "chain-id", "1", "token-ab.dat") == b"signed-token"
-    assert source.fetch_path("eth", "chain-id", "1", "token-ab.dat") == b"signed-token"
-    assert len(fetched) == 2        # the token was fetched once; the failure isn't cached
+
+@pytest.fixture
+def local_definitions():
+    """The local copy, built from the sample of real definitions."""
+    from test_trezor_definitions import FakeHttp
+    trezor_definitions.default_definitions().refresh(session=FakeHttp())
+
+
+def test_definitions_are_answered_from_the_local_copy(device, local_definitions):
+    device.wants = [CRV_PATH, LIDO_PATH, "eth/chain-id/1/token-" + "00" * 20 + ".dat"]
+    raw = TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    crv, lido, unknown = device.answered
+    assert crv is not None and trezor_definitions.verify_definition(crv)
+    assert lido is not None and unknown is None
+
+
+def test_without_a_local_copy_the_device_gets_no_definitions(device):
+    device.wants = [CRV_PATH]
+    raw = TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    assert device.answered == [None]
+
+
+@pytest.mark.parametrize("eip1559", [True, False])
+def test_definitions_the_device_refuses_are_dropped_not_the_signature(
+        device, local_definitions, eip1559):
+    """An outdated definition (the firmware keeps a minimum date) aborts the
+    signature before anything shows: signed again without any."""
+    device.wants = [CRV_PATH]
+    device.refuses_definitions = True
+    req = _req(data="0xa9059cbb") if eip1559 else _req(
+        data="0xa9059cbb", gas_price=10**9, max_fee_per_gas=None,
+        max_priority_fee_per_gas=None)
+    raw = TrezorSigner(_account()).sign(req, _chain(eip1559=eip1559))
+    assert Account.recover_transaction(raw) == _address(N_PATH)
+    signs = [kw for name, kw in device.calls if name.startswith("sign_tx")]
+    assert len(signs) == 2
+    assert device.answered[0] is not None and device.answered[1] is None
+
+
+def test_a_definition_refusal_without_definitions_isnt_retried(device):
+    """Nothing was supplied: the refusal isn't ours to work around."""
+    device.wants = [CRV_PATH]
+    device.sign_fails = _definition_refused()
+    with pytest.raises(SignerError, match="Invalid definition"):
+        TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert [n for n, _ in device.calls].count("sign_tx_eip1559") == 1
+
+
+def test_other_failures_arent_retried(device, local_definitions):
+    device.wants = [CRV_PATH]
+    device.sign_fails = exceptions.TrezorFailure(messages.Failure(
+        code=messages.FailureType.ActionCancelled, message="Cancelled"))
+    with pytest.raises(SignerError):
+        TrezorSigner(_account()).sign(_req(data="0xa9059cbb"), _chain())
+    assert [n for n, _ in device.calls].count("sign_tx_eip1559") == 1
 
 
 class FakeUI:

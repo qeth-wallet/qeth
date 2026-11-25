@@ -6,7 +6,7 @@ the thread that opened it, and trezorlib's client/session objects carry transpor
 state that must not be shared across threads. So each device family gets ONE
 process-lifetime thread: callers submit a closure and block on a ``Future``, and
 the service runs jobs strictly serialized on its own thread, calling an optional
-``after_job`` hook after each (Ledger clears ledgereth's dongle cache there).
+``after_job`` hook after each.
 """
 
 from __future__ import annotations

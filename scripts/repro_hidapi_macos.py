@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise ledgereth/hidapi from different thread shapes on macOS.
+"""Exercise qeth's Ledger client (hidapi) from different thread shapes on macOS.
 
 This is a diagnostic tool, not part of qeth's runtime. Use matrix mode when
 comparing crash behavior: each mode runs in a child process so a native HID
@@ -20,15 +20,9 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
 
 DEFAULT_PATH = "44'/60'/0'/0/0"
 CHILD_TIMEOUT_S = 120.0
-
-
-class _Closeable(Protocol):
-    def close(self) -> None:
-        pass
 
 
 @dataclass
@@ -41,37 +35,24 @@ class ProbeResult:
     message: str
 
 
-def _clear_ledgereth_cache(dongle: object | None = None) -> None:
-    try:
-        from ledgereth import comms
-
-        comms.DONGLE_CACHE = None
-        comms.DONGLE_CONFIG_CACHE = None
-    except Exception:
-        pass
-    if dongle is not None:
-        try:
-            cast(_Closeable, dongle).close()
-        except Exception:
-            pass
-
-
 def _probe_once(iteration: int, path: str) -> ProbeResult:
     start = time.monotonic()
-    dongle: object | None = None
     try:
-        from ledgereth.accounts import get_account_by_path
-        from ledgereth.comms import init_dongle
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from qeth.ledger_app import EthApp, LedgerNotFound, connect, list_devices
 
-        dongle = init_dongle()
-        account = get_account_by_path(path, dongle=dongle)
+        devices = list_devices()
+        if not devices:
+            raise LedgerNotFound()
+        with connect(devices[0]) as transport:
+            address = EthApp(transport).get_address(path)
         return ProbeResult(
             ok=True,
             iteration=iteration,
             thread_id=threading.get_ident(),
             thread_name=threading.current_thread().name,
             elapsed_s=time.monotonic() - start,
-            message=f"derived {account.address} at {path}",
+            message=f"derived {address} at {path}",
         )
     except Exception as exc:
         return ProbeResult(
@@ -82,8 +63,6 @@ def _probe_once(iteration: int, path: str) -> ProbeResult:
             elapsed_s=time.monotonic() - start,
             message="".join(traceback.format_exception_only(type(exc), exc)).strip(),
         )
-    finally:
-        _clear_ledgereth_cache(dongle)
 
 
 def _print_result(result: ProbeResult) -> None:

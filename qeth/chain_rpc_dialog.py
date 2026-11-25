@@ -23,6 +23,7 @@ explicitly clicks OK; on accept the store is updated via
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import QCoreApplication, Qt, QThread, QTimer, Signal
@@ -63,8 +64,8 @@ class _ChainlistLoader(QThread):
     thread pool drains."""
 
     loaded = Signal(object)              # ChainEntry | None
-    # url, ok, latency_ms (or None), simv1 (True/False/None)
-    probed = Signal(str, bool, object, object)
+    # url, ok, latency_ms (or None), simv1 (True/False/None), reason (str|None)
+    probed = Signal(str, bool, object, object, object)
     probing_done = Signal()
     failed = Signal(str)
 
@@ -92,11 +93,11 @@ class _ChainlistLoader(QThread):
         def _probe_one(u):
             # Reachability + latency first; only ask reachable endpoints
             # about eth_simulateV1 (saves a round-trip on dead URLs).
-            ok, latency, _ = probe_rpc(u, self._chain_id,
-                                       timeout=_PROBE_TIMEOUT_S)
+            ok, latency, reason = probe_rpc(u, self._chain_id,
+                                            timeout=_PROBE_TIMEOUT_S)
             simv1 = (probe_simulate_v1(u, timeout=_PROBE_TIMEOUT_S)
                      if ok else None)
-            return ok, latency, simv1
+            return ok, latency, simv1, reason
 
         max_workers = min(_PROBE_CONCURRENCY, len(urls))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -104,10 +105,10 @@ class _ChainlistLoader(QThread):
             for fut in as_completed(futs):
                 url = futs[fut]
                 try:
-                    ok, latency, simv1 = fut.result()
-                except Exception:
-                    ok, latency, simv1 = False, None, None
-                self.probed.emit(url, ok, latency, simv1)
+                    ok, latency, simv1, reason = fut.result()
+                except Exception as e:
+                    ok, latency, simv1, reason = False, None, None, str(e)[:120]
+                self.probed.emit(url, ok, latency, simv1, reason)
         self.probing_done.emit()
 
 
@@ -154,6 +155,9 @@ class ChainRpcDialog(Dialog):
         # picker once all probes have come back. simv1 is True/False/None
         # (supports eth_simulateV1 / definitively not / unknown).
         self._results: dict[str, tuple[float | None, bool, object]] = {}
+        # Why the endpoints that failed did — summarised when none answer, so
+        # an empty list says whether it was timeouts, TLS, DNS, …
+        self._fail_reasons: Counter[str] = Counter()
         self._total_to_probe = 0
         self._done_probing = 0
         self.setWindowTitle(f"RPC for {chain.name} ({chain.chain_id})")
@@ -345,11 +349,13 @@ class ChainRpcDialog(Dialog):
         )
 
     def _on_probed(
-        self, url: str, ok: bool, latency_ms, simv1=None,
+        self, url: str, ok: bool, latency_ms, simv1=None, reason=None,
     ) -> None:
         self._results[url] = (
             float(latency_ms) if latency_ms is not None else None, ok, simv1,
         )
+        if not ok:
+            self._fail_reasons[reason or "no answer"] += 1
         self._done_probing += 1
         # Find the row carrying this URL and update its text /
         # selectability. Iterating is fine — at most ~20 rows.
@@ -375,6 +381,10 @@ class ChainRpcDialog(Dialog):
             )
 
     def _on_probing_done(self) -> None:
+        if not self._results:
+            # Nothing was probed: keep the line saying why (no registry entry,
+            # no HTTP endpoint) instead of a misleading "none reachable".
+            return
         # Drop failed rows, then sort surviving rows by latency
         # ascending. We rebuild item text via the same formatter
         # so the visible row stays consistent.
@@ -396,9 +406,12 @@ class ChainRpcDialog(Dialog):
             if simv1 is True:
                 n_sim += 1
         if not survivors:
+            common = ", ".join(f"{r} ×{n}"
+                               for r, n in self._fail_reasons.most_common(2))
             self.status_lbl.setText(
-                "No reachable public endpoints for this chain. "
-                "Enter a URL manually above."
+                f"None of the {len(self._results)} public endpoints answered"
+                + (f" ({common})" if common else "")
+                + ". Enter a URL manually above."
             )
         else:
             line2 = (f"\n⚡ marks the {n_sim} supporting tx simulation"
@@ -410,7 +423,9 @@ class ChainRpcDialog(Dialog):
             )
 
     def _on_chainlist_failed(self, msg: str) -> None:
-        self.status_lbl.setText(f"chainlist fetch failed: {msg}")
+        self.status_lbl.setText(
+            f"Couldn't download the public endpoint list ({msg}). "
+            "Enter a URL manually above.")
 
     # --- picker behaviour -------------------------------------
 
@@ -471,7 +486,8 @@ class ChainRpcDialog(Dialog):
                 f"✗ Wrong chain — this endpoint isn't chain {self._chain.chain_id}",
                 "bad")
         else:
-            self._set_url_status("✗ Not reachable", "bad")
+            why = f" — {reason}" if isinstance(reason, str) and reason else ""
+            self._set_url_status(f"✗ Not reachable{why}", "bad")
 
     def _set_url_status(self, text: str, kind: str) -> None:
         """Drive the verdict line. ``kind``: ok / bad render as a tinted pill

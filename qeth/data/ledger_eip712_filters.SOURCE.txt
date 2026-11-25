@@ -1,0 +1,19 @@
+Ledger's signed EIP-712 filters — the unmodified data file from Ledger Live's
+npm package, a frozen snapshot.
+
+  package:   @ledgerhq/cryptoassets-evm-signatures@13.7.1 (2025-11-20)
+             https://www.npmjs.com/package/@ledgerhq/cryptoassets-evm-signatures
+  tarball:   https://registry.npmjs.org/@ledgerhq/cryptoassets-evm-signatures/-/cryptoassets-evm-signatures-13.7.1.tgz
+  integrity: sha512-ehLn62L15fOlTH6u5D1eV1d4/QIju6aaUKWy7CpVLSiRmkWEBaORhOL/l9TvBrRIvNLHVBQEhiBaJcJ4hGrlEw==
+  file:      package/lib-es/data/eip712_v2.json (built from Ledger's
+             cdn.live.ledger.com/cryptoassets/eip712_v2.json, since removed)
+  sha256:    63b8427d7ee4f5ac5ccbc1c22e8a93eeb4e96f88a128f28db0e7bef8943f9c67
+  source:    https://github.com/LedgerHQ/ledger-live (libs/ledgerjs/packages/cryptoassets-evm-signatures)
+  license:   the package ships the MIT License (ledger_eip712_filters.LICENSE.txt);
+             its package.json declares Apache-2.0.
+
+Keyed "<chainId>:<verifyingContract>:<schema hash>", each entry is Ledger's
+signed name for a typed message and a signed label and format per field.
+qeth checks every signature against Ledger's key before the Ledger gets it
+(qeth/ledger_metadata.py), and looks messages up locally, so signing tells no
+server what is signed (docs/ledger-clear-signing.md).

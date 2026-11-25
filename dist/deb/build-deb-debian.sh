@@ -17,7 +17,7 @@
 # from-source compile.
 #
 # Debian does NOT package the eth stack (web3/eth-account/eth-abi/eth-keys/rlp/
-# ledgereth), a new-enough hexbytes (>=1), or zxing-cpp, so — like the Mint deb —
+# hidapi), a new-enough hexbytes (>=1), or zxing-cpp, so — like the Mint deb —
 # the FULL Python closure MINUS PySide6 is vendored under /usr/lib/qeth/vendor
 # from PyPI wheels. Vendoring the whole closure (rather than Depending on
 # Debian's python3-pydantic/-aiohttp/-eth-utils, some of which only exist in
@@ -119,7 +119,7 @@ Description: Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-
  qeth is a PySide6 Ethereum wallet for the Linux desktop with Ledger support and
  a Frame-compatible JSON-RPC server. This build targets $DISTRO:
  it Depends on the system PySide6 (native theming) and vendors the eth stack
- (web3, eth-*, ledgereth, ...) privately under /usr/lib/qeth/vendor.$DESC_HELIOS
+ (web3, eth-*, hidapi, ...) privately under /usr/lib/qeth/vendor.$DESC_HELIOS
 EOF
 
 mkdir -p "$OUT"

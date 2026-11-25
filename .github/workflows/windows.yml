@@ -99,7 +99,7 @@ jobs:
           done
           uv run --no-project --with pyinstaller python -m PyInstaller.utils.cliutils.archive_viewer \
             --list --recursive "$D/qeth.exe" > "$RUNNER_TEMP/pyz.txt"
-          for mod in web3 "eth\." ledgereth trezorlib; do
+          for mod in web3 "eth\." qeth.ledger_app trezorlib; do
             grep -q "'$mod" "$RUNNER_TEMP/pyz.txt" \
               || { echo "::error::$mod not in the bundle"; exit 1; }
           done

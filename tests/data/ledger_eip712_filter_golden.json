@@ -1,0 +1,712 @@
+{
+ "source": "LedgerHQ/app-ethereum 1.24.0 client/ (InputData.process_data with filters; signatures from qeth/data/ledger_eip712_filters.json), no token info",
+ "messages": {
+  "permit2_single": {
+   "typed_data": {
+    "types": {
+     "PermitSingle": [
+      {
+       "name": "details",
+       "type": "PermitDetails"
+      },
+      {
+       "name": "spender",
+       "type": "address"
+      },
+      {
+       "name": "sigDeadline",
+       "type": "uint256"
+      }
+     ],
+     "PermitDetails": [
+      {
+       "name": "token",
+       "type": "address"
+      },
+      {
+       "name": "amount",
+       "type": "uint160"
+      },
+      {
+       "name": "expiration",
+       "type": "uint48"
+      },
+      {
+       "name": "nonce",
+       "type": "uint48"
+      }
+     ],
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ]
+    },
+    "primaryType": "PermitSingle",
+    "domain": {
+     "name": "Permit2",
+     "chainId": 1,
+     "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+    },
+    "message": {
+     "details": {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "amount": "1234000000",
+      "expiration": 1800000000,
+      "nonce": 0
+     },
+     "spender": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+     "sigDeadline": 1800000000
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "filters": "Permit2",
+   "v1_filtered": [
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a00000d5065726d697444657461696c73",
+    "e01a00ff070305746f6b656e",
+    "e01a00ff09421406616d6f756e74",
+    "e01a00ff0d42060a65787069726174696f6e",
+    "e01a00ff084206056e6f6e6365",
+    "e01a00000c5065726d697453696e676c65",
+    "e01a00ff17000d5065726d697444657461696c730764657461696c73",
+    "e01a00ff0903077370656e646572",
+    "e01a00ff0e42200b736967446561646c696e65",
+    "e01e000000",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0900075065726d697432",
+    "e01c00ff03000101",
+    "e01c00ff160014000000000022d473030f116ddee9f6b43ac78ba3",
+    "e01e000f51075065726d69743204473045022100e3c597d13d28a87a88b0239404c668373cf5063362f2a81d09eed4582941dfe802207669aabb504fd5b95b2734057f6b8bbf51f14a69a5f9bdf658a5952cefbf44d3",
+    "e01c00000c5065726d697453696e676c65",
+    "e01e00fd4800463044022075103b38995e031d1ebbfe38ac6603bec32854b5146a664e49b4cc4f460c1da6022029f4b0fd1f3b7995ffff1627d4b57f27888a2dcc9b3a4e85c37c67571092c733",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e00fe5910416d6f756e7420616c6c6f77616e63650046304402201a46e6b4ef89eaf9fcf4945d053bfc5616a826400fd758312fbbe976bafc07ec022025a9b408722baf983ee053f90179c75b0c55bb0668f437d55493e36069bbd5a3",
+    "e01c00ff060004498d5880",
+    "e01e00fc570f417070726f76616c20657870697265463044022056b3381e4540629ad73bc434ec49d80523234b82f62340fbb77157fb0eb21a680220459fe9cf6ca309f9c7dfc6d4711fea1848dba661563c57f77b3c2dc480b3a63b",
+    "e01c00ff0600046b49d200",
+    "e01c00ff03000100",
+    "e01e00ff5a12417070726f766520746f207370656e646572463044022033e5713d9cb9bc375b56a9fb53b736c81ea3c4ac5cfb2d3ca7f8b8f0558fe2430220543ca4fef6d6f725f29e343f167fe9dd582aa856ecb5797259050eb990a1befb",
+    "e01c00ff16001466a9893cc07d91d95644aedd05d03f95e1dba8af",
+    "e01c00ff0600046b49d200",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ]
+  },
+  "uniswapx_two_outputs": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ],
+     "PermitWitnessTransferFrom": [
+      {
+       "name": "permitted",
+       "type": "TokenPermissions"
+      },
+      {
+       "name": "spender",
+       "type": "address"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      },
+      {
+       "name": "witness",
+       "type": "ExclusiveDutchOrder"
+      }
+     ],
+     "TokenPermissions": [
+      {
+       "name": "token",
+       "type": "address"
+      },
+      {
+       "name": "amount",
+       "type": "uint256"
+      }
+     ],
+     "ExclusiveDutchOrder": [
+      {
+       "name": "info",
+       "type": "OrderInfo"
+      },
+      {
+       "name": "decayStartTime",
+       "type": "uint256"
+      },
+      {
+       "name": "decayEndTime",
+       "type": "uint256"
+      },
+      {
+       "name": "exclusiveFiller",
+       "type": "address"
+      },
+      {
+       "name": "exclusivityOverrideBps",
+       "type": "uint256"
+      },
+      {
+       "name": "inputToken",
+       "type": "address"
+      },
+      {
+       "name": "inputStartAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "inputEndAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "outputs",
+       "type": "DutchOutput[]"
+      }
+     ],
+     "OrderInfo": [
+      {
+       "name": "reactor",
+       "type": "address"
+      },
+      {
+       "name": "swapper",
+       "type": "address"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      },
+      {
+       "name": "additionalValidationContract",
+       "type": "address"
+      },
+      {
+       "name": "additionalValidationData",
+       "type": "bytes"
+      }
+     ],
+     "DutchOutput": [
+      {
+       "name": "token",
+       "type": "address"
+      },
+      {
+       "name": "startAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "endAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "recipient",
+       "type": "address"
+      }
+     ]
+    },
+    "primaryType": "PermitWitnessTransferFrom",
+    "domain": {
+     "name": "Permit2",
+     "chainId": 1,
+     "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+    },
+    "message": {
+     "permitted": {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "amount": "1000000000"
+     },
+     "spender": "0x6000da47483062A0D734Ba3dc7576Ce6A0B645C4",
+     "nonce": "1993350150331596928745547470452224",
+     "deadline": 1800000000,
+     "witness": {
+      "info": {
+       "reactor": "0x6000da47483062A0D734Ba3dc7576Ce6A0B645C4",
+       "swapper": "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D",
+       "nonce": "1993350150331596928745547470452224",
+       "deadline": 1800000000,
+       "additionalValidationContract": "0x0000000000000000000000000000000000000000",
+       "additionalValidationData": "0x"
+      },
+      "decayStartTime": 1799999000,
+      "decayEndTime": 1799999600,
+      "exclusiveFiller": "0x0000000000000000000000000000000000000000",
+      "exclusivityOverrideBps": "0",
+      "inputToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "inputStartAmount": "1000000000",
+      "inputEndAmount": "1000000000",
+      "outputs": [
+       {
+        "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "startAmount": "330000000000000000",
+        "endAmount": "320000000000000000",
+        "recipient": "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D"
+       },
+       {
+        "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "startAmount": "500000000000000",
+        "endAmount": "480000000000000",
+        "recipient": "0x000000fee13a103A10D593b9AE06b3e05F2E7E1c"
+       }
+      ]
+     }
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "filters": "UniswapX Exclusive Dutch Order",
+   "v1_filtered": [
+    "e01a00000b44757463684f7574707574",
+    "e01a00ff070305746f6b656e",
+    "e01a00ff0e42200b7374617274416d6f756e74",
+    "e01a00ff0c422009656e64416d6f756e74",
+    "e01a00ff0b0309726563697069656e74",
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a0000134578636c757369766544757463684f72646572",
+    "e01a00ff1000094f72646572496e666f04696e666f",
+    "e01a00ff1142200e6465636179537461727454696d65",
+    "e01a00ff0f42200c6465636179456e6454696d65",
+    "e01a00ff11030f6578636c757369766546696c6c6572",
+    "e01a00ff194220166578636c757369766974794f76657272696465427073",
+    "e01a00ff0c030a696e707574546f6b656e",
+    "e01a00ff13422010696e7075745374617274416d6f756e74",
+    "e01a00ff1142200e696e707574456e64416d6f756e74",
+    "e01a00ff17800b44757463684f75747075740100076f757470757473",
+    "e01a0000094f72646572496e666f",
+    "e01a00ff09030772656163746f72",
+    "e01a00ff09030773776170706572",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01a00ff1e031c6164646974696f6e616c56616c69646174696f6e436f6e7472616374",
+    "e01a00ff1a07186164646974696f6e616c56616c69646174696f6e44617461",
+    "e01a0000195065726d69745769746e6573735472616e7366657246726f6d",
+    "e01a00ff1c0010546f6b656e5065726d697373696f6e73097065726d6974746564",
+    "e01a00ff0903077370656e646572",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01a00ff1d00134578636c757369766544757463684f72646572077769746e657373",
+    "e01a000010546f6b656e5065726d697373696f6e73",
+    "e01a00ff070305746f6b656e",
+    "e01a00ff09422006616d6f756e74",
+    "e01e000000",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0900075065726d697432",
+    "e01c00ff03000101",
+    "e01c00ff160014000000000022d473030f116ddee9f6b43ac78ba3",
+    "e01e000f671e556e697377617058204578636c7573697665204475746368204f726465720946304402204571e829b58a2c3d66fdaabb99bcc1b8ecab4941a1f3374a1b29a7c41d5165270220573c71719815aaf0eed481d128cb2a7b77a20de261771149c8b427690a2cd19a",
+    "e01c0000195065726d69745769746e6573735472616e7366657246726f6d",
+    "e01e00fd4800463044022078be69309b8d5ea01982db35d2086bd6aff04515c51fe928ea29fd7e251c46de022059b937f71c84b06bb89d0f7fcd7283134ff56cdd0edd76585239b20b9cd58a82",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e00fe580e417070726f766520616d6f756e7400473045022100c8ec16930a238fcee437e2e941c5723de4ed9eda5e8a209a622148fe7ae7ff7c0220639cfbbaa66ba10d28e9a50c257d25cb60e808d1f4e6eb4dfcb8ee62d96f3627",
+    "e01c00ff0600043b9aca00",
+    "e01e00ff5912417070726f766520746f207370656e64657245304302203b64f5975002aeb73db0a392fce0a706bf1a4f7aa062649c685a601e701c5c50021f3631a4a6213f01320ece3576b91b2f244bb127c79f1cb7c1a64eb25a9db377",
+    "e01c00ff1600146000da47483062a0d734ba3dc7576ce6a0b645c4",
+    "e01c00ff10000e62479db6624b365c356def63b600",
+    "e01e00fc570f417070726f76616c20657870697265463044022049575f4a12e8dc579430758de767a339d5b6a04de5665015cbf0ba01d79bb34a022010416cecc632d6c4e91613c5d341e93ffee3564a20d5b390910e01876ff41827",
+    "e01c00ff0600046b49d200",
+    "e01c00ff1600146000da47483062a0d734ba3dc7576ce6a0b645c4",
+    "e01c00ff160014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d",
+    "e01c00ff10000e62479db6624b365c356def63b600",
+    "e01c00ff0600046b49d200",
+    "e01c00ff1600140000000000000000000000000000000000000000",
+    "e01c00ff020000",
+    "e01c00ff0600046b49ce18",
+    "e01c00ff0600046b49d070",
+    "e01c00ff1600140000000000000000000000000000000000000000",
+    "e01c00ff03000100",
+    "e01e00fd4901473045022100d3c21c3942b5dda1ff2d2a7ac05cfd432d12f1b155717ba0f7b4e0a04ef37c030220432cb15f7aee6d18bf058f30167464412ff9b9496bf9901424ea096106a5c20b",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e00fe5007546f20737761700146304402203a5258f4e4180c34a370f6fa58f3783986b637c5cc4606e0f0d1d9116d3050a5022070f724195bf7780b3f41670c93125d6a2e55b0d58d2128bad0db1925dad34f6c",
+    "e01c00ff0600043b9aca00",
+    "e01c00ff0600043b9aca00",
+    "e01c000f0102",
+    "e01e00ff5911546f6b656e7320746f2072656365697665463044022026ad09b7426cb6990ac9814f57f135f9fa34515f4fbbfae23b27973f8acab2c202203f9720e91c8837e04b18431b7bdcd57acc1ccd7b7c62442f0feb791a1dda62eb",
+    "e01c00ff160014c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "e01c00ff0a00080494654067e10000",
+    "e01e00ff621a4d696e696d756d20616d6f756e747320746f2072656365697665463044022016b38151bd2469157548fb0b681d6e428a527c88f4b36fb862b7623a6b40dbb702201143008909039c6c393e49a99b6efe002b55485be80e663e15aa39513cd074a6",
+    "e01c00ff0a00080470de4df8200000",
+    "e01e00ff550c4f6e20416464726573736573473045022100c6fdae9d879d2c20c3b7a66f44b2e60d6e781f0b0da2c21c5ca612b0a34ac3860220282196259c1d0bad4695f77a653ba03704785ad7a4d6007ea3055c5c4084a8d5",
+    "e01c00ff160014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d",
+    "e01e00ff5911546f6b656e7320746f2072656365697665463044022026ad09b7426cb6990ac9814f57f135f9fa34515f4fbbfae23b27973f8acab2c202203f9720e91c8837e04b18431b7bdcd57acc1ccd7b7c62442f0feb791a1dda62eb",
+    "e01c00ff160014c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "e01c00ff09000701c6bf52634000",
+    "e01e00ff621a4d696e696d756d20616d6f756e747320746f2072656365697665463044022016b38151bd2469157548fb0b681d6e428a527c88f4b36fb862b7623a6b40dbb702201143008909039c6c393e49a99b6efe002b55485be80e663e15aa39513cd074a6",
+    "e01c00ff09000701b48eb57e0000",
+    "e01e00ff550c4f6e20416464726573736573473045022100c6fdae9d879d2c20c3b7a66f44b2e60d6e781f0b0da2c21c5ca612b0a34ac3860220282196259c1d0bad4695f77a653ba03704785ad7a4d6007ea3055c5c4084a8d5",
+    "e01c00ff160014000000fee13a103a10d593b9ae06b3e05f2e7e1c",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ]
+  },
+  "uniswapx_no_outputs": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ],
+     "PermitWitnessTransferFrom": [
+      {
+       "name": "permitted",
+       "type": "TokenPermissions"
+      },
+      {
+       "name": "spender",
+       "type": "address"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      },
+      {
+       "name": "witness",
+       "type": "ExclusiveDutchOrder"
+      }
+     ],
+     "TokenPermissions": [
+      {
+       "name": "token",
+       "type": "address"
+      },
+      {
+       "name": "amount",
+       "type": "uint256"
+      }
+     ],
+     "ExclusiveDutchOrder": [
+      {
+       "name": "info",
+       "type": "OrderInfo"
+      },
+      {
+       "name": "decayStartTime",
+       "type": "uint256"
+      },
+      {
+       "name": "decayEndTime",
+       "type": "uint256"
+      },
+      {
+       "name": "exclusiveFiller",
+       "type": "address"
+      },
+      {
+       "name": "exclusivityOverrideBps",
+       "type": "uint256"
+      },
+      {
+       "name": "inputToken",
+       "type": "address"
+      },
+      {
+       "name": "inputStartAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "inputEndAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "outputs",
+       "type": "DutchOutput[]"
+      }
+     ],
+     "OrderInfo": [
+      {
+       "name": "reactor",
+       "type": "address"
+      },
+      {
+       "name": "swapper",
+       "type": "address"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      },
+      {
+       "name": "additionalValidationContract",
+       "type": "address"
+      },
+      {
+       "name": "additionalValidationData",
+       "type": "bytes"
+      }
+     ],
+     "DutchOutput": [
+      {
+       "name": "token",
+       "type": "address"
+      },
+      {
+       "name": "startAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "endAmount",
+       "type": "uint256"
+      },
+      {
+       "name": "recipient",
+       "type": "address"
+      }
+     ]
+    },
+    "primaryType": "PermitWitnessTransferFrom",
+    "domain": {
+     "name": "Permit2",
+     "chainId": 1,
+     "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+    },
+    "message": {
+     "permitted": {
+      "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "amount": "1000000000"
+     },
+     "spender": "0x6000da47483062A0D734Ba3dc7576Ce6A0B645C4",
+     "nonce": "1993350150331596928745547470452224",
+     "deadline": 1800000000,
+     "witness": {
+      "info": {
+       "reactor": "0x6000da47483062A0D734Ba3dc7576Ce6A0B645C4",
+       "swapper": "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D",
+       "nonce": "1993350150331596928745547470452224",
+       "deadline": 1800000000,
+       "additionalValidationContract": "0x0000000000000000000000000000000000000000",
+       "additionalValidationData": "0x"
+      },
+      "decayStartTime": 1799999000,
+      "decayEndTime": 1799999600,
+      "exclusiveFiller": "0x0000000000000000000000000000000000000000",
+      "exclusivityOverrideBps": "0",
+      "inputToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "inputStartAmount": "1000000000",
+      "inputEndAmount": "1000000000",
+      "outputs": []
+     }
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "filters": "UniswapX Exclusive Dutch Order",
+   "v1_filtered": [
+    "e01a00000b44757463684f7574707574",
+    "e01a00ff070305746f6b656e",
+    "e01a00ff0e42200b7374617274416d6f756e74",
+    "e01a00ff0c422009656e64416d6f756e74",
+    "e01a00ff0b0309726563697069656e74",
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a0000134578636c757369766544757463684f72646572",
+    "e01a00ff1000094f72646572496e666f04696e666f",
+    "e01a00ff1142200e6465636179537461727454696d65",
+    "e01a00ff0f42200c6465636179456e6454696d65",
+    "e01a00ff11030f6578636c757369766546696c6c6572",
+    "e01a00ff194220166578636c757369766974794f76657272696465427073",
+    "e01a00ff0c030a696e707574546f6b656e",
+    "e01a00ff13422010696e7075745374617274416d6f756e74",
+    "e01a00ff1142200e696e707574456e64416d6f756e74",
+    "e01a00ff17800b44757463684f75747075740100076f757470757473",
+    "e01a0000094f72646572496e666f",
+    "e01a00ff09030772656163746f72",
+    "e01a00ff09030773776170706572",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01a00ff1e031c6164646974696f6e616c56616c69646174696f6e436f6e7472616374",
+    "e01a00ff1a07186164646974696f6e616c56616c69646174696f6e44617461",
+    "e01a0000195065726d69745769746e6573735472616e7366657246726f6d",
+    "e01a00ff1c0010546f6b656e5065726d697373696f6e73097065726d6974746564",
+    "e01a00ff0903077370656e646572",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01a00ff1d00134578636c757369766544757463684f72646572077769746e657373",
+    "e01a000010546f6b656e5065726d697373696f6e73",
+    "e01a00ff070305746f6b656e",
+    "e01a00ff09422006616d6f756e74",
+    "e01e000000",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0900075065726d697432",
+    "e01c00ff03000101",
+    "e01c00ff160014000000000022d473030f116ddee9f6b43ac78ba3",
+    "e01e000f671e556e697377617058204578636c7573697665204475746368204f726465720946304402204571e829b58a2c3d66fdaabb99bcc1b8ecab4941a1f3374a1b29a7c41d5165270220573c71719815aaf0eed481d128cb2a7b77a20de261771149c8b427690a2cd19a",
+    "e01c0000195065726d69745769746e6573735472616e7366657246726f6d",
+    "e01e00fd4800463044022078be69309b8d5ea01982db35d2086bd6aff04515c51fe928ea29fd7e251c46de022059b937f71c84b06bb89d0f7fcd7283134ff56cdd0edd76585239b20b9cd58a82",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e00fe580e417070726f766520616d6f756e7400473045022100c8ec16930a238fcee437e2e941c5723de4ed9eda5e8a209a622148fe7ae7ff7c0220639cfbbaa66ba10d28e9a50c257d25cb60e808d1f4e6eb4dfcb8ee62d96f3627",
+    "e01c00ff0600043b9aca00",
+    "e01e00ff5912417070726f766520746f207370656e64657245304302203b64f5975002aeb73db0a392fce0a706bf1a4f7aa062649c685a601e701c5c50021f3631a4a6213f01320ece3576b91b2f244bb127c79f1cb7c1a64eb25a9db377",
+    "e01c00ff1600146000da47483062a0d734ba3dc7576ce6a0b645c4",
+    "e01c00ff10000e62479db6624b365c356def63b600",
+    "e01e00fc570f417070726f76616c20657870697265463044022049575f4a12e8dc579430758de767a339d5b6a04de5665015cbf0ba01d79bb34a022010416cecc632d6c4e91613c5d341e93ffee3564a20d5b390910e01876ff41827",
+    "e01c00ff0600046b49d200",
+    "e01c00ff1600146000da47483062a0d734ba3dc7576ce6a0b645c4",
+    "e01c00ff160014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d",
+    "e01c00ff10000e62479db6624b365c356def63b600",
+    "e01c00ff0600046b49d200",
+    "e01c00ff1600140000000000000000000000000000000000000000",
+    "e01c00ff020000",
+    "e01c00ff0600046b49ce18",
+    "e01c00ff0600046b49d070",
+    "e01c00ff1600140000000000000000000000000000000000000000",
+    "e01c00ff03000100",
+    "e01e00fd4901473045022100d3c21c3942b5dda1ff2d2a7ac05cfd432d12f1b155717ba0f7b4e0a04ef37c030220432cb15f7aee6d18bf058f30167464412ff9b9496bf9901424ea096106a5c20b",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e00fe5007546f20737761700146304402203a5258f4e4180c34a370f6fa58f3783986b637c5cc4606e0f0d1d9116d3050a5022070f724195bf7780b3f41670c93125d6a2e55b0d58d2128bad0db1925dad34f6c",
+    "e01c00ff0600043b9aca00",
+    "e01c00ff0600043b9aca00",
+    "e01c000f0100",
+    "e01e000119187769746e6573732e6f7574707574732e5b5d2e746f6b656e",
+    "e01e01ff5911546f6b656e7320746f2072656365697665463044022026ad09b7426cb6990ac9814f57f135f9fa34515f4fbbfae23b27973f8acab2c202203f9720e91c8837e04b18431b7bdcd57acc1ccd7b7c62442f0feb791a1dda62eb",
+    "e01e00011d1c7769746e6573732e6f7574707574732e5b5d2e656e64416d6f756e74",
+    "e01e01ff621a4d696e696d756d20616d6f756e747320746f2072656365697665463044022016b38151bd2469157548fb0b681d6e428a527c88f4b36fb862b7623a6b40dbb702201143008909039c6c393e49a99b6efe002b55485be80e663e15aa39513cd074a6",
+    "e01e00011d1c7769746e6573732e6f7574707574732e5b5d2e726563697069656e74",
+    "e01e01ff550c4f6e20416464726573736573473045022100c6fdae9d879d2c20c3b7a66f44b2e60d6e781f0b0da2c21c5ca612b0a34ac3860220282196259c1d0bad4695f77a653ba03704785ad7a4d6007ea3055c5c4084a8d5",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ]
+  },
+  "usdc_permit": {
+   "typed_data": {
+    "types": {
+     "EIP712Domain": [
+      {
+       "name": "name",
+       "type": "string"
+      },
+      {
+       "name": "version",
+       "type": "string"
+      },
+      {
+       "name": "chainId",
+       "type": "uint256"
+      },
+      {
+       "name": "verifyingContract",
+       "type": "address"
+      }
+     ],
+     "Permit": [
+      {
+       "name": "owner",
+       "type": "address"
+      },
+      {
+       "name": "spender",
+       "type": "address"
+      },
+      {
+       "name": "value",
+       "type": "uint256"
+      },
+      {
+       "name": "nonce",
+       "type": "uint256"
+      },
+      {
+       "name": "deadline",
+       "type": "uint256"
+      }
+     ]
+    },
+    "primaryType": "Permit",
+    "domain": {
+     "name": "USD Coin",
+     "version": "2",
+     "chainId": 1,
+     "verifyingContract": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    },
+    "message": {
+     "owner": "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D",
+     "spender": "0x1111111254EEB25477B68fb85Ed929f73A960582",
+     "value": "1000000",
+     "nonce": 0,
+     "deadline": 1700000000
+    }
+   },
+   "path": "44'/60'/0'/0/0",
+   "filters": "Permit USDC transfers",
+   "v1_filtered": [
+    "e01a00000c454950373132446f6d61696e",
+    "e01a00ff0605046e616d65",
+    "e01a00ff09050776657273696f6e",
+    "e01a00ff0a422007636861696e4964",
+    "e01a00ff130311766572696679696e67436f6e7472616374",
+    "e01a0000065065726d6974",
+    "e01a00ff0703056f776e6572",
+    "e01a00ff0903077370656e646572",
+    "e01a00ff0842200576616c7565",
+    "e01a00ff084220056e6f6e6365",
+    "e01a00ff0b422008646561646c696e65",
+    "e01e000000",
+    "e01c00000c454950373132446f6d61696e",
+    "e01c00ff0a000855534420436f696e",
+    "e01c00ff03000132",
+    "e01c00ff03000101",
+    "e01c00ff160014a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "e01e000f5e155065726d69742055534443207472616e7366657273044630440220206a52ce36fb75683481981c6f1f2e1cc405da8b7172b4fe3b465b19139bd66602200d5d2a800a253881fe4d87ebaf57fffbc7fbb8591ebe251ac69d650469b51d16",
+    "e01c0000065065726d6974",
+    "e01e00ff4c0446726f6d463044022048b3e79d00220b5fb5908cb13264f0a10ab1faa1f9c95702c4dcb91aefa2475a02204096676422035d37f30a9fea09553d5d1751413e5a2cb60d1b9919aa33e166b1",
+    "e01c00ff160014dad77910dbdfde764fc21fcd4e74d71bbaca6d8d",
+    "e01e00ff5b12417070726f766520746f207370656e646572473045022100da7a47dbc3c943c29f2211e139c5dc43b6c54d79d4aec205694155a8a2bed5b902202f1a885a2a6de6b705f8cfe87d6994e470c779f8bb8e6e52166c4e41437e605f",
+    "e01c00ff1600141111111254eeb25477b68fb85ed929f73a960582",
+    "e01e00fe5910416d6f756e7420616c6c6f77616e6365ff46304402204051e74e9df5f2f42d4f41e3753ceed3cd98a7061c64caf7d6042de668e6b26e02204a277db67a39a5db5aee910a4086482c76e13fe39793049c40514be6dcde27b0",
+    "e01c00ff0500030f4240",
+    "e01c00ff03000100",
+    "e01e00fc570f417070726f76616c2065787069726546304402204c15b30fec2f9f4724326abaa390a08ec626b4ada487d0ed3c6adb32a54da73f02205c6484d3e5ebb3d5a05d5286bc1443c69960771e44d392a16f6cf029325adc62",
+    "e01c00ff0600046553f100",
+    "e00c000115058000002c8000003c800000000000000000000000"
+   ]
+  }
+ }
+}

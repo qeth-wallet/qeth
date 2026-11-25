@@ -109,7 +109,7 @@ Description: Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-
  qeth is a PySide6 Ethereum wallet for the Linux desktop with Ledger support and
  a Frame-compatible JSON-RPC server. This build runs under deadsnakes python3.11
  with a from-source PySide6 6.4 against the system Qt 6.4 (native theming),
- vendoring PySide6 + the eth stack (web3, eth-*, ledgereth, ...) privately.$DESC_HELIOS
+ vendoring PySide6 + the eth stack (web3, eth-*, hidapi, ...) privately.$DESC_HELIOS
 EOF
 
 mkdir -p "$OUT"

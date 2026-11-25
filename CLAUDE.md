@@ -15,10 +15,15 @@ user's Qt theme applies.
 - `qeth/chains.py` — `Chain` dataclass (incl. `ws_url` for the live watcher; `family` `"evm"`/`"tron"`, `native_decimals`, `api_url`/`api_fallbacks` for a family's own HTTP API, `multicall_address` when Multicall3 isn't at the canonical address) + `DEFAULT_CHAINS` (Ethereum, OP, Polygon, Arb, Base, Gnosis, BSC, Robinhood on DRPC/publicnode, and Tron)
 - `qeth/address.py` — per-family address codecs: `codec_for(chain).parse(text)` → internal `0x` hex, `.display(addr)` → EIP-55 or Tron `T…` (base58check); `parse_any` picks the family from the text. `qeth/explorer.py` — `explorer_url(chain, kind, value)`, Etherscan-family paths or Tronscan's `#/` routes.
 - `qeth/tron/` — Tron (docs/tron.md): `tx.py` (proto3 encoding of `Transaction.raw` — Transfer / TriggerSmartContract — built LOCALLY, never a node's txID; txid = sha256(raw_data); TaPoS `ref_block`; signature helpers), `client.py` (`TronClient` over the full-node HTTP API — PublicNode first, TronGrid fallback since keyless TronGrid is ~3 req/s — plus TronGrid's indexed `/v1` via `index_get`), `fees.py` (bandwidth / activation / energy burn estimate, `fee_limit`, `build_tx` with a fresh solid-block reference expiring 10 min after head), `history.py` (`TronGridTransactionSource`), `paths.py` (coin type 195 schemes), ABIs from the chain itself (`abi.TronAbiSource`: `wallet/getcontract`'s deployed ABI, normalised, proxy-resolved; the transactions plugin routes Tron chain ids to it), `messages.py` (TronWeb's message digests — TIP-191 `signMessageV2`, the legacy fixed-`\n32`-header `trx.sign(hex)` — and a port of TronWeb's TIP-712 encoder: `trcToken` keeps its name in the type hash, addresses in any form; `check_domain_chain` refuses a domain not pinning the Tron chain, since the same key's signature would be valid EIP-712 for its EVM account). Send on Tron is the SAME composer as EVM: `plugins/transactions/tron_send._TronFeesMixin` swaps `_TxComposerDialog`'s fee hooks (`_build_gas_section` / `_kick_gas` / `_update_max_total` / `_set_fee_controls_enabled` / `_native_fee_reserve`, `finalised_tron` instead of `finalised_request`) → `TronSendTokenDialog(_TronFeesMixin, SendTokenDialog)`; events come from the node's own simulation (`simulate._simulate_tron`), recipient identity from Tronscan (`contract_identity.TronIdentitySource`, which `ContractIdentitySource` delegates Tron chains to). Tron reads (TRX balance, TRC-20 multicall, metadata) go through the unchanged `EthClient` over Tron's read-only `/jsonrpc`; sending never does.
-- `qeth/ledger.py` — Ledger signing + account discovery via `ledgereth`. Driven from QThread workers, but **all** ledgereth/hidapi calls route through `ledger_hid.py` (never touch HID from a worker directly — see the thread-safety convention below).
+- `qeth/ledger.py` — Ledger signing + account discovery on qeth's own client (`ledger_app.py`). Driven from QThread workers, but **all** device calls route through `ledger_hid.py` (never touch HID from a worker directly — see the thread-safety convention below). Every signature's y-parity is recovered against the account being signed for (`ledger_app.recover_parity`) — the device's `v` byte is never trusted, and a signature that doesn't recover to the account is refused. With several Ledgers plugged in, signing uses the one deriving the account (`_on_device_holding`, skipping a locked one); discovery refuses to guess.
+- `qeth/ledger_app.py` — qeth's Ledger Ethereum-app client (Qt-free; replaced ledgereth — plan + milestones in `docs/ledger-clear-signing.md`). Ledger's USB-HID framing straight on `hidapi` (channel/tag/sequence-checked reassembly, a continuation timeout, no `assert`-based validation), a Speculos TCP transport (`QETH_LEDGER_SPECULOS=host:port` points qeth itself at an emulator), `EthApp` (GET CONFIGURATION / GET ADDRESS / SIGN tx / personal sign / EIP-712 by hashes), the status-word → sentence table, and device model from the USB product id. Encodings are pinned byte-for-byte to what ledgereth sent by golden vectors (`tests/data/ledger_golden_apdus.json`); `tests/test_ledger_app.py`'s `SoftLedger` signs with real keys like the device (incl. the low-byte EIP-155 `v`).
+- `qeth/ledger_metadata.py` — the local mirror of Ledger's signed ERC-20 token descriptors (M4 of `docs/ledger-clear-signing.md`): the WHOLE token list for every EVM chain in the store, from Ledger's keyless CAL, ETag-revalidated (an unchanged dataset = one 304), refreshed by `plugins/wallets/ledger_mirror.py`'s hourly scheduler while a Ledger account exists — **never because of a signature**, so the lookup at signing time tells no server what's being signed. `TokenMirror.lookup` verifies Ledger's signature on the host (sha256 + the legacy key from app-ethereum `doc/apdu.md`) before `LedgerSigner` sends `PROVIDE ERC 20 TOKEN INFORMATION`; the signing spinner says what the device will show (`SignerPlugin.tx_progress_text`). Don't add an online fallback for a token missing from the mirror — that's exactly the leak the design avoids. Also holds `Eip712FilterSet` (M5b): Ledger's signed EIP-712 filters from the shipped, FROZEN snapshot `qeth/data/ledger_eip712_filters.json` (npm `@ledgerhq/cryptoassets-evm-signatures@13.7.1`'s `eip712_v2.json`, byte-for-byte, sha256 pinned by a test; provenance + license beside it — Ledger removed the source file and its live `/dapps` is per-message and partner-gated), keyed `chainId:verifyingContract:schemaHash`, each entry's signatures checked on first lookup (same legacy key).
+- `qeth/ledger_eip712.py` — EIP-712 typed data as the Ledger app's full-message commands (M5 of `docs/ledger-clear-signing.md`; Qt-free): `parse_typed_data` normalises the dapp's JSON the way eth_account reads it (domain fields in eth_account's own order, its readings of bools/hex ints/bytes) into a schema + leaf-encoded value tree, and `v1_commands` (app 1.9.19+, streaming review: domain fields then the message hash) / `v2_commands` (app 1.24+, two TLV payloads checked before the review, every field shown) build the wire from it; what the device can't carry raises `Eip712Unsupported` → the hashes (V0). `LedgerSigner.sign_typed_data` picks by app version and falls back to V0 when the app refuses before showing anything (the Nano S answers `0x6D00`). Pinned byte-for-byte to Ledger's reference client (`tests/data/ledger_eip712_golden.json`) and by re-hashing against eth_account. **Filters (M5b)**: a message in the snapshot (`schema_hash` = sha224 of the types JSON, structs sorted by name — what the device computes from the definitions it gets) goes first as `filtered_v1_commands` (app 1.12+; V1-only, definitions sorted by name, token info from the M4 mirror, each filter right before its value, empty arrays' filters "discarded") → Ledger's labels, no blind signing; `check_filters` refuses any filter that doesn't lead to a value it can format, and a device refusal before SIGN sends the message undescribed. Pinned to the reference client too (`tests/data/ledger_eip712_filter_golden.json`).
+- `qeth/eip712_values.py` — eth_account's reading of EIP-712 values (`read_int` / `read_bytes` / `read_bool` / `read_address`, `DOMAIN_FIELDS` in eth_account's order, `Eip712Unsupported`), shared by the Ledger encoder and the Trezor normaliser so what each device hashes matches qeth's hash. `signing.typed_data_hashes` is eth_account's domain / message hash both signers recover against.
+- `qeth/trezor_definitions.py` — the local copy of Trezor's signed definitions (`docs/trezor-clear-signing.md`; Qt-free): the WHOLE `data.trezor.io/firmware/definitions/definitions.tar.xz` (~14 MB: networks, tokens, ERC-7730 display formats), revalidated by ETag (unchanged = one 304), its Ethereum part split by chain id mod 32 into xz tar buckets under `~/.qeth/trezor/definitions/` (xz shares the Merkle proofs: ~16 MB vs ~46 MB as a zip); refreshed by `plugins/wallets/trezor_mirror.py` while a Trezor account exists (shared `mirror_scheduler.MirrorScheduler` with the Ledger mirror). `lookup` verifies each definition on the host against Trezor's production keys (`verify_definition`) — the firmware aborts the whole signature on a bad one. No online fallback.
 - `qeth/device_thread.py` — `DeviceJobService`: the generic one-process-lifetime-thread job queue a USB hardware wallet runs on (callers block on a `Future`; optional `after_job` hook). `ledger_hid.LedgerHidService` and the Trezor service are instances.
-- `qeth/trezor.py` — Trezor signing + discovery via **trezorlib** (the optional `trezor` extra, imported lazily; missing → "install qeth[trezor]"). Every call is a job on the Trezor device thread (`run_trezor_job(fn(session), ui)`), which also **caches the trezorlib session** (so a passphrase wallet isn't re-asked per signature; the USB transport is still opened per call, so Suite can use the device between jobs) and rebuilds it once on a stale transport / `InvalidSessionError`. **Passphrase wallets:** the session IS one passphrase wallet, so it's ENDED (`_Connection.forget`) when the holds-check fails (a typo'd passphrase otherwise refused every retry until a re-plug) and at the start of every `TrezorWorker` scan (`fresh_session`), so the next job asks for the passphrase again. `TrezorSigner` (EIP-1559 + legacy tx, personal_sign, EIP-712 — full `sign_typed_data`, hash-only on a Trezor One) checks the device holds the address first, like Ledger; raw txs are assembled by `signing.signed_eip1559_tx` / `signed_legacy_tx` (shared with the QR signer). Tx signing passes a tolerant, memoized data.trezor.io definition source so the device names the chain/token. Device callbacks (PIN / passphrase / THP pairing code / "confirm on device") reach the job's `SignerInteraction`. `TrezorWorker` discovery: BIP44 / Legacy export ONE public node and derive on the host (`qr.derive`); Ledger Live asks per address; emits the wallet's root `fingerprint` (per seed AND passphrase) stored as the account's `xfp` to key its device tree. trezorlib's `@workflow` ParamSpec typing reads every `ethereum.*` parameter as `Never` under mypy, hence the `_ethereum() -> Any` accessor.
-- `qeth/ledger_hid.py` — single-thread Ledger/HID execution service. Funnels every ledgereth call (discovery, signing, the availability probe) through one process-lifetime thread via `run_ledger_hid_job()`, and clears ledgereth's dongle cache after each job. hidapi's macOS backend ties the HID handle to the thread that opened it, so this is load-bearing on macOS.
+- `qeth/trezor.py` — Trezor signing + discovery via **trezorlib** (the optional `trezor` extra, imported lazily; missing → "install qeth[trezor]"). Every call is a job on the Trezor device thread (`run_trezor_job(fn(session), ui)`), which also **caches the trezorlib session** (so a passphrase wallet isn't re-asked per signature; the USB transport is still opened per call, so Suite can use the device between jobs) and rebuilds it once on a stale transport / `InvalidSessionError`. **Passphrase wallets:** the session IS one passphrase wallet, so it's ENDED (`_Connection.forget`) when the holds-check fails (a typo'd passphrase otherwise refused every retry until a re-plug) and at the start of every `TrezorWorker` scan (`fresh_session`), so the next job asks for the passphrase again. `TrezorSigner` (EIP-1559 + legacy tx, personal_sign, EIP-712 — full `sign_typed_data`, hash-only on a Trezor One) checks the device holds the address first, like Ledger; EIP-712 goes as `trezor_typed_data(typed)` — values read the way eth_account reads them (`eip712_values`) and put in the forms trezorlib encodes (it refused hex amounts / "true" MIDWAY through the review), domain type rebuilt in eth_account's order; an array of arrays (no firmware support, and core firmware has NO hash-signing message — `UnexpectedMessage`) is refused before the device shows anything; every typed signature is recovered against eth_account's hash (`v` from recovery); raw txs are assembled by `signing.signed_eip1559_tx` / `signed_legacy_tx` (shared with the QR signer). Tx signing answers the firmware's mid-signature definition requests (chain / token / ERC-7730 display format) from the LOCAL copy of Trezor's archive (`trezor_definitions`) — never data.trezor.io per signature; if the firmware refuses a definition qeth sent (`_refused_definitions`: a DataError about a definition, e.g. older than its minimum date) the tx is signed again without any (raw display) rather than failing (`_sign_with_definitions`). Device callbacks (PIN / passphrase / THP pairing code / "confirm on device") reach the job's `SignerInteraction`. `TrezorWorker` discovery: BIP44 / Legacy export ONE public node and derive on the host (`qr.derive`); Ledger Live asks per address; emits the wallet's root `fingerprint` (per seed AND passphrase) stored as the account's `xfp` to key its device tree. trezorlib's `@workflow` ParamSpec typing reads every `ethereum.*` parameter as `Never` under mypy, hence the `_ethereum() -> Any` accessor.
+- `qeth/ledger_hid.py` — single-thread Ledger/HID execution service. Funnels every device call (discovery, signing, the availability probe) through one process-lifetime thread via `run_ledger_hid_job()`; each job opens and closes the device (`ledger_app.connect`), so no handle outlives it. hidapi's macOS backend ties the HID handle to the thread that opened it, so this is load-bearing on macOS.
 - `qeth/token_discovery/` — every way tokens are found: `sources.py` (per-holder explorer sources: Etherscan v2 / Blockscout + the `BLOCKSCOUT_INSTANCES` / `ETHERSCAN_V2_*` endpoint maps reused across the codebase; `TokenSource` ABC), `tokenlists.py` (curated whitelists from Uniswap / CoinGecko / Curve / 1inch, merged + disk-cached at `~/.qeth/tokenlists/`), `toptokens.py` (top-by-market-cap head), `own_history.py` (`discover_own_tokens` — vault/LP tokens the user obtained via their OWN txs, reconstructed from the tx + activity caches — DISK only, so it misses a deposit whose tx was never loaded into the Transactions tab), `vault_provenance.py` (the network rescue for exactly that miss: `read_vault_assets` is a cheap `asset()`-multicall pre-filter narrowing held-but-unrecognised tokens to the rare ERC-4626-shaped ones, then `self_acquired_via_own_tx` confirms **provenance** — the account acquired it via a tx it SENT, not an airdrop — from explorer `Transfer(*, to=owner)` logs; that's a stronger "not spam" signal than any redeem simulation, and needs none). Public API re-exported from the package `__init__`. (The Transfer/Approval log fetches use the **explorer logs API**, not node `eth_getLogs` — public RPCs cap the block range and reject a full-history query.)
 - `qeth/pricing/` — USD price discovery: `base.py` (`Price` / `PriceSource`), `native.py` (native-asset CoinGecko id), `defillama.py` (the free keyless primary source), `onchain.py` (on-chain vault/LP pricing — ERC-4626, Curve LP, UniV2 LP — via `EthClient` multicall, with `ChainedPriceSource` falling back to it when DefiLlama has no quote).
 - `qeth/plugins/transactions/contract_identity.py` — "what is this contract": name/verified (Etherscan v2 `getsourcecode`) + deployer/date (`getcontractcreation`) + public name-tags for the address and its deployer (Blockscout OLI metadata service — free; "AladdinDAO: Deployer", "Binance: Hot Wallet"). `fetch_labels` folds the tag's `meta.projectName` into a bare `name` (`_tag_label`: Curve's "Router v1.2" + project "Curve Finance" → "Curve Finance: Router v1.2") so every OLI label reads "Project: Name", without double-prefixing an already-`Project: Label` name. Permanently disk-cached at `~/.qeth/contract_id/`. `describe_identity()` renders a multi-line badge: headline (name-tag › ContractName › ⚠ unverified) / provenance (deployed-date · deployer-label-or-cluster) / familiarity, whose verb is set by `context` — "interact" ("you've interacted N×"), "send" ("sent here N×"), or **"approve"** (the SPENDER of an approve: "approved to this spender N× before" · "called it M×", ⚠ "first approval to this spender" on a brand-new one). Counts come from the local tx cache (`TransactionCache.interaction_count`/`sent_to_count`/`approvals_to_count` — the last reads the spender out of `approve`/`increaseAllowance` calldata, since an approve's `to` is the TOKEN). Shown on the Contract: row of the details + signing + send dialogs — and an **approve additionally gets its own "Spender:" identity row** (the token Contract: row doesn't show who the allowance empowers): `_parse_approve` → `_make_identity_row(to_addr=spender, mode="approve")` in both `SignTransactionDialog` and `TransactionDetailsDialog`.
@@ -55,9 +60,9 @@ fresh security fixes are pulled forward per-package — see the comments in
 **The lock is what ships.** The AppImage and Flatpak install exactly the
 `uv.lock` versions, hash-checked: `dist/lock-export.sh OUTDIR EXTRA…` exports
 `requirements.txt` + a pinned setuptools (`build-backend` group) and the builds
-run pip with `--require-hashes --no-build-isolation` (so even the sdist-only
-deps — ledgerblue, pydes, python-u2flib-host — build with the pinned
-setuptools). Helios comes from `dist/fetch-helios.sh` (pinned version +
+run pip with `--require-hashes --no-build-isolation` (so qeth itself, and any
+dep that falls back to its sdist, builds with the pinned setuptools; the lock
+has no sdist-only deps since ledgereth/ledgerblue left it). Helios comes from `dist/fetch-helios.sh` (pinned version +
 sha256); appimagetool + its runtime and the manylinux image are pinned too.
 `scripts/release.sh` gates on the lock first: in sync, `uv audit` clean, and not
 behind on any shipped package (else bump, test, commit — or
@@ -77,6 +82,38 @@ distro package — and break on a self-contained / non-Linux install. This
 already bit `cryptography` (Frame-import only; now the `frame` extra +
 guarded import). When adding an import, declare it (core dep or an extra);
 don't lean on system-site-packages.
+
+### Ledger: Speculos locally, a real device for the final check
+
+`scripts/speculos.sh test [nanos|nanox|nanosp]` runs `tests/test_ledger_speculos.py`
+(marker `speculos`, off by default) against Ledger's Speculos emulator running
+the real Ethereum app: it signs every flow through the production path
+(`LedgerSigner` → `run_ledger_hid_job` → `ledger_app` over Speculos' APDU
+socket), presses the device's buttons through the REST API, and recovers each
+signature against Speculos' test seed. Containers only (podman or docker — the
+Speculos image bundles qemu-arm). Pins: the Nano S app is built from app-ethereum
+1.16.1-lns (its last, what real Nano S devices run; Ledger dropped the Nano S in 1.17 and in Speculos 0.25.7) in
+`ledger-app-builder-lite:4.3.0` and emulated by Speculos 0.25.5; the Nano X /
+S Plus run the 1.24.0 release ELFs (sha256-pinned) on Speculos 0.27.4, pinned by
+digest (no version tag past 0.25.13; app 1.24 needs API level 27). Stax/Flex
+(touchscreens) aren't driven yet. `scripts/speculos.sh qeth MODEL` launches qeth
+itself against the emulator (`QETH_LEDGER_SPECULOS=host:port`). A real Nano S /
+Nano X only has to confirm the USB-HID layer: `scripts/ledger_probe.py [--sign]`
+(model, app version + settings, first address; `--sign` signs a text message and
+checks it recovers).
+
+### Trezor: the firmware emulator locally, a real device for the final check
+
+`scripts/trezor-emu.sh test [safe3|safe5]` runs `tests/test_trezor_emulator.py` (marker
+`trezor_emulator`, off by default) against Trezor's own Linux builds of release firmware
+2.13.1 (data.trezor.io `emulators-new`, sha256-pinned), each headless in a small Debian
+container (pinned by digest) with SDL3 — the binaries are Nix builds, so their loader is
+patched with patchelf as trezor-user-env does. Loaded with the test seed "all" × 12; UDP
+on loopback (Safe 3 21324, Safe 5 21334; the debug link is the next port), which qeth
+reaches through trezorlib's `TREZOR_PATH` (`scripts/trezor-emu.sh qeth` launches qeth
+against one). The debug link reads screens (`read_layout`) and presses (`press_yes` /
+`press_no`, both layouts). Emulator builds accept Trezor's production-signed definitions,
+so the tests use real ones (`tests/data/trezor_definitions_sample.tar.xz`).
 
 ### Windows: Wine locally, GitHub for the final check
 
@@ -132,9 +169,13 @@ into `dev` (`simulate` → py-evm, `frame` → cryptography) so their tests run.
   Run after touching imports/deps.
 - `uvx detect-secrets scan --baseline .secrets.baseline` — secret scan. The
   committed `.secrets.baseline` records the known test-fixture keys/hex (e.g.
-  `_TEST_PRIV`), so a run flags only NEW potential secrets. Regenerate with
-  `uvx detect-secrets scan > .secrets.baseline` after adding intentional
-  fixtures.
+  `_TEST_PRIV`), so a run flags only NEW potential secrets. It also holds the
+  scan's settings, incl. an `--exclude-files` pattern for the Ledger data files
+  (`qeth/data/ledger_eip712_filters.json`, `tests/data/ledger_*.json` — public
+  signatures and APDUs by the thousand). After adding intentional fixtures,
+  update it with the same `--baseline` command (it keeps those settings and
+  adds the new findings — review them); a fresh `scan > .secrets.baseline`
+  would drop the exclusion.
 
 ## Conventions
 
@@ -254,6 +295,13 @@ track the user's Qt font, not a pixel count):
   an empty label still claims a font line — `setVisible(bool(text))` it;
   see the status-label note below.)
 
+It also replaces **macOS's QFormLayout defaults** on every form in the dialog
+(`pin_form_defaults`): QMacStyle centres a form and keeps its fields at
+their size hint, so line edits rendered as short boxes mid-dialog (a Mac
+report of the chain-RPC dialog). Only those Mac defaults are replaced, so it's
+a no-op elsewhere and an explicit policy survives. A form OUTSIDE a `Dialog`
+(a main-window panel) doesn't get it — call `pin_form_defaults` yourself.
+
 So just build `VBox[ form, …, buttonBox ]` and inherit it: the button row
 sits a clear gap below the content — no per-dialog `setSpacing`/
 `addSpacing` for the outer rhythm (those fight or double the standard).
@@ -293,17 +341,16 @@ in this codebase is the pattern).
 
 ### Ledger / hidapi: one thread, always
 
-hidapi (the USB-HID layer `ledgereth` sits on) is **not** thread-safe — its
+hidapi (the USB-HID layer `ledger_app.py` sits on) is **not** thread-safe — its
 macOS backend ties the open handle to the thread's CoreFoundation run-loop,
 so a handle opened on one transient Qt worker and touched from another
-corrupts state and hangs/crashes. **Never call `ledgereth` (or `init_dongle`)
-from a worker thread directly.** Route every Ledger op through the
-single-thread service: `run_ledger_hid_job(fn)` (`qeth/ledger_hid.py`) runs
+corrupts state and hangs/crashes. **Never open a Ledger (`ledger_app.connect`,
+`HidTransport`) from a worker thread directly.** Route every Ledger op through
+the single-thread service: `run_ledger_hid_job(fn)` (`qeth/ledger_hid.py`) runs
 `fn` serialized on one process-lifetime thread and blocks for the result.
 Discovery batches paths into one job; signing does the device-holds check +
-the sign in one job (shared dongle). The service clears ledgereth's dongle
-cache after every job, so the old per-call cache-clearing is centralized
-there — don't re-add it at call sites.
+the sign in one job (one session). Each job opens the device and closes it in
+a `with connect(device)` block — don't keep a transport across jobs.
 
 ### Type checking: mypy enforced over the whole package
 
@@ -463,6 +510,14 @@ restarts. UI changes persist; RPC chain switches are session-only.
   `/v1/openapi.json` — pull that when looking for an endpoint rather
   than guessing path shapes. Per-chain tokens at
   `/v1/getTokens/all/{ethereum|optimism|polygon|arbitrum|base}`.
+- **Ledger CAL** (`global.api.prd.ledger.com/cal/v1`) — Ledger's signed
+  metadata service. Keyless: `/tokens` (bulk-listable with `network=<id>`; a
+  bare `chain_id=` filter is IGNORED in listings and returns every network;
+  cursor in the `x-ledger-next` response header, sent back as `cursor=`),
+  `/networks`, `/certificates`; ETag = the dataset commit (weak `W/"…"`).
+  `/dapps` (ERC-7730 calldata descriptors, EIP-712 filters) is 403 without a
+  partner origin token. Ledger's proxy lookup POSTs calldata and its trusted
+  names need a per-signature device challenge — qeth uses neither.
 - **TrustWallet assets** — bundled logos sourced from
   `github.com/trustwallet/assets/master/blockchains/<slug>/info/logo.png`.
 - **Token icons** — `logoURI` field in the tokenlists.org schema

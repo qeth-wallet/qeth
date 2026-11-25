@@ -1,5 +1,5 @@
 Name:           qeth
-Version:        0.27.0
+Version:        0.27.1
 Release:        1%{?dist}
 Summary:        Qt Ethereum wallet with Ledger support and a Frame-compatible JSON-RPC server
 
@@ -148,6 +148,13 @@ install -Dm0644 qeth/assets/logos/qeth-icon-rounded.svg \
 %{_datadir}/icons/hicolor/scalable/apps/io.github.michwill.qeth.svg
 
 %changelog
+* Wed Nov 25 2026 Michael Egorov <michwill@yieldbasis.com> - 0.27.1-1
+- The -verify variant bundles Helios 0.12.1: EVM execution under revm's
+  standard memory limit, the OP Stack's Jovian and Karst upgrades
+- Linea leaves verified mode: Helios stopped syncing it and 0.12.1 removes it
+- RPC dialog: says why an endpoint failed (timeout, TLS, DNS, HTTP status),
+  and shows full-width fields on macOS
+
 * Tue Nov 24 2026 Michael Egorov <michwill@yieldbasis.com> - 0.27.0-1
 - Ledger: qeth talks to the Ethereum app itself (ledgereth and its 28
   dependencies are gone); ERC-20 transfers and approvals show the token and

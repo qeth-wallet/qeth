@@ -39,11 +39,12 @@ def test_quit_waits_for_a_worker_that_finishes_in_time(mainwindow):
         release.join()
 
 
-@pytest.mark.parametrize("helios_stalled", [False, True], ids=["cleanup", "startup-lock"])
-def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, helios_stalled):
+@pytest.mark.parametrize("stall", ["worker", "startup-lock", "logging-lock", "sidecar-stop"])
+def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, stall):
     from qeth.single_instance import SingleInstanceGuard
 
     script = textwrap.dedent('''
+        import logging
         import sys
         from threading import Event
         from types import SimpleNamespace
@@ -57,16 +58,24 @@ def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, helios_st
         guard = SingleInstanceGuard(sys.argv[1])
         assert guard.is_primary()
         assert guard._server is not None  # A listen failure also returns True.
-        helios_stalled = sys.argv[2] == "True"
-        if not helios_stalled:
-            helios._stop_all = lambda: print("helios stopped", flush=True)
+        stall = sys.argv[2]
+        helios._FORCED_STOP_TIMEOUT_S = 0.5
+        if stall == "sidecar-stop":
+            helios._sidecars[10] = SimpleNamespace(stop=lambda: Event().wait(20))
+        helios._sidecars[1] = SimpleNamespace(
+            stop=lambda: print("helios stopped", flush=True),
+        )
 
         class Window(QWidget):
             _join_workers = MainWindow._join_workers
             _SHUTDOWN_JOIN_S = 0.05
-            _HELIOS_SHUTDOWN_S = 0.25
 
         started = Event()
+
+        class BlockedHandler(logging.Handler):
+            def emit(self, record):
+                started.set()
+                Event().wait(20)
 
         class StuckWorker(QThread):
             def requestInterruption(self):
@@ -74,7 +83,12 @@ def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, helios_st
                 print("interruption requested", flush=True)
 
             def run(self):
-                if helios_stalled:
+                if stall == "logging-lock":
+                    logger = logging.getLogger()
+                    logger.addHandler(BlockedHandler())
+                    logger.warning("worker entered log handler")
+                    return
+                if stall == "startup-lock":
                     # _ensure_sidecar holds this lock while starting Helios.
                     with helios._lock:
                         started.set()
@@ -99,18 +113,16 @@ def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, helios_st
     ''')
     key = str(tmp_path)
     completed = subprocess.run(
-        [sys.executable, "-c", script, key, str(helios_stalled)],
+        [sys.executable, "-c", script, key, stall],
         capture_output=True, text=True, timeout=10,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    expected = [
+    assert completed.stdout.splitlines() == [
         "interruption requested",
         "cache drained",
         "rpc stopped",
+        "helios stopped",
     ]
-    if not helios_stalled:
-        expected.append("helios stopped")
-    assert completed.stdout.splitlines() == expected
     guard = SingleInstanceGuard(key)
     assert guard.is_primary()
     assert guard._server is not None

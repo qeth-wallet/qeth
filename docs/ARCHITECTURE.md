@@ -45,9 +45,10 @@ hand off through the `SignerBridge` (a `QObject` + `concurrent.futures.Future`,
 On quit, `MainWindow` refuses new workers, cancels GUI prompts, requests
 cooperative interruption, and stops plugins. Plugin shutdown drains the
 transaction cache. The window gives running workers one shared five-second
-join deadline. If a worker is still running, qeth stops its RPC server and
-gives Helios cleanup up to six seconds. It then exits even if the Helios lock
-is still held, before Qt can destroy the running thread. ENS text-key
+join deadline. If a worker is still running, qeth stops its RPC server.
+Helios starts cleanup for all registered sidecars in parallel and waits up
+to six seconds. A stalled startup cannot block cleanup of registered sidecars.
+Qeth then exits before Qt can destroy the running thread. ENS text-key
 discovery stops between history pages and suppresses cancelled results.
 
 ---

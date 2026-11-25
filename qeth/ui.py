@@ -6,10 +6,8 @@ and ``.plugins.wallets``. This module just orchestrates: instantiates
 the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
-import logging
 import os
 import random
-from threading import Thread
 from time import monotonic
 
 from PySide6.QtCore import (
@@ -769,7 +767,6 @@ class MainWindow(QMainWindow):
         return worker
 
     _SHUTDOWN_JOIN_S = 5.0
-    _HELIOS_SHUTDOWN_S = 6.0  # Allow the five-second terminate-to-kill grace.
 
     def _join_workers(self) -> None:
         """Stop workers cooperatively and bound the wait before Qt teardown."""
@@ -803,18 +800,13 @@ class MainWindow(QMainWindow):
         if stuck:
             # Qt aborts when it destroys a running QThread. Plugin shutdown
             # above has already drained the transaction cache.
-            logging.getLogger(__name__).warning("Forcing exit after worker shutdown timeout")
             try:
                 if self.rpc is not None:
                     self.rpc.stop()
             finally:
                 try:
-                    from .helios import _stop_all
-                    # A stuck worker can hold the Helios startup lock. Bound
-                    # the entire cleanup, including any waits on sidecars.
-                    cleanup = Thread(target=_stop_all, daemon=True)
-                    cleanup.start()
-                    cleanup.join(timeout=self._HELIOS_SHUTDOWN_S)
+                    from .helios import stop_for_exit
+                    stop_for_exit()
                 finally:
                     os._exit(0)
 

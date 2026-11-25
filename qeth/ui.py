@@ -9,6 +9,7 @@ and handles geometry persistence."""
 import logging
 import os
 import random
+from threading import Thread
 from time import monotonic
 
 from PySide6.QtCore import (
@@ -768,6 +769,7 @@ class MainWindow(QMainWindow):
         return worker
 
     _SHUTDOWN_JOIN_S = 5.0
+    _HELIOS_SHUTDOWN_S = 6.0  # Allow the five-second terminate-to-kill grace.
 
     def _join_workers(self) -> None:
         """Stop workers cooperatively and bound the wait before Qt teardown."""
@@ -808,7 +810,11 @@ class MainWindow(QMainWindow):
             finally:
                 try:
                     from .helios import _stop_all
-                    _stop_all()
+                    # A stuck worker can hold the Helios startup lock. Bound
+                    # the entire cleanup, including any waits on sidecars.
+                    cleanup = Thread(target=_stop_all, daemon=True)
+                    cleanup.start()
+                    cleanup.join(timeout=self._HELIOS_SHUTDOWN_S)
                 finally:
                     os._exit(0)
 

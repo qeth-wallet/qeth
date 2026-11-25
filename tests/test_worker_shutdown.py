@@ -5,6 +5,7 @@ import sys
 import textwrap
 from threading import Event, Timer
 
+import pytest
 from PySide6.QtCore import QThread
 
 
@@ -38,21 +39,32 @@ def test_quit_waits_for_a_worker_that_finishes_in_time(mainwindow):
         release.join()
 
 
-def test_quit_exits_when_a_worker_misses_the_deadline():
+@pytest.mark.parametrize("helios_stalled", [False, True], ids=["cleanup", "startup-lock"])
+def test_quit_exits_when_a_worker_misses_the_deadline(qtbot, tmp_path, helios_stalled):
+    from qeth.single_instance import SingleInstanceGuard
+
     script = textwrap.dedent('''
+        import sys
         from threading import Event
         from types import SimpleNamespace
         from PySide6.QtCore import QThread
         from PySide6.QtWidgets import QApplication, QWidget
         from qeth import helios
+        from qeth.single_instance import SingleInstanceGuard
         from qeth.ui import MainWindow
 
         app = QApplication([])
-        helios._stop_all = lambda: print("helios stopped", flush=True)
+        guard = SingleInstanceGuard(sys.argv[1])
+        assert guard.is_primary()
+        assert guard._server is not None  # A listen failure also returns True.
+        helios_stalled = sys.argv[2] == "True"
+        if not helios_stalled:
+            helios._stop_all = lambda: print("helios stopped", flush=True)
 
         class Window(QWidget):
             _join_workers = MainWindow._join_workers
             _SHUTDOWN_JOIN_S = 0.05
+            _HELIOS_SHUTDOWN_S = 0.25
 
         started = Event()
 
@@ -62,6 +74,12 @@ def test_quit_exits_when_a_worker_misses_the_deadline():
                 print("interruption requested", flush=True)
 
             def run(self):
+                if helios_stalled:
+                    # _ensure_sidecar holds this lock while starting Helios.
+                    with helios._lock:
+                        started.set()
+                        Event().wait(20)
+                    return
                 started.set()
                 Event().wait(20)
 
@@ -79,16 +97,23 @@ def test_quit_exits_when_a_worker_misses_the_deadline():
         window._join_workers()
         raise AssertionError("Qt teardown would encounter a live worker")
     ''')
+    key = str(tmp_path)
     completed = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=10,
+        [sys.executable, "-c", script, key, str(helios_stalled)],
+        capture_output=True, text=True, timeout=10,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert completed.stdout.splitlines() == [
+    expected = [
         "interruption requested",
         "cache drained",
         "rpc stopped",
-        "helios stopped",
     ]
+    if not helios_stalled:
+        expected.append("helios stopped")
+    assert completed.stdout.splitlines() == expected
+    guard = SingleInstanceGuard(key)
+    assert guard.is_primary()
+    assert guard._server is not None
 
 
 def test_no_callback_can_start_another_worker_after_quit(mainwindow):

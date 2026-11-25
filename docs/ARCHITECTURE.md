@@ -46,8 +46,9 @@ On quit, `MainWindow` refuses new workers, cancels GUI prompts, requests
 cooperative interruption, and stops plugins. Plugin shutdown drains the
 transaction cache. The window gives running workers one shared five-second
 join deadline. If a worker is still running, qeth stops its RPC server and
-Helios sidecars, then exits before Qt can destroy the running thread. ENS
-text-key discovery stops between history pages and suppresses cancelled results.
+gives Helios cleanup up to six seconds. It then exits even if the Helios lock
+is still held, before Qt can destroy the running thread. ENS text-key
+discovery stops between history pages and suppresses cancelled results.
 
 ---
 

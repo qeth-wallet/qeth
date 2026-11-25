@@ -91,16 +91,18 @@ jobs:
 
       # The "verify" variant bundles the Helios light client, matching the
       # -verify .deb/.rpm/Flatpak/AppImage. Pinned to the same release those
-      # ship (0.12.0) rather than "latest", so a release is reproducible and an
+      # ship (0.12.1) rather than "latest", so a release is reproducible and an
       # upstream change can't silently alter what we distribute. (0.11.1
       # compiled in a CA list that trusts the compromised eMudhra intermediates;
-      # 0.12.0 uses the system store.) The digest is GitHub's for that asset.
+      # 0.12.0 uses the system store; 0.12.1 applies revm's standard EVM
+      # memory limit and follows the OP Stack's Jovian and Karst upgrades.) The
+      # digest is GitHub's for that asset.
       - name: Fetch Helios (darwin arm64)
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/helios.tar.gz \
-            https://github.com/a16z/helios/releases/download/0.12.0/helios_darwin_arm64.tar.gz
-          echo "2e18f13b498c52122f2002d585f1734b6b14b0380a325273cbf9d47ae27bc0f5  /tmp/helios.tar.gz" \
+            https://github.com/a16z/helios/releases/download/0.12.1/helios_darwin_arm64.tar.gz
+          echo "3bd6d44e175eeacf2554909415ebeeaf954d6752c8d2c9954886d0c676038a79  /tmp/helios.tar.gz" \
             | shasum -a 256 -c -
           tar -xzf /tmp/helios.tar.gz -C /tmp
           chmod +x /tmp/helios

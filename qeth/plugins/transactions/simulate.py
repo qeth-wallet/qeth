@@ -331,7 +331,6 @@ _VERIFIED_FORK_LAG: dict[int, int] = {
     1:     2,     # mainnet, ~12s blocks  → ~24s
     10:    10,    # OP,      ~2s blocks   → ~20s
     8453:  10,    # Base,    ~2s blocks   → ~20s
-    59144: 8,     # Linea,   ~2-3s blocks → ~16-24s
 }
 _DEFAULT_FORK_LAG = 3
 

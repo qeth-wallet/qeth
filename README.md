@@ -142,7 +142,7 @@ curl https://raw.githubusercontent.com/a16z/helios/master/heliosup/install | bas
 heliosup
 ```
 
-Supported on Ethereum, Optimism, Base and Linea (the chains Helios verifies).
+Supported on Ethereum, Optimism and Base (the chains Helios verifies).
 Set `QETH_HELIOS=0` to disable.
 
 **Or skip the install:** every package has a **`-verify` variant** (e.g.

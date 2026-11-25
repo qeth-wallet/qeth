@@ -11,8 +11,8 @@
 # path via QETH_BUNDLE_HELIOS; copy them this one.
 set -euo pipefail
 
-HELIOS_VERSION="0.12.0"
-HELIOS_SHA256="dd2746b11323f8f4a4e4613891b275148f34963bf4912cab79a34316a02a94b4"
+HELIOS_VERSION="0.12.1"
+HELIOS_SHA256="9913fd8595d94f7d2a13619e508fe5c30ad99830fceda046b869fdcdcf380cfe"
 URL="https://github.com/a16z/helios/releases/download/${HELIOS_VERSION}/helios_linux_amd64.tar.gz"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

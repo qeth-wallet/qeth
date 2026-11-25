@@ -131,14 +131,15 @@ def note_execution_rpc_incapable(chain: Chain) -> bool:
 # chain_id -> (helios subcommand, --network value or None for the
 # subcommand's default). Only networks Helios actually verifies: the
 # consensus light client exists for Ethereum; OP-stack chains verify via
-# the unsafe-signer path; Linea via its own module. Everything else
-# (Polygon, Arbitrum, Gnosis, BNB, TAC, …) has no Helios support — those
-# chains keep the direct untrusted-RPC path.
+# the unsafe-signer path. Everything else (Polygon, Arbitrum, Gnosis, BNB,
+# TAC, Linea, …) has no Helios support — those chains keep the direct
+# untrusted-RPC path. (Linea had its own module, but it stopped syncing at a
+# Linea hard fork and Helios 0.12.1 removed the `linea` subcommand: mapping it
+# would respawn a process that exits at once on every verified read.)
 HELIOS_NETWORKS: dict[int, tuple[str, str | None]] = {
     1:     ("ethereum", None),          # mainnet is the subcommand default
     10:    ("opstack", "op-mainnet"),
     8453:  ("opstack", "base"),
-    59144: ("linea", None),
 }
 
 # Per-module flag that makes helios fetch a FRESH weak-subjectivity checkpoint
@@ -149,7 +150,7 @@ HELIOS_NETWORKS: dict[int, tuple[str, str | None]] = {
 # the sidecar never reports ready and verified mode silently degrades to the
 # untrusted path. The flag is a no-op when the checkpoint is still fresh. Its
 # spelling differs by subcommand (opstack needs a fresh *Ethereum* checkpoint
-# to trustlessly fetch its unsafe-signer address); linea's module has none.
+# to trustlessly fetch its unsafe-signer address).
 _FALLBACK_FLAG: dict[str, str] = {
     "ethereum": "--load-external-fallback",
     "opstack": "--ethereum-load-external-fallback",

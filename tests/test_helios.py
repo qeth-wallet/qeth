@@ -87,9 +87,10 @@ def test_explicit_bin_missing_falls_through(monkeypatch):
 
 
 def test_network_map_covers_helios_chains_only():
-    assert set(hl.HELIOS_NETWORKS) == {1, 10, 8453, 59144}
-    # The unsupported majority must stay on the direct path.
-    for cid in (137, 42161, 100, 56, 239, 324):
+    assert set(hl.HELIOS_NETWORKS) == {1, 10, 8453}
+    # The unsupported majority must stay on the direct path — incl. Linea
+    # (59144): Helios 0.12.1 has no `linea` subcommand.
+    for cid in (137, 42161, 100, 56, 239, 324, 59144):
         assert cid not in hl.HELIOS_NETWORKS
 
 
@@ -245,24 +246,18 @@ def test_spawn_argv_shape():
 
 
 def test_spawn_argv_includes_checkpoint_fallback_per_module():
-    """Every Helios module that CAN self-heal a stale weak-subjectivity
-    checkpoint gets the (module-specific) external-fallback flag; the one that
-    can't (linea) gets none. Without it an aged-out checkpoint returns '404 LC
-    bootstrap unavailable' from the consensus RPC and the sidecar never syncs."""
+    """Every Helios module gets its (module-specific) flag to self-heal a stale
+    weak-subjectivity checkpoint. Without it an aged-out checkpoint returns '404
+    LC bootstrap unavailable' from the consensus RPC and the sidecar never syncs."""
     cases = {
         1:     "--load-external-fallback",           # ethereum
         8453:  "--ethereum-load-external-fallback",  # opstack
-        59144: None,                                 # linea: no such flag
     }
     for chain_id, flag in cases.items():
         sc = hl.HeliosSidecar(
             Chain("C", chain_id, "https://rpc.example"), "/fake/helios",
             popen=_FakeProc)
-        argv = sc._proc.argv
-        if flag is None:
-            assert not any("external-fallback" in a for a in argv), argv
-        else:
-            assert flag in argv, argv
+        assert flag in sc._proc.argv, sc._proc.argv
 
 
 # --- verified_chain ------------------------------------------------------------

@@ -6,7 +6,10 @@ and ``.plugins.wallets``. This module just orchestrates: instantiates
 the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
+import logging
+import os
 import random
+from time import monotonic
 
 from PySide6.QtCore import (
     QByteArray, QEvent, QObject, QRect, QSize, Qt, QThread, QTimer,
@@ -764,14 +767,10 @@ class MainWindow(QMainWindow):
         worker.start()
         return worker
 
-    def _join_workers(self) -> None:
-        """Finish in-flight background workers before Qt destroys its threads.
+    _SHUTDOWN_JOIN_S = 5.0
 
-        A network read can outlast a fixed shutdown deadline. Abandoning its
-        QThread then aborts the process (SIGABRT). Request cooperative stopping
-        and wait for the current timeout-bounded reads to finish. Workers
-        self-evict via ``finished``, but at quit there's no event loop left to
-        run that, so we join explicitly here."""
+    def _join_workers(self) -> None:
+        """Stop workers cooperatively and bound the wait before Qt teardown."""
         self._shutting_down = True
         # Signing workers can be blocked on callbacks queued to this thread.
         # Release them before joining, while the GUI can still close widgets.
@@ -790,12 +789,28 @@ class MainWindow(QMainWindow):
                 plugin.shutdown()
             except RuntimeError:
                 pass          # C++ side already gone
-        for w in list(self._active_workers):
+        deadline = monotonic() + self._SHUTDOWN_JOIN_S
+        stuck = False
+        for worker in list(self._active_workers):
             try:
-                if w.isRunning():
-                    w.wait()
+                if worker.isRunning():
+                    worker.wait(max(0, int((deadline - monotonic()) * 1000)))
+                    stuck |= worker.isRunning()
             except RuntimeError:
                 pass          # C++ object already gone — nothing to join
+        if stuck:
+            # Qt aborts when it destroys a running QThread. Plugin shutdown
+            # above has already drained the transaction cache.
+            logging.getLogger(__name__).warning("Forcing exit after worker shutdown timeout")
+            try:
+                if self.rpc is not None:
+                    self.rpc.stop()
+            finally:
+                try:
+                    from .helios import _stop_all
+                    _stop_all()
+                finally:
+                    os._exit(0)
 
     def set_tray(self, tray) -> None:
         """Adopt the tray controller (the desktop-notification sink). Called

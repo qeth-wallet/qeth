@@ -55,7 +55,7 @@ def test_join_workers_joins_running_and_skips_finished(mainwindow):
         def requestInterruption(self):
             pass
 
-        def wait(self):
+        def wait(self, timeout_ms):
             calls[self.name] += 1
             self.running = False
             return True

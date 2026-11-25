@@ -1,5 +1,8 @@
 """Shutdown must finish network workers before Qt destroys their wrappers."""
 
+import subprocess
+import sys
+import textwrap
 from threading import Event, Timer
 
 from PySide6.QtCore import QThread
@@ -18,13 +21,11 @@ class DelayedRead(QThread):
         self.completed.set()
 
 
-def test_quit_waits_for_a_read_beyond_the_old_shutdown_deadline(mainwindow):
+def test_quit_waits_for_a_worker_that_finishes_in_time(mainwindow):
     worker = DelayedRead()
     mainwindow.start_worker(worker)
     assert worker.entered.wait(1)
-    # Shorten the old five-second deadline so this reproduces the real crash
-    # boundary without spending five seconds or aborting pytest itself.
-    mainwindow._SHUTDOWN_JOIN_S = 0.001
+    mainwindow._SHUTDOWN_JOIN_S = 1.0
     release = Timer(0.1, worker.release.set)
     release.start()
     try:
@@ -35,6 +36,59 @@ def test_quit_waits_for_a_read_beyond_the_old_shutdown_deadline(mainwindow):
         worker.release.set()
         worker.wait(3000)
         release.join()
+
+
+def test_quit_exits_when_a_worker_misses_the_deadline():
+    script = textwrap.dedent('''
+        from threading import Event
+        from types import SimpleNamespace
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication, QWidget
+        from qeth import helios
+        from qeth.ui import MainWindow
+
+        app = QApplication([])
+        helios._stop_all = lambda: print("helios stopped", flush=True)
+
+        class Window(QWidget):
+            _join_workers = MainWindow._join_workers
+            _SHUTDOWN_JOIN_S = 0.05
+
+        started = Event()
+
+        class StuckWorker(QThread):
+            def requestInterruption(self):
+                super().requestInterruption()
+                print("interruption requested", flush=True)
+
+            def run(self):
+                started.set()
+                Event().wait(20)
+
+        worker = StuckWorker()
+        worker.start()
+        assert started.wait(3)
+        window = Window()
+        window._active_workers = {worker}
+        window.rpc = SimpleNamespace(stop=lambda: print("rpc stopped", flush=True))
+        window.plugins = {
+            "transactions": SimpleNamespace(
+                shutdown=lambda: print("cache drained", flush=True),
+            )
+        }
+        window._join_workers()
+        raise AssertionError("Qt teardown would encounter a live worker")
+    ''')
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.splitlines() == [
+        "interruption requested",
+        "cache drained",
+        "rpc stopped",
+        "helios stopped",
+    ]
 
 
 def test_no_callback_can_start_another_worker_after_quit(mainwindow):

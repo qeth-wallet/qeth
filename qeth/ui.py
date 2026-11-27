@@ -6,7 +6,9 @@ and ``.plugins.wallets``. This module just orchestrates: instantiates
 the plugins, mounts them in two slots, wires cross-plugin signals,
 and handles geometry persistence."""
 
+import os
 import random
+from time import monotonic
 
 from PySide6.QtCore import (
     QByteArray, QEvent, QObject, QRect, QSize, Qt, QThread, QTimer,
@@ -159,6 +161,7 @@ class MainWindow(QMainWindow):
         # alive). Plugins register workers via host.start_worker(...);
         # they self-evict via the ``finished`` signal.
         self._active_workers: set[QThread] = set()
+        self._shutting_down = False
         # On quit, join any still-running workers before Qt tears them down —
         # the same QThread-alive-on-destroy abort as above, but at shutdown: it
         # SIGABRTs, which on macOS pops a "closed unexpectedly" dialog on Ctrl+C.
@@ -755,26 +758,28 @@ class MainWindow(QMainWindow):
 
     def start_worker(self, worker: QThread) -> QThread:
         """Track a worker so Python doesn't GC it while running."""
+        if self._shutting_down:
+            return worker
         self._active_workers.add(worker)
         worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
         worker.finished.connect(worker.deleteLater)
         worker.start()
         return worker
 
-    # Total wall-clock budget for joining in-flight workers at quit. Workers run
-    # concurrently, so this bounds the SLOWEST one, not their sum; they do
-    # timeout-bounded network I/O, so most finish well inside it.
     _SHUTDOWN_JOIN_S = 5.0
 
     def _join_workers(self) -> None:
-        """Wait (bounded) for in-flight background workers on quit so none is
-        still running when Qt destroys its QThread — that aborts (SIGABRT). They
-        self-evict via ``finished``, but at quit there's no event loop left to
-        run that, so we join explicitly here."""
+        """Stop workers cooperatively and bound the wait before Qt teardown."""
+        self._shutting_down = True
         # Signing workers can be blocked on callbacks queued to this thread.
         # Release them before joining, while the GUI can still close widgets.
         for interaction in self.findChildren(DialogInteraction):
             interaction.cancel()
+        for worker in list(self._active_workers):
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass          # C++ object already gone
         # Silence every mounted plugin's long-lived poll timers / ws watchers
         # first, so nothing kicks a fresh worker while we drain the in-flight
         # ones. (Iterating self.plugins means a new plugin is covered for free.)
@@ -783,17 +788,27 @@ class MainWindow(QMainWindow):
                 plugin.shutdown()
             except RuntimeError:
                 pass          # C++ side already gone
-        import time as _t
-        deadline = _t.monotonic() + self._SHUTDOWN_JOIN_S
-        for w in list(self._active_workers):
-            remaining = deadline - _t.monotonic()
-            if remaining <= 0:
-                break
+        deadline = monotonic() + self._SHUTDOWN_JOIN_S
+        stuck = False
+        for worker in list(self._active_workers):
             try:
-                if w.isRunning():
-                    w.wait(int(remaining * 1000))
+                if worker.isRunning():
+                    worker.wait(max(0, int((deadline - monotonic()) * 1000)))
+                    stuck |= worker.isRunning()
             except RuntimeError:
                 pass          # C++ object already gone — nothing to join
+        if stuck:
+            # Qt aborts when it destroys a running QThread. Plugin shutdown
+            # above has already drained the transaction cache.
+            try:
+                if self.rpc is not None:
+                    self.rpc.stop()
+            finally:
+                try:
+                    from .helios import stop_for_exit
+                    stop_for_exit()
+                finally:
+                    os._exit(0)
 
     def set_tray(self, tray) -> None:
         """Adopt the tray controller (the desktop-notification sink). Called

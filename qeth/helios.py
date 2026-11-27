@@ -182,6 +182,8 @@ _STUCK_LIMIT = 20
 # resolv.conf. Until then reads take the unverified path, as for an unready one.
 _STALE_RESPAWN_S = 90.0
 _HEALTH_TIMEOUT_S = 2.0   # loopback eth_syncing; a hung RPC server is stale too
+_STOP_GRACE_S = 5.0
+_FORCED_STOP_TIMEOUT_S = _STOP_GRACE_S + 1.0
 
 
 def helios_binary() -> str | None:
@@ -413,7 +415,7 @@ class HeliosSidecar:
         if self.alive():
             self._proc.terminate()
             try:
-                self._proc.wait(timeout=5)
+                self._proc.wait(timeout=_STOP_GRACE_S)
             except Exception:
                 self._proc.kill()
 
@@ -434,6 +436,21 @@ def _stop_all() -> None:
 
 
 atexit.register(_stop_all)
+
+
+def stop_for_exit() -> None:
+    """Give registered sidecars a shared deadline before a forced exit."""
+    deadline = time.monotonic() + _FORCED_STOP_TIMEOUT_S
+    # A worker can stall in Popen while holding _lock. Copy the built-in dict
+    # before iterating so we can still stop the processes already registered.
+    # Start every stop before joining so a slow process cannot delay the rest.
+    stops = []
+    for sc in _sidecars.copy().values():
+        thread = threading.Thread(target=sc.stop, daemon=True)
+        thread.start()
+        stops.append(thread)
+    for thread in stops:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def _ensure_sidecar(chain: Chain, replace: HeliosSidecar | None = None,
